@@ -89,6 +89,14 @@ the background; the next view shows them. A title Steam has no
 image for is asked again at most once an hour. Nothing is fetched for an entry after **Remove
 artwork** or for a Desktop entry, and the console never contacts SteamGridDB.
 
+## In Nova's Host Console
+
+Nova opens this console inside itself, as Host Console. There it shows in the theme Nova uses,
+for that visit only; your saved theme does not change, and a theme you pick in the console saves
+as usual. **Launch** and Play on the shelf hand the title to Nova, which streams it to the device
+in your hands, instead of only starting it on the host. The guide links are hidden there; any
+other link to a page outside the console opens in the device's browser.
+
 ## Session history
 
 Two lists can appear here. This browser keeps its own list of sessions it watched, with grade,

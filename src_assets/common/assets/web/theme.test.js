@@ -11,6 +11,7 @@ import {
   onThemeChange,
   THEMES,
 } from './theme.js'
+import { embeddedTheme, initClientEmbed } from './client-embed.js'
 
 function hexToRgb(hex) {
   return hex.replace('#', '').match(/.{2}/g).map((channel) => Number.parseInt(channel, 16) / 255)
@@ -305,6 +306,55 @@ describe('theme skin registry', () => {
     expect(seen).toEqual(['miami'])
 
     unsubscribe()
+  })
+
+  it('shows the theme Nova asked for during a Host Console visit, and a theme picked there saves as usual', () => {
+    const ids = THEMES.map(theme => theme.id)
+    localStorage.setItem('polaris-theme', 'miami')
+    try {
+      initClientEmbed({ search: '?client=nova&theme=director', themes: ids })
+      expect(getTheme()).toBe('director')
+      expect(localStorage.getItem('polaris-theme')).toBe('miami')
+      setTheme('oled')
+      expect(localStorage.getItem('polaris-theme')).toBe('oled')
+      expect(embeddedTheme()).toBe('')
+      expect(getTheme()).toBe('oled')
+    } finally {
+      initClientEmbed({ search: '', storage: null, themes: ids })
+      sessionStorage.clear()
+      applyTheme('polaris')
+    }
+  })
+
+  it('paints the theme Nova named before first paint, and then the visit\'s', () => {
+    const boot = readFileSync('src_assets/common/assets/web/public/assets/theme-boot.js', 'utf8')
+    const run = new Function('localStorage', 'document', boot)
+    const stored = { getItem: () => 'miami' }
+    try {
+      history.replaceState(null, '', '/?client=nova&theme=director#/')
+      document.documentElement.removeAttribute('data-theme')
+      run(stored, document)
+      expect(document.documentElement.getAttribute('data-theme')).toBe('director')
+      // Nova's own Aurora shows as Aurora, whatever the browser saved.
+      history.replaceState(null, '', '/?client=nova&theme=polaris#/')
+      run(stored, document)
+      expect(document.documentElement.getAttribute('data-theme')).toBe('director')
+      document.documentElement.removeAttribute('data-theme')
+      run(stored, document)
+      expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
+      // After the first load the visit's session storage carries it; an unknown theme falls back.
+      history.replaceState(null, '', '/#/apps')
+      sessionStorage.setItem('polaris-embed', JSON.stringify({ client: 'nova', theme: 'oled' }))
+      run(stored, document)
+      expect(document.documentElement.getAttribute('data-theme')).toBe('oled')
+      sessionStorage.setItem('polaris-embed', JSON.stringify({ client: 'nova', theme: 'crimson' }))
+      run(stored, document)
+      expect(document.documentElement.getAttribute('data-theme')).toBe('miami')
+    } finally {
+      history.replaceState(null, '', '/')
+      sessionStorage.clear()
+      document.documentElement.removeAttribute('data-theme')
+    }
   })
 
   it('falls back to the default when storage contains an unknown skin', () => {

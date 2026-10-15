@@ -4,7 +4,7 @@
     <section>
       <div class="flex min-w-0 items-start justify-between gap-3">
         <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
-        <a href="https://papi-ux.com/docs/mission-control/" target="_blank" rel="noopener" class="focus-ring inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-storm hover:text-ice" :aria-label="t('dashboard.docs_link')" :title="t('dashboard.docs_link')" data-tab-docs-link>
+        <a v-if="!inNova" href="https://papi-ux.com/docs/mission-control/" target="_blank" rel="noopener" class="focus-ring inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-storm hover:text-ice" :aria-label="t('dashboard.docs_link')" :title="t('dashboard.docs_link')" data-tab-docs-link>
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.25" /><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.8" /><path d="M12 17.2h.01" stroke-width="2.4" /></svg>
         </a>
       </div>
@@ -514,6 +514,7 @@ import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import { readConfigOrNull } from '../config-cache.js'
 import { liveClientFamilyLabel, streamClientFamilyLabel } from '../client-family.js'
+import { artLaunchHref, embeddedClient, followClientLink } from '../client-embed.js'
 import {
   buildLiveSummary,
   buildQualityGrade,
@@ -569,6 +570,8 @@ async function refreshApps() {
       const data = await res.json()
       if (revision !== appsRequestRevision) return
       readinessSources.value.apps = Array.isArray(data.apps) ? 'ready' : 'unavailable'
+      hostUuid.value = typeof data.host_uuid === 'string' ? data.host_uuid : ''
+      hostName.value = typeof data.host_name === 'string' ? data.host_name : ''
       currentAppAvailable.value = data.current_app_available !== false && typeof data.current_app === 'string'
       currentAppUuid.value = currentAppAvailable.value ? data.current_app : ''
       // The whole catalog, so the running app (Desktop included) resolves whether or not it is recent.
@@ -1493,9 +1496,18 @@ async function undoDoctorAction() {
 // Launch a recent game straight from the landing page (same endpoint the
 // Library uses). Launching is the page's primary action, not destructive.
 const launchingUuid = ref('')
+// Opened in Nova's Host Console, Play hands the title to Nova, which streams it to the device in
+// the player's hands; in a browser the host starts it.
+const inNova = embeddedClient() === 'nova'
+const hostUuid = ref('')
+const hostName = ref('')
 
 async function launchRecentApp(app) {
   if (launchingUuid.value || !currentAppAvailable.value) return
+  if (inNova && hostUuid.value) {
+    followClientLink(artLaunchHref({ hostUuid: hostUuid.value, hostName: hostName.value, app }))
+    return
+  }
   launchingUuid.value = app.uuid
   try {
     const response = await fetch('./api/apps/launch', {

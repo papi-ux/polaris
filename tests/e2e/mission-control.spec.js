@@ -562,6 +562,32 @@ test.describe('Mission Control stage', () => {
     expect(host.writes).toEqual([])
   })
 
+  test('inside Nova\'s Host Console: Nova\'s theme for the visit, no guide link, and Play goes to Nova', async ({ page }, testInfo) => {
+    // Nova's panel is about 520 CSS pixels wide; its WebView opens the console with ?client=nova.
+    await page.setViewportSize({ width: 520, height: 900 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page, { theme: 'miami' })
+    // Chromium has no art:// handler; the navigation Nova's WebView would take still shows as a request.
+    const handedToNova = []
+    page.on('request', request => { if (request.url().startsWith('art://')) handedToNova.push(request.url()) })
+    await page.goto('/?client=nova&theme=director#/')
+    await stageMode(page, 'idle')
+    expect(await page.evaluate(() => [document.documentElement.getAttribute('data-theme'), localStorage.getItem('polaris-theme')])).toEqual(['director', 'miami'])
+    await expect(page.locator('[data-tab-docs-link]')).toHaveCount(0)
+    await shot(page, testInfo, 'nova-host-console-idle.png')
+    const play = page.locator('[data-dashboard-launch-app="hades"]')
+    await play.focus()
+    await page.keyboard.press('Enter')
+    await expect.poll(() => handedToNova).toEqual(['art://launch?host_uuid=fixture&host_name=Fixture%20Host&app_uuid=hades&app_name=Hades%20II'])
+    expect(host.writes).toEqual([])
+    // Another page of the same visit keeps Nova's theme and hides its guide link too.
+    await page.goto('/#/apps')
+    await expect(page.locator('[data-library-app]').first()).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.getAttribute('data-theme'))).toBe('director')
+    await expect(page.locator('[data-tab-docs-link]')).toHaveCount(0)
+    expect(host.writes).toEqual([])
+  })
+
   test('Spaces appears only when it needs attention or a Space is running', async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.emulateMedia({ reducedMotion: 'reduce' })

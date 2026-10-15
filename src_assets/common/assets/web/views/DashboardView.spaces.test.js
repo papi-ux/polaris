@@ -4,6 +4,7 @@ import { createI18n } from 'vue-i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import DashboardView from './DashboardView.vue'
+import { followClientLink, initClientEmbed } from '../client-embed.js'
 
 const shared = vi.hoisted(() => ({ stats: null, gpu: null, connected: undefined, receivedAt: undefined }))
 // connected and receivedAt stay undefined unless a case models the stream-status channel itself.
@@ -13,6 +14,8 @@ vi.mock('../composables/useSystemStats', () => ({ useSystemStats: () => ({ gpu: 
 vi.mock('../composables/useSessionHistory', () => ({ useSessionHistory: () => ({ sessions: ref([]), clearHistory: vi.fn(), activeStartedAt: ref(null) }), formatDuration: String }))
 vi.mock('../composables/useAiOptimizer', () => ({ useAiOptimizer: () => ({ status: ref(null), fetchStatus: vi.fn(), fetchDevices: vi.fn() }) }))
 vi.mock('../composables/useFavicon', () => ({ useFavicon: vi.fn() }))
+// Nova takes its launch link before the page goes anywhere; jsdom cannot follow it.
+vi.mock('../client-embed.js', async importOriginal => ({ ...(await importOriginal()), followClientLink: vi.fn() }))
 const messages = JSON.parse(readFileSync('src_assets/common/assets/web/public/assets/locale/en.json', 'utf8'))
 const snapshot = extra => ({ enabled: true, available: true, changing: false, failed: false,
   profiles: [{ id: 'a', name: 'Gaming Space', clients: ['device'], family: 'steam' }], activity: [], ...extra })
@@ -301,6 +304,39 @@ describe('Mission Control header, Spaces and shelf', () => {
     await pointerClick('[data-dashboard-launch-app="b"]')
     await wrapper.get('[data-dashboard-launch-app="c"]').trigger('click'); await flushPromises()
     expect(launches().map(([, options]) => JSON.parse(options.body).uuid)).toEqual(['b', 'c'])
+  })
+
+  it('inside Nova\'s Host Console hands Play to Nova, hides the guide link and starts nothing on the host', async () => {
+    initClientEmbed({ search: '?client=nova&theme=director', storage: null, themes: ['polaris', 'director'] })
+    try {
+      appPayload = { apps: shelf, current_app: '', host_uuid: 'host-1', host_name: 'Living Room' }
+      await render(false)
+      expect(wrapper.find('[data-tab-docs-link]').exists()).toBe(false)
+      await wrapper.get('[data-dashboard-launch-app="b"]').trigger('click')
+      expect(followClientLink).toHaveBeenLastCalledWith('art://launch?host_uuid=host-1&host_name=Living%20Room&app_uuid=b&app_name=Bravo')
+      await stage().get('[data-stage-launch]').trigger('click')
+      expect(followClientLink).toHaveBeenLastCalledWith('art://launch?host_uuid=host-1&host_name=Living%20Room&app_uuid=a&app_name=Alpha')
+      expect(launches()).toHaveLength(0)
+      // Without the host's id Nova could not take the link, so the host starts it as in a browser.
+      followClientLink.mockClear()
+      appPayload = { apps: shelf, current_app: '' }
+      await wrapper.vm.refreshApps(); await flushPromises()
+      await wrapper.get('[data-dashboard-launch-app="b"]').trigger('click'); await flushPromises()
+      expect(followClientLink).not.toHaveBeenCalled()
+      expect(launches()).toHaveLength(1)
+    } finally {
+      initClientEmbed({ search: '', storage: null, themes: [] })
+      followClientLink.mockClear()
+    }
+  })
+
+  it('in a browser keeps the guide link and starts Play on the host', async () => {
+    appPayload = { apps: shelf, current_app: '', host_uuid: 'host-1', host_name: 'Living Room' }
+    await render(false)
+    expect(wrapper.get('[data-tab-docs-link]').attributes('href')).toBe('https://papi-ux.com/docs/mission-control/')
+    await wrapper.get('[data-dashboard-launch-app="b"]').trigger('click'); await flushPromises()
+    expect(followClientLink).not.toHaveBeenCalled()
+    expect(launches()).toHaveLength(1)
   })
 
   it('offers Library from the shelf, and from the stage only when the library is empty', async () => {

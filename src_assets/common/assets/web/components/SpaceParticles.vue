@@ -116,7 +116,7 @@ function getModeConfig(mode) {
 }
 
 // Per-theme particle strength, mirroring Nova's librarySurfaces particle
-// table: OLED stays true black; Director keeps its opaque crimson stage.
+// table: OLED stays true black; Director keeps its near-black stage still.
 const THEME_PARTICLE_ALPHA = {
   polaris: 1,
   'portable-chrome': 0.44,
