@@ -3142,7 +3142,8 @@ textarea {
   background: var(--surface-raised);
 }
 
-/* Play rides the poster: shown on hover or keyboard focus, and always on touch. */
+/* Play rides the poster: shown on hover or keyboard focus, and always when any touch input
+   exists. Hidden, it takes no hits, and the shelf only launches a press that began on it. */
 .mc-film .mc-film-play {
   position: absolute;
   left: 0.5rem;
@@ -3150,20 +3151,23 @@ textarea {
   gap: 0.4rem;
   max-width: calc(100% - 1rem);
   opacity: var(--play, 0);
+  pointer-events: var(--play-hit, none);
   transition: opacity 0.12s ease, background-color 0.2s ease;
 }
 
 .mc-film-art:is(:hover, :focus-within) {
   --play: 1;
+  --play-hit: auto;
 }
 
 .mc-film .mc-film-play:disabled {
   opacity: calc(var(--play, 0) * 0.5);
 }
 
-@media (hover: none), (pointer: coarse) {
+@media (hover: none), (any-pointer: coarse) {
   .mc-film {
     --play: 1;
+    --play-hit: auto;
   }
 }
 

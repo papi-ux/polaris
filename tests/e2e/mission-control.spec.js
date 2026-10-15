@@ -42,10 +42,13 @@ const live = {
   },
 }
 const idle = { streaming: false }
+const spacesState = extra => ({ enabled: true, available: true, changing: false, failed: false,
+  profiles: [{ id: 'living', name: 'Living room', family: 'steam', clients: ['device'] }], activity: [], ...extra })
+const spacesOff = { enabled: false, available: true, changing: false, failed: false, profiles: [], activity: [] }
 
 async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uuid: 'device', name: 'Fixture handheld', client_family: 'nova', last_seen_at: 0 }],
-  currentApp = '', systemGpu = gpu, history = [] } = {}) {
-  const host = { stats, streamDown: false, systemDown: false, requests: [], writes: [] }
+  currentApp = '', systemGpu = gpu, history = [], spaces = spacesOff } = {}) {
+  const host = { stats, spaces, streamDown: false, systemDown: false, requests: [], writes: [] }
   await page.addInitScript(({ skin, initial }) => {
     localStorage.setItem('polaris-theme', skin)
     window.__mockStats = initial
@@ -87,7 +90,7 @@ async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uui
       if (host.streamDown) return route.fulfill({ status: 503, json: { status: false } })
       return route.fulfill({ json: host.stats })
     }
-    if (path === '/api/multiseat/profiles') return route.fulfill({ json: { enabled: false, available: true, changing: false, failed: false, profiles: [], activity: [] } })
+    if (path === '/api/multiseat/profiles') return route.fulfill({ json: host.spaces })
     if (path === '/api/clients/list') return route.fulfill({ json: { status: true, platform: 'linux', named_certs: certs } })
     const artwork = path.match(/^\/api\/apps\/([^/]+)\/artwork\/(hero|logo)$/)
     if (artwork) {
@@ -467,6 +470,63 @@ test.describe('Mission Control stage', () => {
     await expect.poll(() => host.writes).toEqual(['POST /api/apps/launch'])
   })
 
+  test('a tap where Play is hidden features the poster and never launches', async ({ page }, testInfo) => {
+    // A fine, hovering primary pointer receiving real touch input, as on a touchscreen laptop.
+    // Chromium cannot report any-pointer: coarse beside a fine primary pointer, so this is the case
+    // where Play stays hidden until the tap lands.
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page)
+    await page.goto('/#/')
+    await stageMode(page, 'idle')
+    expect(await page.evaluate(() => ['(pointer: fine)', '(hover: hover)', '(any-pointer: coarse)'].map(query => matchMedia(query).matches))).toEqual([true, true, false])
+    const pick = page.locator('[data-dashboard-feature-app="hades"]')
+    const play = page.locator('[data-dashboard-launch-app="hades"]')
+    await pick.scrollIntoViewIfNeeded()
+    await page.mouse.move(1, 1)
+    await expect(play).toHaveCSS('opacity', '0')
+    await expect(play).toHaveCSS('pointer-events', 'none')
+    const box = await play.boundingBox()
+    const at = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }
+    // Nothing unseen sits under the finger: the poster's feature button takes the hit.
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-dashboard-feature-app'), at)).toBe('hades')
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] })
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(pick).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-dashboard-idle-hero] .mc-stage-title')).toHaveText('Hades II')
+    await page.waitForTimeout(500)
+    expect(host.writes).toEqual([])
+    // Revealed by the pointer, Play is the explicit control that launches.
+    await pick.hover()
+    await expect(play).toHaveCSS('opacity', '1')
+    await expect(play).toHaveCSS('pointer-events', 'auto')
+    await page.screenshot({ path: testInfo.outputPath('shelf-play-revealed-desktop.png'), animations: 'disabled' })
+    await play.click()
+    await expect.poll(() => host.writes).toEqual(['POST /api/apps/launch'])
+  })
+
+  test('Spaces appears only when it needs attention or a Space is running', async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page, { spaces: spacesState() })
+    await page.goto('/#/')
+    await stageMode(page, 'idle')
+    await expect(page.locator('[data-dashboard-spaces]')).toHaveCount(0)
+    host.spaces = spacesState({ failed: true })
+    await page.reload()
+    await stageMode(page, 'idle')
+    await expect(page.locator('[data-spaces-attention]')).toHaveText('Needs attention')
+    await shot(page, testInfo, 'spaces-attention-idle.png')
+    host.spaces = spacesState({ activity: [{ profile_id: 'living', client_id: 'device', state: 'running' }] })
+    await page.reload()
+    await expect(page.locator('[data-space-session]')).toContainText('Living room')
+    await expect(page.locator('[data-space-session]')).toContainText('Fixture handheld')
+    await expect(page.locator('[data-mission-stage]')).toHaveCount(0)
+    await shot(page, testInfo, 'spaces-active.png', { deck: true })
+    expect(host.writes).toEqual([])
+  })
+
   test('idle stage puts a launch check that needs attention before Launch', async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await mockHost(page, { certs: [] })
@@ -633,8 +693,11 @@ test.describe('Mission Control on phones and tablets', () => {
         await noSidewaysPage(page, `${label} idle`)
         await reachable(page.locator('[data-stage-launch]'), `${label} idle Launch`)
         await reachable(page.locator('[data-dashboard-launch-app]').first(), `${label} idle rail launch`)
-        // Touch has no hover, so Play is always shown.
+        // Touch has no hover, so Play is always shown and takes the tap.
         await expect(page.locator('[data-dashboard-launch-app]').first()).toHaveCSS('opacity', '1')
+        await expect(page.locator('[data-dashboard-launch-app]').first()).toHaveCSS('pointer-events', 'auto')
+        await page.locator('[data-dashboard-play-rail]').scrollIntoViewIfNeeded()
+        await page.screenshot({ path: testInfo.outputPath(`shelf-${width}x${height}-${text}.png`), animations: 'disabled' })
         await touchTargets(page, `${label} idle`)
         await shot(page, testInfo, `idle-${width}x${height}-${text}.png`, { deck: true })
 
