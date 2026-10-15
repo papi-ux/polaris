@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures/mocked.js'
+import { writeFileSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
 
 // Mission Control's stage, readings, route, Doctor note and Diagnostics in a browser, against a
@@ -473,37 +474,50 @@ test.describe('Mission Control stage', () => {
   test('a tap where Play is hidden features the poster and never launches', async ({ page }, testInfo) => {
     // A fine, hovering primary pointer receiving real touch input, as on a touchscreen laptop.
     // Chromium cannot report any-pointer: coarse beside a fine primary pointer, so this is the case
-    // where Play stays hidden until the tap lands.
+    // where Play stays hidden until the tap lands. Every measurement is attached to the result.
     await page.setViewportSize({ width: 1440, height: 1000 })
     await page.emulateMedia({ reducedMotion: 'reduce' })
     const host = await mockHost(page)
     await page.goto('/#/')
     await stageMode(page, 'idle')
-    expect(await page.evaluate(() => ['(pointer: fine)', '(hover: hover)', '(any-pointer: coarse)'].map(query => matchMedia(query).matches))).toEqual([true, true, false])
+    const evidence = {}
+    evidence.media = await page.evaluate(() => Object.fromEntries(['(pointer: fine)', '(pointer: coarse)', '(any-pointer: fine)', '(any-pointer: coarse)', '(hover: hover)', '(hover: none)', '(any-hover: hover)']
+      .map(query => [query, matchMedia(query).matches])))
+    expect(evidence.media).toMatchObject({ '(pointer: fine)': true, '(hover: hover)': true, '(any-pointer: coarse)': false })
     const pick = page.locator('[data-dashboard-feature-app="hades"]')
     const play = page.locator('[data-dashboard-launch-app="hades"]')
     await pick.scrollIntoViewIfNeeded()
     await page.mouse.move(1, 1)
-    await expect(play).toHaveCSS('opacity', '0')
-    await expect(play).toHaveCSS('pointer-events', 'none')
+    const style = () => play.evaluate(node => ({ opacity: getComputedStyle(node).opacity, pointerEvents: getComputedStyle(node).pointerEvents }))
+    evidence.hiddenPlay = await style()
+    expect(evidence.hiddenPlay).toEqual({ opacity: '0', pointerEvents: 'none' })
     const box = await play.boundingBox()
-    const at = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }
+    evidence.tapPoint = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }
     // Nothing unseen sits under the finger: the poster's feature button takes the hit.
-    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-dashboard-feature-app'), at)).toBe('hades')
+    evidence.hitAtPlayCentre = await page.evaluate(({ x, y }) => {
+      const node = document.elementFromPoint(x, y)
+      return { feature: node?.getAttribute('data-dashboard-feature-app') || null, launch: node?.getAttribute('data-dashboard-launch-app') || null }
+    }, evidence.tapPoint)
+    expect(evidence.hitAtPlayCentre).toEqual({ feature: 'hades', launch: null })
     const cdp = await page.context().newCDPSession(page)
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] })
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [evidence.tapPoint] })
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
     await expect(pick).toHaveAttribute('aria-pressed', 'true')
     await expect(page.locator('[data-dashboard-idle-hero] .mc-stage-title')).toHaveText('Hades II')
     await page.waitForTimeout(500)
-    expect(host.writes).toEqual([])
+    evidence.writesAfterTap = [...host.writes]
+    expect(evidence.writesAfterTap).toEqual([])
     // Revealed by the pointer, Play is the explicit control that launches.
     await pick.hover()
     await expect(play).toHaveCSS('opacity', '1')
-    await expect(play).toHaveCSS('pointer-events', 'auto')
+    evidence.revealedPlay = await style()
+    expect(evidence.revealedPlay).toEqual({ opacity: '1', pointerEvents: 'auto' })
     await page.screenshot({ path: testInfo.outputPath('shelf-play-revealed-desktop.png'), animations: 'disabled' })
     await play.click()
     await expect.poll(() => host.writes).toEqual(['POST /api/apps/launch'])
+    evidence.writesAfterPlayClick = [...host.writes]
+    writeFileSync(testInfo.outputPath('hybrid-touch-evidence.json'), JSON.stringify(evidence, null, 2))
+    await testInfo.attach('hybrid-touch-evidence', { path: testInfo.outputPath('hybrid-touch-evidence.json'), contentType: 'application/json' })
   })
 
   test('Spaces appears only when it needs attention or a Space is running', async ({ page }, testInfo) => {
