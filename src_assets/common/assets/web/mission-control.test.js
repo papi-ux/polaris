@@ -149,6 +149,20 @@ describe('Mission Control stage helpers', () => {
     expect(known.readiness.sub).toBe('mission_control.checks_ready {"passing":6,"total":6}')
   })
 
+  it('shows an unreported GPU temperature and power as dashes in their units, never as 0', () => {
+    const gpuCell = gpu => idleSignalCells({ gpu, t }).find(cell => cell.key === 'gpu')
+    // The live dashboard.spec AMD payload: utilization reported, temperature and power absent.
+    const amd = gpuCell({ vendor: 'amd', name: 'AMD Radeon RX 7900 XTX', utilization_pct: 55, vram_used_mb: 8192, vram_total_mb: 24576 })
+    expect(`${amd.value}${amd.unit}`).toBe('--°C')
+    expect(amd.sub).toBe('55% · --W')
+    expect(amd.sub).not.toMatch(/(^|\D)0W|NaN|undefined/)
+    // A measured zero is a reading; malformed values are gaps.
+    expect(gpuCell({ name: 'GPU', temperature_c: 40, utilization_pct: 0, power_draw_w: 0 }).sub).toBe('0% · 0W')
+    const malformed = gpuCell({ name: 'GPU', temperature_c: '', utilization_pct: false, power_draw_w: [] })
+    expect(`${malformed.value}${malformed.unit} ${malformed.sub}`).toBe('--°C --% · --W')
+    expect(gpuCell({ name: 'GPU', temperature_c: 54.25, utilization_pct: 38, power_draw_w: 120.4 }).sub).toBe('38% · 120W')
+  })
+
   it('features the most recently launched library title', () => {
     expect(featuredLibraryApp([])).toBeNull()
     expect(featuredLibraryApp([{ uuid: 'a', name: 'A', 'last-launched': 1700000000 }]).launchedAt).toBe(1700000000000)

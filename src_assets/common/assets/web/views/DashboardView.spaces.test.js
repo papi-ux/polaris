@@ -293,6 +293,15 @@ describe('Mission Control stage', () => {
     expect(stage.find('[data-stage-artwork]').exists()).toBe(false)
   })
 
+  it('renders an unreported GPU temperature and power as dashes in the idle reading', async () => {
+    shared.gpu.value = { vendor: 'amd', name: 'AMD Radeon RX 7900 XTX', utilization_pct: 55, vram_used_mb: 8192, vram_total_mb: 24576 }
+    await render(false)
+    const reading = wrapper.get('[data-dashboard-idle-hero] [data-idle-signal="gpu"]').text()
+    expect(reading).toContain('--°C')
+    expect(reading).toContain('55% · --W')
+    expect(reading).not.toMatch(/(^|\D)0W|NaN|undefined/)
+  })
+
   it('keeps a title without a cover typographic', async () => {
     appPayload = { apps: [{ uuid: 'plain', name: 'Plain Game', 'last-launched': 5 }], current_app: '' }
     await render(false)

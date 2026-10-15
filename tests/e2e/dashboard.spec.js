@@ -168,8 +168,11 @@ test.describe('dashboard', () => {
     // Missing temperature and power draw render as '--', not raw numbers (Mission Control's
     // idle stage carries the host GPU reading since issue #408)
     const gpuReading = loggedInPage.locator('[data-dashboard-idle-hero] [data-idle-signal="gpu"]')
-    await expect(gpuReading.getByText(/--W/)).toBeVisible()
     await expect(gpuReading).toContainText('--°C')
+    await expect(gpuReading).toContainText('55%')
+    await expect(gpuReading.getByText(/--W/)).toBeVisible()
+    // Missing power is never invented as a measured zero.
+    await expect(gpuReading).not.toContainText(/(^|\D)0W|NaN|undefined/)
 
     // No raw undefined or NaN values anywhere on the page
     const bodyText = await loggedInPage.locator('body').innerText()
