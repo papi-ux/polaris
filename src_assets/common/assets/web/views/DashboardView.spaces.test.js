@@ -282,6 +282,25 @@ describe('Mission Control header, Spaces and shelf', () => {
     expect(wrapper.get('[data-dashboard-feature-app="c"]').attributes('aria-pressed')).toBe('true')
   })
 
+  it('features the poster for a tap that began while Play was hidden, even when its click lands on Play', async () => {
+    appPayload = { apps: shelf, current_app: '' }
+    await render(false)
+    // The finger went down on the poster; the browser then delivers the click to the revealed Play.
+    // test-utils cannot set a click's detail, so these pointer clicks are dispatched directly.
+    const pointerClick = async selector => { wrapper.get(selector).element.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })); await flushPromises() }
+    await wrapper.get('[data-dashboard-feature-app="b"]').trigger('pointerdown')
+    await pointerClick('[data-dashboard-launch-app="b"]')
+    expect(launches()).toHaveLength(0)
+    expect(stage().get('.mc-stage-title').text()).toBe('Bravo')
+    // A press that began on the shown Play launches, and so does keyboard activation (detail 0).
+    const base = fetch.getMockImplementation()
+    fetch.mockImplementation(async (url, options) => (url === './api/apps/launch' ? reply({ status: true }) : base(url, options)))
+    await wrapper.get('[data-dashboard-launch-app="b"]').trigger('pointerdown')
+    await pointerClick('[data-dashboard-launch-app="b"]')
+    await wrapper.get('[data-dashboard-launch-app="c"]').trigger('click'); await flushPromises()
+    expect(launches().map(([, options]) => JSON.parse(options.body).uuid)).toEqual(['b', 'c'])
+  })
+
   it('offers Library from the shelf, and from the stage only when the library is empty', async () => {
     appPayload = { apps: shelf, current_app: '' }
     await render(false)

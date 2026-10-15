@@ -170,7 +170,7 @@
           <router-link to="/apps" class="focus-ring mc-inline-link">{{ $t('navbar.library') }} <span aria-hidden="true">→</span></router-link>
         </div>
         <p v-if="!currentAppAvailable" role="status" class="mt-2 text-sm text-support">Waiting for current app status.</p>
-        <ul class="mc-film">
+        <ul class="mc-film" @pointerdown.capture="notePlayPress">
           <li v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
             <div class="mc-film-art">
               <PosterImage class="w-full" :name="app.name" :src="appCoverSrc(app)" aria-hidden="true" />
@@ -188,7 +188,7 @@
                 :aria-label="t('mission_control.launch_title', { name: app.name })"
                 :disabled="launchingUuid === app.uuid || !currentAppAvailable"
                 :data-dashboard-launch-app="app.uuid"
-                @click="launchRecentApp(app)"
+                @click="playClicked(app, $event)"
               >
                 <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11l9.5-5.5z" /></svg>
                 {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
@@ -1749,6 +1749,21 @@ const selectedFeaturedUuid = ref('')
 const featuredApp = computed(() => featuredLibraryApp(recentApps.value, selectedFeaturedUuid.value))
 const missionStage = ref(null)
 watch(stageMode, mode => { if (mode !== 'idle') selectedFeaturedUuid.value = '' })
+
+// Play launches only a press that began on it while it was shown. A tap on a hover-capable screen
+// reveals Play as it lands, so its click can arrive on a Play that was hidden and took no hit when
+// the finger went down; that tap meant the poster, so it features the title. Keyboard activation
+// (detail 0) has no press and launches.
+let playPress = ''
+function notePlayPress(event) {
+  playPress = event.target?.closest?.('[data-dashboard-launch-app]')?.getAttribute('data-dashboard-launch-app') || ''
+}
+function playClicked(app, event) {
+  const pressed = playPress === app.uuid
+  playPress = ''
+  if (event?.detail && !pressed) featureApp(app)
+  else launchRecentApp(app)
+}
 
 // Featuring never moves focus; it only brings the stage back into view when it has scrolled away.
 function featureApp(app) {
