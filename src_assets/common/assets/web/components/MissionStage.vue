@@ -29,7 +29,7 @@ const titleId = `mission-stage-title-${Math.random().toString(36).slice(2)}`
 // image that failed is retried only when it is featured anew.
 const loadedArt = reactive(new Set())
 const failedArt = reactive(new Set())
-for (const key of ['artSrc', 'heroSrc', 'logoSrc']) watch(() => props[key], src => { failedArt.delete(src) })
+for (const key of ['artSrc', 'heroSrc']) watch(() => props[key], src => { failedArt.delete(src) })
 const usable = src => Boolean(src) && !failedArt.has(src)
 // The cover frames the title. Behind it is the title's Steam background when the host has one,
 // otherwise a softened copy of the cover. Each change of image crossfades: the new layer fades in
@@ -44,24 +44,32 @@ const keyartLayers = computed(() => (showArt.value ? [props.artSrc] : []))
 // The logo stands in for the title text once it has loaded and passed the screen below; the text
 // stays the heading for assistive technology. Until then, and whenever the logo fails the screen
 // or the screen cannot run, the text title stays visible.
-const showLogo = computed(() => props.mode !== 'loading' && usable(props.logoSrc))
-const logoShown = computed(() => showLogo.value && loadedArt.has(props.logoSrc))
-function logoLoaded(src, event) {
-  if (logoReadable(event.target, readThemeTokens(['void']).void)) loadedArt.add(src)
-  else failedArt.add(src)
-}
-// A new theme brings a new scrim: forget the logo's verdict and mount it again, so the title text
-// shows until the logo has passed the screen against the new scrim.
-const logoCheck = ref(0)
+//
+// A verdict belongs to the one logo element on screen. A new logo or a new theme (a new scrim)
+// mounts a fresh element, so no verdict is reused, and an event from an element that is no longer
+// on screen settles nothing. Logos keep their own state, apart from the cover and background.
+const logoMount = ref(0)
+const logoVerdict = ref(null)
+const missingLogos = reactive(new Set())
+watch(() => props.logoSrc, src => { missingLogos.delete(src); logoMount.value++ })
 let stopThemeWatch = null
-onMounted(() => {
-  stopThemeWatch = onThemeTokensChange(() => {
-    loadedArt.delete(props.logoSrc)
-    failedArt.delete(props.logoSrc)
-    logoCheck.value++
-  })
-})
+onMounted(() => { stopThemeWatch = onThemeTokensChange(() => { logoMount.value++ }) })
 onUnmounted(() => stopThemeWatch?.())
+const currentVerdict = computed(() => {
+  const verdict = logoVerdict.value
+  return verdict && verdict.mount === logoMount.value && verdict.src === props.logoSrc ? verdict.pass : null
+})
+const showLogo = computed(() => props.mode !== 'loading' && Boolean(props.logoSrc) &&
+  !missingLogos.has(props.logoSrc) && currentVerdict.value !== false)
+const logoShown = computed(() => showLogo.value && currentVerdict.value === true)
+const isCurrentLogo = img => img?.getAttribute('src') === props.logoSrc && Number(img.dataset.logoMount) === logoMount.value
+function logoLoaded(event) {
+  if (!isCurrentLogo(event.target)) return
+  logoVerdict.value = { mount: logoMount.value, src: props.logoSrc, pass: logoReadable(event.target, readThemeTokens(['void']).void) }
+}
+function logoFailed(event) {
+  if (isCurrentLogo(event.target)) missingLogos.add(props.logoSrc)
+}
 
 const channel = value => { const n = value / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4 }
 const luminance = (r, g, b) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
@@ -145,8 +153,8 @@ const metaItems = computed(() => props.meta.filter(Boolean))
           </div>
         </template>
         <h2 v-else :id="titleId" class="mc-stage-title" :class="`is-${step}`" :data-title-step="step">
-          <img v-if="showLogo" v-show="logoShown" :key="`${logoSrc}#${logoCheck}`" class="mc-stage-logo" :src="logoSrc" alt="" data-stage-logo
-            @load="logoLoaded(logoSrc, $event)" @error="failedArt.add(logoSrc)" />
+          <img v-if="showLogo" v-show="logoShown" :key="`${logoSrc}#${logoMount}`" class="mc-stage-logo" :src="logoSrc" alt="" data-stage-logo
+            :data-logo-mount="logoMount" @load="logoLoaded" @error="logoFailed" />
           <span :class="{ 'sr-only': logoShown }">{{ title }}</span>
         </h2>
         <span class="mc-rule" aria-hidden="true"></span>

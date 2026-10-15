@@ -176,6 +176,55 @@ describe('MissionStage artwork', () => {
     view.unmount()
   })
 
+  it('ignores a load from the previous title\'s logo once another title is featured', async () => {
+    scrim('#0b0a0a')
+    solid([240, 240, 240, 255])
+    const view = stage()
+    const previous = view.get('[data-stage-logo]').element
+    await view.setProps({ title: 'Bravo', logoSrc: './api/apps/bravo/artwork/logo' })
+    previous.dispatchEvent(new Event('load'))
+    await view.vm.$nextTick()
+    expect(view.get('h2 span').text()).toBe('Bravo')
+    expect(view.get('h2 span').classes()).not.toContain('sr-only')
+    // Bravo's own logo settles Bravo's title.
+    expect(await loadLogo(view)).toBe(true)
+    view.unmount()
+  })
+
+  it('keeps the current logo when the previous title\'s logo reports an error', async () => {
+    scrim('#0b0a0a')
+    solid([240, 240, 240, 255])
+    const view = stage()
+    const previous = view.get('[data-stage-logo]').element
+    await view.setProps({ title: 'Bravo', logoSrc: './api/apps/bravo/artwork/logo' })
+    previous.dispatchEvent(new Event('error'))
+    await view.vm.$nextTick()
+    expect(view.get('[data-stage-logo]').attributes('src')).toBe('./api/apps/bravo/artwork/logo')
+    view.unmount()
+  })
+
+  it('checks a logo again when its title returns after a theme change, leaving the background loaded', async () => {
+    solid([230, 230, 230, 255])
+    scrim('#000')
+    applyTheme('oled')
+    const view = stage()
+    await view.get('[data-stage-hero]').trigger('load')
+    expect(await loadLogo(view)).toBe(true)
+    await view.setProps({ title: 'Bravo', logoSrc: './api/apps/bravo/artwork/logo' })
+    expect(await loadLogo(view)).toBe(true)
+    scrim('#2a2840')
+    applyTheme('polaris')
+    await view.vm.$nextTick()
+    await view.setProps({ title: 'Control', logoSrc: logo })
+    // The pass Control's logo earned in OLED does not carry over: its name shows until it is checked.
+    expect(view.get('h2 span').classes()).not.toContain('sr-only')
+    expect(await loadLogo(view)).toBe(false)
+    expect(view.get('h2 span').classes()).not.toContain('sr-only')
+    // The logo's verdicts never touch the background's own load state.
+    expect(view.get('[data-stage-hero]').classes()).toContain('is-loaded')
+    view.unmount()
+  })
+
   it('reads the shortened hex the built stylesheet writes for a scrim, such as OLED\'s #000', async () => {
     solid([240, 240, 240, 255])
     scrim('#000')
