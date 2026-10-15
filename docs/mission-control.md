@@ -1,12 +1,15 @@
 # Mission Control
 
 **Mission Control** is the host's cockpit: what is streaming, how well, and the one safe thing to
-do about it. It shows Space sessions first when Spaces is enabled, followed by the host's
-live stream or idle view.
+do about it. A stage shows the running or next title with its artwork, its main action and the
+host's readings. When a Space session is running or Spaces needs attention, the Spaces card
+appears above it.
 
 ## Space sessions
 
-On Linux, the Spaces card lists reported sessions by Space, launcher, device, and state:
+On Linux, the Spaces card appears while a Space session is starting, running, or stopping,
+while Spaces is changing, or when it needs attention. A healthy, idle Spaces stays on its own
+page. The card lists reported sessions by Space, launcher, device, and state:
 **Starting**, **Running**, or **Stopping**. Device names come from the paired device list;
 an unknown device is labeled without exposing its identifier. Assigning a device to a Space
 does not make it an active session. A running session is a host report, not confirmation that
@@ -62,10 +65,17 @@ resume window so the client can come back.
 
 ## While the host is idle
 
-The readiness card tells you whether the host can stream right now and, when it cannot, the first
-thing to fix. **Host vitals** shows GPU temperature, load, encoder load, and VRAM as gauges; a
-gauge without data is not drawn rather than showing a placeholder. **Quick Launch** lists recent
-games so you can start the next session from the host.
+The stage features the next title: the most recently launched one, framed with its cover over a
+softened copy of it. **Launch** starts it. When a launch check needs attention, the stage says so
+and **Open priority fix** comes first. The readings along its lower edge show readiness, paired
+devices, the last session, the mode new sessions start in, the GPU and Live Tuning.
+
+**Recent games** is the shelf under the stage, with up to eight titles. Select a poster to feature
+it on the stage without starting anything; **Launch** on the poster, shown when you point at it
+or move to it with the keyboard and always on a touch screen, starts that title. **Library**
+opens the full library. **Host vitals** shows GPU temperature, load, encoder load, and VRAM as
+gauges; a gauge without data is not drawn rather than showing a placeholder. The host's route,
+with its displays, audio and paired devices, is in **Diagnostics**.
 
 ## Session history
 

@@ -145,7 +145,7 @@ export function idleSignalCells({
   readiness = { label: '', tone: '', passing: 0, total: 0 },
   clientsKnown = false, pairedClients = 0,
   lastSession = null, modeLabel = '',
-  gpu = null, liveTuningLabel = '', sessionCount = 0,
+  gpu = null, liveTuningLabel = '',
   t = key => key,
 } = {}) {
   const attrs = name => ({ 'data-idle-signal': name })
@@ -156,7 +156,7 @@ export function idleSignalCells({
       attrs: attrs('readiness'),
     }),
     clientsKnown
-      ? cell('paired', t('mission_control.signal_paired'), String(pairedClients), { sub: t('dashboard.clients_paired'), attrs: attrs('paired') })
+      ? cell('paired', t('mission_control.signal_paired'), String(pairedClients), { attrs: attrs('paired') })
       : missingCell('paired', t('mission_control.signal_paired'), t('mission_control.not_read'), { attrs: attrs('paired') }),
   ]
   if (lastSession) {
@@ -165,7 +165,7 @@ export function idleSignalCells({
     }))
   }
   cells.push(modeLabel
-    ? cell('mode', t('dashboard.mode'), modeLabel, { word: true, sub: t('mission_control.mode_new_sessions'), attrs: attrs('mode') })
+    ? cell('mode', t('dashboard.mode'), modeLabel, { word: true, attrs: attrs('mode') })
     : missingCell('mode', t('dashboard.mode'), t('mission_control.not_read'), { attrs: attrs('mode') }))
   const temperature = finite(gpu?.temperature_c)
   const utilization = finite(gpu?.utilization_pct)
@@ -182,19 +182,20 @@ export function idleSignalCells({
   }
   // The shared Live Tuning labels name the feature themselves ("Live Tuning Off"); the cell already does.
   const tuning = String(liveTuningLabel || '').replace(/^Live Tuning:?\s*/, '')
-  cells.push(cell('tuning', t('mission_control.signal_live_tuning'), tuning || MISSING, {
-    word: true, sub: t('mission_control.sessions_recorded', { count: sessionCount }), attrs: attrs('tuning'),
-  }))
+  cells.push(cell('tuning', t('mission_control.signal_live_tuning'), tuning || MISSING, { word: true, attrs: attrs('tuning') }))
   return cells
 }
 
-// The library title the idle stage features: the most recently launched one. Without any launch
-// record it is simply the first title in the library, and the stage says so.
-export function featuredLibraryApp(recentApps = []) {
-  const app = Array.isArray(recentApps) ? recentApps[0] : null
+// The library title the idle stage features: the one picked from the shelf while it is still
+// there, otherwise the most recently launched one. Without any launch record it is simply the
+// first title in the library, and the stage says so.
+export function featuredLibraryApp(recentApps = [], selectedUuid = '') {
+  const list = Array.isArray(recentApps) ? recentApps : []
+  const picked = selectedUuid ? list.find(app => app?.uuid === selectedUuid) : null
+  const app = picked || list[0]
   if (!app) return null
   const launched = finite(app['last-launched'])
-  return { app, launchedAt: launched > 0 ? (launched > 1e12 ? launched : launched * 1000) : 0 }
+  return { app, launchedAt: launched > 0 ? (launched > 1e12 ? launched : launched * 1000) : 0, chosen: Boolean(picked) }
 }
 
 export function relativeDay(epochMs, now = Date.now()) {

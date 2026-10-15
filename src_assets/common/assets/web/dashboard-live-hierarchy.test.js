@@ -63,6 +63,11 @@ describe('DashboardView hierarchy', () => {
     const dashboard = webSource('views/DashboardView.vue')
 
     expectBefore(dashboard, 'data-dashboard-idle-hero', 'data-dashboard-play-rail')
+    // The shelf sits right under the stage, ahead of the deck and the host vitals.
+    expectBefore(dashboard, 'data-dashboard-play-rail', 'class="mc-deck"')
+    expectBefore(dashboard, 'data-dashboard-play-rail', 'data-dashboard-idle-vitals')
+    expect(dashboard).toContain('featureApp(app)')
+    expect(dashboard).toContain(':data-dashboard-feature-app="app.uuid"')
     expect(dashboard).toContain('launchRecentApp(app)')
     expect(dashboard).toContain("$t('dashboard.open_priority_fix')")
     expect(dashboard).toContain('<PosterImage')

@@ -1,24 +1,16 @@
 <template>
   <div class="page-shell operator-console mission-control-view relative">
-    <p class="mc-docs-link -mt-3 text-right text-xs text-storm" data-tab-docs-link>
-      <a href="https://papi-ux.com/docs/mission-control/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ t('dashboard.docs_link') }}</a>
-    </p>
-
-    <section class="page-header">
-      <div class="page-heading">
-        <div class="section-title-row">
-          <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
-        </div>
-        <!-- Director's own greeting is its exact theme name; every other theme keeps the summary. -->
-        <p v-if="directorGreeting" class="page-subtitle mc-greeting" data-director-greeting><span class="mc-bracket">&lt;</span> {{ directorGreeting }} <span class="mc-bracket">&gt;</span></p>
-        <div v-else class="page-subtitle">{{ actionSummary }}</div>
+    <!-- Just the title: the stage slate shows the state, and the readings carry the counts. -->
+    <section>
+      <div class="flex min-w-0 items-start justify-between gap-3">
+        <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
+        <a href="https://papi-ux.com/docs/mission-control/" target="_blank" rel="noopener" class="focus-ring inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-storm hover:text-ice" :aria-label="t('dashboard.docs_link')" :title="t('dashboard.docs_link')" data-tab-docs-link>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.25" /><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.8" /><path d="M12 17.2h.01" stroke-width="2.4" /></svg>
+        </a>
       </div>
-      <div class="page-meta" role="status" aria-live="polite" aria-atomic="true">
-        <span v-if="stats?.streaming && !streamStatusIsUnavailable" class="pulse-dot"></span>
-        <span class="meta-pill" :class="stats?.streaming && !streamStatusIsUnavailable ? 'border-success/30 bg-success/10 text-success' : ''">
-          {{ streamStatusIsUnavailable ? t('mission_control.status_unavailable') : stageMode === 'loading' ? t('mission_control.connecting') : dashboardSpaces.hasActivity ? $t('dashboard_spaces.active_title') : stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
-        </span>
-      </div>
+      <!-- Director's own greeting is its exact theme name. -->
+      <p v-if="directorGreeting" class="page-subtitle mc-greeting" data-director-greeting><span class="mc-bracket">&lt;</span> {{ directorGreeting }} <span class="mc-bracket">&gt;</span></p>
+      <p class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-mission-status>{{ missionStatusLabel }}</p>
     </section>
 
     <DashboardSpaces v-if="hostPlatform === 'linux' && dashboardSpaces.visible" :model="dashboardSpaces" :loading="spacesLoading" @refresh="refreshSpaces" />
@@ -28,6 +20,7 @@
            Space sessions keep their own section above and no stage. -->
       <MissionStage
         v-if="stageMode !== 'spaces'"
+        ref="missionStage"
         :mode="stageMode"
         :data-dashboard-idle-hero="stageMode === 'idle' ? '' : undefined"
         :slate="stageView.slate"
@@ -82,7 +75,8 @@
             >
               {{ launchingUuid === featuredApp.app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
             </button>
-            <router-link to="/apps" class="focus-ring dashboard-action-button no-underline" :class="featuredApp || readyCheckDisplay.primaryIssue ? 'dashboard-action-button-ghost' : 'dashboard-action-button-primary'">
+            <!-- The shelf below holds the Library link; the stage offers it only to an empty library. -->
+            <router-link v-else to="/apps" class="focus-ring dashboard-action-button no-underline" :class="readyCheckDisplay.primaryIssue ? 'dashboard-action-button-ghost' : 'dashboard-action-button-primary'" data-stage-library>
               {{ $t('navbar.library') }}
             </router-link>
           </template>
@@ -91,7 +85,8 @@
           </router-link>
         </template>
 
-        <template v-if="stageMode !== 'loading'" #aside>
+        <!-- The idle stage leaves its right side to the artwork; the host route is in Diagnostics. -->
+        <template v-if="stageMode === 'live' || stageMode === 'unavailable'" #aside>
           <RoutePanel v-if="stageMode === 'live'" :title="t('mission_control.route')" :nodes="liveRouteNodes">
             <template #foot>
               <span class="meta-pill">{{ viewerCountLabel }}</span>
@@ -105,15 +100,6 @@
               >
                 {{ $t('dashboard.disconnect_client') }}
               </button>
-            </template>
-          </RoutePanel>
-          <RoutePanel v-else-if="stageMode === 'idle'" :title="t('mission_control.host')" :nodes="idleRouteNodes">
-            <template #foot>
-              <template v-if="readinessSources.config === 'ready'">
-                <span class="meta-pill">{{ discoveryEnabled ? t('mission_control.discovery_on') : t('mission_control.discovery_off') }}</span>
-                <span class="meta-pill">{{ pairingEnabled ? t('mission_control.pairing_open') : t('mission_control.pairing_closed') }}</span>
-              </template>
-              <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-ghost" :disabled="refreshingReadiness" @click="refreshLaunchChecks">{{ $t('dashboard.refresh_checks') }}</button>
             </template>
           </RoutePanel>
           <RoutePanel v-else :title="t('mission_control.route')" :nodes="unavailableRouteNodes" />
@@ -176,6 +162,42 @@
           <SignalStrip v-else :aria-label="t('mission_control.unavailable_signals_label')" :cells="unavailableCells" />
         </template>
       </MissionStage>
+
+      <!-- The shelf: recent titles as posters. A poster features its title on the stage; Play launches it. -->
+      <section v-if="stageMode === 'idle' && recentApps.length" class="mc-shelf" data-dashboard-play-rail aria-labelledby="mc-shelf-title">
+        <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+          <h2 id="mc-shelf-title" class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.recent_games') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h2>
+          <router-link to="/apps" class="focus-ring mc-inline-link">{{ $t('navbar.library') }} <span aria-hidden="true">→</span></router-link>
+        </div>
+        <p v-if="!currentAppAvailable" role="status" class="mt-2 text-sm text-support">Waiting for current app status.</p>
+        <ul class="mc-film">
+          <li v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
+            <div class="mc-film-art">
+              <PosterImage class="w-full" :name="app.name" :src="appCoverSrc(app)" aria-hidden="true" />
+              <button
+                type="button"
+                class="focus-ring mc-film-pick"
+                :aria-label="t('mission_control.feature_title', { name: app.name })"
+                :aria-pressed="featuredApp?.app.uuid === app.uuid ? 'true' : 'false'"
+                :data-dashboard-feature-app="app.uuid"
+                @click="featureApp(app)"
+              ></button>
+              <button
+                type="button"
+                class="focus-ring dashboard-action-button dashboard-action-button-primary mc-film-play"
+                :aria-label="t('mission_control.launch_title', { name: app.name })"
+                :disabled="launchingUuid === app.uuid || !currentAppAvailable"
+                :data-dashboard-launch-app="app.uuid"
+                @click="launchRecentApp(app)"
+              >
+                <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11l9.5-5.5z" /></svg>
+                {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
+              </button>
+            </div>
+            <div class="mc-film-name" :title="app.name">{{ app.name }}</div>
+          </li>
+        </ul>
+      </section>
 
       <div v-if="stageMode !== 'loading'" class="mc-deck">
         <div class="mc-deck-main">
@@ -250,40 +272,6 @@
             <p v-if="doctorActionStatus" class="mt-3 text-xs leading-relaxed text-storm" role="status" aria-live="polite">{{ doctorActionStatus }}</p>
           </section>
 
-          <!-- Recent titles: the landing page is a remote control, so each one launches. -->
-          <section v-if="stageMode === 'idle'" class="mc-panel" data-dashboard-play-rail>
-            <div class="flex flex-wrap items-start justify-between gap-3">
-              <div class="min-w-0">
-                <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.recent_games') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
-                <p class="mt-1 text-sm text-support">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</p>
-              </div>
-              <router-link to="/apps" class="focus-ring dashboard-action-button dashboard-action-button-ghost no-underline">
-                {{ $t('navbar.library') }}
-              </router-link>
-            </div>
-            <p v-if="!currentAppAvailable" role="status" class="mt-3 text-sm text-support">Waiting for current app status.</p>
-            <div v-if="recentApps.length" class="dashboard-play-grid mc-film">
-              <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
-                <PosterImage class="w-full" :name="app.name" :src="app['image-path'] ? './api/covers/image?name=' + encodeURIComponent(app.name) : ''" />
-                <div class="mt-2 min-w-0">
-                  <div class="mc-film-name" :title="app.name">{{ app.name }}</div>
-                  <div class="mc-film-source" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
-                </div>
-                <button
-                  type="button"
-                  class="focus-ring dashboard-play-launch"
-                  :aria-label="t('mission_control.launch_title', { name: app.name })"
-                  :disabled="launchingUuid === app.uuid || !currentAppAvailable"
-                  :data-dashboard-launch-app="app.uuid"
-                  @click="launchRecentApp(app)"
-                >
-                  {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
-                </button>
-              </div>
-            </div>
-            <div v-else class="py-6 text-center text-sm text-support">{{ $t('dashboard.no_games') }}</div>
-          </section>
-
           <!-- Host vitals stay readable while collapsed, including without colour vision. -->
           <template v-if="stageMode === 'idle'">
             <details class="mc-panel mc-vitals" v-if="gpu" data-dashboard-idle-vitals>
@@ -320,6 +308,18 @@
           <!-- One disclosure for the dense detail; opening it is the viewer's choice and survives updates. -->
           <MissionDiagnostics ref="diagnosticsPanel" v-model="diagnosticsOpen" :title="t('mission_control.diagnostics')" :summary="diagnosticsSummary">
             <div class="mc-diag-grid">
+              <section v-if="stageMode === 'idle'" class="mc-diag-wide min-w-0" data-diagnostics-host>
+                <RoutePanel :title="t('mission_control.host')" :nodes="idleRouteNodes">
+                  <template #foot>
+                    <template v-if="readinessSources.config === 'ready'">
+                      <span class="meta-pill">{{ discoveryEnabled ? t('mission_control.discovery_on') : t('mission_control.discovery_off') }}</span>
+                      <span class="meta-pill">{{ pairingEnabled ? t('mission_control.pairing_open') : t('mission_control.pairing_closed') }}</span>
+                    </template>
+                    <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-ghost" :disabled="refreshingReadiness" @click="refreshLaunchChecks">{{ $t('dashboard.refresh_checks') }}</button>
+                  </template>
+                </RoutePanel>
+              </section>
+
               <section v-if="stageMode === 'live' || stageMode === 'unavailable'" class="min-w-0" data-diagnostics-stream-status>
                 <h4 class="mc-diag-section-title">{{ t('mission_control.diag_stream_status') }}</h4>
                 <dl class="mc-kv">
@@ -573,7 +573,10 @@ async function refreshApps() {
       const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
       apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
       appCatalogCount.value = apps.length
-      recentApps.value = apps.slice(0, 5)
+      recentApps.value = apps.slice(0, 8)
+      // A featured pick lasts while its title is on the shelf and differs from the default.
+      if (selectedFeaturedUuid.value && (!recentApps.value.some(app => app.uuid === selectedFeaturedUuid.value) ||
+        recentApps.value[0]?.uuid === selectedFeaturedUuid.value)) selectedFeaturedUuid.value = ''
     } else if (revision === appsRequestRevision) {
       readinessSources.value.apps = 'unavailable'
       currentAppAvailable.value = false
@@ -641,11 +644,12 @@ watch(hostPlatform, platform => {
 
 const autoQuality = computed(() => resolveAutoQualityState(stats.value || {}, clientSettingsSync.value || {}))
 
-const actionSummary = computed(() => {
-  if (dashboardSpaces.value.hasActivity) return t('dashboard_spaces.summary', { count: dashboardSpaces.value.total })
-  if (!statsLoaded.value) return t('dashboard.loading_summary')
-  if (stats.value?.streaming) return t('dashboard.streaming_summary')
-  return t('dashboard.idle_summary', { count: pairedClients.value })
+// Announced to screen readers; sighted viewers read the same state from the stage slate.
+const missionStatusLabel = computed(() => {
+  if (streamStatusIsUnavailable.value) return t('mission_control.status_unavailable')
+  if (stageMode.value === 'loading') return t('mission_control.connecting')
+  if (dashboardSpaces.value.hasActivity) return t('dashboard_spaces.active_title')
+  return stats.value?.streaming ? t('dashboard.live') : t('dashboard.standby')
 })
 
 const readinessLabel = computed(() => {
@@ -1500,6 +1504,8 @@ async function launchRecentApp(app) {
     const result = response.ok ? await response.json() : { status: false, error: `HTTP ${response.status}` }
     if (result.status === true) {
       showToast(t('dashboard.launched', { name: app.name }), 'success')
+      // The stage moves once, to the title that just launched.
+      selectedFeaturedUuid.value = ''
       refreshApps()
     } else {
       showToast(t('dashboard.launch_failed') + (result.error || ''), 'error')
@@ -1738,7 +1744,20 @@ const directorGreeting = computed(() => {
 
 // ── Stage content ──
 const hostDisplayName = computed(() => String(readinessConfig.value?.sunshine_name || '').trim() || t('mission_control.this_host'))
-const featuredApp = computed(() => featuredLibraryApp(recentApps.value))
+// A poster picked from the shelf takes the stage until a launch, a refresh without it, or a stream.
+const selectedFeaturedUuid = ref('')
+const featuredApp = computed(() => featuredLibraryApp(recentApps.value, selectedFeaturedUuid.value))
+const missionStage = ref(null)
+watch(stageMode, mode => { if (mode !== 'idle') selectedFeaturedUuid.value = '' })
+
+// Featuring never moves focus; it only brings the stage back into view when it has scrolled away.
+function featureApp(app) {
+  selectedFeaturedUuid.value = app.uuid === recentApps.value[0]?.uuid ? '' : app.uuid
+  const stage = missionStage.value?.$el
+  if (stage?.getBoundingClientRect?.().top < 0) {
+    stage.scrollIntoView?.({ block: 'start', behavior: prefersReducedMotion.value ? 'auto' : 'smooth' })
+  }
+}
 const streamFormat = computed(() => streamFormatLabel(stats.value || {}))
 
 const liveCells = computed(() => liveSignalCells({
@@ -1770,7 +1789,6 @@ const idleCells = computed(() => {
     modeLabel: newSessionModeLabel.value,
     gpu: gpu.value,
     liveTuningLabel: liveTuningLabel.value,
-    sessionCount: sessionHistory.value.length,
     t,
   })
 })
@@ -1886,7 +1904,8 @@ const idleNote = computed(() => {
     return [t('dashboard.checks_attention', { count: display.attention }),
       display.primaryIssue ? t('dashboard.checks_start_with', { check: display.primaryIssue.label }) : ''].filter(Boolean).join('. ')
   }
-  if (display.allPassing) return t('mission_control.idle_ready_note', { total: display.total })
+  // All clear needs no note: the readiness reading already says so.
+  if (display.allPassing) return ''
   return `${t('dashboard.checks_waiting')}. ${t('dashboard.check_waiting')}`
 })
 
@@ -1923,13 +1942,13 @@ const stageView = computed(() => {
   const display = readyCheckDisplay.value
   return {
     slate: t('mission_control.standby'),
-    timecode: t(display.allPassing ? 'dashboard.check_state_ready' : display.attention ? 'dashboard.check_state_attention' : 'dashboard.check_state_not_checked'),
-    kicker: featured ? (featured.launchedAt ? t('mission_control.next_up') : t('mission_control.from_library')) : t('dashboard.stream_readiness'),
+    timecode: '',
+    kicker: featured ? (featured.chosen || featured.launchedAt ? t('mission_control.next_up') : t('mission_control.from_library')) : t('dashboard.stream_readiness'),
     title: featured ? featured.app.name : t('dashboard.no_games'),
     meta: featured ? [featured.app.source && featured.app.source !== 'manual' ? featured.app.source : '',
       featured.launchedAt ? t('mission_control.last_launched', { when: relativeDay(featured.launchedAt, nowMs.value) }) : ''] : [],
     note: idleNote.value,
-    noteTone: display.attention > 0 ? 'text-warning-bright' : display.allPassing ? 'text-success' : '',
+    noteTone: display.attention > 0 ? 'text-warning-bright' : '',
     artSrc: appCoverSrc(featured?.app),
   }
 })

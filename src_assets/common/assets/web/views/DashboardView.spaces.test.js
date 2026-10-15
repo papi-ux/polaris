@@ -207,6 +207,94 @@ describe('Mission Control with Space sessions', () => {
 
 })
 
+describe('Mission Control header, Spaces and shelf', () => {
+  const shelf = [
+    { uuid: 'a', name: 'Alpha', 'image-path': 'a.png', source: 'steam', 'last-launched': 30 },
+    { uuid: 'b', name: 'Bravo', 'image-path': 'b.png', 'last-launched': 20 },
+    { uuid: 'c', name: 'Charlie', 'last-launched': 0 },
+  ]
+  const launches = () => fetch.mock.calls.filter(([url]) => url === './api/apps/launch')
+  const stage = () => wrapper.get('[data-dashboard-idle-hero]')
+
+  it('keeps the header to the title and guide, announcing the state only to screen readers', async () => {
+    await render(false)
+    expect(wrapper.find('.page-subtitle').exists()).toBe(false)
+    const status = wrapper.get('[data-mission-status]')
+    expect(status.attributes('role')).toBe('status')
+    expect(status.classes()).toContain('sr-only')
+    expect(status.text()).toBe(messages.dashboard.standby)
+    const guide = wrapper.get('[data-tab-docs-link]')
+    expect(guide.attributes('href')).toBe('https://papi-ux.com/docs/mission-control/')
+    expect(guide.attributes('aria-label')).toBe(messages.dashboard.docs_link)
+    shared.stats.value = { streaming: true, fps: 60 }; await flushPromises()
+    expect(status.text()).toBe(messages.dashboard.live)
+  })
+
+  it('leaves healthy idle Spaces off the page and brings them back for a problem or a session', async () => {
+    await render(false)
+    expect(wrapper.find('[data-dashboard-spaces]').exists()).toBe(false)
+    spaces = snapshot({ failed: true })
+    await vi.advanceTimersByTimeAsync(10000); await flushPromises()
+    expect(wrapper.get('[data-spaces-attention]').text()).toBe(messages.dashboard_spaces.attention)
+    expect(wrapper.find('[data-dashboard-idle-hero]').exists()).toBe(true)
+    spaces = active('running')
+    await vi.advanceTimersByTimeAsync(10000); await flushPromises()
+    expect(wrapper.get('[data-space-session]').text()).toContain('Gaming Space')
+    expect(wrapper.find('[data-dashboard-idle-hero]').exists()).toBe(false)
+  })
+
+  it('features a poster on the stage without launching it, and launches only from Play', async () => {
+    appPayload = { apps: shelf, current_app: '' }
+    await render(false)
+    expect(stage().get('.mc-stage-title').text()).toBe('Alpha')
+    expect(wrapper.get('[data-dashboard-feature-app="a"]').attributes('aria-pressed')).toBe('true')
+
+    await wrapper.get('[data-dashboard-feature-app="b"]').trigger('click')
+    expect(stage().get('.mc-stage-title').text()).toBe('Bravo')
+    expect(stage().get('[data-stage-artwork] img').attributes('src')).toBe('./api/covers/image?name=Bravo')
+    expect(stage().get('[data-stage-launch]').attributes('aria-label')).toBe('Launch Bravo')
+    expect(wrapper.get('[data-dashboard-feature-app="b"]').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.get('[data-dashboard-feature-app="a"]').attributes('aria-pressed')).toBe('false')
+    expect(launches()).toHaveLength(0)
+
+    // A pick with no launch record is still next up; without a cover the stage is typographic.
+    await wrapper.get('[data-dashboard-feature-app="c"]').trigger('click')
+    expect(stage().get('.mc-kicker').text()).toBe(messages.mission_control.next_up)
+    expect(stage().find('[data-stage-artwork]').exists()).toBe(false)
+    expect(stage().find('.mc-stage-backdrop').exists()).toBe(false)
+
+    // A refresh that drops the pick returns the stage to the most recent title.
+    appPayload = { apps: shelf.slice(0, 2), current_app: '' }
+    await wrapper.vm.refreshApps(); await flushPromises()
+    expect(stage().get('.mc-stage-title').text()).toBe('Alpha')
+    expect(launches()).toHaveLength(0)
+
+    // Play launches its own title; afterwards the stage follows the launch record, not the old pick.
+    const base = fetch.getMockImplementation()
+    fetch.mockImplementation(async (url, options) => (url === './api/apps/launch' ? reply({ status: true }) : base(url, options)))
+    appPayload = { apps: shelf, current_app: '' }
+    await wrapper.vm.refreshApps(); await flushPromises()
+    await wrapper.get('[data-dashboard-feature-app="b"]').trigger('click')
+    appPayload = { apps: [{ ...shelf[2], 'last-launched': 40 }, ...shelf.slice(0, 2)], current_app: '' }
+    await wrapper.get('[data-dashboard-launch-app="c"]').trigger('click'); await flushPromises()
+    expect(launches().map(([, options]) => JSON.parse(options.body).uuid)).toEqual(['c'])
+    expect(stage().get('.mc-stage-title').text()).toBe('Charlie')
+    expect(wrapper.get('[data-dashboard-feature-app="c"]').attributes('aria-pressed')).toBe('true')
+  })
+
+  it('offers Library from the shelf, and from the stage only when the library is empty', async () => {
+    appPayload = { apps: shelf, current_app: '' }
+    await render(false)
+    expect(stage().find('a[href="/apps"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-dashboard-play-rail] a[href="/apps"]')).toHaveLength(1)
+    expect(wrapper.find('[data-diagnostics-host] [data-mission-route]').exists()).toBe(true)
+    appPayload = { apps: [], current_app: '' }
+    await wrapper.vm.refreshApps(); await flushPromises()
+    expect(wrapper.find('[data-dashboard-play-rail]').exists()).toBe(false)
+    expect(stage().get('[data-stage-library]').attributes('href')).toBe('/apps')
+  })
+})
+
 describe('Mission Control stage', () => {
   const displayReads = () => fetch.mock.calls.filter(([url]) => /\/api\/display\/(stream|screenshot)/.test(String(url)))
   const live = { streaming: true, fps: 60, bitrate_kbps: 10000, encode_time_ms: 2, latency_ms: 5,
