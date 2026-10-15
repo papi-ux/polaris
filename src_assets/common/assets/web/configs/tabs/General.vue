@@ -1,7 +1,10 @@
 <script setup>
+import { embeddedClient } from '../../client-embed.js'
 import { onMounted, ref } from 'vue'
 import Checkbox from '../../Checkbox.vue'
 import { hostPowerLines } from '../../host-power-status.js'
+
+const inNova = embeddedClient() === 'nova'
 
 const props = defineProps({
   platform: String,
@@ -82,7 +85,7 @@ function handleSteamGridDbKeyInput() {
 
 <template>
   <div id="general" class="config-page space-y-4">
-    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+    <p v-if="!inNova" class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
       <a href="https://papi-ux.com/docs/configuration/#general-tab" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.general_docs_link') }}</a>
     </p>
     <section class="settings-section">

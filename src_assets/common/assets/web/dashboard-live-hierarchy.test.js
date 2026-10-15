@@ -73,10 +73,13 @@ describe('DashboardView hierarchy', () => {
     expect(css).toMatch(/@media \(hover: none\), \(any-pointer: coarse\) \{\s*\.mc-film \{\s*--play: 1;\s*--play-hit: auto;/)
     expect(dashboard).toContain('@pointerdown.capture="notePlayPress"')
     // Inside Nova's Host Console every page's guide control is hidden; contextual help stays.
-    const pages = ['views', 'components'].flatMap(dir => readdirSync(`src_assets/common/assets/web/${dir}`)
+    const pages = ['views', 'components', 'configs/tabs'].flatMap(dir => readdirSync(`src_assets/common/assets/web/${dir}`)
       .filter(name => name.endsWith('.vue')).map(name => `${dir}/${name}`))
     const guided = pages.filter(page => webSource(page).includes('data-tab-docs-link'))
-    expect(guided).toEqual(expect.arrayContaining(['views/AppsView.vue', 'views/DashboardView.vue']))
+    expect(guided).toEqual(expect.arrayContaining([
+      'views/AppsView.vue', 'views/DashboardView.vue',
+      ...['Advanced', 'Files', 'General', 'Inputs', 'Network'].map(name => `configs/tabs/${name}.vue`),
+    ]))
     for (const page of guided) {
       const source = webSource(page)
       const guides = source.split('data-tab-docs-link').length - 1

@@ -588,6 +588,35 @@ test.describe('Mission Control stage', () => {
     expect(host.writes).toEqual([])
   })
 
+  test('settings keeps each tab guide in a browser and hides it throughout a Nova visit', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page, { theme: 'miami' })
+    const tabs = [
+      ['General', 'general-tab'], ['Input', 'input-tab'], ['Network', 'network-tab'],
+      ['Config Files', 'files'], ['Advanced', 'advanced-tab'],
+    ]
+    const selectTab = async name => {
+      await page.locator('.settings-nav-button').filter({ hasText: new RegExp(`^${name}$`) }).click()
+      await expect(page.locator('.settings-tab-title')).toHaveText(name)
+    }
+    await page.goto('/#/config')
+    for (const [name, anchor] of tabs) {
+      await selectTab(name)
+      await expect(page.locator(`.config-page [data-tab-docs-link] a[href$="#${anchor}"]`)).toBeVisible()
+    }
+    // Nova's presentation hint hides only page-level guides, leaving the settings usable.
+    await page.goto('/?client=nova&theme=director#/config')
+    for (const [name] of tabs) {
+      await selectTab(name)
+      await expect(page.locator('[data-tab-docs-link]')).toHaveCount(0)
+      await expect(page.locator('.config-page').first()).toBeVisible()
+      expect(await page.locator('.config-page input, .config-page select, .config-page textarea').count()).toBeGreaterThan(0)
+    }
+    expect(await page.evaluate(() => [document.documentElement.getAttribute('data-theme'), localStorage.getItem('polaris-theme')])).toEqual(['director', 'miami'])
+    expect(host.writes).toEqual([])
+  })
+
   test('inside Nova, a theme picked in the console survives a reload of the address it is on', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.emulateMedia({ reducedMotion: 'reduce' })
