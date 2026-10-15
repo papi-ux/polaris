@@ -77,6 +77,16 @@ opens the full library. **Host vitals** shows GPU temperature, load, encoder loa
 gauges; a gauge without data is not drawn rather than showing a placeholder. The host's route,
 with its displays, audio and paired devices, is in **Diagnostics**.
 
+## Stage artwork
+
+The poster on the stage is the entry's own image. The host also serves each entry's background and
+logo from the artwork cache Nova uses, at `GET /api/apps/<uuid>/artwork/hero` and
+`GET /api/apps/<uuid>/artwork/logo`, so the console only ever loads images from the host. When a
+Steam title has no background or logo yet, the request answers without one and the host fetches the
+missing images from Steam once, in the background; the next view shows them. A title Steam has no
+image for is asked again at most once an hour. Nothing is fetched for an entry after **Remove
+artwork** or for a Desktop entry, and the console never contacts SteamGridDB.
+
 ## Session history
 
 Two lists can appear here. This browser keeps its own list of sessions it watched, with grade,
