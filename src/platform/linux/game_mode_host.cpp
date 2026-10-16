@@ -7,9 +7,11 @@
 #include "game_mode_host.h"
 
 #include "executable_path.h"
+#include "user_unit_override.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -18,6 +20,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <pwd.h>
 #include <sstream>
 #include <sys/stat.h>
 #include <thread>
@@ -551,6 +554,32 @@ namespace platf::game_mode_host {
                              fs::exists(paths.system_wants_dir / "polaris.service", ec);
     readiness.boot_start_linked = user_want || system_want;
     return readiness;
+  }
+
+  bool suppress_tray_for_headless_boot(std::string_view self_cgroup, const boot_paths_t &paths) {
+    return user_unit::in_polaris_service(self_cgroup) && boot_readiness(paths).independent();
+  }
+
+  bool suppress_tray_for_headless_boot() {
+    const auto cgroup = read_small_file("/proc/self/cgroup");
+    if (!cgroup || !user_unit::in_polaris_service(*cgroup)) {
+      return false;
+    }
+
+    // Use the same passwd home as --enable-headless-boot, not HOME or XDG_CONFIG_HOME.
+    // HTTP threads are already running at tray startup, so use the reentrant lookup.
+    std::vector<char> buffer(16384);
+    struct passwd account {};
+    struct passwd *found = nullptr;
+    int error;
+    while ((error = getpwuid_r(geteuid(), &account, buffer.data(), buffer.size(), &found)) == ERANGE &&
+           buffer.size() < (1U << 20)) {
+      buffer.resize(buffer.size() * 2);
+    }
+    if (error != 0 || !found || !found->pw_name || !*found->pw_name || !found->pw_dir || !*found->pw_dir) {
+      return false;
+    }
+    return suppress_tray_for_headless_boot(*cgroup, default_boot_paths(found->pw_name, found->pw_dir));
   }
 
   guidance_t boot_readiness_guidance(const detection_t &detection, bool boot_independent) {

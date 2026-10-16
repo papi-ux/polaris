@@ -58,6 +58,8 @@ The `EXIT` trap attempts to restore read-only mode if disabling the root, packag
 
 `--enable-headless-boot` starts Polaris at boot, before anyone signs in, so it keeps running when the Deck switches between Desktop Mode and Game Mode. Without it a Deck that boots into Game Mode has no Polaris until someone opens Desktop Mode. `sudo -H polaris --setup-host --disable-headless-boot` turns it off again. [Handhelds and Game Mode](handhelds.md#keep-polaris-reachable-across-mode-switches) explains what it changes.
 
+With headless boot enabled, the Polaris user service skips its desktop tray so closing the compositor cannot end the host through the tray's GTK display connection. This also applies when the service runs the KMS helper. Use the web console to control that service. Direct launches and ordinary desktop services without headless boot still honor your system tray setting.
+
 SteamOS ships without an initialized pacman keyring, so the first `pacman` transaction that has to download anything fails signature verification. `pacman-key --init` creates `/etc/pacman.d/gnupg`, and `pacman-key --populate` imports every keyring already on the image, which on SteamOS means the Arch and Holo keyrings. Both steps are one-time and idempotent, and both write to the root filesystem, so they run after `steamos-readonly disable`.
 
 `pacman -Sy` refreshes the sync databases so `pacman -U` can resolve the handful of Polaris dependencies a stock SteamOS image does not carry. Do not substitute `-Syu`. A full upgrade replaces Valve's pinned packages with rolling Arch versions and is not supported on SteamOS.

@@ -4,6 +4,7 @@
  */
 // standard includes
 #ifdef __linux__
+  #include "platform/linux/game_mode_host.h"
   #include "platform/linux/gamescope_process.h"
   #include "platform/linux/labwc_supervisor.h"
 
@@ -804,6 +805,10 @@ int main(int argc, char *argv[]) {
 
   bool start_tray = tray_is_enabled && config::sunshine.system_tray;
 #ifdef __linux__
+  if (start_tray && platf::game_mode_host::suppress_tray_for_headless_boot()) {
+    BOOST_LOG(info) << "Not starting the system tray: the headless-boot service must outlive the desktop compositor"sv;
+    start_tray = false;
+  }
   if (start_tray) {
     const char *runtime = std::getenv("XDG_RUNTIME_DIR");
     const auto runtime_dir = (runtime && *runtime) ? std::filesystem::path(runtime) :

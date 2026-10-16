@@ -2,11 +2,12 @@
  * @file tests/unit/platform/test_game_mode_host.cpp
  * @brief Test gamescope Steam session (Game Mode) host detection and the guidance built on it.
  */
-#include "../../tests_common.h"
+#include <gtest/gtest.h>
 
 #ifdef __linux__
 
 #include <src/platform/linux/game_mode_host.h>
+#include <src/platform/linux/user_unit_override.h>
 #include <src/utility.h>
 
 #include <atomic>
@@ -254,6 +255,64 @@ TEST(GameModeHostTests, BootReadinessNeedsBothLingerAndTheWantLink) {
   EXPECT_FALSE(gm::boot_readiness(paths).boot_start_linked);
   scratch.file("system-wants/polaris.service", "");
   EXPECT_TRUE(gm::boot_readiness(paths).independent());
+}
+
+TEST(GameModeHostTests, TrayPolicyKeepsOrdinaryMenuAndInteractiveLaunches) {
+  scratch_t scratch;
+  const gm::boot_paths_t paths {scratch.dir("linger"), "deck", scratch.dir("config"), scratch.dir("system-wants")};
+  const auto service = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service\n"sv;
+  EXPECT_FALSE(gm::suppress_tray_for_headless_boot(service, paths)) << "ordinary menu-started service";
+
+  scratch.file("linger/deck", "");
+  scratch.file("config/systemd/user/default.target.wants/polaris.service", "");
+  for (const auto cgroup : {
+         "0::/user.slice/user-1000.slice/session-4.scope\n"sv,
+         "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-dev.polaris@42.service\n"sv,
+         "0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service.d\n"sv,
+         ""sv,
+       }) {
+    EXPECT_FALSE(gm::suppress_tray_for_headless_boot(cgroup, paths)) << cgroup;
+  }
+}
+
+TEST(GameModeHostTests, TrayPolicyRequiresBothHeadlessBootOptIns) {
+  scratch_t scratch;
+  const gm::boot_paths_t paths {scratch.dir("linger"), "deck", scratch.dir("config"), scratch.dir("system-wants")};
+  const auto service = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service\n"sv;
+  scratch.file("linger/deck", "");
+  EXPECT_FALSE(gm::suppress_tray_for_headless_boot(service, paths));
+
+  fs::remove(scratch.root / "linger/deck");
+  scratch.file("config/systemd/user/default.target.wants/polaris.service", "");
+  EXPECT_FALSE(gm::suppress_tray_for_headless_boot(service, paths));
+
+  scratch.file("linger/deck", "");
+  EXPECT_TRUE(gm::suppress_tray_for_headless_boot(service, paths));
+}
+
+TEST(GameModeHostTests, TrayPolicyCoversAKmsExecStartOverride) {
+  scratch_t scratch;
+  const gm::boot_paths_t paths {scratch.dir("linger"), "deck", scratch.dir("config"), scratch.dir("system-wants")};
+  scratch.file("linger/deck", "");
+  scratch.file("config/systemd/user/default.target.wants/polaris.service", "");
+  const auto helper = scratch.file("usr/libexec/polaris/polaris-kms", "fixture", true);
+  const auto drop_in = scratch.file("config/systemd/user/polaris.service.d/20-polaris-kms.conf",
+                                   "[Service]\nExecStart=\nExecStart=" + helper.string() + "\n");
+  const auto override = platf::user_unit::effective_exec_override(drop_in.parent_path());
+  ASSERT_TRUE(override.active());
+  ASSERT_EQ(override.binary, helper);
+  ASSERT_FALSE(override.binary_missing);
+  EXPECT_TRUE(gm::suppress_tray_for_headless_boot(
+    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service\n", paths));
+}
+
+TEST(GameModeHostTests, TrayPolicyHonorsTheExistingSystemWideBootWant) {
+  scratch_t scratch;
+  const gm::boot_paths_t paths {scratch.dir("linger"), "deck", scratch.dir("config"), scratch.dir("system-wants")};
+  scratch.file("linger/deck", "");
+  scratch.file("system-wants/polaris.service", "");
+  EXPECT_TRUE(gm::suppress_tray_for_headless_boot(
+    "0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service\n", paths));
 }
 
 TEST(GameModeHostTests, BootReadinessGuidanceNamesGameModeOnlyWhenTheHostHasOne) {

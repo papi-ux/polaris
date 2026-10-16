@@ -45,6 +45,11 @@ The first command enables lingering for your account and hooks the Polaris user 
 `default.target`, so it starts at boot before any login. Run it from Desktop Mode's terminal or
 over SSH, as your normal user through sudo. `--disable-headless-boot` undoes the hook later.
 
+The headless-boot service skips the desktop tray so logging out cannot end the host through the
+tray's display connection. Control it from the web console. If Polaris was already running when
+you enabled headless boot, end any streams and run `systemctl --user restart polaris` once to apply
+that startup policy. Direct launches and desktop services without headless boot keep their tray setting.
+
 Verify after a reboot. Over SSH from another machine:
 
 ```bash
