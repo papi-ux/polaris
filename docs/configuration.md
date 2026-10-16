@@ -336,7 +336,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **Log Level** (`min_log_level`) | The minimum log level printed to standard out |
 | **Server Commands** (`server_cmd`) | Configure a list of commands to be executed when called from client during streaming. |
 | **Include beta releases** (`notify_pre_releases`) | Offer newer beta and release-candidate packages in Update Center. Off by default; also available in **System → Update Center**. Older versions label it **PreRelease Notifications**. See [updates and beta releases](updates.md). |
-| **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray |
+| **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray. The Linux headless-boot user service keeps it off so the host survives desktop logout; direct launches and ordinary desktop services still honor this setting. |
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
 | **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |

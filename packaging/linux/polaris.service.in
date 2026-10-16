@@ -13,10 +13,7 @@ StartLimitBurst=5
 # Avoid starting Polaris before the desktop is fully initialized.
 ExecStartPre=/bin/sleep 5
 PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID XAUTHORITY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
-# The GTK tray holds a desktop display connection and exits the process when
-# that compositor closes. Keep this persistent host independent of the tray;
-# interactive launches still honor the user's system_tray setting.
-@POLARIS_SERVICE_START_COMMAND@ system_tray=disabled
+@POLARIS_SERVICE_START_COMMAND@
 @POLARIS_SERVICE_STOP_COMMAND@
 Restart=on-failure
 RestartSec=5s

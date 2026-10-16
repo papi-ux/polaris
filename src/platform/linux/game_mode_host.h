@@ -145,6 +145,17 @@ namespace platf::game_mode_host {
 
   boot_readiness_t boot_readiness(const boot_paths_t &paths);
 
+  /**
+   * @brief Keep a headless-boot service independent of the desktop tray's display connection.
+   *
+   * Ordinary desktop services and interactive launches keep their configured tray.
+   * Checking the service cgroup also covers an ExecStart override for the KMS helper.
+   */
+  bool suppress_tray_for_headless_boot(std::string_view self_cgroup, const boot_paths_t &paths);
+
+  /// The startup decision for the calling process, using its passwd account and cgroup.
+  bool suppress_tray_for_headless_boot();
+
   struct guidance_t {
     std::string status;
     std::string summary;

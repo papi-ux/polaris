@@ -504,7 +504,7 @@ describe('Heroic library launcher entry', () => {
 })
 
 describe('Linux packaging contracts', () => {
-  it('runs the generated persistent service without a desktop tray connection', () => {
+  it('preserves the generated desktop service command for ordinary menu launches', () => {
     const fixture = mkdtempSync(join(tmpdir(), 'polaris-service-contract-'))
     try {
       writeFileSync(join(fixture, 'CMakeLists.txt'), [
@@ -523,7 +523,7 @@ describe('Linux packaging contracts', () => {
       expect(configure.status, configure.stdout + configure.stderr).toBe(0)
       const unit = readFileSync(join(build, 'polaris.service'), 'utf8')
       expect(unit.split('\n').filter((line) => line.startsWith('ExecStart=')))
-        .toEqual(['ExecStart=/usr/bin/polaris system_tray=disabled'])
+        .toEqual(['ExecStart=/usr/bin/polaris'])
     } finally {
       rmSync(fixture, { force: true, recursive: true })
     }
