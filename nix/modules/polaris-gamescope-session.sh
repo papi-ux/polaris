@@ -801,6 +801,27 @@ retire_marked_nested_gamescope_under_fence() (
   return 0
 )
 
+require_live_nested_primary_for_start() {
+  load_session_instance_id && [ "$POLARIS_PERSISTED_SESSION_MODE" = nested ] || {
+    echo "polaris-gamescope-session: nested session credential changed during startup" >&2
+    return 1
+  }
+  nested_primary_child_exit_matches || return 0
+  echo "polaris-gamescope-session: exact-session Steam primary command exited before nested runtime ready" >&2
+  # The keeper can leave compositor/Xwayland endpoints looking healthy after
+  # Steam is terminal. Retire only the generation captured by this start, using
+  # the same pre-freeze and complete ownership fence as normal nested teardown.
+  if polaris_validate_marker "$marker" nested \
+      && [ "$POLARIS_MARKER_PID" = "$nested_gamescope_pid" ] \
+      && [ "$POLARIS_MARKER_START_TIME" = "$nested_gamescope_start_time" ] \
+      && [ "$POLARIS_MARKER_EXECUTABLE" = "$nested_gamescope_executable" ]; then
+    retire_marked_nested_gamescope_under_fence || true
+  fi
+  # Fence failure retains the recovery claim; it never turns terminal startup
+  # into success or authorizes a numeric PID/group fallback.
+  return 1
+}
+
 # True while a real game process for $1 (Steam appid) is running.
 # Steam client / webhelper also inherit SteamAppId — exclude those so
 # Big Picture alone does not count as "game still up".
@@ -1138,6 +1159,8 @@ case "${1:-}" in
             && [ "$POLARIS_PROCESS_SESSION_ID" = "$nested_launch_pid" ]; then
           nested_marked=1
           nested_gamescope_pid="$gs_pid"
+          nested_gamescope_start_time="$POLARIS_MARKER_START_TIME"
+          nested_gamescope_executable="$POLARIS_MARKER_EXECUTABLE"
           break
         fi
         kill -0 "$nested_launch_pid" 2>/dev/null || break
@@ -1161,7 +1184,9 @@ case "${1:-}" in
       ready_timeout="$(polaris_runtime_ready_timeout_seconds)"
       ready_deadline=$((SECONDS + ready_timeout))
       while [ "$SECONDS" -lt "$ready_deadline" ]; do
+        require_live_nested_primary_for_start || exit 1
         if polaris_write_runtime_env "$marker" gamescope-0 nested "$rt"; then
+          require_live_nested_primary_for_start || exit 1
           ready=1
           break
         fi
@@ -1190,6 +1215,7 @@ case "${1:-}" in
       }
       # Brief settle so Steam's first controller udev events land after portal is up.
       sleep 1
+      require_live_nested_primary_for_start || exit 1
       echo "polaris-gamescope-session: nested ${POLARIS_GAMESCOPE_BIN:-gamescope} ready; WSI logs → $steam_log and ~/.local/share/Steam/logs/console-linux.txt" >&2
       echo "polaris-gamescope-session: pass = 'Creating Gamescope surface' + 'hdr formats exposed: true'" >&2
     else

@@ -1681,9 +1681,10 @@ namespace proc {
 
     bool is_transient_steam_client_cmdline(std::string_view cmdline) {
       const auto lower_cmdline = boost::to_lower_copy(std::string {cmdline});
+      // SteamRT3 keeps -srt-logger-opened on the persistent client, including
+      // SteamOS Desktop autostart. It does not identify a transient launcher.
       return lower_cmdline.find("-shutdown") != std::string::npos ||
-             lower_cmdline.find("-child-update-ui") != std::string::npos ||
-             lower_cmdline.find("-srt-logger-opened") != std::string::npos;
+             lower_cmdline.find("-child-update-ui") != std::string::npos;
     }
 
     bool proc_status_is_zombie(std::string_view status) {

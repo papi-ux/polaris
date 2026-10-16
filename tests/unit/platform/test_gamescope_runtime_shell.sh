@@ -767,6 +767,142 @@ fi
 [ -e "$work/run/gamescope-0" ] || fail "symlink-lock socket was removed"
 rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock" "$work/run/foreign-lock"
 
+# Exercise the FD scan in isolation: cost must scale with bounded batches,
+# while unreadable/gone entries and literal target bytes keep their semantics.
+fd_scan_regressions() (
+  local scan_lock scan_calls scan_owner pid fd fd_name
+  mkdir -p "$POLARIS_PROC_ROOT/991/fd" "$POLARIS_PROC_ROOT/992/fd" \
+    "$POLARIS_PROC_ROOT/993/fd"
+  scan_lock="$work/run/fd-scan.lock"
+  : >"$scan_lock"
+  for pid in 991 992; do
+    for ((fd = 0; fd < 96; fd++)); do
+      printf -v fd_name '%03d' "$fd"
+      ln -s 'socket:[123]' "$POLARIS_PROC_ROOT/$pid/fd/$fd_name"
+    done
+  done
+  # Called indirectly by the sourced scanner.
+  # shellcheck disable=SC2329
+  readlink() {
+    printf 'call\n' >>"$work/fd-scan-calls"
+    command readlink "$@"
+  }
+  polaris_wayland_lock_has_no_deleted_holder "$scan_lock" || fail "empty holder set was rejected"
+  scan_calls="$(wc -l <"$work/fd-scan-calls")"
+  [ "$scan_calls" -le 8 ] || fail "FD scan launched $scan_calls readlinks for 192 FDs"
+  printf 'FD scan: %s readlink calls for 192 FDs (limit 8)\n' "$scan_calls"
+
+  # A mixed-success batch must retain readable records even when readlink
+  # returns nonzero for a regular file, hidden FD, or vanished FD before them.
+  ln -sf "$scan_lock (deleted)" "$POLARIS_PROC_ROOT/991/fd/000"
+  : >"$POLARIS_PROC_ROOT/991/fd/002-regular"
+  # shellcheck disable=SC2329
+  readlink() {
+    local arg
+    local -a visible=()
+    for arg in "$@"; do
+      case "$arg" in
+        "$POLARIS_PROC_ROOT/991/fd/000") continue ;; # permission denied
+        "$POLARIS_PROC_ROOT/991/fd/001") rm -f "$arg" ;; # raced enumeration
+      esac
+      visible+=("$arg")
+    done
+    command readlink "${visible[@]}"
+  }
+  polaris_wayland_lock_has_no_deleted_holder "$scan_lock" || fail "unreadable/gone FD blocked cleanup"
+  ln -sf "$scan_lock (deleted)" "$POLARIS_PROC_ROOT/991/fd/003"
+  if polaris_wayland_lock_has_no_deleted_holder "$scan_lock"; then
+    fail "readable deleted holder in a failed batch was missed"
+  fi
+  rm -f "$POLARIS_PROC_ROOT/991/fd/003"
+  ln -sf "$scan_lock (deleted)" "$POLARIS_PROC_ROOT/991/fd/095"
+  if polaris_wayland_lock_has_no_deleted_holder "$scan_lock"; then
+    fail "deleted holder after failed reads/in a later batch was missed"
+  fi
+  rm -f "$POLARIS_PROC_ROOT/991/fd/000" "$POLARIS_PROC_ROOT/991/fd/095"
+
+  # Owner filtering uses the proc directory's kernel UID, not a claimed
+  # status-file UID. Simulate a different owner without privileged chown.
+  scan_owner="$(command stat -Lc '%u' "$scan_lock")"
+  printf 'Uid:\t%s\t%s\t%s\t%s\n' "$scan_owner" "$scan_owner" "$scan_owner" "$scan_owner" \
+    >"$POLARIS_PROC_ROOT/992/status"
+  ln -sf "$scan_lock (deleted)" "$POLARIS_PROC_ROOT/992/fd/095"
+  # shellcheck disable=SC2329
+  stat() {
+    if [ "$#" -eq 3 ] && [ "$1" = -Lc ] && [ "$2" = '%u' ] \
+        && [ "$3" = "$POLARIS_PROC_ROOT/992" ]; then
+      printf '%s\n' "$((scan_owner + 1))"
+    else
+      command stat "$@"
+    fi
+  }
+  polaris_wayland_lock_has_no_deleted_holder "$scan_lock" || fail "other UID's holder blocked cleanup"
+  unset -f stat
+  if polaris_wayland_lock_has_no_deleted_holder "$scan_lock"; then
+    fail "same UID's deleted holder was missed"
+  fi
+  rm -f "$POLARIS_PROC_ROOT/992/fd/095"
+
+  scan_lock="$work/run/"$'literal [*]?\\ lock\tline\n.lock'
+  : >"$scan_lock"
+  ln -s "$scan_lock" "$POLARIS_PROC_ROOT/993/fd/0"
+  ln -s "prefix$scan_lock (deleted)" "$POLARIS_PROC_ROOT/993/fd/1"
+  ln -s "$scan_lock (deleted) suffix" "$POLARIS_PROC_ROOT/993/fd/2"
+  ln -s "$scan_lock (deleted)"$'\n' "$POLARIS_PROC_ROOT/993/fd/3"
+  ln -s $'before\n'"$scan_lock (deleted)"$'\nafter' "$POLARIS_PROC_ROOT/993/fd/4"
+  polaris_wayland_lock_has_no_deleted_holder "$scan_lock" || fail "nonliteral deleted target blocked cleanup"
+  ln -s "$scan_lock (deleted)" "$POLARIS_PROC_ROOT/993/fd/5"
+  if polaris_wayland_lock_has_no_deleted_holder "$scan_lock"; then
+    fail "literal whitespace/newline/glob target holder was missed"
+  fi
+
+  # A holder appearing at the final bookend must revoke an otherwise proven
+  # orphan reclaim, retaining both paths and cleaning up the temporary pin.
+  rm -rf "$POLARIS_PROC_ROOT"
+  mkdir -p "$POLARIS_PROC_ROOT/991/fd"
+  : >"$work/run/gamescope-0"
+  : >"$work/run/gamescope-0.lock"
+  # shellcheck disable=SC2329
+  polaris_socket_is_orphan() {
+    ln -s "$1.lock (deleted)" "$POLARIS_PROC_ROOT/991/fd/3"
+  }
+  if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+    fail "deleted holder appearing at final bookend did not revoke cleanup"
+  fi
+  [ -e "$work/run/gamescope-0" ] && [ -e "$work/run/gamescope-0.lock" ] ||
+    fail "late deleted holder lost its socket or lock"
+  if compgen -G "$work/run/gamescope-0.polaris-pin.*" >/dev/null; then
+    fail "late deleted holder left an inode pin behind"
+  fi
+
+  # Use a real kernel-generated " (deleted)" FD target as well as synthetic
+  # targets. Only this fixture's process is exposed through the injected root.
+  unset -f readlink
+  # shellcheck source=/dev/null
+  source "$runtime_lib"
+  rm -rf "$POLARIS_PROC_ROOT"
+  mkdir -p "$POLARIS_PROC_ROOT"
+  ln -s "/proc/$BASHPID" "$POLARIS_PROC_ROOT/$BASHPID"
+  exec 7<"$work/run/gamescope-0.lock"
+  rm -f "$work/run/gamescope-0.lock"
+  : >"$work/run/gamescope-0.lock"
+  if polaris_wayland_lock_has_no_deleted_holder "$work/run/gamescope-0.lock"; then
+    fail "real open unlinked lock inode was missed"
+  fi
+  if polaris_remove_orphan_socket "$work/run/gamescope-0"; then
+    fail "real open unlinked lock inode allowed reclaim"
+  fi
+  [ -e "$work/run/gamescope-0" ] && [ -e "$work/run/gamescope-0.lock" ] ||
+    fail "real unlinked holder lost its socket or replacement lock"
+  exec 7<&-
+  polaris_wayland_lock_has_no_deleted_holder "$work/run/gamescope-0.lock" ||
+    fail "closed unlinked lock inode still blocked cleanup"
+  polaris_remove_orphan_socket "$work/run/gamescope-0" ||
+    fail "orphan reclaim did not recover after real holder closed"
+)
+POLARIS_PROC_ROOT="$work/fd-scan-proc" fd_scan_regressions
+rm -f "$work/run/gamescope-0" "$work/run/gamescope-0.lock"
+
 # An unlocked regular replacement lock is still unsafe while a producer holds
 # the deleted predecessor inode under the same pathname.
 : >"$work/run/gamescope-0"

@@ -4825,6 +4825,30 @@ TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresTransientShutdownClie
   ));
 }
 
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorRecognizesPersistentSteamRT3LoggerClient) {
+  // Model the persistent SteamOS Desktop autostart client holding steam.pipe.
+  // Use a synthetic path with the recorded runtime flags and NUL boundaries.
+  constexpr char client_argv[] =
+    "/fixture/Steam/steamrt64/steam\0"
+    "-srt-logger-opened\0-steamdeck\0-pipewire\0-silent\0";
+  const std::string cmdline {client_argv, sizeof(client_argv) - 1};
+  const std::string running_status = "Name:\tsteam\nState:\tS (sleeping)\n";
+  const auto active = [&](std::string_view args, std::string_view status = {}, std::string_view environ = {}) {
+    return proc::desktop_steam_client_process_for_tests(
+      "steam", "/fixture/Steam/steamrt64/steam", args, status, environ
+    );
+  };
+  EXPECT_TRUE(active(cmdline, running_status));
+  EXPECT_FALSE(active(cmdline + "-shutdown" + char(0), running_status));
+  EXPECT_FALSE(active(cmdline + "-child-update-ui" + char(0), running_status));
+  EXPECT_FALSE(active(cmdline, "Name:\tsteam\nState:\tZ (zombie)\n"));
+  EXPECT_FALSE(active(cmdline, running_status, std::string("POLARIS_PRIVATE_SESSION=1") + char(0)));
+  EXPECT_TRUE(active(cmdline, running_status, std::string("POLARIS_PRIVATE_SESSION=0") + char(0)));
+  EXPECT_FALSE(proc::desktop_steam_client_process_for_tests(
+    "srt-logger", "/usr/bin/srt-logger", std::string("srt-logger") + char(0) + "-srt-logger-opened", running_status
+  ));
+}
+
 TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresZombieShutdownRemnant) {
   EXPECT_FALSE(proc::desktop_steam_client_process_for_tests(
     "steam",
