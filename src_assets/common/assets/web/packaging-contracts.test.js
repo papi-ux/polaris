@@ -504,6 +504,31 @@ describe('Heroic library launcher entry', () => {
 })
 
 describe('Linux packaging contracts', () => {
+  it('runs the generated persistent service without a desktop tray connection', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-service-contract-'))
+    try {
+      writeFileSync(join(fixture, 'CMakeLists.txt'), [
+        'cmake_minimum_required(VERSION 3.22)',
+        'project(PolarisServiceContract LANGUAGES NONE)',
+        'set(POLARIS_EXECUTABLE_PATH "/usr/bin/polaris")',
+        'include("${POLARIS_SOURCE}/cmake/prep/init.cmake")',
+        'configure_file("${POLARIS_SOURCE}/packaging/linux/polaris.service.in"',
+        '               "${CMAKE_CURRENT_BINARY_DIR}/polaris.service" @ONLY)',
+      ].join('\n'))
+      const build = join(fixture, 'build')
+      const configure = spawnSync('cmake', [
+        '-S', fixture, '-B', build, '-DCMAKE_SYSTEM_NAME=Linux',
+        `-DPOLARIS_SOURCE=${process.cwd()}`,
+      ], { encoding: 'utf8' })
+      expect(configure.status, configure.stdout + configure.stderr).toBe(0)
+      const unit = readFileSync(join(build, 'polaris.service'), 'utf8')
+      expect(unit.split('\n').filter((line) => line.startsWith('ExecStart=')))
+        .toEqual(['ExecStart=/usr/bin/polaris system_tray=disabled'])
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
   it('lets the user service outlive the desktop session', () => {
     // A streaming host must keep serving when the desktop session ends: a
     // headless-boot host never has one, and PartOf= stop propagation would end
