@@ -83,6 +83,119 @@ chmod +x "$work/bin/steam"
 script="${POLARIS_SOURCE_DIR:?}/nix/modules/polaris-gamescope-session.sh"
 state="$work/run/polaris-gamescope-session-state"
 exit_marker="$work/run/polaris-gamescope-primary-child-exit"
+
+# Run the production nested readiness block without entering helper main or
+# launching Gamescope. Only kernel/service operations are doubles; credential
+# parsing, terminal matching and the teardown fence are the production bodies.
+awk '/^case "\$\{1:-\}" in$/{exit} {print}' "$script" >"$work/definitions.sh"
+awk '/^      ready=0$/{copy=1} copy && /^    else$/{exit} copy{print}' \
+  "$script" >"$work/readiness.sh"
+[ -s "$work/readiness.sh" ] || fail "could not locate nested readiness block"
+cat >"$work/readiness-fixture.sh" <<'EOF'
+nested_gamescope_pid=4242
+nested_gamescope_start_time=22
+nested_gamescope_executable=/fixture/gamescope
+steam_log="$TEST_CASE_DIR/steam.log"
+: >"$steam_log"
+attempts=0
+polaris_validate_marker() {
+  [ "${TEST_OWNER:-exact}" != missing ] || return 1
+  POLARIS_MARKER_PID=4242
+  POLARIS_MARKER_START_TIME=22
+  POLARIS_MARKER_EXECUTABLE=/fixture/gamescope
+  case "${TEST_OWNER:-exact}" in
+    replaced) POLARIS_MARKER_START_TIME=23 ;;
+    foreign) POLARIS_MARKER_PID=4343 ;;
+    executable) POLARIS_MARKER_EXECUTABLE=/foreign/gamescope ;;
+  esac
+}
+polaris_write_runtime_env() {
+  attempts=$((attempts + 1))
+  printf 'env-attempt\n' >>"$TEST_CASE_DIR/actions"
+  case "$TEST_PHASE:$attempts" in
+    during:1) printf 'session-A\n' >"$nested_primary_exit_file"; return 1 ;;
+    ready:1) printf 'session-A\n' >"$nested_primary_exit_file" ;;
+  esac
+}
+publish_nested_claim() { printf 'claim\n' >>"$TEST_CASE_DIR/actions"; }
+rebind_private_portal_after_nested_start() {
+  printf 'portal\n' >>"$TEST_CASE_DIR/actions"
+  [ "$TEST_PHASE" != portal ] || printf 'session-A\n' >"$nested_primary_exit_file"
+  return 0
+}
+sleep() {
+  if [ "$1" = 1 ] && [ "$TEST_PHASE" = settle ]; then
+    printf 'session-A\n' >"$nested_primary_exit_file"
+  fi
+}
+kill() { [ "$1" = -0 ] && [ "$2" = 4242 ]; }
+session_steam_alive() { return 1; }
+session_steam_absent() { return 0; }
+kill_session_steam() { printf 'drain-steam\n' >>"$TEST_CASE_DIR/actions"; }
+polaris_freeze_marked_gamescope() { printf 'freeze\n' >>"$TEST_CASE_DIR/actions"; }
+polaris_stop_marked_gamescope() {
+  [ "${POLARIS_GAMESCOPE_PREFROZEN:-0}" = 1 ] || return 1
+  printf 'fence\n' >>"$TEST_CASE_DIR/actions"
+  [ "${TEST_FENCE_OK:-1}" = 1 ]
+}
+polaris_reclaim_orphan_gamescope_sockets() { return 1; }
+case "$TEST_PHASE" in
+  before) printf 'session-A\n' >"$nested_primary_exit_file" ;;
+  stale) printf 'session-B\n' >"$nested_primary_exit_file" ;;
+  symlink)
+    printf 'session-A\n' >"$TEST_CASE_DIR/unbound"
+    ln -s "$TEST_CASE_DIR/unbound" "$nested_primary_exit_file"
+    ;;
+esac
+. "$TEST_READINESS_BLOCK"
+EOF
+
+check_readiness() {
+  local phase="$1" expected="$2" owner="${3:-exact}" credential="${4:-session-A}" fence_ok="${5:-1}"
+  local case_dir="$work/readiness-$phase-$owner-$credential-$fence_ok" rc=0
+  mkdir -p "$case_dir"
+  printf '%s nested standalone\n' "$credential" >"$case_dir/polaris-gamescope-session-state"
+  : >"$case_dir/actions"
+  # shellcheck disable=SC2016 # The child shell expands its own arguments.
+  env XDG_RUNTIME_DIR="$case_dir" POLARIS_GAMESCOPE_RUNTIME_LIB="$work/runtime-stub.sh" \
+    POLARIS_SESSION_INSTANCE_ID=session-A POLARIS_GAMESCOPE_LOCK_HELD=1 \
+    TEST_CASE_DIR="$case_dir" TEST_PHASE="$phase" TEST_OWNER="$owner" TEST_FENCE_OK="$fence_ok" \
+    TEST_READINESS_BLOCK="$work/readiness.sh" \
+    bash -c '. "$1"; . "$2"' _ "$work/definitions.sh" "$work/readiness-fixture.sh" \
+    >"$case_dir/output" 2>&1 || rc=$?
+  if [ "$expected" = ready ]; then
+    [ "$rc" = 0 ] || fail "$phase/$owner readiness failed: $(cat "$case_dir/output")"
+    grep -q 'ready; WSI logs' "$case_dir/output" || fail "$phase did not announce readiness"
+    ! grep -qE '^(freeze|drain-steam|fence)$' "$case_dir/actions" || fail "$phase retired a live/unbound generation"
+  else
+    [ "$rc" != 0 ] || fail "$phase/$owner announced ready after terminal/ownership failure"
+    ! grep -q 'ready; WSI logs' "$case_dir/output" || fail "$phase announced terminal runtime ready"
+    if [ "$owner:$credential" = exact:session-A ]; then
+      grep -q 'Steam primary command exited before nested runtime ready' "$case_dir/output" ||
+        fail "$phase did not explain primary exit: $(cat "$case_dir/output")"
+      printf 'freeze\ndrain-steam\nfence\n' >"$case_dir/expected-fence"
+      grep -E '^(freeze|drain-steam|fence)$' "$case_dir/actions" >"$case_dir/actual-fence"
+      cmp -s "$case_dir/expected-fence" "$case_dir/actual-fence" || fail "$phase bypassed exact fence ordering"
+    else
+      ! grep -qE '^(freeze|drain-steam|fence)$' "$case_dir/actions" || fail "$phase retired a mismatched owner"
+    fi
+  fi
+  printf 'PASS: nested readiness phase=%s owner=%s credential=%s fence=%s\n' "$phase" "$owner" "$credential" "$fence_ok"
+}
+
+for phase in before during ready portal settle; do
+  check_readiness "$phase" refused
+done
+check_readiness live ready
+check_readiness stale ready
+check_readiness symlink ready
+check_readiness before refused replaced
+check_readiness before refused foreign
+check_readiness before refused executable
+check_readiness before refused missing
+check_readiness before refused exact session-B
+check_readiness before refused exact session-A 0
+
 printf 'session-A nested standalone\n' >"$state"
 
 helper_env=(

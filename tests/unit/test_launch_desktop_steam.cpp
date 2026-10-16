@@ -788,6 +788,55 @@ TEST_F(LaunchDesktopSteamTest, AnAdmittedTransitionPrecedesLaunchAsAndTheModeDec
   EXPECT_TRUE(platf::game_mode_host::session_live_fresh());
 }
 
+TEST_F(LaunchDesktopSteamTest, DesktopSteamAppearingDuringTransitionIsRefusedWithoutConsent) {
+  stage_log_t log;
+  session_answer_host_t host;
+  session_answer_adapter_t adapter;
+  instant_clock_t clock;
+  prelaunch::set_dependencies_for_tests(&host, &adapter, &clock);
+  proc::set_prelaunch_capture_ready_for_tests([](std::string_view, std::string &) { return true; });
+  pair_moonlight(false);
+  use_apps({opted_in(steam_game()), desktop()});
+  steam.running = false;
+  platf::game_mode_host::set_session_live_for_tests(true);
+  host.on_scan = [&] {
+    if (!platf::game_mode_host::session_live_fresh()) steam.running = true;
+  };
+
+  const auto reply = launch(moonlight, moonlight_launch(steam_game_id));
+  EXPECT_EQ(reply.error_code, "desktop_active_private_stream_refused");
+  EXPECT_TRUE(log.has("transition_ready"));
+  EXPECT_FALSE(log.has("prep"));
+  EXPECT_EQ(steam.close_requests.load(), 0);
+  EXPECT_TRUE(steam.running.load());
+  EXPECT_EQ(prelaunch::coordinator().receipt().restore, prelaunch::restore_e::rolled_back);
+}
+
+TEST_F(LaunchDesktopSteamTest, DesktopSteamAppearingDuringTransitionRequiresSuccessfulOptInShutdown) {
+  stage_log_t log;
+  session_answer_host_t host;
+  session_answer_adapter_t adapter;
+  instant_clock_t clock;
+  prelaunch::set_dependencies_for_tests(&host, &adapter, &clock);
+  proc::set_prelaunch_capture_ready_for_tests([](std::string_view, std::string &) { return true; });
+  pair_moonlight(true);
+  use_apps({opted_in(steam_game()), desktop()});
+  steam.running = false;
+  steam.closes_when_asked = false;
+  platf::game_mode_host::set_session_live_for_tests(true);
+  host.on_scan = [&] {
+    if (!platf::game_mode_host::session_live_fresh()) steam.running = true;
+  };
+
+  const auto reply = launch(moonlight, moonlight_launch(steam_game_id));
+  EXPECT_EQ(reply.error_code, "desktop_steam_shutdown_failed");
+  EXPECT_TRUE(log.has("transition_ready"));
+  EXPECT_FALSE(log.has("prep"));
+  EXPECT_EQ(steam.close_requests.load(), 1);
+  EXPECT_TRUE(steam.running.load());
+  EXPECT_EQ(prelaunch::coordinator().receipt().restore, prelaunch::restore_e::rolled_back);
+}
+
 TEST_F(LaunchDesktopSteamTest, APinnedPrivateLaunchAsIsJudgedAfterTheTransitionNotRefusedForGameMode) {
   stage_log_t log;
   session_answer_host_t host;
