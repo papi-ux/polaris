@@ -4826,16 +4826,16 @@ TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresTransientShutdownClie
 }
 
 TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorRecognizesPersistentSteamRT3LoggerClient) {
-  // Recorded from the persistent SteamOS Desktop autostart client holding
-  // steam.pipe after #418. Preserve /proc/cmdline's actual argument boundaries.
-  constexpr char recorded_argv[] =
-    "/home/deck/.local/share/Steam/steamrt64/steam\0"
+  // Model the persistent SteamOS Desktop autostart client holding steam.pipe.
+  // Use a synthetic path with the recorded runtime flags and NUL boundaries.
+  constexpr char client_argv[] =
+    "/fixture/Steam/steamrt64/steam\0"
     "-srt-logger-opened\0-steamdeck\0-pipewire\0-silent\0";
-  const std::string cmdline {recorded_argv, sizeof(recorded_argv) - 1};
+  const std::string cmdline {client_argv, sizeof(client_argv) - 1};
   const std::string running_status = "Name:\tsteam\nState:\tS (sleeping)\n";
   const auto active = [&](std::string_view args, std::string_view status = {}, std::string_view environ = {}) {
     return proc::desktop_steam_client_process_for_tests(
-      "steam", "/home/deck/.local/share/Steam/steamrt64/steam", args, status, environ
+      "steam", "/fixture/Steam/steamrt64/steam", args, status, environ
     );
   };
   EXPECT_TRUE(active(cmdline, running_status));
