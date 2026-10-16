@@ -304,7 +304,8 @@ polaris_wayland_lock_is_stable() {
 # evidence of a deleted holder — treating them as fail-closed left orphan
 # gamescope-* sockets forever and stuck polaris in start-pre.
 polaris_wayland_lock_has_no_deleted_holder() {
-  local lock="$1" owner proc_root process process_owner fd target seen=0
+  local lock="$1" owner proc_root process process_owner target offset seen=0
+  local -a fds=()
   owner="$(stat -Lc '%u' "$lock" 2>/dev/null)" || return 1
   proc_root="$(polaris_proc_root)"
   [ -d "$proc_root" ] && [ -r "$proc_root" ] && [ -x "$proc_root" ] || return 1
@@ -314,11 +315,15 @@ polaris_wayland_lock_has_no_deleted_holder() {
     process_owner="$(stat -Lc '%u' "$process" 2>/dev/null)" || continue
     [ "$process_owner" = "$owner" ] || continue
     [ -d "$process/fd" ] || continue
-    for fd in "$process"/fd/*; do
-      [ -e "$fd" ] || [ -L "$fd" ] || continue
-      # skip unreadable FDs; only a real "path (deleted)" target blocks reclaim
-      target="$(readlink "$fd" 2>/dev/null)" || continue
-      [ "$target" != "$lock (deleted)" ] || return 1
+    fds=("$process"/fd/*)
+    # GNU coreutils is already required by the Linux/Nix callers. Bound argv
+    # size and avoid a subprocess per FD; NUL records preserve literal targets,
+    # including whitespace/newlines. Failed reads emit no record, so keep the
+    # successful records even when another FD in the batch vanished/is hidden.
+    for ((offset = 0; offset < ${#fds[@]}; offset += 64)); do
+      while IFS= read -r -d '' target; do
+        [ "$target" != "$lock (deleted)" ] || return 1
+      done < <(readlink -z -- "${fds[@]:offset:64}" 2>/dev/null)
     done
   done
   [ "$seen" = 1 ]
