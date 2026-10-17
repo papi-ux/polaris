@@ -1059,9 +1059,12 @@ namespace proc {
     bool transition_launch_to_stop();
     void begin_snapshot();
     bool try_begin_snapshot();
+    bool try_begin_snapshot_now(); // no condition-variable wait, including during launch/status
     void finish_snapshot();
     void finish_launch(const std::function<void()> &before_release = {});
-    void finish_stop(bool committed = true);
+    void finish_stop(bool committed = true,
+                     std::atomic<const void *> *projection = nullptr,
+                     const void *ticket_identity = nullptr);
     bool stop_in_progress() const;
     /// #204: closes admission for a restore to Game Mode that runs after this gate's lock is gone.
     /// Fails, changing nothing, while a launch or an RTSP setup is admitted; until released every
@@ -1093,6 +1096,7 @@ namespace proc {
   public:
     explicit session_snapshot_guard_t(session_lifecycle_gate_t &gate);
     static session_snapshot_guard_t try_acquire(session_lifecycle_gate_t &gate);
+    static session_snapshot_guard_t try_acquire_now(session_lifecycle_gate_t &gate);
     ~session_snapshot_guard_t();
     bool owns_snapshot() const;
     session_snapshot_guard_t(const session_snapshot_guard_t &) = delete;
@@ -1208,6 +1212,30 @@ namespace proc {
     bool session_shutdown_requested() const;
     session_status_view_t get_session_status_view(const std::string &unique_id, bool can_launch);
     session_stop_snapshot_t get_session_stop_snapshot(const std::string &unique_id, bool can_launch);
+    /// A claimed stop. The owning caller must drain it before moving or destroying this proc_t.
+    /// Dropping an unqueued ticket releases admission without tearing down the session.
+    class session_shutdown_ticket_t {
+    public:
+      ~session_shutdown_ticket_t();
+      session_shutdown_ticket_t(const session_shutdown_ticket_t &) = delete;
+      session_shutdown_ticket_t &operator=(const session_shutdown_ticket_t &) = delete;
+      session_stop_result_t complete(); // exactly once; retains the original cleanup budgets
+      bool publish_native_end() noexcept;
+    private:
+      friend class proc_t;
+      struct state_t;
+      explicit session_shutdown_ticket_t(std::unique_ptr<state_t> state);
+      std::unique_ptr<state_t> _state;
+    };
+    struct session_shutdown_admission_t {
+      session_stop_result_t result;
+      std::unique_ptr<session_shutdown_ticket_t> ticket;
+    };
+    session_shutdown_admission_t prepare_session_shutdown(
+      const std::string &unique_id, std::string_view expected_token,
+      bool can_launch, bool require_exact_token);
+    bool native_end_pending() const;
+    session_snapshot_guard_t try_session_status_guard();
     session_stop_result_t request_session_shutdown(
       const std::string &unique_id,
       std::string_view expected_token,
@@ -1293,6 +1321,8 @@ namespace proc {
       std::weak_ptr<rtsp_stream::launch_session_t> capture_launch;
       /// Set while a stop runs because someone ended the session on purpose.
       std::atomic<bool> stop_ends_session {false};
+      // Exact accepted native-End ticket identity; not a cleanup-completion flag.
+      std::atomic<const void *> native_end_ticket {nullptr};
     };
 
     void launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
@@ -1329,6 +1359,7 @@ namespace proc {
     void stop_steam_big_picture_input_guard();
 #endif
     session_lifecycle_sync_t &session_lifecycle_sync() const;
+    session_stop_result_t complete_session_shutdown(session_shutdown_ticket_t &ticket);
     session_stop_snapshot_t get_session_stop_snapshot_locked(
       const std::string &unique_id,
       bool can_launch,

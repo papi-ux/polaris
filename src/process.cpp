@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <stdexcept>
 #include <vector>
 
 // lib includes
@@ -304,7 +305,16 @@ namespace proc {
     _changed.notify_all();
     if (cancel_launch) {
       lock.unlock();
-      cancel_launch();
+      try {
+        cancel_launch();
+      } catch (...) {
+        lock.lock();
+        // This attempt owns stop_waiting. No queued cleanup exists; preserve the original
+        // exception and spent generation, releasing only this admission claim.
+        _stop_waiting = false;
+        _changed.notify_all();
+        throw;
+      }
       lock.lock();
     }
     _changed.wait(lock, [this]() {
@@ -385,6 +395,14 @@ namespace proc {
     return true;
   }
 
+  bool session_lifecycle_gate_t::try_begin_snapshot_now() {
+    std::unique_lock lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || _state != state_e::idle || _stop_waiting ||
+        _launch_to_stop_handoff || _restore_fenced) return false;
+    _state = state_e::snapshotting;
+    return true;
+  }
+
   void session_lifecycle_gate_t::finish_snapshot() {
     std::lock_guard lock(_mutex);
     if (_state == state_e::snapshotting) {
@@ -403,6 +421,12 @@ namespace proc {
     if (gate.try_begin_snapshot()) {
       guard._gate = &gate;
     }
+    return guard;
+  }
+
+  session_snapshot_guard_t session_snapshot_guard_t::try_acquire_now(session_lifecycle_gate_t &gate) {
+    session_snapshot_guard_t guard;
+    if (gate.try_begin_snapshot_now()) guard._gate = &gate;
     return guard;
   }
 
@@ -430,9 +454,14 @@ namespace proc {
     }
   }
 
-  void session_lifecycle_gate_t::finish_stop(bool committed) {
+  void session_lifecycle_gate_t::finish_stop(bool committed,
+                                            std::atomic<const void *> *projection,
+                                            const void *ticket_identity) {
     std::lock_guard lock(_mutex);
     if (_state == state_e::stopping) {
+      // Clear only this ticket, under the admission lock, before any new launch can enter.
+      // A projection must never survive into a replacement generation's launching state.
+      if (projection) projection->compare_exchange_strong(ticket_identity, nullptr);
       _last_stop_committed = committed;
       _state = state_e::idle;
       _changed.notify_all();
@@ -13340,16 +13369,66 @@ namespace proc {
     return std::move(view.snapshot.stop);
   }
 
+  struct proc_t::session_shutdown_ticket_t::state_t {
+    proc_t *process = nullptr; // server joins/drains before the proc owner can go away
+    std::shared_ptr<session_lifecycle_gate_t> gate;
+    std::shared_ptr<session_lifecycle_sync_t> sync;
+    std::shared_ptr<void> pending_cancel;
+    session_stop_result_t result;
+    std::uint64_t generation = 0;
+    bool owns_gate = false;
+    bool consumed = false;
+  };
+
+  proc_t::session_shutdown_ticket_t::session_shutdown_ticket_t(std::unique_ptr<state_t> state):
+      _state(std::move(state)) {}
+
+  proc_t::session_shutdown_ticket_t::~session_shutdown_ticket_t() {
+    if (_state->owns_gate) {
+      _state->pending_cancel.reset();
+      _state->gate->finish_stop(false, &_state->sync->native_end_ticket, _state.get());
+    }
+    const void *expected = _state.get();
+    // A late old holder cannot clear a replacement ticket's projection.
+    _state->sync->native_end_ticket.compare_exchange_strong(expected, nullptr);
+  }
+
+  bool proc_t::session_shutdown_ticket_t::publish_native_end() noexcept {
+    if (!_state->owns_gate || _state->consumed) return false;
+    _state->sync->native_end_ticket.store(_state.get());
+    return true;
+  }
+
+  session_stop_result_t proc_t::session_shutdown_ticket_t::complete() {
+    return _state->process->complete_session_shutdown(*this);
+  }
+
+  bool proc_t::native_end_pending() const {
+    return session_lifecycle_sync().native_end_ticket.load() != nullptr;
+  }
+
+  session_snapshot_guard_t proc_t::try_session_status_guard() {
+    return session_snapshot_guard_t::try_acquire_now(*_session_lifecycle_gate);
+  }
+
   session_stop_result_t proc_t::request_session_shutdown(
+      const std::string &unique_id, std::string_view expected_token,
+      bool can_launch, bool require_exact_token) {
+    auto admission = prepare_session_shutdown(unique_id, expected_token, can_launch, require_exact_token);
+    return admission.ticket ? admission.ticket->complete() : std::move(admission.result);
+  }
+
+  proc_t::session_shutdown_admission_t proc_t::prepare_session_shutdown(
     const std::string &unique_id,
     std::string_view expected_token,
     bool can_launch,
     bool require_exact_token
   ) {
-    session_stop_result_t result;
+    session_shutdown_admission_t admission;
+    auto &result = admission.result;
     if (!can_launch) {
       result.snapshot.outcome = session_stop_outcome_t::permission_denied;
-      return result;
+      return admission;
     }
     // Check authority without a snapshot gate: an interactive launch holds
     // admission, but has released the process mutex. A rejected request must
@@ -13365,16 +13444,21 @@ namespace proc {
         unique_id, can_launch, expected_token, require_exact_token,
         admission_snapshot, admission_stop_in_progress, false);
       if (result.snapshot.outcome != session_stop_outcome_t::allowed) {
-        return result;
+        return admission;
       }
       if (expected_capture_owner != sync.capture_owner.load()) {
         result.snapshot.outcome = session_stop_outcome_t::session_changed;
-        return result;
+        return admission;
       }
     }
-    std::shared_ptr<void> pending_cancel;
+    // Allocate the holder before claiming admission. Any later refusal/exception drops only
+    // this ticket's gate and pending capture cancellation; it never runs cleanup implicitly.
+    auto state = std::make_unique<session_shutdown_ticket_t::state_t>();
+    state->process = this; state->gate = _session_lifecycle_gate; state->sync = _session_lifecycle_sync;
+    auto ticket = std::unique_ptr<session_shutdown_ticket_t>(new session_shutdown_ticket_t(std::move(state)));
+    auto &owned = *ticket->_state;
     if (!_session_lifecycle_gate->begin_stop([&]() {
-          pending_cancel = cancel_capture_preparation_for_shutdown(
+          owned.pending_cancel = cancel_capture_preparation_for_shutdown(
             unique_id, expected_token, can_launch, require_exact_token);
         }, [&]() {
           return session_lifecycle_sync().capture_owner.load() == expected_capture_owner;
@@ -13382,16 +13466,11 @@ namespace proc {
       result.snapshot.stop_in_progress = _session_lifecycle_gate->stop_in_progress();
       result.snapshot.outcome = result.snapshot.stop_in_progress ?
         session_stop_outcome_t::stop_in_progress : session_stop_outcome_t::session_changed;
-      return result;
+      return admission;
     }
-    bool stop_committed = false;
-    auto release_stop = util::fail_guard([this, &stop_committed, &pending_cancel]() {
-      pending_cancel.reset();
-      _session_lifecycle_gate->finish_stop(stop_committed);
-    });
+    owned.owns_gate = true;
 
     const auto rtsp_snapshot = rtsp_stream::session_snapshot(unique_id);
-    std::uint64_t claimed_generation = 0;
     {
       auto &sync = session_lifecycle_sync();
       std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
@@ -13401,14 +13480,25 @@ namespace proc {
         expected_token,
         require_exact_token,
         rtsp_snapshot,
-        false
+        false,
+        false // metadata only: running() may itself enter blocking teardown
       );
       if (result.snapshot.outcome != session_stop_outcome_t::allowed) {
-        return result;
+        return admission;
       }
-      claimed_generation = _session_generation;
+      owned.generation = _session_generation;
     }
 
+    owned.result = result;
+    admission.ticket = std::move(ticket);
+    return admission;
+  }
+
+  session_stop_result_t proc_t::complete_session_shutdown(session_shutdown_ticket_t &ticket) {
+    auto &owned = *ticket._state;
+    if (!owned.owns_gate || owned.consumed) throw std::logic_error("Session stop ticket already consumed");
+    owned.consumed = true;
+    auto result = owned.result;
     if (result.snapshot.had_running_app || result.snapshot.active_sessions > 0) {
       confighttp::set_session_state(confighttp::session_state_e::tearing_down);
       confighttp::emit_session_event("stream_stopping", "Stopping session");
@@ -13418,16 +13508,17 @@ namespace proc {
     {
       auto &sync = session_lifecycle_sync();
       std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
-      if (_session_generation != claimed_generation) {
+      if (_session_generation != owned.generation) {
         result.snapshot.outcome = session_stop_outcome_t::session_changed;
         return result;
       }
-      if (result.snapshot.had_running_app && running() > 0) {
+      if (result.snapshot.had_running_app) {
+        // running() can itself retire an exited app; that is still this purposeful End.
         const session_end_request_scope_t ending {sync.stop_ends_session};
 #ifdef POLARIS_TESTS
         if (_session_shutdown_observer_for_tests) _session_shutdown_observer_for_tests(false);
 #endif
-        terminate_impl(false, true);
+        if (running() > 0) terminate_impl(false, true);
 #ifdef POLARIS_TESTS
         if (_session_shutdown_observer_for_tests) _session_shutdown_observer_for_tests(true);
 #endif
@@ -13447,10 +13538,15 @@ namespace proc {
 #endif
     }
 
-    stop_committed = true;
-    pending_cancel.reset();
-    _session_lifecycle_gate->finish_stop(stop_committed);
-    release_stop.disable();
+#ifdef __linux__
+    // The restore worker may read process metadata. Wait with neither metadata nor gate
+    // mutex held; keep this ticket's stop admission/projection until its fence unwinds.
+    if (session_lifecycle_sync().native_end_ticket.load() == ticket._state.get() &&
+        _session_lifecycle_gate->restore_fenced()) prelaunch::coordinator().wait_for_restore();
+#endif
+    owned.pending_cancel.reset();
+    _session_lifecycle_gate->finish_stop(true, &owned.sync->native_end_ticket, ticket._state.get());
+    owned.owns_gate = false;
     return result;
   }
 
