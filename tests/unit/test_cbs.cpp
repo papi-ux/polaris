@@ -12,11 +12,13 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/cbs_h265.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
 }
 
 #include <src/cbs.h>
+#include <src/video.h>
 
 namespace {
   struct codec_ctx_deleter {
@@ -86,6 +88,75 @@ namespace {
     return packet;
   }
 
+  std::vector<std::uint8_t> without_hevc_vui(const std::vector<std::uint8_t> &bytes) {
+    CodedBitstreamContext *ctx {};
+    CodedBitstreamFragment fragment {};
+    auto cleanup = util::fail_guard([&]() {
+      ff_cbs_fragment_free(&fragment);
+      ff_cbs_close(&ctx);
+    });
+    const auto packet = packet_of(bytes);
+    const int init = ff_cbs_init(&ctx, AV_CODEC_ID_HEVC, nullptr);
+    EXPECT_EQ(init, 0);
+    if (init != 0) {
+      return {};
+    }
+    const int read = ff_cbs_read_packet(ctx, &fragment, packet.get());
+    EXPECT_EQ(read, 0);
+    if (read != 0) {
+      return {};
+    }
+    H265RawSPS *sps {};
+    for (int i = 0; i < fragment.nb_units; ++i) {
+      if (fragment.units[i].type == HEVC_NAL_SPS) {
+        sps = static_cast<H265RawSPS *>(fragment.units[i].content);
+        break;
+      }
+    }
+    EXPECT_NE(sps, nullptr);
+    if (!sps) {
+      return {};
+    }
+    sps->vui_parameters_present_flag = 0;
+    // CBS also validates the inferred values when VUI syntax is absent.
+    auto &vui = sps->vui;
+    std::memset(&vui, 0, sizeof(vui));
+    vui.video_format = 5;
+    vui.colour_primaries = AVCOL_PRI_UNSPECIFIED;
+    vui.transfer_characteristics = AVCOL_TRC_UNSPECIFIED;
+    vui.matrix_coefficients = AVCOL_SPC_UNSPECIFIED;
+    vui.motion_vectors_over_pic_boundaries_flag = 1;
+    vui.max_bytes_per_pic_denom = 2;
+    vui.max_bits_per_min_cu_denom = 1;
+    vui.log2_max_mv_length_horizontal = 15;
+    vui.log2_max_mv_length_vertical = 15;
+    const int write = ff_cbs_write_fragment_data(ctx, &fragment);
+    EXPECT_EQ(write, 0);
+    if (write != 0) {
+      return {};
+    }
+    return {fragment.data, fragment.data + fragment.data_size};
+  }
+
+  std::vector<std::uint8_t> with_truncated_hevc_idr(const std::vector<std::uint8_t> &bytes) {
+    for (std::size_t i = 0; i + 5 < bytes.size(); ++i) {
+      std::size_t header {};
+      if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1) {
+        header = i + 3;
+      } else if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 0 && bytes[i + 3] == 1) {
+        header = i + 4;
+      } else {
+        continue;
+      }
+      const auto type = (bytes[header] >> 1) & 0x3f;
+      if (type == HEVC_NAL_IDR_W_RADL || type == HEVC_NAL_IDR_N_LP) {
+        // Keep the real VPS/SPS/PPS, but no slice header after the two-byte NAL header.
+        return {bytes.begin(), bytes.begin() + header + 2};
+      }
+    }
+    return {};
+  }
+
   /// A filler data unit the way a VA-API encoder at CBR pads a frame, which FFmpeg's reader cannot decompose.
   std::vector<std::uint8_t> padded_with_filler(std::vector<std::uint8_t> bytes, std::vector<std::uint8_t> filler) {
     bytes.insert(bytes.end(), {0x00, 0x00, 0x00, 0x01});
@@ -136,9 +207,42 @@ TEST(CbsReadPacket, FillerDataDoesNotHideTheHevcSps) {
 // A packet with no slice leaves FFmpeg with no active SPS, and reading one must not crash.
 TEST(CbsReadPacket, APacketWithNoSliceHasNoActiveSps) {
   const auto only_filler = packet_of({0x00, 0x00, 0x00, 0x01, 0x0c, 0xff, 0xff, 0x80});
+  EXPECT_EQ(cbs::inspect_sps(only_filler.get(), AV_CODEC_ID_H264), cbs::sps_vui_status_e::unreadable);
   EXPECT_FALSE(cbs::validate_sps(only_filler.get(), AV_CODEC_ID_H264));
   codec_ctx_ptr ctx {avcodec_alloc_context3(nullptr)};
   EXPECT_EQ(cbs::make_sps_h264(ctx.get(), only_filler.get()).sps.old.size(), 0u);
+}
+
+TEST(CbsReadPacket, DistinguishesUnreadableHevcFromReadableSpsWithoutVui) {
+  if (!avcodec_find_encoder_by_name("libx265")) {
+    GTEST_SKIP() << "this FFmpeg has no libx265";
+  }
+  codec_ctx_ptr ctx;
+  const auto frame = encode_one_frame("libx265", ctx);
+  ASSERT_FALSE(frame.empty()) << "the available libx265 must encode the control packet";
+  const auto plain = packet_of(frame);
+  ASSERT_EQ(cbs::inspect_sps(plain.get(), AV_CODEC_ID_HEVC), cbs::sps_vui_status_e::present);
+  EXPECT_GT(video::validate_avcodec_probe_packet_for_tests(plain.get(), AV_CODEC_ID_HEVC, "hevc_vulkan"), 0);
+
+  const auto no_vui_bytes = without_hevc_vui(frame);
+  ASSERT_FALSE(no_vui_bytes.empty());
+  const auto no_vui = packet_of(no_vui_bytes);
+  EXPECT_EQ(cbs::inspect_sps(no_vui.get(), AV_CODEC_ID_HEVC), cbs::sps_vui_status_e::absent);
+  EXPECT_FALSE(cbs::validate_sps(no_vui.get(), AV_CODEC_ID_HEVC));
+  EXPECT_EQ(video::validate_avcodec_probe_packet_for_tests(no_vui.get(), AV_CODEC_ID_HEVC, "hevc_vulkan"), 0)
+    << "a readable packet without VUI remains eligible for parameter-set repair";
+
+  const auto unreadable_bytes = with_truncated_hevc_idr(frame);
+  ASSERT_FALSE(unreadable_bytes.empty());
+  const auto unreadable = packet_of(unreadable_bytes);
+  EXPECT_EQ(cbs::inspect_sps(unreadable.get(), AV_CODEC_ID_HEVC), cbs::sps_vui_status_e::unreadable);
+  EXPECT_FALSE(cbs::validate_sps(unreadable.get(), AV_CODEC_ID_HEVC))
+    << "the old VUI predicate returns false for both cases; only a readable SPS can be repaired";
+  EXPECT_LT(video::validate_avcodec_probe_packet_for_tests(unreadable.get(), AV_CODEC_ID_HEVC, "hevc_vulkan"), 0);
+  EXPECT_EQ(video::validate_avcodec_probe_packet_for_tests(unreadable.get(), AV_CODEC_ID_HEVC, "hevc_nvenc"), 0)
+    << "the new refusal is confined to Vulkan HEVC";
+  const auto h264_filler = packet_of({0x00, 0x00, 0x00, 0x01, 0x0c, 0xff, 0xff, 0x80});
+  EXPECT_EQ(video::validate_avcodec_probe_packet_for_tests(h264_filler.get(), AV_CODEC_ID_H264, "h264_vulkan"), 0);
 }
 
 namespace {
