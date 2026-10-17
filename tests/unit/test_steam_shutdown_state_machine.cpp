@@ -1393,11 +1393,30 @@ TEST(SteamShutdownStateMachineTests, DeviceCloseDesktopSteamReachesOnlyTheGameSt
     "void resume(bool &host_audio"
   );
   ASSERT_FALSE(launch_route.empty());
-  const auto desktop_steam_step = launch_route.find("admit_desktop_launch_policy(");
-  const auto device_switch = launch_route.find("named_cert_p->close_desktop_steam");
+  const auto app_copy = launch_route.find("auto admitted_app = *app_iter;");
+  const auto effective_consent = launch_route.find("admitted_app.close_desktop_steam_for_private =", app_copy);
+  const auto request_switch = launch_route.find("force_private_after_desktop_steam_shutdown_requested(args)", effective_consent);
+  const auto app_switch = launch_route.find("app_iter->close_desktop_steam_for_private", effective_consent);
+  const auto device_switch = launch_route.find("named_cert_p->close_desktop_steam", effective_consent);
+  const auto desktop_steam_step = launch_route.find("admit_desktop_launch_policy(", effective_consent);
+  const auto execution = launch_route.find("execute_and_raise(admitted_app, launch_session, [&]()", desktop_steam_step);
+  ASSERT_NE(app_copy, std::string::npos);
+  ASSERT_NE(effective_consent, std::string::npos);
+  ASSERT_NE(request_switch, std::string::npos);
+  ASSERT_NE(app_switch, std::string::npos);
   ASSERT_NE(desktop_steam_step, std::string::npos);
   ASSERT_NE(device_switch, std::string::npos);
-  EXPECT_LT(desktop_steam_step, device_switch);
+  ASSERT_NE(execution, std::string::npos);
+  EXPECT_LT(app_copy, effective_consent);
+  EXPECT_LT(effective_consent, request_switch);
+  EXPECT_LT(request_switch, app_switch);
+  EXPECT_LT(app_switch, device_switch);
+  EXPECT_LT(device_switch, desktop_steam_step);
+  EXPECT_LT(desktop_steam_step, execution);
+  EXPECT_EQ(launch_route.find("named_cert_p->close_desktop_steam", device_switch + 1), std::string::npos);
+  const auto admission = source_between(launch_route.substr(desktop_steam_step), "admit_desktop_launch_policy(", ")) {");
+  EXPECT_NE(admission.find("\n              admitted_app,"), std::string::npos);
+  EXPECT_NE(admission.find("\n              false"), std::string::npos) << "consent comes from the frozen app, not a second device read";
 
   const auto preview = source_between(
     nvhttp,

@@ -34,6 +34,7 @@
 #include <memory>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <ctime>
 #include <mutex>
 #include <optional>
@@ -643,6 +644,151 @@ namespace {
     proc::proc.reload_configuration(proc::proc_t {boost::process::v1::environment {}, std::move(apps)});
   }
 
+  // Exercise the real critical prep boundary without starting Steam, Gamescope or a title.
+  // The sentinel always fails start, and records whether admission let it run at all.
+  class nested_prep_sentinel_t {
+  public:
+    explicit nested_prep_sentinel_t(const std::filesystem::path &root):
+        calls {root / "calls"},
+        previous_capture {config::video.capture},
+        previous_encoder {config::video.encoder},
+        previous_ignore_probe {config::video.ignore_encoder_probe_failure} {
+      std::filesystem::create_directories(root);
+      const auto helper = root / "polaris-gamescope-session";
+      write_file(helper, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n"
+        "if [ \"$1\" = start ]; then exit 73; fi\nexit 0\n");
+      const auto gamescope = root / "gamescope";
+      write_file(gamescope, "#!/bin/sh\nexit 73\n");
+      std::filesystem::permissions(helper, std::filesystem::perms::owner_all);
+      std::filesystem::permissions(gamescope, std::filesystem::perms::owner_all);
+      if (const auto *value = std::getenv("PATH")) previous_path = value;
+      if (const auto *value = std::getenv("POLARIS_GAMESCOPE_SESSION")) previous_helper = value;
+      const auto path = root.string() + ":" + previous_path.value_or("");
+      setenv("PATH", path.c_str(), 1);
+      setenv("POLARIS_GAMESCOPE_SESSION", helper.c_str(), 1);
+      // Existing capture test seam; no physical display or encoder is needed to reach prep.
+      platf::set_capture_request_satisfiable_for_tests(true);
+      config::video.capture = "late-steam-test-unavailable";
+      config::video.encoder.clear();
+      config::video.ignore_encoder_probe_failure = true;
+    }
+
+    ~nested_prep_sentinel_t() {
+      if (previous_path) setenv("PATH", previous_path->c_str(), 1);
+      else unsetenv("PATH");
+      if (previous_helper) setenv("POLARIS_GAMESCOPE_SESSION", previous_helper->c_str(), 1);
+      else unsetenv("POLARIS_GAMESCOPE_SESSION");
+      platf::set_capture_request_satisfiable_for_tests(std::nullopt);
+      config::video.capture = previous_capture;
+      config::video.encoder = previous_encoder;
+      config::video.ignore_encoder_probe_failure = previous_ignore_probe;
+    }
+
+    bool started() const {
+      std::ifstream input {calls};
+      std::string line;
+      while (std::getline(input, line)) if (line == "start" || line.starts_with("start ")) return true;
+      return false;
+    }
+
+  private:
+    std::filesystem::path calls;
+    std::optional<std::string> previous_path;
+    std::optional<std::string> previous_helper;
+    std::string previous_capture;
+    std::string previous_encoder;
+    bool previous_ignore_probe;
+  };
+
+  class LateDesktopSteamTest: public LaunchDesktopSteamTest {
+  protected:
+    void late_launch(bool device_opt_in, bool app_opt_in, std::string_view request, bool closes_when_asked) {
+      stage_log_t log;
+      session_answer_host_t host;
+      session_answer_adapter_t adapter;
+      instant_clock_t clock;
+      prelaunch::set_dependencies_for_tests(&host, &adapter, &clock);
+      proc::set_prelaunch_capture_ready_for_tests([](std::string_view, std::string &) { return true; });
+      nested_prep_sentinel_t sentinel {directory / uuid_util::uuid_t::generate().string()};
+      const auto client = pair_moonlight(device_opt_in);
+      auto app = opted_in(steam_game());
+      app.close_desktop_steam_for_private = app_opt_in;
+      // Failure cleanup reloads file_apps. Give that real loader the same fixture-owned
+      // catalogue as admission, instead of letting a missing host file erase the test apps.
+      const auto apps_path = directory / ("late-apps-" + uuid_util::uuid_t::generate().string() + ".json");
+      const auto previous_apps_file = std::exchange(config::stream.file_apps, apps_path.string());
+      auto restore_apps_file = util::fail_guard([previous_apps_file]() {
+        config::stream.file_apps = previous_apps_file;
+      });
+      ASSERT_EQ(file_handler::write_file(apps_path.string().c_str(), nlohmann::json {{"version", 15}, {"apps", {
+        {{"name", app.name}, {"uuid", app.uuid}, {"steam-appid", app.steam_appid},
+          {std::string {prelaunch::k_app_key}, true}, {"close-desktop-steam-for-private", app_opt_in},
+          {"exclude-global-prep-cmd", true}, {"exclude-global-state-cmd", true}},
+        {{"name", desktop().name}, {"uuid", desktop().uuid},
+          {"exclude-global-prep-cmd", true}, {"exclude-global-state-cmd", true}},
+      }}}.dump()), 0);
+      ASSERT_TRUE(proc::proc.reload_configuration_from_file(apps_path.string()));
+      const auto initial_apps = proc::proc.get_apps();
+      const auto initial_game = std::find_if(initial_apps.begin(), initial_apps.end(), [&](const auto &entry) { return entry.uuid == app.uuid; });
+      ASSERT_NE(initial_game, initial_apps.end());
+      ASSERT_EQ(initial_game->close_desktop_steam_for_private, app_opt_in);
+      ASSERT_TRUE(initial_game->leave_game_mode_before_launch);
+      const auto launch_app_id = initial_game->id; // the loader derives IDs; UUID is the persisted identity
+      auto persisted_before = nlohmann::json::parse(file_handler::read_file(apps_path.string().c_str()));
+      steam.running = false;
+      steam.closes_when_asked = closes_when_asked;
+      platf::game_mode_host::set_session_live_for_tests(true);
+      auto stages = log.stages;
+      prelaunch::set_stage_sink_for_tests([this, stages](std::string_view stage) {
+        stages->emplace_back(stage);
+        if (stage == "prep") steam.running = true; // after the existing post-transition admission
+      });
+
+      const auto reply = launch(moonlight, moonlight_launch(launch_app_id, request));
+      ASSERT_TRUE(log.has("transition_ready"));
+      ASSERT_TRUE(log.has("prep")) << reply.refusal_code << ": " << reply.message;
+      EXPECT_LT(log.at("transition_ready"), log.at("prep"));
+      const bool effective_opt_in = device_opt_in || app_opt_in || !request.empty();
+      if (!effective_opt_in) {
+        EXPECT_EQ(reply.status, 409);
+        EXPECT_EQ(reply.refusal_code, "desktop_active_private_stream_refused");
+        EXPECT_EQ(steam.close_requests.load(), 0);
+        EXPECT_TRUE(steam.running.load());
+        EXPECT_FALSE(sentinel.started());
+      } else if (!closes_when_asked) {
+        EXPECT_EQ(reply.status, 409);
+        EXPECT_EQ(reply.refusal_code, "desktop_steam_shutdown_failed");
+        EXPECT_EQ(steam.close_requests.load(), 1);
+        EXPECT_TRUE(steam.running.load());
+        EXPECT_FALSE(sentinel.started());
+      } else {
+        // Only the harmless sentinel ran. Its fixed failure keeps the route from publishing media.
+        EXPECT_EQ(reply.status, 503);
+        EXPECT_EQ(reply.refusal_code, "gamescope_session_failed");
+        EXPECT_EQ(steam.close_requests.load(), 1);
+        EXPECT_FALSE(steam.running.load());
+        EXPECT_TRUE(sentinel.started());
+      }
+      EXPECT_EQ(client->close_desktop_steam, device_opt_in);
+      EXPECT_EQ(prelaunch::coordinator().receipt().restore, prelaunch::restore_e::rolled_back);
+      auto persisted_after = nlohmann::json::parse(file_handler::read_file(apps_path.string().c_str()));
+      // The route owns only this timestamp write; all persisted permission/settings bytes
+      // represented by JSON values must survive admission, failure cleanup and loader refresh.
+      for (auto *catalogue : {&persisted_before, &persisted_after}) {
+        for (auto &entry : catalogue->at("apps")) {
+          if (entry.value("uuid", std::string {}) == app.uuid) entry.erase("last-launched");
+        }
+      }
+      EXPECT_EQ(persisted_after, persisted_before);
+      const auto &stored = proc::proc.get_apps();
+      EXPECT_EQ(stored.size(), initial_apps.size());
+      const auto game = std::find_if(stored.begin(), stored.end(), [&](const auto &entry) { return entry.uuid == app.uuid; });
+      ASSERT_NE(game, stored.end());
+      EXPECT_EQ(game->id, launch_app_id);
+      EXPECT_EQ(game->close_desktop_steam_for_private, app_opt_in) << "effective consent never changes the stored app";
+    }
+  };
+
   /// The production console app list, save and launch handlers on a loopback TLS listener, with an
   /// API key, and the apps file pointed at a scratch copy for the length of the test.
   class console_routes_t {
@@ -835,6 +981,26 @@ TEST_F(LaunchDesktopSteamTest, DesktopSteamAppearingDuringTransitionRequiresSucc
   EXPECT_EQ(steam.close_requests.load(), 1);
   EXPECT_TRUE(steam.running.load());
   EXPECT_EQ(prelaunch::coordinator().receipt().restore, prelaunch::restore_e::rolled_back);
+}
+
+TEST_F(LateDesktopSteamTest, AppearingAfterAdmissionIsRefusedBeforeNestedPrepWithoutConsent) {
+  late_launch(false, false, {}, false);
+}
+
+TEST_F(LateDesktopSteamTest, AppearingAfterAdmissionUsesTheAdmittedDeviceConsent) {
+  late_launch(true, false, {}, true);
+}
+
+TEST_F(LateDesktopSteamTest, AppearingAfterAdmissionUsesTheAdmittedAppConsent) {
+  late_launch(false, true, {}, true);
+}
+
+TEST_F(LateDesktopSteamTest, AppearingAfterAdmissionUsesTheAdmittedRequestConsent) {
+  late_launch(false, false, "&closeDesktopSteamForPrivate=true", true);
+}
+
+TEST_F(LateDesktopSteamTest, AppearingAfterAdmissionMustFinishOptInShutdownBeforeNestedPrep) {
+  late_launch(true, false, {}, false);
 }
 
 TEST_F(LaunchDesktopSteamTest, APinnedPrivateLaunchAsIsJudgedAfterTheTransitionNotRefusedForGameMode) {
