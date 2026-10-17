@@ -8465,9 +8465,9 @@ namespace nvhttp {
           if (result.snapshot.outcome != proc::session_stop_outcome_t::allowed || !result.stopped)
             BOOST_LOG(warning) << "Native End cleanup retained state or changed; refresh before another request"sv;
         } catch (const std::exception &e) {
-          BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete: "sv << e.what();
+          try { BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete: "sv << e.what(); } catch (...) {}
         } catch (...) {
-          BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete"sv;
+          try { BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete"sv; } catch (...) {}
         }
         ticket.reset(); // unwind exact gate/projection before capacity is available again
         std::lock_guard lock(mutex);
