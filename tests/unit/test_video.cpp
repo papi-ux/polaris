@@ -2241,7 +2241,7 @@ TEST(PyroWaveAnnounceTests, SdrMustBeRec709) {
 }
 
 TEST(PyroWaveAnnounceTests, AnOddExtentIsRefused) {
-  for (const auto [width, height] : {std::pair {1921, 1080}, std::pair {1920, 1081},
+  for (const auto &[width, height] : {std::pair {1921, 1080}, std::pair {1920, 1081},
                                      std::pair {0, 1080}, std::pair {1920, -2}}) {
     auto config = pyrowave_request();
     config.width = width;
