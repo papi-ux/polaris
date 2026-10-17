@@ -12876,6 +12876,9 @@ namespace nvhttp {
     state->server.resource["^/launch$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       launch(state->host_audio, std::move(response), std::move(request));
     };
+    // Actual single-executor TLS routes, including their certificate and ownership checks (#424).
+    state->server.resource["^/cancel$"]["GET"] = cancel;
+    state->server.resource["^/serverinfo$"]["GET"] = serverinfo<PolarisHTTPS>;
     // The production /resume handler too (#204: a refused resume changes nothing on the host).
     state->server.resource["^/resume$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       resume(state->host_audio, std::move(response), std::move(request));

@@ -13035,6 +13035,12 @@ namespace proc {
     placebo = true;
   }
 
+  void proc_t::set_session_shutdown_observer_for_tests(std::function<void(bool)> observer) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _session_shutdown_observer_for_tests = std::move(observer);
+  }
+
   void proc_t::clear_running_app_for_tests() {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
@@ -13418,7 +13424,13 @@ namespace proc {
       }
       if (result.snapshot.had_running_app && running() > 0) {
         const session_end_request_scope_t ending {sync.stop_ends_session};
+#ifdef POLARIS_TESTS
+        if (_session_shutdown_observer_for_tests) _session_shutdown_observer_for_tests(false);
+#endif
         terminate_impl(false, true);
+#ifdef POLARIS_TESTS
+        if (_session_shutdown_observer_for_tests) _session_shutdown_observer_for_tests(true);
+#endif
       }
 #ifdef __linux__
       if (!_host_virtual_cleanup_pending) {
