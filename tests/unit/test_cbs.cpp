@@ -118,6 +118,18 @@ namespace {
       return {};
     }
     sps->vui_parameters_present_flag = 0;
+    // CBS also validates the inferred values when VUI syntax is absent.
+    auto &vui = sps->vui;
+    std::memset(&vui, 0, sizeof(vui));
+    vui.video_format = 5;
+    vui.colour_primaries = AVCOL_PRI_UNSPECIFIED;
+    vui.transfer_characteristics = AVCOL_TRC_UNSPECIFIED;
+    vui.matrix_coefficients = AVCOL_SPC_UNSPECIFIED;
+    vui.motion_vectors_over_pic_boundaries_flag = 1;
+    vui.max_bytes_per_pic_denom = 2;
+    vui.max_bits_per_min_cu_denom = 1;
+    vui.log2_max_mv_length_horizontal = 15;
+    vui.log2_max_mv_length_vertical = 15;
     const int write = ff_cbs_write_fragment_data(ctx, &fragment);
     EXPECT_EQ(write, 0);
     if (write != 0) {
