@@ -8549,7 +8549,8 @@ namespace nvhttp {
     const auto admission = ends.submit([&]() {
       is_owner = proc::proc.is_session_owner(named_cert_p->uuid);
       return proc::proc.prepare_session_shutdown(
-        named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner);
+        named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner
+      );
     });
     const auto outcome = admission.result.snapshot.outcome;
     // The route returns so the one executor can actually send. Transport completion/error
