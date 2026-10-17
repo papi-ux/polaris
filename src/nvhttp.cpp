@@ -18,6 +18,9 @@
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
+#include <condition_variable>
+#include <exception>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <format>
@@ -7033,9 +7036,8 @@ namespace nvhttp {
   }
 
   template<class T>
-  void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+  void serverinfo_stable(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
-    reconcile_game_mode_host();
 
     auto local_endpoint = request->local_endpoint();
     crypto::p_named_cert_t named_cert_p;
@@ -7047,6 +7049,7 @@ namespace nvhttp {
     const auto profile_service = named_cert_p ? multiseat::profile_service_for(named_cert_p->uuid) : nullptr;
     profile_client = static_cast<bool>(profile_service);
 #endif
+    if (!profile_client) reconcile_game_mode_host();
     const int pair_status = named_cert_p ? 1 : 0;
     const auto advertised_codec_support = profile_client ? video::codec_capability_state_t {1, 1, {}} :
       advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
@@ -7207,6 +7210,66 @@ namespace nvhttp {
     std::ostringstream data;
 
     pt::write_xml(data, tree);
+    response->write(data.str());
+    response->close_connection_after_response = true;
+  }
+
+  template<class T>
+  void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+                  std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    crypto::p_named_cert_t client;
+    if constexpr (std::is_same_v<PolarisHTTPS, T>) client = get_verified_cert(request);
+#ifdef __linux__
+    if (client && multiseat::profile_service_for(client->uuid)) {
+      serverinfo_stable<T>(std::move(response), std::move(request));
+      return; // independent profile lifecycle, no global process getters/probes
+    }
+#endif
+    const auto observe = [&](const proc::session_snapshot_guard_t &guard) {
+      if (guard.owns_snapshot()) {
+        serverinfo_stable<T>(response, request);
+        return true;
+      }
+      if (!proc::proc.native_end_pending()) return false;
+      // Accepted native End means no resumable game, NOT completed host cleanup.
+      // No process, encoder-cache, display or capability probe is safe on this branch.
+      pt::ptree tree;
+      tree.put("root.<xmlattr>.status_code", 200);
+      tree.put("root.hostname", config::nvhttp.sunshine_name);
+      tree.put("root.appversion", VERSION);
+      tree.put("root.GfeVersion", GFE_VERSION);
+      tree.put("root.uniqueid", http::unique_id);
+      tree.put("root.HttpsPort", net::map_port(PORT_HTTPS));
+      tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
+      tree.put("root.PairStatus", client ? 1 : 0);
+      tree.put("root.Permission", client ? static_cast<std::uint32_t>(client->perm) : 0U);
+      tree.put("root.currentgame", 0);
+      tree.put("root.currentgameuuid", "");
+      tree.put("root.state", "POLARIS_SERVER_FREE");
+      tree.put("root.currentgamesessiontoken", "");
+      tree.put("root.currentgameowner", "");
+      tree.put("root.currentgameownername", "");
+      tree.put("root.currentgameowned", 0);
+      tree.put("root.currentgameviewercount", 0);
+      tree.put("root.currentgamewatchable", 0);
+      tree.put("root.session_cleanup_pending", 1);
+      tree.put("root.session_launch_available", 0);
+      tree.put("root.capabilities_available", 0);
+      std::ostringstream data; pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+      return true;
+    };
+    auto guard = proc::proc.try_session_status_guard();
+    if (observe(guard)) return;
+    // Completion can release stop between the first failed guard and pending read.
+    // One new nonblocking claim observes that settled generation; no polling/wait loop.
+    auto settled = proc::proc.try_session_status_guard();
+    if (observe(settled)) return;
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", 503);
+    tree.put("root.<xmlattr>.status_message", "Session status temporarily unavailable");
+    std::ostringstream data; pt::write_xml(data, tree);
     response->write(data.str());
     response->close_connection_after_response = true;
   }
@@ -7429,9 +7492,14 @@ namespace nvhttp {
       return;
     }
 #endif
-    const auto advertised_codec_support = advertised_codec_support_for_http(true);
-
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
+      auto status_guard = proc::proc.try_session_status_guard();
+      if (!status_guard.owns_snapshot()) {
+        apps.put("<xmlattr>.status_code", 503);
+        apps.put("<xmlattr>.status_message", "Session cleanup or transition in progress");
+        return;
+      }
+      const auto advertised_codec_support = advertised_codec_support_for_http(true);
       auto current_appid = proc::proc.running();
       auto should_hide_inactive_apps = config::input.enable_input_only_mode && current_appid > 0 && current_appid != proc::input_only_app_id;
 
@@ -8314,10 +8382,116 @@ namespace nvhttp {
 #endif
   }
 
-  void cancel(resp_https_t response, req_https_t request) {
+  // Exactly one server-lifetime-owned End job; never the HTTPS executor or a shared pool.
+  // Lock order: queue -> process admission. The worker drops queue before process/RTSP work.
+  class native_end_worker_t {
+  public:
+    native_end_worker_t(): worker([this]() { run(); }) {}
+    ~native_end_worker_t() { shutdown(); }
+    native_end_worker_t(const native_end_worker_t &) = delete;
+    native_end_worker_t &operator=(const native_end_worker_t &) = delete;
+
+    using dispatch_lease_t = std::shared_ptr<const char>;
+    struct submission_t {
+      proc::session_stop_result_t result;
+      dispatch_lease_t dispatch;
+    };
+    template<class Prepare>
+    submission_t submit(Prepare prepare) {
+      std::lock_guard lock(mutex);
+      if (!accepting || busy) {
+        proc::session_stop_result_t result;
+        result.snapshot.outcome = proc::session_stop_outcome_t::stop_in_progress;
+        return {std::move(result), {}};
+      }
+      // Reserve capacity before authority/admission. Refusal never enters the worker.
+      auto dispatch = std::make_shared<const char>(); // allocation before any stop admission effects
+      auto admitted = prepare();
+      if (!admitted.ticket) return {std::move(admitted.result), {}};
+      pending = std::move(admitted.ticket); // noexcept ownership transfer, no queue allocation
+      if (!pending->publish_native_end()) {
+        pending.reset(); // releases only this unqueued claim, no teardown
+        admitted.result.snapshot.outcome = proc::session_stop_outcome_t::session_changed;
+        return {std::move(admitted.result), {}};
+      }
+      lease = dispatch;
+      ready = false;
+      busy = true;
+      return {std::move(admitted.result), std::move(dispatch)}; // accepted, NOT cleanup-complete
+    }
+
+    void dispatch(const dispatch_lease_t &expected) {
+      std::lock_guard lock(mutex);
+      if (expected && lease == expected) {
+        ready = true;
+        changed.notify_one();
+      }
+    }
+    template<class Write, class Send>
+    void respond(const dispatch_lease_t &expected, Write write, Send send) {
+      try {
+        write();
+        if (expected) send([this, expected](const auto &) { dispatch(expected); });
+      } catch (...) {
+        // An accepted user End remains owned even when serializing/setting up its reply fails.
+        const auto original = std::current_exception();
+        try { BOOST_LOG(error) << "Native End reply failed; accepted cleanup remains owned"sv; } catch (...) {}
+        try { dispatch(expected); } catch (...) {}
+        std::rethrow_exception(original);
+      }
+    }
+    void stop_accepting() {
+      std::lock_guard lock(mutex);
+      accepting = false;
+      ready = true; // drain an accepted unsent lease if IO stopped before its callback
+      changed.notify_one();
+    }
+    void shutdown() {
+      stop_accepting();
+      if (worker.joinable()) worker.join(); // drain accepted ownership; no detached or timeout kill
+    }
+  private:
+    void run() {
+      for (;;) {
+        std::unique_ptr<proc::proc_t::session_shutdown_ticket_t> ticket;
+        {
+          std::unique_lock lock(mutex);
+          changed.wait(lock, [this]() { return (pending && ready) || !accepting; });
+          if (!pending) return;
+          ticket = std::move(pending);
+        }
+        try {
+          const auto result = ticket->complete();
+          if (result.snapshot.outcome != proc::session_stop_outcome_t::allowed || !result.stopped)
+            BOOST_LOG(warning) << "Native End cleanup retained state or changed; refresh before another request"sv;
+        } catch (const std::exception &e) {
+          try { BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete: "sv << e.what(); } catch (...) {}
+        } catch (...) {
+          try { BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete"sv; } catch (...) {}
+        }
+        ticket.reset(); // unwind exact gate/projection before capacity is available again
+        std::lock_guard lock(mutex);
+        busy = false;
+        lease.reset();
+        ready = false;
+      }
+    }
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool accepting = true;
+    bool busy = false;
+    bool ready = false;
+    dispatch_lease_t lease;
+    std::unique_ptr<proc::proc_t::session_shutdown_ticket_t> pending;
+    std::thread worker;
+  };
+
+  void cancel(native_end_worker_t &ends, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
 
     pt::ptree tree;
+    tree.put("root.cancel", 0);
+    tree.put("root.<xmlattr>.status_code", 500);
     bool response_written = false;
     auto g = util::fail_guard([&]() {
       // SB-2: when we already answered Moonlight before nested teardown, skip.
@@ -8369,85 +8543,90 @@ namespace nvhttp {
 #endif
 
     const auto session_token = get_arg(args, "sessiontoken", "");
-    auto pending_capture_cancel = proc::proc.cancel_capture_preparation_for_shutdown(
-      named_cert_p->uuid, session_token, true, false);
-    // Paired cert UUID is the owner identity. Never require sessiontoken for the
-    // owner — Artemis/Moonlight often send a stale token and map any cancel
-    // failure to "started by another device".
-    const bool is_owner = proc::proc.is_session_owner(named_cert_p->uuid);
-
-    // Preflight without teardown so we can answer the client before nested
-    // gamescope undo (which can SEGV polaris mid-cancel and leave Moonlight
-    // thinking quit failed as "another device").
-    auto preflight = proc::proc.get_session_stop_snapshot(named_cert_p->uuid, true);
-    auto outcome = preflight.outcome;
-    if (is_owner &&
-        (outcome == proc::session_stop_outcome_t::other_owner ||
-         outcome == proc::session_stop_outcome_t::token_mismatch ||
-         outcome == proc::session_stop_outcome_t::uncontrolled_stream)) {
-      // Owner cert always wins over stale token / role race after disconnect.
-      if (preflight.had_running_app || preflight.active_sessions > 0) {
-        outcome = proc::session_stop_outcome_t::allowed;
+    // Reserve one owned worker slot, then perform the original final authority/generation
+    // checks and close launch admission, all before promising acceptance on the wire.
+    bool is_owner = false;
+    const auto admission = ends.submit([&]() {
+      is_owner = proc::proc.is_session_owner(named_cert_p->uuid);
+      return proc::proc.prepare_session_shutdown(
+        named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner
+      );
+    });
+    const auto outcome = admission.result.snapshot.outcome;
+    // The route returns so the one executor can actually send. Transport completion/error
+    // releases only this job's lease. Content timeout closes a stalled write; shutdown drains
+    // an accepted lease even if the pinned server suppresses callbacks while stopping.
+    ends.respond(admission.dispatch, [&]() {
+      response_written = true; // construction attempted: never retry serialization on exception
+      switch (outcome) {
+        case proc::session_stop_outcome_t::allowed:
+        case proc::session_stop_outcome_t::no_active_session:
+          tree.put("root.cancel", 1);
+          tree.put("root.<xmlattr>.status_code", 200);
+          break;
+        case proc::session_stop_outcome_t::permission_denied:
+        case proc::session_stop_outcome_t::viewer_forbidden:
+        case proc::session_stop_outcome_t::uncontrolled_stream:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 403);
+          tree.put("root.<xmlattr>.status_message", "This client cannot stop the active session");
+          break;
+        case proc::session_stop_outcome_t::stop_in_progress:
+        case proc::session_stop_outcome_t::session_changed:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 409);
+          tree.put("root.<xmlattr>.status_message", "The active session changed or is already stopping");
+          break;
+        case proc::session_stop_outcome_t::other_owner:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
+          break;
+        case proc::session_stop_outcome_t::token_mismatch:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
+          break;
       }
-      else {
-        outcome = proc::session_stop_outcome_t::no_active_session;
-      }
-    }
 
-    switch (outcome) {
-      case proc::session_stop_outcome_t::allowed:
-      case proc::session_stop_outcome_t::no_active_session:
-        tree.put("root.cancel", 1);
-        tree.put("root.<xmlattr>.status_code", 200);
-        break;
-      case proc::session_stop_outcome_t::permission_denied:
-      case proc::session_stop_outcome_t::viewer_forbidden:
-      case proc::session_stop_outcome_t::uncontrolled_stream:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 403);
-        tree.put("root.<xmlattr>.status_message", "This client cannot stop the active session");
-        break;
-      case proc::session_stop_outcome_t::stop_in_progress:
-      case proc::session_stop_outcome_t::session_changed:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 409);
-        tree.put("root.<xmlattr>.status_message", "The active session changed or is already stopping");
-        break;
-      case proc::session_stop_outcome_t::other_owner:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 470);
-        tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
-        break;
-      case proc::session_stop_outcome_t::token_mismatch:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 470);
-        tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
-        break;
-    }
+      BOOST_LOG(info) << "cancel: client=["sv << named_cert_p->name
+                      << "] owner="sv << (is_owner ? "yes" : "no")
+                      << " preflight_outcome="sv << static_cast<int>(outcome)
+                      << " token_sent="sv << !session_token.empty()
+                      << " had_app="sv << admission.result.snapshot.had_running_app;
+      if (outcome == proc::session_stop_outcome_t::allowed) tree.put("root.session_cleanup_pending", 1);
 
-    BOOST_LOG(info) << "cancel: client=["sv << named_cert_p->name
-                    << "] owner="sv << (is_owner ? "yes" : "no")
-                    << " preflight_outcome="sv << static_cast<int>(outcome)
-                    << " token_sent="sv << !session_token.empty()
-                    << " had_app="sv << preflight.had_running_app;
-
-    // Answer Moonlight first — nested WSI undo can SEGV the host process.
-    {
       std::ostringstream data;
       pt::write_xml(data, tree);
       response->write(data.str());
       response->close_connection_after_response = true;
-      response_written = true;
-    }
+    }, [&](auto callback) { response->send(std::move(callback)); });
 
-    if (outcome == proc::session_stop_outcome_t::allowed) {
-      // Require no token for owner; empty token for non-owner still fails if not owned.
-      static_cast<void>(proc::proc.request_session_shutdown(
-        named_cert_p->uuid,
-        session_token,
-        true,
-        !session_token.empty() && !is_owner
-      ));
+    // Returning releases the buffered response on the same executor. The owned worker
+    // continues even if this client disconnects; one accepted End is never auto-retried.
+  }
+
+  void guard_native_end_v1_routes(https_server_t &server) {
+    // Only native /cancel publishes the ticket, on this same single HTTPS executor.
+    // Therefore a nonbusy v1 body finishes before another cancel can claim admission.
+    // While busy, no v1 route body can park this executor behind process/cache teardown.
+    for (auto &[pattern, methods] : server.resource) {
+      for (auto &[method, handler] : methods) {
+        handler = [next = std::move(handler)](resp_https_t response, req_https_t request) {
+          if (request->path.rfind("/polaris/v1/", 0) != 0 || !proc::proc.native_end_pending()) {
+            next(std::move(response), std::move(request));
+            return;
+          }
+          const auto client = get_verified_cert(request); // live/revoked cert check before busy reply
+          SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+          nlohmann::json body {{"status", false}, {"error_code", client ? "session_cleanup_pending" : "unauthorized"}};
+          if (client) body["session_cleanup_pending"] = true;
+          response->write(client ? SimpleWeb::StatusCode::server_error_service_unavailable :
+                                   SimpleWeb::StatusCode::client_error_unauthorized,
+                          body.dump(), headers);
+          response->close_connection_after_response = true;
+        };
+      }
     }
   }
 
@@ -8476,6 +8655,13 @@ namespace nvhttp {
       return;
     }
 
+    auto status_guard = proc::proc.try_session_status_guard();
+    if (!status_guard.owns_snapshot()) {
+      fg.disable();
+      response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+      response->close_connection_after_response = true;
+      return;
+    }
     auto args = request->parse_query_string();
     auto app_image = proc::proc.get_app_image(util::from_view(get_arg(args, "appid")));
 
@@ -8654,7 +8840,9 @@ namespace nvhttp {
     // Declared after the server so it is destroyed first; stopped explicitly below as well.
     tailscale_connection::status_collector_t network_collector;
     http_server_t http_server;
+    native_end_worker_t native_ends; // declared after servers, drained before their destruction
 
+    https_server.config.thread_pool_size = 1;
     https_server.verify = verify_https_client;
 
     https_server.on_verify_failed = [](resp_https_t resp, req_https_t req) {
@@ -8684,7 +8872,9 @@ namespace nvhttp {
     https_server.resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) {
       resume(host_audio, resp, req);
     };
-    https_server.resource["^/cancel$"]["GET"] = cancel;
+    https_server.resource["^/cancel$"]["GET"] = [&native_ends](auto response, auto request) {
+      cancel(native_ends, std::move(response), std::move(request));
+    };
     https_server.resource["^/actions/clipboard$"]["GET"] = getClipboard;
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
 
@@ -12670,6 +12860,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/games/.+/steam-launch-mode$"]["POST"] = polarisSetSteamLaunchMode;
     https_server.resource["^/polaris/v1/session/launch$"]["POST"] = polarisLaunchGame;
 
+    guard_native_end_v1_routes(https_server);
     https_server.config.reuse_address = true;
     https_server.config.address = net::af_to_any_address_string(address_family);
     https_server.config.port = port_https;
@@ -12704,11 +12895,13 @@ namespace nvhttp {
     // Wait for any event
     shutdown_event->view();
 
+    native_ends.stop_accepting();
     https_server.stop();
     http_server.stop();
 
     ssl.join();
     tcp.join();
+    native_ends.shutdown();
     // Any network-evidence request still waiting is answered unknown before the server goes.
     network_collector.stop();
 
@@ -12860,6 +13053,7 @@ namespace nvhttp {
     https_server_t server;
     // After the server: destroyed first. The test reader hook replaces the daemon read.
     tailscale_connection::status_collector_t network_collector;
+    native_end_worker_t native_ends;
     bool host_audio = false;
     std::atomic<unsigned short> port {0};
     std::thread worker;
@@ -12872,10 +13066,32 @@ namespace nvhttp {
     state->server.config.port = 0;
     state->server.config.timeout_request = 5;
     state->server.config.timeout_content = 5;
+    state->server.config.thread_pool_size = 1;
     state->server.verify = verify_https_client;
+    state->server.on_verify_failed = [](resp_https_t response, req_https_t) {
+      pt::ptree tree; tree.put("root.<xmlattr>.status_code", 401);
+      std::ostringstream data; pt::write_xml(data, tree);
+      response->write(data.str()); response->close_connection_after_response = true;
+    };
+    state->server.default_resource["GET"] = not_found<PolarisHTTPS>;
+    state->server.resource["^/applist$"]["GET"] = applist;
+    state->server.resource["^/appasset$"]["GET"] = appasset;
+    // Representative v1 body uses the same production blocking status-view primitive.
+    // The tested production wrapper must prevent this body from running while End is pending.
+    state->server.resource["^/polaris/v1/session/status$"]["GET"] = [](resp_https_t response, req_https_t request) {
+      const auto client = get_verified_cert(request);
+      if (!client) { response->write(SimpleWeb::StatusCode::client_error_unauthorized); return; }
+      auto view = proc::proc.get_session_status_view(client->uuid, !!(client->perm & PERM::launch));
+      response->write(nlohmann::json {{"game_id", view.snapshot.stop.running_app_id}}.dump());
+    };
     state->server.resource["^/launch$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       launch(state->host_audio, std::move(response), std::move(request));
     };
+    // Actual single-executor TLS routes, including their certificate and ownership checks (#424).
+    state->server.resource["^/cancel$"]["GET"] = [state](auto response, auto request) {
+      cancel(state->native_ends, std::move(response), std::move(request));
+    };
+    state->server.resource["^/serverinfo$"]["GET"] = serverinfo<PolarisHTTPS>;
     // The production /resume handler too (#204: a refused resume changes nothing on the host).
     state->server.resource["^/resume$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       resume(state->host_audio, std::move(response), std::move(request));
@@ -12883,6 +13099,7 @@ namespace nvhttp {
     state->server.resource["^/polaris/v1/network/connection$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       networkConnection(state->network_collector, std::move(response), std::move(request));
     };
+    guard_native_end_v1_routes(state->server);
     state->worker = std::thread([state]() {
       try {
         state->server.start([state](unsigned short assigned) {
@@ -12899,10 +13116,12 @@ namespace nvhttp {
   }
 
   launch_route_for_tests_t::~launch_route_for_tests_t() {
+    impl->native_ends.stop_accepting();
     impl->server.stop();
     if (impl->worker.joinable()) {
       impl->worker.join();
     }
+    impl->native_ends.shutdown();
     impl->network_collector.stop();
   }
 

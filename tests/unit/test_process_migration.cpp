@@ -531,7 +531,7 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   // else still needs the token to match when they supplied one.
   EXPECT_NE(
     collapse_whitespace(cancel_handler)
-      .find("request_session_shutdown( named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner )"),
+      .find("prepare_session_shutdown( named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner )"),
     std::string::npos
   );
   EXPECT_NE(
@@ -925,8 +925,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   const auto rtsp_snapshot = stop_impl.find("rtsp_stream::session_snapshot(unique_id)", claim);
   const auto rtsp_terminate = stop_impl.find("rtsp_stream::terminate_sessions()");
   const auto process_terminate = stop_impl.find("terminate_impl(");
-  const auto stop_commit = stop_impl.find("stop_committed = true");
-  const auto release = stop_impl.rfind("finish_stop(stop_committed)");
+  const auto stop_commit = stop_impl.find("finish_stop(true, &owned.sync->native_end_ticket");
+  const auto release = stop_impl.find("owned.owns_gate = false", stop_commit);
   ASSERT_NE(claim, std::string::npos);
   ASSERT_NE(authorization, std::string::npos);
   EXPECT_LT(authorization, claim);
@@ -940,7 +940,11 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_LT(rtsp_terminate, process_terminate);
   EXPECT_LT(process_terminate, stop_commit);
   EXPECT_LT(stop_commit, release);
-  EXPECT_NE(stop_impl.find("bool stop_committed = false"), std::string::npos);
+  EXPECT_NE(stop_impl.find("owned.owns_gate = true"), std::string::npos);
+  const auto ticket_state = function_source_between(source,
+    "struct proc_t::session_shutdown_ticket_t::state_t", "proc_t::session_shutdown_ticket_t::session_shutdown_ticket_t(");
+  EXPECT_NE(ticket_state.find("bool owns_gate = false"), std::string::npos);
+  EXPECT_NE(ticket_state.find("bool consumed = false"), std::string::npos);
 
   const auto lifecycle_handoff = function_source_between(
     source,
@@ -949,7 +953,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   );
   EXPECT_NE(header.find("bool _launch_to_stop_handoff = false"), std::string::npos);
   EXPECT_NE(header.find("bool _last_stop_committed = false"), std::string::npos);
-  EXPECT_NE(header.find("void finish_stop(bool committed = true)"), std::string::npos);
+  EXPECT_NE(header.find("void finish_stop(bool committed = true,"), std::string::npos);
   EXPECT_NE(lifecycle_handoff.find("_launch_to_stop_handoff = true"), std::string::npos);
   EXPECT_NE(lifecycle_handoff.find("if (_last_stop_committed)"), std::string::npos);
   EXPECT_NE(lifecycle_handoff.find("_state = state_e::stopping"), std::string::npos);
@@ -963,7 +967,14 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
        }) {
     EXPECT_NE(body.find("_launch_to_stop_handoff"), std::string::npos);
   }
-  EXPECT_NE(stop_impl.find("[this, &stop_committed, &pending_cancel]"), std::string::npos);
+  const auto ticket_release = function_source_between(source,
+    "proc_t::session_shutdown_ticket_t::~session_shutdown_ticket_t()", "bool proc_t::session_shutdown_ticket_t::publish_native_end()");
+  const auto pending_release = ticket_release.find("_state->pending_cancel.reset()");
+  const auto gate_release = ticket_release.find("_state->gate->finish_stop(false, &_state->sync->native_end_ticket, _state.get())");
+  ASSERT_NE(pending_release, std::string::npos);
+  ASSERT_NE(gate_release, std::string::npos);
+  EXPECT_LT(pending_release, gate_release);
+  EXPECT_NE(ticket_release.find("if (_state->owns_gate)"), std::string::npos);
 
   const auto terminate_start = source.find("void proc_t::terminate_impl(");
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
