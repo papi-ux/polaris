@@ -1023,7 +1023,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   EXPECT_NE(
-    launch_handler.find("execute_and_raise(*app_iter, launch_session, [&]()"),
+    launch_handler.find("execute_and_raise(admitted_app, launch_session, [&]()"),
     std::string::npos
   );
   EXPECT_NE(
