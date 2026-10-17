@@ -7916,15 +7916,23 @@ namespace nvhttp {
           return;
         }
         proc::apply_app_display_semantics(*app_iter, *launch_session);
+        // Keep the admitted app/request/device consent with this launch, without changing the
+        // stored app or treating launch_session's request-only force flag as device permission.
+        auto admitted_app = *app_iter;
+        admitted_app.close_desktop_steam_for_private =
+          force_private_after_desktop_steam_shutdown_requested(args) ||
+          app_iter->close_desktop_steam_for_private || named_cert_p->close_desktop_steam;
         if (!admit_desktop_launch_policy(
               tree,
               args,
-              *app_iter,
+              admitted_app,
               current_appid > 0 && current_appid != proc::input_only_app_id,
-              named_cert_p->close_desktop_steam
+              false // the effective consent is frozen in the per-launch app above
             )) {
           return;
         }
+#else
+        const auto &admitted_app = *app_iter;
 #endif
 
         // Update last_launched timestamp
@@ -7943,7 +7951,7 @@ namespace nvhttp {
           }
         } catch (...) {}
 
-        auto err = proc::proc.execute_and_raise(*app_iter, launch_session, [&]() {
+        auto err = proc::proc.execute_and_raise(admitted_app, launch_session, [&]() {
           return publish_authorized_launch(named_cert_p, perm, [&]() {
             return proc::proc.raise_session_for_admitted_launch(launch_session);
           });

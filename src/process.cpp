@@ -10159,6 +10159,27 @@ namespace proc {
       // no output file configured.
       if (critical_nested_session_prep) {
         prep_output = stderr;
+        // Desktop Steam can appear after route admission (for example, on leaving Game Mode).
+        // Reuse that policy immediately before the nested session can start Steam or a title.
+        // The route froze effective app/request/device consent in this per-launch app. The
+        // lifecycle lock excludes another Polaris launch; our own _app is not a desktop game.
+        auto launch_policy = resolve_desktop_launch_safety_policy(
+          true, false, _app.close_desktop_steam_for_private,
+          _app, desktop_steam_client_active_impl(), false
+        );
+        if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
+          if (!request_desktop_steam_shutdown_for_private_stream()) {
+            return launch_failure::refuse(409, "desktop_steam_shutdown_failed",
+              "Desktop Steam did not finish shutting down on the host.",
+              "Quit Steam on the host, then launch again.");
+          }
+          launch_policy = resolve_desktop_launch_safety_policy_after_shutdown(_app, false);
+        }
+        if (launch_policy.recommendedAction == "refuse_private_stream") {
+          return launch_failure::refuse(409, "desktop_active_private_stream_refused",
+            "Unsafe private stream launch refused because desktop Steam is active.",
+            "Quit Steam on the host, or turn on \"Close Steam on the host to start games\" for this device in Devices so Polaris closes Steam for you, or retry with explicit desktop mirroring.");
+        }
       }
 #endif
       auto child = platf::run_command(
