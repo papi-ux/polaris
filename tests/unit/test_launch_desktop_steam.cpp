@@ -713,7 +713,28 @@ namespace {
       const auto client = pair_moonlight(device_opt_in);
       auto app = opted_in(steam_game());
       app.close_desktop_steam_for_private = app_opt_in;
-      use_apps({app, desktop()});
+      // Failure cleanup reloads file_apps. Give that real loader the same fixture-owned
+      // catalogue as admission, instead of letting a missing host file erase the test apps.
+      const auto apps_path = directory / ("late-apps-" + uuid_util::uuid_t::generate().string() + ".json");
+      const auto previous_apps_file = std::exchange(config::stream.file_apps, apps_path.string());
+      auto restore_apps_file = util::fail_guard([previous_apps_file]() {
+        config::stream.file_apps = previous_apps_file;
+      });
+      ASSERT_EQ(file_handler::write_file(apps_path.string().c_str(), nlohmann::json {{"version", 15}, {"apps", {
+        {{"name", app.name}, {"uuid", app.uuid}, {"steam-appid", app.steam_appid},
+          {std::string {prelaunch::k_app_key}, true}, {"close-desktop-steam-for-private", app_opt_in},
+          {"exclude-global-prep-cmd", true}, {"exclude-global-state-cmd", true}},
+        {{"name", desktop().name}, {"uuid", desktop().uuid},
+          {"exclude-global-prep-cmd", true}, {"exclude-global-state-cmd", true}},
+      }}}.dump()), 0);
+      ASSERT_TRUE(proc::proc.reload_configuration_from_file(apps_path.string()));
+      const auto initial_apps = proc::proc.get_apps();
+      const auto initial_game = std::find_if(initial_apps.begin(), initial_apps.end(), [&](const auto &entry) { return entry.uuid == app.uuid; });
+      ASSERT_NE(initial_game, initial_apps.end());
+      ASSERT_EQ(initial_game->close_desktop_steam_for_private, app_opt_in);
+      ASSERT_TRUE(initial_game->leave_game_mode_before_launch);
+      const auto launch_app_id = initial_game->id; // the loader derives IDs; UUID is the persisted identity
+      auto persisted_before = nlohmann::json::parse(file_handler::read_file(apps_path.string().c_str()));
       steam.running = false;
       steam.closes_when_asked = closes_when_asked;
       platf::game_mode_host::set_session_live_for_tests(true);
@@ -723,7 +744,7 @@ namespace {
         if (stage == "prep") steam.running = true; // after the existing post-transition admission
       });
 
-      const auto reply = launch(moonlight, moonlight_launch(steam_game_id, request));
+      const auto reply = launch(moonlight, moonlight_launch(launch_app_id, request));
       ASSERT_TRUE(log.has("transition_ready"));
       ASSERT_TRUE(log.has("prep")) << reply.refusal_code << ": " << reply.message;
       EXPECT_LT(log.at("transition_ready"), log.at("prep"));
@@ -749,11 +770,22 @@ namespace {
         EXPECT_TRUE(sentinel.started());
       }
       EXPECT_EQ(client->close_desktop_steam, device_opt_in);
-      const auto &stored = proc::proc.get_apps();
-      const auto game = std::find_if(stored.begin(), stored.end(), [](const auto &entry) { return entry.id == steam_game_id; });
-      ASSERT_NE(game, stored.end());
-      EXPECT_EQ(game->close_desktop_steam_for_private, app_opt_in) << "effective consent never changes the stored app";
       EXPECT_EQ(prelaunch::coordinator().receipt().restore, prelaunch::restore_e::rolled_back);
+      auto persisted_after = nlohmann::json::parse(file_handler::read_file(apps_path.string().c_str()));
+      // The route owns only this timestamp write; all persisted permission/settings bytes
+      // represented by JSON values must survive admission, failure cleanup and loader refresh.
+      for (auto *catalogue : {&persisted_before, &persisted_after}) {
+        for (auto &entry : catalogue->at("apps")) {
+          if (entry.value("uuid", std::string {}) == app.uuid) entry.erase("last-launched");
+        }
+      }
+      EXPECT_EQ(persisted_after, persisted_before);
+      const auto &stored = proc::proc.get_apps();
+      EXPECT_EQ(stored.size(), initial_apps.size());
+      const auto game = std::find_if(stored.begin(), stored.end(), [&](const auto &entry) { return entry.uuid == app.uuid; });
+      ASSERT_NE(game, stored.end());
+      EXPECT_EQ(game->id, launch_app_id);
+      EXPECT_EQ(game->close_desktop_steam_for_private, app_opt_in) << "effective consent never changes the stored app";
     }
   };
 
