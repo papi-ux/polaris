@@ -1159,6 +1159,9 @@ namespace video {
     const std::function<bool(encoder_t &, bool)> &validate
   );
 
+  /// The avcodec packet decision used by validate_config(), without capture or a hardware encode.
+  int validate_avcodec_probe_packet_for_tests(const AVPacket *packet, AVCodecID codec, std::string_view encoder_name);
+
   /**
    * @brief Probe as probe_encoders_with_hooks_for_tests() does, with Auto planning for a GPU driven
    *        by gpu_driver instead of the selected render node's own driver.

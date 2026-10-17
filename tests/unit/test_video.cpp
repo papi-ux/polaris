@@ -1619,6 +1619,33 @@ TEST(VideoAutoPolicyProbeTests, ExplicitVulkanOnGamescopeStreamOffersNoHdrUnless
   launch_failure::clear();
 }
 
+TEST(VideoAutoPolicyProbeTests, FailedBaseHevcCannotBeAdvertisedThroughStaleHdrCapability) {
+  const auto_probe_guard_t guard;
+  for (const int hevc_mode : {0, 2, 3}) {
+    SCOPED_TRACE(hevc_mode);
+    video::reset_encoder_probe_state();
+    config::video.encoder = "vulkan";
+    config::video.hevc_mode = hevc_mode;
+    config::video.av1_mode = 0;
+    config::video.capture = "portal";
+    config::video.linux_display.stream_mode = "gamescope_stream";
+    config::video.linux_display.private_runtime = "gamescope";
+    config::video.linux_display.use_cage_compositor = false;
+    const auto validate = [](video::encoder_t &encoder, bool) {
+      encoder.h264.capabilities.set();
+      // validate_encoder() starts with all bits set. A failed base HEVC
+      // probe skips the HDR probe, so DYNAMIC_RANGE can still be set.
+      encoder.hevc.capabilities.set();
+      encoder.hevc[video::encoder_t::PASSED] = false;
+      encoder.av1.capabilities.reset();
+      return true;
+    };
+    ASSERT_EQ(video::probe_encoders_with_hooks_for_tests(k_probe_identity, validate, "amdgpu"), 0);
+    ASSERT_EQ(video::active_encoder_selection_info().selected_encoder, "vulkan");
+    EXPECT_EQ(video::active_hevc_mode, 1) << "failed HEVC must be unavailable in every configured mode";
+  }
+}
+
 TEST(VideoAutoPolicyProbeTests, ExplicitVulkanProbesAgainWhenTheRouteDecidesItsHdr) {
   // An explicit encoder keeps the policy "explicit" on every route, and the refresh compared plans by
   // policy alone. A host set to encoder = vulkan that left Gamescope Stream would have gone on

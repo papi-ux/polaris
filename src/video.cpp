@@ -6423,6 +6423,16 @@ namespace video {
     VUI_PARAMS = 0x01,  ///< VUI parameters
   };
 
+  int validate_avcodec_probe_packet(const AVPacket *packet, AVCodecID codec, std::string_view encoder_name) {
+    const auto sps_status = cbs::inspect_sps(packet, codec);
+    if (sps_status == cbs::sps_vui_status_e::unreadable &&
+        codec == AV_CODEC_ID_H265 && encoder_name == "hevc_vulkan"sv) {
+      BOOST_LOG(warning) << "Vulkan HEVC probe produced an unreadable packet; this codec is unavailable"sv;
+      return -1;
+    }
+    return sps_status == cbs::sps_vui_status_e::present ? VUI_PARAMS : 0;
+  }
+
   int validate_config(std::shared_ptr<platf::display_t> disp, const encoder_t &encoder, const config_t &config) {
     auto encode_device = make_encode_device(*disp, encoder, config);
     if (!encode_device) {
@@ -6478,8 +6488,10 @@ namespace video {
     // This check only applies for H.264 and HEVC
     if (config.videoFormat <= 1) {
       if (auto packet_avcodec = dynamic_cast<packet_raw_avcodec *>(packet.get())) {
-        if (cbs::validate_sps(packet_avcodec->av_packet, config.videoFormat ? AV_CODEC_ID_H265 : AV_CODEC_ID_H264)) {
-          flag |= VUI_PARAMS;
+        const auto codec = config.videoFormat ? AV_CODEC_ID_H265 : AV_CODEC_ID_H264;
+        flag = validate_avcodec_probe_packet(packet_avcodec->av_packet, codec, config.videoFormat ? encoder.hevc.name : encoder.h264.name);
+        if (flag < 0) {
+          return flag;
         }
       } else {
         // Don't check it for non-avcodec encoders.
@@ -7071,7 +7083,8 @@ namespace video {
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
-      if (active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) {
+      if (active_hevc_mode == 3 &&
+          (!encoder->hevc[encoder_t::PASSED] || !encoder->hevc[encoder_t::DYNAMIC_RANGE])) {
         // The dummy source is NV12, so an 8-bit failure is authoritative: an
         // encoder that could not pass at all has nothing to say about 10-bit.
         // Overriding there would advertise Main10 on a host with no HEVC and
@@ -8428,6 +8441,10 @@ namespace video {
     std::string_view selected_encoder
   ) {
     finalize_encoder_selection_info(info, selected_encoder);
+  }
+
+  int validate_avcodec_probe_packet_for_tests(const AVPacket *packet, AVCodecID codec, std::string_view encoder_name) {
+    return validate_avcodec_probe_packet(packet, codec, encoder_name);
   }
 
   int probe_encoders_with_hooks_for_tests(
