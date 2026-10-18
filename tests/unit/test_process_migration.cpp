@@ -880,8 +880,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_EQ(rtsp_snapshot_body.find("break;"), std::string::npos);
   const auto rtsp_clear_body = function_source_between(
     rtsp_source,
-    "void clear(bool all = true)",
-    "/**\n     * @brief Removes the provided session"
+    "void clear(bool all = true,",
+    "void terminate_owned_host_sessions("
   );
   const auto clear_lock = rtsp_clear_body.find("_session_slots.lock()");
   const auto clear_unlock = rtsp_clear_body.find("}\n#ifdef POLARIS_TESTS", clear_lock);
@@ -1261,7 +1261,7 @@ TEST(ProcessRuntimeConfigTests, RefreshPreservesLifecycleSynchronizationObjects)
   EXPECT_NE(refresh_body.find("proc.reload_configuration_from_file(file_name)"), std::string::npos);
   EXPECT_EQ(refresh_body.find("proc = std::move(*proc_opt)"), std::string::npos);
 
-  const auto terminate_start = source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh)");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
   ASSERT_NE(terminate_start, std::string::npos);
   ASSERT_NE(terminate_end, std::string::npos);
@@ -5616,7 +5616,7 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
     << "the host left Game Mode in between, so the title went with the session";
 
   const auto source = read_source_file_for_contract("src/process.cpp");
-  const auto terminate_start = source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(terminate_start, std::string::npos);
   const auto terminate_end = source.find("\n  bool proc_t::reload_configuration_from_file(", terminate_start);
   ASSERT_NE(terminate_end, std::string::npos);
@@ -5785,7 +5785,9 @@ TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGame
 
   // A stream that started in Game Mode opened no Steam of its own, so its cleanup does not stop the
   // desktop Steam if the host has gone back to the desktop by the time the stream ends.
-  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto terminate = source.substr(terminate_start);
   EXPECT_NE(terminate.find("const bool steam_is_not_this_streams = game_mode_live || _session_started_in_game_mode;"), std::string::npos);
 
   const auto retry = source.substr(source.find("bool proc_t::retry_retained_steam_shutdown() {"));
