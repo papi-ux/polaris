@@ -1006,6 +1006,69 @@ TEST_F(LaunchDesktopSteamTest, ConsoleCloseCannotRetireMediaWhenAnotherStopOwnsA
   }
 }
 
+TEST_F(LaunchDesktopSteamTest, ConsoleCloseRetiresOnlyTheExactOwnedPendingResume) {
+  const auto apps_file = directory / "console-return-pending-apps.json";
+  write_file(apps_file, R"({"version":15,"apps":[]})");
+  console_routes_t console {host.cert.string(), host.key.string(), apps_file};
+  console_return_launch_t owned;
+  ASSERT_NO_FATAL_FAILURE(owned.prepare());
+  ASSERT_NO_FATAL_FAILURE(owned.retained_resumes());
+  rtsp_stream::add_session_for_tests(*owned.launch, false);
+  auto resume = std::make_shared<rtsp_stream::launch_session_t>();
+  resume->id = 42903;
+  resume->unique_id = owned.launch->unique_id;
+  resume->session_token = owned.launch->session_token;
+  const auto admitted = proc::proc.capture_session_launch_generation();
+  ASSERT_TRUE(admitted && proc::proc.try_begin_session_launch(*admitted));
+  {
+    auto finish_launch = util::fail_guard([]() { proc::proc.finish_session_launch(); });
+    resume->lifecycle_generation = *admitted;
+    ASSERT_TRUE(rtsp_stream::launch_session_raise(resume));
+  }
+
+  EXPECT_EQ(console.request("POST", "/api/apps/close", "{}").first, 200);
+  prelaunch::coordinator().wait_for_restore();
+
+  EXPECT_EQ(owned.retired_slots.load(), 1);
+  EXPECT_TRUE(owned.retirement_admitted.load());
+  EXPECT_TRUE(resume->is_cancelled());
+  EXPECT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 0);
+  const auto receipt = prelaunch::coordinator().receipt();
+  EXPECT_EQ(receipt.restore, prelaunch::restore_e::restored) << receipt.restore_reason;
+}
+
+TEST_F(LaunchDesktopSteamTest, ConsoleCloseCannotRetireUnboundStaleOrIndependentMedia) {
+  const auto apps_file = directory / "console-return-binding-apps.json";
+  write_file(apps_file, R"({"version":15,"apps":[]})");
+  console_routes_t console {host.cert.string(), host.key.string(), apps_file};
+  for (const std::string kind : {"missing token", "other owner", "stale token", "stale generation", "worker"}) {
+    SCOPED_TRACE(kind);
+    console_return_launch_t owned;
+    ASSERT_NO_FATAL_FAILURE(owned.prepare());
+    rtsp_stream::launch_session_t media {};
+    media.id = 42904;
+    media.unique_id = owned.launch->unique_id;
+    media.session_token = owned.launch->session_token;
+    media.lifecycle_generation = owned.launch->lifecycle_generation;
+    if (kind == "missing token") owned.launch->session_token.clear();
+    if (kind == "other owner") media.unique_id = "another-launch-owner";
+    if (kind == "stale token") media.session_token = "previous-launch-token";
+    if (kind == "stale generation") media.lifecycle_generation = *media.lifecycle_generation + 1;
+    if (kind == "worker") media.require_worker_connection();
+    rtsp_stream::add_session_for_tests(media, false);
+
+    EXPECT_EQ(console.request("POST", "/api/apps/close", "{}").first, 200);
+    prelaunch::coordinator().wait_for_restore();
+
+    EXPECT_EQ(owned.retired_slots.load(), 0);
+    EXPECT_EQ(rtsp_stream::session_snapshot({}).active_sessions, 1);
+    const auto receipt = prelaunch::coordinator().receipt();
+    EXPECT_EQ(receipt.restore, prelaunch::restore_e::refused);
+    EXPECT_EQ(receipt.restore_reason, "a stream is active or pending on the host");
+    EXPECT_EQ(owned.adapter.starts, (std::vector<prelaunch::direction_e> {prelaunch::direction_e::to_desktop}));
+  }
+}
+
 TEST_F(LaunchDesktopSteamTest, OptedInLaunchOnAGameModeHostIsRefusedByTheUnavailableAdapterBeforeAnythingElse) {
   stage_log_t log;
   unavailable_build_t build;
