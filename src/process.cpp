@@ -11586,6 +11586,11 @@ namespace proc {
       return _app_id;
     }
 
+    // A Console stop owns cleanup from its admission callback through the selected media joins.
+    // Report this exited child's liveness without consuming the owner's one-shot return binding.
+#ifdef __linux__
+    if (sync.console_cleanup_owner) return 0;
+#endif
     // Perform cleanup actions now if needed
     if (_process) {
       terminate_impl(false, true);
@@ -11826,27 +11831,50 @@ namespace proc {
   }
 
   void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session, bool retire_owned_media) {
+    bool stop_admitted = false;
 #ifdef __linux__
     std::shared_ptr<const char> capture_owner;
     session_media::pending_start_cancel_owner_t pending_cancel;
+    bool deferral_owned = false;
+    const auto release_deferral = [&]() {
+      if (!deferral_owned) return;
+      auto &sync = session_lifecycle_sync();
+      std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+      if (sync.console_cleanup_owner == &stop_admitted) sync.console_cleanup_owner = nullptr;
+      deferral_owned = false;
+    };
 #endif
+    // This guard exists before admission, including a throwing cancellation callback. Remove the
+    // metadata deferral before reopening admission, without nesting the metadata and gate locks.
+    auto release_stop = util::fail_guard([&]() {
+#ifdef __linux__
+      release_deferral();
+      pending_cancel = {};
+#endif
+      if (stop_admitted) _session_lifecycle_gate->finish_stop();
+    });
     if (!_session_lifecycle_gate->begin_stop([&]() {
 #ifdef __linux__
+          // begin_stop has closed admission and released its mutex before this callback. Install
+          // the scoped deferral before waiting for any admitted launch or media setup to finish.
+          // If cancellation throws, remove it before begin_stop releases its admission claim.
+          auto failed_cancel = util::fail_guard([&]() { release_deferral(); });
+          if (retire_owned_media) {
+            auto &sync = session_lifecycle_sync();
+            std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+            sync.console_cleanup_owner = &stop_admitted;
+            deferral_owned = true;
+          }
           // Admission publishes its owner under the gate lock. Read it after
           // stop closes admission, then cancel before waiting for the launch.
           capture_owner = session_lifecycle_sync().capture_owner.load();
           pending_cancel = session_media::cancel_pending_starts(capture_owner.get());
+          failed_cancel.disable();
 #endif
         })) {
       return;
     }
-    auto release_stop = util::fail_guard([&]() {
-#ifdef __linux__
-      // Reopen this owner before the lifecycle gate admits the next launch.
-      pending_cancel = {};
-#endif
-      _session_lifecycle_gate->finish_stop();
-    });
+    stop_admitted = true;
     // Marked only once this stop owns the gate. A request that lost the race to another stop
     // returned above, and neither marks nor clears that other stop.
     std::optional<session_end_request_scope_t> ending;
@@ -11862,6 +11890,7 @@ namespace proc {
     }
     if (before_media) before_media();
 #endif
+    std::function<bool(const rtsp_stream::launch_session_t &)> prepared_matches;
 #ifdef __linux__
     if (retire_owned_media) {
       std::string owner, token;
@@ -11871,12 +11900,21 @@ namespace proc {
         std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
         // Only the launch that owns a Game Mode transition needs this ordering. Freeze its
         // admitted identity before teardown clears it; a display/app label is never authority.
-        if (_prelaunch_transition_generation && _launch_session) {
+        if (_prelaunch_transition_generation && _launch_session &&
+            !_launch_session->worker_connection_requirement()->load()) {
           owner = _launch_session->unique_id;
           token = _launch_session->session_token;
           generation = _launch_session->lifecycle_generation;
         }
       }
+      // The prepared request may be a different Resume/Watch object from _launch_session. Apply
+      // the same frozen authority when terminate_impl retires preparation, including refusal when
+      // the owner tuple is incomplete. Clearing a weak metadata reference never cancels RTSP.
+      prepared_matches = [owner, token, generation](const rtsp_stream::launch_session_t &pending) {
+        return !owner.empty() && !token.empty() && generation &&
+          !pending.worker_connection_requirement()->load() && pending.unique_id == owner &&
+          pending.session_token == token && pending.lifecycle_generation == generation;
+      };
       // Stop admission already fences every host launch/SETUP. Claim matching ordinary host
       // media before the one-shot restore, but join it with no process metadata lock held.
       // Unbound, foreign or independent-worker media stays visible to the restore refusal.
@@ -11887,7 +11925,7 @@ namespace proc {
 #else
     (void) retire_owned_media;
 #endif
-    terminate_impl(immediate, needs_refresh);
+    terminate_impl(immediate, needs_refresh, prepared_matches);
   }
 
   bool proc_t::terminate_if(
@@ -12371,7 +12409,8 @@ namespace proc {
 
 #endif
 
-  void proc_t::terminate_impl(bool immediate, bool needs_refresh) {
+  void proc_t::terminate_impl(bool immediate, bool needs_refresh,
+                            const std::function<bool(const rtsp_stream::launch_session_t &)> &prepared_matches) {
     // Any committed teardown retires a paused-session timeout. Without this,
     // an explicit End session can finish before the detached timeout wakes and
     // the stale timer would enter a second stop transaction.
@@ -12382,7 +12421,9 @@ namespace proc {
     // (which may be a distinct Resume object) before clearing its app record.
     // RTSP handoff/start already share this atomic state, without lock nesting.
     if (auto pending_launch = sync.capture_launch.lock()) {
-      pending_launch->cancel_for_timeout();
+      // Native/legacy callers retain their existing cancellation. Console Close filters this
+      // otherwise unqualified reference just as it filters selected RTSP retirement.
+      if (!prepared_matches || prepared_matches(*pending_launch)) pending_launch->cancel_for_timeout();
     }
     sync.capture_launch.reset();
     if (_retained_gamepad) _retained_gamepad->retire();

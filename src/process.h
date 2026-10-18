@@ -1325,6 +1325,10 @@ namespace proc {
       // Protected by mutex; binds the launch metadata to its admission identity.
       std::shared_ptr<const char> metadata_capture_owner {capture_owner.load()};
       std::weak_ptr<rtsp_stream::launch_session_t> capture_launch;
+#ifdef __linux__
+      // Mutex-protected scoped Console stop owner; only that stop may clean up during its drain.
+      const void *console_cleanup_owner = nullptr;
+#endif
       /// Set while a stop runs because someone ended the session on purpose.
       std::atomic<bool> stop_ends_session {false};
       // Exact accepted native-End ticket identity; not a cleanup-completion flag.
@@ -1337,7 +1341,8 @@ namespace proc {
       std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
       bool no_active_sessions_at_launch
     );
-    void terminate_impl(bool immediate, bool needs_refresh);
+    void terminate_impl(bool immediate, bool needs_refresh,
+                        const std::function<bool(const rtsp_stream::launch_session_t &)> &prepared_matches = {});
     /// terminate() and end_session(): take the lifecycle gate, then tear down.
     void stop(bool immediate, bool needs_refresh, bool ends_session, bool retire_owned_media = false);
 #ifdef __linux__
