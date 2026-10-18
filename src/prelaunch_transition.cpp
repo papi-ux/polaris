@@ -471,13 +471,15 @@ namespace prelaunch {
         case state_e::awaiting_capture: {
           // Up to the hand-off: still this run, still the desktop this launch opened, read fresh
           // before and after the capture check. Anything else and the change is not published as owned.
+          bool read_failed = false;
           const auto same_desktop = [&](std::string &reason) {
             {
               std::lock_guard lock {mutex_};
               if (!active_ || active_->generation != generation) return false;
             }
             const auto now_seen = host_.observe(&pre, forward);
-            if (!now_seen.read.ok()) {
+            read_failed = !now_seen.read.ok();
+            if (read_failed) {
               reason = now_seen.read.reason;
               return false;
             }
@@ -495,7 +497,17 @@ namespace prelaunch {
           }
           wait_reason.clear();
           if (request.capture_ready && request.capture_ready(wait_reason)) {
-            if (!same_desktop(read_reason)) {
+            // Capture and the last typed read share the original forward deadline. Either can
+            // consume the remaining time or observe a caller cancellation; never publish ready
+            // from that late answer. The existing loop handles failure and owned rollback.
+            if (is_cancelled() || clock_.now() >= forward.deadline) continue;
+            const bool desktop_unchanged = same_desktop(read_reason);
+            if (is_cancelled() || clock_.now() >= forward.deadline) continue;
+            if (!desktop_unchanged) {
+              if (read_failed) {
+                wait_reason = read_reason;
+                break;
+              }
               fail(409, "prelaunch_desktop_changed", "The host's session changed while this launch checked capture.", "Try again.", state_e::failed);
               continue;
             }

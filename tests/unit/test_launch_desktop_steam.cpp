@@ -39,6 +39,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -524,6 +525,8 @@ namespace {
   class session_answer_host_t final: public prelaunch::host_t {
   public:
     bool desktop_appears = true;
+    // The #427 cases keep the typed unit independent of the process scan, as production does.
+    std::optional<bool> typed_game_mode;
     std::function<void()> on_scan;
     std::atomic<int> scans {0};
 
@@ -531,7 +534,7 @@ namespace {
       ++scans;
       if (on_scan) on_scan();
       prelaunch::observation_t out;
-      const bool live = platf::game_mode_host::session_live_fresh();
+      const bool live = typed_game_mode ? *typed_game_mode : platf::game_mode_host::session_live_fresh();
       out.game_mode = live ? prelaunch::steamos::game_mode_e::active : prelaunch::steamos::game_mode_e::inactive;
       if (live) {
         out.session = stand_in_session("1", prelaunch::mode_e::game, 'a');
@@ -558,6 +561,7 @@ namespace {
   public:
     std::vector<prelaunch::direction_e> starts;
     prelaunch::direction_e direction = prelaunch::direction_e::to_desktop;
+    std::function<void(prelaunch::direction_e)> on_switch;
 
     bool implemented() const override {
       return true;
@@ -578,7 +582,8 @@ namespace {
     }
 
     prelaunch::step_e poll() override {
-      platf::game_mode_host::set_session_live_for_tests(direction == prelaunch::direction_e::to_game_mode);
+      if (on_switch) on_switch(direction);
+      else platf::game_mode_host::set_session_live_for_tests(direction == prelaunch::direction_e::to_game_mode);
       return prelaunch::step_e::succeeded;
     }
 
@@ -932,6 +937,113 @@ TEST_F(LaunchDesktopSteamTest, AnAdmittedTransitionPrecedesLaunchAsAndTheModeDec
   EXPECT_EQ(adapter.starts.back(), prelaunch::direction_e::to_game_mode);
   EXPECT_EQ(prelaunch::coordinator().receipt().restore, prelaunch::restore_e::rolled_back);
   EXPECT_TRUE(platf::game_mode_host::session_live_fresh());
+}
+
+TEST_F(LaunchDesktopSteamTest, PrelaunchWaitsForFreshProcessAbsenceBeforeHandOff) {
+  for (const bool lingering_process : {false, true}) {
+    SCOPED_TRACE(lingering_process);
+    stage_log_t log;
+    session_answer_host_t host_double;
+    session_answer_adapter_t adapter;
+    instant_clock_t clock;
+    host_double.typed_game_mode = true;
+    bool returning = false;
+    adapter.on_switch = [&](prelaunch::direction_e direction) {
+      returning = direction == prelaunch::direction_e::to_game_mode;
+      host_double.typed_game_mode = returning;
+    };
+    const auto clears_at = lingering_process ? 3 * prelaunch::k_poll_period : 0ms;
+    std::atomic<int> process_scans {0};
+    bool switched = false;
+    host_double.on_scan = [&]() {
+      if (host_double.typed_game_mode == false) switched = true;
+    };
+    platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+    platf::game_mode_host::set_session_scan_for_tests([&]() {
+      ++process_scans;
+      return !switched || returning || clock.at.time_since_epoch() < clears_at;
+    });
+    auto reset_scan = util::fail_guard([]() {
+      platf::game_mode_host::set_session_scan_for_tests({});
+      platf::game_mode_host::set_session_live_for_tests(false);
+    });
+    ASSERT_TRUE(platf::game_mode_host::session_live()) << "prime the real cache with Game Mode";
+    prelaunch::set_dependencies_for_tests(&host_double, &adapter, &clock);
+    int capture_checks = 0;
+    int typed_before_capture = 0;
+    proc::set_prelaunch_capture_ready_for_tests([&](std::string_view, std::string &) {
+      ++capture_checks;
+      typed_before_capture = host_double.scans.load();
+      EXPECT_EQ(host_double.typed_game_mode, false);
+      return true;
+    });
+    const auto generation = proc::proc.capture_session_launch_generation();
+    ASSERT_TRUE(generation && proc::proc.try_begin_session_launch(*generation));
+    auto release = util::fail_guard([]() { proc::proc.finish_session_launch(); });
+    const auto outcome = proc::prelaunch_for_admitted_launch(
+      prelaunch::entry_e::rtsp, opted_in(steam_game()), "client-427", *generation, {}, {});
+    prelaunch::launch_scope_t rollback {outcome};
+    rollback.set_others([](std::string &) { return false; });
+    ASSERT_TRUE(outcome.proceed()) << outcome.code;
+    EXPECT_EQ(outcome.state, prelaunch::state_e::ready);
+    EXPECT_FALSE(platf::game_mode_host::session_live()) << "handoff must not retain the old true answer";
+    EXPECT_GE(process_scans.load(), lingering_process ? 4 : 2);
+    EXPECT_GE(clock.at.time_since_epoch(), clears_at);
+    EXPECT_LT(clock.at.time_since_epoch(), prelaunch::budgets_t {}.forward);
+    EXPECT_EQ(capture_checks, 1);
+    EXPECT_EQ(host_double.scans.load(), typed_before_capture + 1) << "fresh typed identity after readiness";
+    const auto receipt = prelaunch::coordinator().receipt();
+    EXPECT_EQ(receipt.pre, stand_in_session("1", prelaunch::mode_e::game, 'a'));
+    EXPECT_EQ(receipt.post, stand_in_session("2", prelaunch::mode_e::desktop, 'b'));
+    EXPECT_FALSE(log.has("prep"));
+    EXPECT_EQ(proc::proc.running(), 0) << "this admitted-entry check never executes an app";
+  }
+}
+
+TEST_F(LaunchDesktopSteamTest, PersistentOrUnreadableProcessModeRefusesBeforeHandOff) {
+  for (const bool unreadable : {false, true}) {
+    SCOPED_TRACE(unreadable);
+    stage_log_t log;
+    session_answer_host_t host_double;
+    session_answer_adapter_t adapter;
+    instant_clock_t clock;
+    host_double.typed_game_mode = true;
+    bool switched = false;
+    adapter.on_switch = [&](prelaunch::direction_e direction) {
+      switched = direction == prelaunch::direction_e::to_desktop;
+      host_double.typed_game_mode = !switched;
+    };
+    platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+    platf::game_mode_host::set_session_scan_for_tests([&]() {
+      if (switched && unreadable) throw std::runtime_error {"unavailable process observation"};
+      return true;
+    });
+    auto reset_scan = util::fail_guard([]() {
+      platf::game_mode_host::set_session_scan_for_tests({});
+      platf::game_mode_host::set_session_live_for_tests(false);
+    });
+    ASSERT_TRUE(platf::game_mode_host::session_live());
+    prelaunch::budgets_t budget;
+    budget.forward = 4 * prelaunch::k_poll_period;
+    prelaunch::set_dependencies_for_tests(&host_double, &adapter, &clock, budget);
+    proc::set_prelaunch_capture_ready_for_tests([](std::string_view, std::string &) { return true; });
+    const auto generation = proc::proc.capture_session_launch_generation();
+    ASSERT_TRUE(generation && proc::proc.try_begin_session_launch(*generation));
+    auto release = util::fail_guard([]() { proc::proc.finish_session_launch(); });
+    const auto outcome = proc::prelaunch_for_admitted_launch(
+      prelaunch::entry_e::rtsp, opted_in(steam_game()), "client-427", *generation, {}, {});
+    prelaunch::launch_scope_t rollback {outcome};
+    rollback.set_others([](std::string &) { return false; });
+    EXPECT_FALSE(outcome.proceed());
+    EXPECT_EQ(outcome.code, "prelaunch_capture_timeout");
+    EXPECT_EQ(clock.at.time_since_epoch(), budget.forward) << "one original forward deadline, no reset";
+    EXPECT_FALSE(log.has("transition_ready"));
+    EXPECT_FALSE(log.has("prep"));
+    EXPECT_EQ(proc::proc.running(), 0);
+    EXPECT_EQ(prelaunch::coordinator().receipt().restore, prelaunch::restore_e::rolled_back);
+    ASSERT_EQ(adapter.starts.size(), 2u);
+    EXPECT_EQ(adapter.starts.back(), prelaunch::direction_e::to_game_mode);
+  }
 }
 
 TEST_F(LaunchDesktopSteamTest, DesktopSteamAppearingDuringTransitionIsRefusedWithoutConsent) {

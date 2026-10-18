@@ -61,17 +61,37 @@ namespace {
     std::function<void()> on_scan;
     std::vector<std::string> *log = nullptr;
 
+    /// Opt in to the production observer's failed-read contract when its wait ends.
+    std::function<std::chrono::steady_clock::time_point()> read_clock;
+    int failed_reads = 0;
+    int failed_read_scan = 0;
+    prelaunch::verdict_t last_failed_read;
+    std::optional<std::chrono::steady_clock::time_point> failed_read_deadline;
+
     /// Overrides the Game Mode unit's state; otherwise it follows `live`.
     std::optional<steamos::game_mode_e> mode_state;
     int service_proofs = 0;
 
-    prelaunch::observation_t observe(const session_identity_t *since, const prelaunch::wait_t &, bool prove_service) override {
+    prelaunch::observation_t observe(const session_identity_t *since, const prelaunch::wait_t &wait, bool prove_service) override {
       ++scans;
       if (log) log->push_back("scan");
       if (on_scan) on_scan();
       prelaunch::observation_t out;
       out.read = read_failure;
-      if (!out.read.ok()) return out;
+      if (read_clock) {
+        if (read_clock() >= wait.deadline) {
+          out.read = prelaunch::verdict_t::fail("prelaunch_session_read_timeout", "The scripted session read exhausted its wait.");
+        } else if (wait.cancelled && wait.cancelled()) {
+          out.read = prelaunch::verdict_t::fail("prelaunch_cancelled", "The scripted session read was cancelled.");
+        }
+      }
+      if (!out.read.ok()) {
+        ++failed_reads;
+        failed_read_scan = scans;
+        last_failed_read = out.read;
+        failed_read_deadline = wait.deadline;
+        return out;
+      }
       out.game_mode = mode_state.value_or(live ? steamos::game_mode_e::active : steamos::game_mode_e::inactive);
       if (prove_service) {
         ++service_proofs;
@@ -666,6 +686,167 @@ TEST(PrelaunchTransitionTests, ADesktopThatChangesWhileCaptureWaitsIsNeverPublis
   EXPECT_EQ(f.adapter.starts.size(), 1u);
 }
 
+TEST(PrelaunchTransitionTests, AReadyAnswerCannotExtendTheOriginalForwardDeadline) {
+  for (const bool slow_final_observation : {false, true}) {
+    fixture_t f;
+    bool capture_checked = false;
+    bool delayed = false;
+    f.host.on_scan = [&]() {
+      if (slow_final_observation && capture_checked && !delayed) {
+        f.clock.at += budgets.forward;
+        delayed = true;
+      }
+    };
+    auto request = launch_request();
+    request.capture_ready = [&](std::string &) {
+      capture_checked = true;
+      if (!slow_final_observation) f.clock.at += budgets.forward;
+      return true;
+    };
+    const auto outcome = f.coordinator.run(request);
+    EXPECT_FALSE(outcome.proceed()) << slow_final_observation;
+    EXPECT_EQ(outcome.code, "prelaunch_capture_timeout") << slow_final_observation;
+    EXPECT_EQ(f.coordinator.receipt().restore, restore_e::rolled_back);
+    EXPECT_FALSE(f.coordinator.receipt().committed);
+  }
+}
+
+TEST(PrelaunchTransitionTests, CancellationDuringAReadyCheckWinsBeforeHandOff) {
+  fixture_t f;
+  bool cancelled = false;
+  auto request = launch_request();
+  request.cancelled = [&]() { return cancelled; };
+  request.capture_ready = [&](std::string &) {
+    cancelled = true;
+    return true;
+  };
+  const auto outcome = f.coordinator.run(request);
+  EXPECT_FALSE(outcome.proceed());
+  EXPECT_EQ(outcome.code, "prelaunch_cancelled");
+  EXPECT_EQ(outcome.state, state_e::cancelled);
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::rolled_back);
+  EXPECT_LT(f.clock.slept, budgets.forward);
+}
+
+TEST(PrelaunchTransitionTests, CancellationDuringTheFinalTypedReadWinsBeforeHandOff) {
+  fixture_t f;
+  const auto deadline = f.clock.at + budgets.forward;
+  bool cancelled = false;
+  int capture_scan = 0;
+  f.host.read_clock = [&]() { return f.clock.now(); };
+  f.host.on_scan = [&]() {
+    if (capture_scan != 0 && f.host.scans == capture_scan + 1) cancelled = true;
+  };
+  auto request = launch_request();
+  request.cancelled = [&]() { return cancelled; };
+  request.capture_ready = [&](std::string &) {
+    EXPECT_EQ(f.host.session, desktop_leader);
+    EXPECT_FALSE(f.host.live);
+    capture_scan = f.host.scans;
+    return true;
+  };
+  const auto outcome = f.coordinator.run(request);
+  ASSERT_NE(capture_scan, 0);
+  ASSERT_EQ(f.host.failed_reads, 1) << "the final observer returned a failed read, not a same-desktop success";
+  EXPECT_EQ(f.host.failed_read_scan, capture_scan + 1);
+  EXPECT_EQ(f.host.last_failed_read.code, "prelaunch_cancelled");
+  EXPECT_EQ(f.host.failed_read_deadline, deadline);
+  EXPECT_FALSE(outcome.proceed());
+  EXPECT_EQ(outcome.code, "prelaunch_cancelled");
+  EXPECT_EQ(outcome.state, state_e::cancelled);
+  const auto receipt = f.coordinator.receipt();
+  EXPECT_EQ(receipt.pre, game_mode_leader);
+  EXPECT_EQ(receipt.post, desktop_leader);
+  EXPECT_EQ(receipt.restore, restore_e::rolled_back);
+  EXPECT_FALSE(receipt.committed);
+  EXPECT_EQ(f.adapter.starts, (std::vector<direction_e> {direction_e::to_desktop, direction_e::to_game_mode}));
+  EXPECT_LT(f.clock.slept, budgets.forward);
+}
+
+TEST(PrelaunchTransitionTests, ExpiryDuringTheFinalTypedReadUsesTheOriginalForwardDeadline) {
+  fixture_t f;
+  const auto deadline = f.clock.at + budgets.forward;
+  int capture_scan = 0;
+  f.host.read_clock = [&]() { return f.clock.now(); };
+  f.host.on_scan = [&]() {
+    if (capture_scan != 0 && f.host.scans == capture_scan + 1) f.clock.at = deadline;
+  };
+  auto request = launch_request();
+  request.capture_ready = [&](std::string &) {
+    EXPECT_EQ(f.host.session, desktop_leader);
+    EXPECT_FALSE(f.host.live);
+    capture_scan = f.host.scans;
+    return true;
+  };
+  const auto outcome = f.coordinator.run(request);
+  ASSERT_NE(capture_scan, 0);
+  ASSERT_EQ(f.host.failed_reads, 1) << "the final observer returned timeout before the coordinator's guard";
+  EXPECT_EQ(f.host.failed_read_scan, capture_scan + 1);
+  EXPECT_EQ(f.host.last_failed_read.code, "prelaunch_session_read_timeout");
+  EXPECT_EQ(f.host.failed_read_deadline, deadline);
+  EXPECT_FALSE(outcome.proceed());
+  EXPECT_EQ(outcome.code, "prelaunch_capture_timeout");
+  EXPECT_EQ(outcome.state, state_e::failed);
+  const auto receipt = f.coordinator.receipt();
+  EXPECT_EQ(receipt.pre, game_mode_leader);
+  EXPECT_EQ(receipt.post, desktop_leader);
+  EXPECT_EQ(receipt.restore, restore_e::rolled_back);
+  EXPECT_FALSE(receipt.committed);
+  EXPECT_EQ(f.adapter.starts, (std::vector<direction_e> {direction_e::to_desktop, direction_e::to_game_mode}));
+  EXPECT_LT(f.clock.now(), deadline + budgets.rollback);
+}
+
+TEST(PrelaunchTransitionTests, AnUnreadFinalDesktopWaitsForFreshProofInsteadOfClaimingReplacement) {
+  fixture_t f;
+  const auto deadline = f.clock.at + budgets.forward;
+  int capture_checks = 0;
+  bool unread_delivered = false;
+  f.host.on_scan = [&]() {
+    if (capture_checks == 1 && !unread_delivered) {
+      // An unavailable read is not a replacement even if it has no diagnostic text.
+      f.host.read_failure = prelaunch::verdict_t::fail("prelaunch_session_read_failed", "");
+      unread_delivered = true;
+    } else {
+      f.host.read_failure = prelaunch::verdict_t::pass();
+    }
+  };
+  auto request = launch_request();
+  request.capture_ready = [&](std::string &) {
+    ++capture_checks;
+    EXPECT_EQ(f.host.session, desktop_leader);
+    EXPECT_FALSE(f.host.live);
+    return true;
+  };
+  const auto outcome = f.coordinator.run(request);
+  ASSERT_TRUE(unread_delivered);
+  EXPECT_EQ(f.host.failed_reads, 1);
+  EXPECT_EQ(f.host.last_failed_read.code, "prelaunch_session_read_failed");
+  EXPECT_EQ(f.host.failed_read_deadline, deadline);
+  EXPECT_EQ(capture_checks, 2) << "readiness follows a new successful typed read and capture check";
+  EXPECT_TRUE(outcome.proceed());
+  EXPECT_EQ(outcome.state, state_e::ready);
+  EXPECT_EQ(f.coordinator.receipt().pre, game_mode_leader);
+  EXPECT_EQ(f.coordinator.receipt().post, desktop_leader);
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::owned);
+  EXPECT_LT(f.clock.now(), deadline);
+  EXPECT_EQ(f.adapter.starts.size(), 1u);
+  EXPECT_EQ(f.coordinator.rollback(outcome.transition_generation, nobody_else), restore_e::rolled_back);
+}
+
+TEST(PrelaunchTransitionTests, AReadyCaptureCannotAdoptAReplacementTypedDesktop) {
+  fixture_t f;
+  auto request = launch_request();
+  request.capture_ready = [&](std::string &) {
+    f.host.session = identity("6", prelaunch::mode_e::desktop, 'f', 250, 9500);
+    return true;
+  };
+  const auto outcome = f.coordinator.run(request);
+  EXPECT_FALSE(outcome.proceed());
+  EXPECT_EQ(outcome.code, "prelaunch_desktop_changed");
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::refused);
+  EXPECT_EQ(f.adapter.starts.size(), 1u) << "a replacement desktop is not ours to roll back";
+}
+
 TEST(PrelaunchTransitionTests, ALaunchScopeRollsBackAnUncommittedReadyTransitionOnce) {
   scripted_host_t host;
   scripted_adapter_t adapter;
@@ -984,6 +1165,12 @@ TEST(PrelaunchTransitionTests, RegisteredCasesAreFrozen) {
     "AnOwnedChangeCommittedOrNotBlocksAnotherTransitionUntilItSettles",
     "AnImplementedAdapterWithoutItsInstalledCommandIsNeverStarted",
     "ADesktopThatChangesWhileCaptureWaitsIsNeverPublishedAsOwned",
+    "AReadyAnswerCannotExtendTheOriginalForwardDeadline",
+    "CancellationDuringAReadyCheckWinsBeforeHandOff",
+    "CancellationDuringTheFinalTypedReadWinsBeforeHandOff",
+    "ExpiryDuringTheFinalTypedReadUsesTheOriginalForwardDeadline",
+    "AnUnreadFinalDesktopWaitsForFreshProofInsteadOfClaimingReplacement",
+    "AReadyCaptureCannotAdoptAReplacementTypedDesktop",
     "ALaunchScopeRollsBackAnUncommittedReadyTransitionOnce",
     "StagesReachTheTestSinkInOrderAndProductionHasNone",
     "AnOutOfRangeUidNeverMatchesThisAccount",

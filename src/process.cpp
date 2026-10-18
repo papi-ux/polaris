@@ -6261,6 +6261,19 @@ namespace proc {
       return prelaunch_other_sessions_now(reason);
     };
     request.capture_ready = [selection](std::string &reason) {
+      // Typed session records may already describe the new desktop while an old process answer
+      // (or a genuinely retiring Game Mode process) still says Game Mode. Converge here, inside
+      // the owned transition's existing deadline and its fresh before/after desktop observations.
+      // The caller-thread scan also fences out older background refreshes before hand-off.
+      try {
+        if (platf::game_mode_host::session_live_fresh()) {
+          reason = "Steam Game Mode processes have not finished leaving the host.";
+          return false;
+        }
+      } catch (const std::exception &) {
+        reason = "Whether Steam Game Mode processes have ended could not be read.";
+        return false;
+      }
       {
         std::lock_guard lock {prelaunch_capture_ready_mutex};
         if (prelaunch_capture_ready_for_tests) return prelaunch_capture_ready_for_tests(selection, reason);
