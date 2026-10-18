@@ -666,6 +666,62 @@ TEST(PrelaunchTransitionTests, ADesktopThatChangesWhileCaptureWaitsIsNeverPublis
   EXPECT_EQ(f.adapter.starts.size(), 1u);
 }
 
+TEST(PrelaunchTransitionTests, AReadyAnswerCannotExtendTheOriginalForwardDeadline) {
+  for (const bool slow_final_observation : {false, true}) {
+    fixture_t f;
+    bool capture_checked = false;
+    bool delayed = false;
+    f.host.on_scan = [&]() {
+      if (slow_final_observation && capture_checked && !delayed) {
+        f.clock.at += budgets.forward;
+        delayed = true;
+      }
+    };
+    auto request = launch_request();
+    request.capture_ready = [&](std::string &) {
+      capture_checked = true;
+      if (!slow_final_observation) f.clock.at += budgets.forward;
+      return true;
+    };
+    const auto outcome = f.coordinator.run(request);
+    EXPECT_FALSE(outcome.proceed()) << slow_final_observation;
+    EXPECT_EQ(outcome.code, "prelaunch_capture_timeout") << slow_final_observation;
+    EXPECT_EQ(f.coordinator.receipt().restore, restore_e::rolled_back);
+    EXPECT_FALSE(f.coordinator.receipt().committed);
+  }
+}
+
+TEST(PrelaunchTransitionTests, CancellationDuringAReadyCheckWinsBeforeHandOff) {
+  fixture_t f;
+  bool cancelled = false;
+  auto request = launch_request();
+  request.cancelled = [&]() { return cancelled; };
+  request.capture_ready = [&](std::string &) {
+    cancelled = true;
+    return true;
+  };
+  const auto outcome = f.coordinator.run(request);
+  EXPECT_FALSE(outcome.proceed());
+  EXPECT_EQ(outcome.code, "prelaunch_cancelled");
+  EXPECT_EQ(outcome.state, state_e::cancelled);
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::rolled_back);
+  EXPECT_LT(f.clock.slept, budgets.forward);
+}
+
+TEST(PrelaunchTransitionTests, AReadyCaptureCannotAdoptAReplacementTypedDesktop) {
+  fixture_t f;
+  auto request = launch_request();
+  request.capture_ready = [&](std::string &) {
+    f.host.session = identity("6", prelaunch::mode_e::desktop, 'f', 250, 9500);
+    return true;
+  };
+  const auto outcome = f.coordinator.run(request);
+  EXPECT_FALSE(outcome.proceed());
+  EXPECT_EQ(outcome.code, "prelaunch_desktop_changed");
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::refused);
+  EXPECT_EQ(f.adapter.starts.size(), 1u) << "a replacement desktop is not ours to roll back";
+}
+
 TEST(PrelaunchTransitionTests, ALaunchScopeRollsBackAnUncommittedReadyTransitionOnce) {
   scripted_host_t host;
   scripted_adapter_t adapter;
