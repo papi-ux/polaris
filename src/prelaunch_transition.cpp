@@ -3,6 +3,7 @@
  * @brief Leaving Steam Game Mode before a private launch (#204): coordinator, receipt and probes.
  */
 #include "prelaunch_transition.h"
+#include "logging.h"
 
 #include <algorithm>
 #include <cctype>
@@ -749,6 +750,8 @@ namespace prelaunch {
           receipt_.outcome_unknown = receipt_.outcome_unknown || unknown;
         }
       }
+      BOOST_LOG(info) << "prelaunch: return generation=" << job.generation << " result=" << name(result)
+                      << " outcome_unknown=" << unknown << " reason=" << reason;
       // Launches are admitted again only once the outcome is recorded, outside the coordinator lock.
       if (job.release_fence) job.release_fence();
       {

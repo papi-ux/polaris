@@ -1254,6 +1254,8 @@ namespace proc {
      * which no other stop does.
      */
     void end_session(bool immediate = false, bool needs_refresh = true);
+    /// Console Close App: retire this launch's exact host media only after owning stop admission.
+    void end_session_and_retire_owned_media();
     bool terminate_if(const std::function<bool()> &condition,
                       const std::function<void()> &before_terminate);
     bool terminate_abandoned_desktop_takeover(std::string_view session_token);
@@ -1333,7 +1335,7 @@ namespace proc {
     );
     void terminate_impl(bool immediate, bool needs_refresh);
     /// terminate() and end_session(): take the lifecycle gate, then tear down.
-    void stop(bool immediate, bool needs_refresh, bool ends_session);
+    void stop(bool immediate, bool needs_refresh, bool ends_session, bool retire_owned_media = false);
 #ifdef __linux__
     bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
     /// Ask the private session app rooted at app_root_pid to close its windows; returns how many were asked.

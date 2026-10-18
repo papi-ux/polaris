@@ -11821,7 +11821,11 @@ namespace proc {
     stop(immediate, needs_refresh, true);
   }
 
-  void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session) {
+  void proc_t::end_session_and_retire_owned_media() {
+    stop(false, true, true, true);
+  }
+
+  void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session, bool retire_owned_media) {
 #ifdef __linux__
     std::shared_ptr<const char> capture_owner;
     session_media::pending_start_cancel_owner_t pending_cancel;
@@ -11849,6 +11853,31 @@ namespace proc {
     if (ends_session) {
       ending.emplace(session_lifecycle_sync().stop_ends_session);
     }
+#ifdef __linux__
+    if (retire_owned_media) {
+      std::string owner, token;
+      std::optional<std::uint64_t> generation;
+      {
+        auto &sync = session_lifecycle_sync();
+        std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+        // Only the launch that owns a Game Mode transition needs this ordering. Freeze its
+        // admitted identity before teardown clears it; a display/app label is never authority.
+        if (_prelaunch_transition_generation && _launch_session) {
+          owner = _launch_session->unique_id;
+          token = _launch_session->session_token;
+          generation = _launch_session->lifecycle_generation;
+        }
+      }
+      // Stop admission already fences every host launch/SETUP. Claim matching ordinary host
+      // media before the one-shot restore, but join it with no process metadata lock held.
+      // Unbound, foreign or independent-worker media stays visible to the restore refusal.
+      if (!owner.empty() && !token.empty() && generation) {
+        rtsp_stream::terminate_owned_host_sessions(owner, token, *generation);
+      }
+    }
+#else
+    (void) retire_owned_media;
+#endif
     terminate_impl(immediate, needs_refresh);
   }
 

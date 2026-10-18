@@ -403,6 +403,11 @@ namespace rtsp_stream {
    */
   void terminate_sessions();
 
+  /// Caller owns the host stop admission. Retire only ordinary host media and pending launch
+  /// matching its nonempty owner/token and admitted lifecycle generation; leave all others alone.
+  void terminate_owned_host_sessions(std::string_view unique_id, std::string_view token,
+                                    std::uint64_t lifecycle_generation);
+
   /**
    * @brief Runs the RTSP server loop.
    */
