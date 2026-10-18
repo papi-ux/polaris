@@ -499,6 +499,10 @@ namespace prelaunch {
               fail(409, "prelaunch_desktop_changed", "The host's session changed while this launch checked capture.", "Try again.", state_e::failed);
               continue;
             }
+            // Capture and the last typed read share the original forward deadline. Either can
+            // consume the remaining time or observe a caller cancellation; never publish ready
+            // from that late answer. The existing loop handles failure and owned rollback.
+            if (is_cancelled() || clock_.now() >= forward.deadline) continue;
             outcome_t ready;
             ready.state = state_e::ready;
             ready.changed_session = true;
