@@ -1309,7 +1309,11 @@ namespace proc {
      *        starting anything. clear_running_app_for_tests() leaves the host with no app again.
      */
     void set_running_app_for_tests(const ctx_t &app);
+    /// Adopt a real, already-exited child for running() cleanup tests; never spawns a process.
+    void set_exited_app_child_for_tests(boost::process::v1::child child);
     void clear_running_app_for_tests();
+    /// Stop admission is held; the observer runs without the metadata mutex, before media claim.
+    void set_stop_before_media_observer_for_tests(std::function<void()> observer);
     /// Observe real shutdown before/after terminate_impl; the before callback may hold a test barrier.
     void set_session_shutdown_observer_for_tests(std::function<void(bool)> observer);
 #endif
@@ -1374,6 +1378,7 @@ namespace proc {
 
 #ifdef POLARIS_TESTS
     std::function<void(bool)> _session_shutdown_observer_for_tests;
+    std::function<void()> _stop_before_media_observer_for_tests;
 #endif
     int _app_id = 0;
     std::string _app_name;

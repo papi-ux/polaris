@@ -11853,6 +11853,15 @@ namespace proc {
     if (ends_session) {
       ending.emplace(session_lifecycle_sync().stop_ends_session);
     }
+#ifdef POLARIS_TESTS
+    std::function<void()> before_media;
+    {
+      auto &sync = session_lifecycle_sync();
+      std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+      before_media = _stop_before_media_observer_for_tests;
+    }
+    if (before_media) before_media();
+#endif
 #ifdef __linux__
     if (retire_owned_media) {
       std::string owner, token;
@@ -13104,6 +13113,21 @@ namespace proc {
     _app = app;
     _app_id = static_cast<int>(util::from_view(app.id));
     placebo = true;
+  }
+
+  void proc_t::set_exited_app_child_for_tests(boost::process::v1::child child) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _process = std::move(child);
+    _app.auto_detach = false;
+    _app.wait_all = false;
+    placebo = false;
+  }
+
+  void proc_t::set_stop_before_media_observer_for_tests(std::function<void()> observer) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _stop_before_media_observer_for_tests = std::move(observer);
   }
 
   void proc_t::set_session_shutdown_observer_for_tests(std::function<void(bool)> observer) {
