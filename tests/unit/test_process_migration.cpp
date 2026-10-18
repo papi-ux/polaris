@@ -5686,11 +5686,11 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
   const auto close_app = confighttp.substr(confighttp.find("void closeApp(resp_https_t response, req_https_t request)"), 700);
   EXPECT_NE(close_app.find("proc::proc.end_session_and_retire_owned_media();"), std::string::npos);
-  const auto owned_console_end = function_source_between(
-    source,
-    "void proc_t::end_session_and_retire_owned_media()",
-    "void proc_t::stop("
-  );
+  const auto owned_end_start = source.find("void proc_t::end_session_and_retire_owned_media()");
+  ASSERT_NE(owned_end_start, std::string::npos);
+  const auto owned_end_stop = source.find("void proc_t::stop(", owned_end_start);
+  ASSERT_NE(owned_end_stop, std::string::npos);
+  const auto owned_console_end = source.substr(owned_end_start, owned_end_stop - owned_end_start);
   EXPECT_NE(owned_console_end.find("stop(false, true, true, true);"), std::string::npos)
     << "Console Close still marks its admitted stop as an intentional End";
   // The console's Disconnect force-stops when the owner's shutdown does not stop, and Browser
