@@ -18,6 +18,7 @@
 #include <src/nvhttp.h>
 #include <src/prelaunch_transition.h>
 #include <src/process.h>
+#include <src/rtsp.h>
 #include <src/tailscale_connection.h>
 #include <src/utility.h>
 #include <src/uuid.h>
@@ -840,7 +841,170 @@ namespace {
     std::future<void> server_;
     unsigned short port_ = 0;
   };
+
+  // Model an admitted, committed opted-in launch without opening a compositor or encoder.
+  // Only the host/adapter and the media threads are doubles: Close App below is the real TLS
+  // Console handler, process stop admission, teardown, binding and restore worker.
+  struct console_return_launch_t {
+    session_answer_host_t host;
+    session_answer_adapter_t adapter;
+    instant_clock_t clock;
+    proc::ctx_t app = opted_in(desktop());
+    std::shared_ptr<rtsp_stream::launch_session_t> launch = std::make_shared<rtsp_stream::launch_session_t>();
+    std::uint64_t transition_generation = 0;
+    std::atomic<int> retired_slots {0};
+    std::atomic<bool> retirement_admitted {false};
+
+    console_return_launch_t() {
+      prelaunch::set_dependencies_for_tests(&host, &adapter, &clock);
+      proc::set_prelaunch_capture_ready_for_tests([](std::string_view, std::string &) { return true; });
+      rtsp_stream::set_cleanup_session_probe_for_tests([this]() {
+        ++retired_slots;
+        retirement_admitted = proc::proc.session_shutdown_requested() &&
+          !proc::proc.capture_session_launch_generation();
+      });
+    }
+
+    ~console_return_launch_t() {
+      // Also cleans up the deliberately failing old-code comparator, without joining fake media.
+      rtsp_stream::terminate_sessions();
+      proc::proc.end_session(false, false);
+      prelaunch::coordinator().wait_for_restore();
+      rtsp_stream::set_cleanup_session_probe_for_tests({});
+      proc::set_prelaunch_capture_ready_for_tests({});
+      prelaunch::set_dependencies_for_tests(nullptr, nullptr, nullptr);
+    }
+
+    void prepare() {
+      ASSERT_EQ(rtsp_stream::session_snapshot({}).active_sessions, 0);
+      ASSERT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 0);
+      platf::game_mode_host::set_session_live_for_tests(true);
+      const auto admitted = proc::proc.capture_session_launch_generation();
+      ASSERT_TRUE(admitted && proc::proc.try_begin_session_launch(*admitted));
+      auto finish_launch = util::fail_guard([]() { proc::proc.finish_session_launch(); });
+      launch->id = 42901;
+      launch->unique_id = "console-return-owner";
+      launch->session_token = "console-return-token";
+      launch->lifecycle_generation = *admitted;
+      const auto ready = proc::prelaunch_for_admitted_launch(
+        prelaunch::entry_e::rtsp, app, launch->unique_id, *admitted, "gamescope_stream",
+        []() { return false; });
+      ASSERT_TRUE(ready.proceed()) << ready.code;
+      ASSERT_EQ(ready.state, prelaunch::state_e::ready);
+      prelaunch::launch_scope_t scope {ready};
+      proc::proc.set_active_launch_for_tests(app, launch);
+      proc::proc.set_running_app_for_tests(app); // detached command, no native child
+      transition_generation = scope.commit();
+      ASSERT_NE(transition_generation, 0u);
+      proc::proc.bind_prelaunch_transition(transition_generation);
+      ASSERT_TRUE(prelaunch::coordinator().receipt().committed);
+    }
+
+    void retained_resumes() {
+      for (int cycle = 0; cycle < 2; ++cycle) {
+        proc::proc.pause();
+        ASSERT_GT(proc::proc.running(), 0);
+        proc::proc.resume();
+        const auto receipt = prelaunch::coordinator().receipt();
+        ASSERT_EQ(receipt.transition_generation, transition_generation);
+        ASSERT_TRUE(receipt.committed);
+        ASSERT_EQ(receipt.restore, prelaunch::restore_e::owned);
+        ASSERT_EQ(proc::proc.get_session_token(), launch->session_token);
+      }
+    }
+  };
 }  // namespace
+
+TEST_F(LaunchDesktopSteamTest, ConsoleCloseReturnsCommittedGameModeLaunchAfterRetainedResumes) {
+  const auto apps_file = directory / "console-return-apps.json";
+  write_file(apps_file, R"({"version":15,"apps":[]})");
+  console_routes_t console {host.cert.string(), host.key.string(), apps_file};
+  console_return_launch_t owned;
+  ASSERT_NO_FATAL_FAILURE(owned.prepare());
+  ASSERT_NO_FATAL_FAILURE(owned.retained_resumes());
+  rtsp_stream::add_session_for_tests(*owned.launch, false);
+  ASSERT_EQ(rtsp_stream::session_snapshot(owned.launch->unique_id).active_sessions, 1);
+
+  const auto [status, reply] = console.request("POST", "/api/apps/close", "{}");
+  prelaunch::coordinator().wait_for_restore();
+
+  EXPECT_EQ(status, 200);
+  EXPECT_EQ(reply, (nlohmann::json {{"status", true}}));
+  EXPECT_EQ(owned.retired_slots.load(), 1) << "the owned slot must retire before the one-shot restore";
+  EXPECT_TRUE(owned.retirement_admitted.load()) << "media retirement must already own stop admission";
+  EXPECT_EQ(proc::proc.running(), 0);
+  EXPECT_EQ(rtsp_stream::session_snapshot({}).active_sessions, 0);
+  const auto receipt = prelaunch::coordinator().receipt();
+  EXPECT_EQ(receipt.transition_generation, owned.transition_generation);
+  EXPECT_EQ(receipt.restore, prelaunch::restore_e::restored) << receipt.restore_reason;
+  EXPECT_FALSE(receipt.committed);
+  EXPECT_EQ(owned.adapter.starts, (std::vector<prelaunch::direction_e> {
+    prelaunch::direction_e::to_desktop, prelaunch::direction_e::to_game_mode}));
+}
+
+TEST_F(LaunchDesktopSteamTest, ConsoleCloseLeavesOtherClientActiveOrPendingToRefuseGameModeReturn) {
+  const auto apps_file = directory / "console-return-other-apps.json";
+  write_file(apps_file, R"({"version":15,"apps":[]})");
+  console_routes_t console {host.cert.string(), host.key.string(), apps_file};
+  for (const bool pending : {false, true}) {
+    SCOPED_TRACE(pending ? "other pending viewer" : "other active viewer");
+    console_return_launch_t owned;
+    ASSERT_NO_FATAL_FAILURE(owned.prepare());
+    ASSERT_NO_FATAL_FAILURE(owned.retained_resumes());
+    rtsp_stream::add_session_for_tests(*owned.launch, false);
+    auto other = std::make_shared<rtsp_stream::launch_session_t>();
+    other->id = 42902;
+    other->unique_id = "console-return-other-client";
+    // A viewer shares the app's token; the token alone is not retirement authority.
+    other->session_token = owned.launch->session_token;
+    other->watch_only = true;
+    if (pending) {
+      const auto admitted = proc::proc.capture_session_launch_generation();
+      ASSERT_TRUE(admitted && proc::proc.try_begin_session_launch(*admitted));
+      auto finish_launch = util::fail_guard([]() { proc::proc.finish_session_launch(); });
+      other->lifecycle_generation = *admitted;
+      ASSERT_TRUE(rtsp_stream::launch_session_raise(other));
+    } else {
+      rtsp_stream::add_session_for_tests(*other, false);
+    }
+
+    const auto [status, reply] = console.request("POST", "/api/apps/close", "{}");
+    prelaunch::coordinator().wait_for_restore();
+
+    EXPECT_EQ(status, 200);
+    EXPECT_EQ(reply, (nlohmann::json {{"status", true}}));
+    EXPECT_EQ(owned.retired_slots.load(), 1) << "only the owned media may be retired";
+    EXPECT_TRUE(owned.retirement_admitted.load());
+    const auto remaining = rtsp_stream::session_snapshot(other->unique_id);
+    EXPECT_EQ(remaining.active_sessions, pending ? 0 : 1);
+    EXPECT_EQ(remaining.pending_sessions, pending ? 1 : 0);
+    EXPECT_FALSE(other->is_cancelled());
+    const auto receipt = prelaunch::coordinator().receipt();
+    EXPECT_EQ(receipt.transition_generation, owned.transition_generation);
+    EXPECT_EQ(receipt.restore, prelaunch::restore_e::refused);
+    EXPECT_EQ(receipt.restore_reason, "a stream is active or pending on the host");
+    EXPECT_EQ(owned.adapter.starts, (std::vector<prelaunch::direction_e> {prelaunch::direction_e::to_desktop}));
+  }
+}
+
+TEST_F(LaunchDesktopSteamTest, ConsoleCloseCannotRetireMediaWhenAnotherStopOwnsAdmission) {
+  const auto apps_file = directory / "console-return-admission-apps.json";
+  write_file(apps_file, R"({"version":15,"apps":[]})");
+  console_routes_t console {host.cert.string(), host.key.string(), apps_file};
+  console_return_launch_t owned;
+  ASSERT_NO_FATAL_FAILURE(owned.prepare());
+  rtsp_stream::add_session_for_tests(*owned.launch, false);
+  ASSERT_TRUE(proc::proc.begin_session_stop_for_tests());
+  {
+    auto finish_stop = util::fail_guard([]() { proc::proc.finish_session_stop_for_tests(false); });
+    const auto [status, reply] = console.request("POST", "/api/apps/close", "{}");
+    EXPECT_EQ(status, 200); // preserve the existing admin Close App response
+    EXPECT_EQ(reply, (nlohmann::json {{"status", true}}));
+    EXPECT_EQ(owned.retired_slots.load(), 0);
+    EXPECT_EQ(rtsp_stream::session_snapshot({}).active_sessions, 1);
+    EXPECT_TRUE(prelaunch::coordinator().receipt().committed);
+  }
+}
 
 TEST_F(LaunchDesktopSteamTest, OptedInLaunchOnAGameModeHostIsRefusedByTheUnavailableAdapterBeforeAnythingElse) {
   stage_log_t log;

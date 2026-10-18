@@ -11047,7 +11047,7 @@ namespace confighttp {
     const std::string &cert, const std::string &key,
     const std::function<void(unsigned short, std::function<void()>)> &ready
   ) {
-    // The production console app handlers (list, save, launch) on an owned loopback TLS listener.
+    // The production console app handlers on an owned loopback TLS listener.
     // Their own authentication runs; the CSRF wrapper the console adds in front is a separate layer.
     https_server_t server {cert, key};
     server.config.address = "127.0.0.1";
@@ -11055,6 +11055,7 @@ namespace confighttp {
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/apps$"]["POST"] = saveApp;
     server.resource["^/api/apps/launch$"]["POST"] = launchApp;
+    server.resource["^/api/apps/close$"]["POST"] = closeApp;
     server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
   }
 #endif
