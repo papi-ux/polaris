@@ -1254,6 +1254,8 @@ namespace proc {
      * which no other stop does.
      */
     void end_session(bool immediate = false, bool needs_refresh = true);
+    /// Console Close App: retire this launch's exact host media only after owning stop admission.
+    void end_session_and_retire_owned_media();
     bool terminate_if(const std::function<bool()> &condition,
                       const std::function<void()> &before_terminate);
     bool terminate_abandoned_desktop_takeover(std::string_view session_token);
@@ -1307,7 +1309,11 @@ namespace proc {
      *        starting anything. clear_running_app_for_tests() leaves the host with no app again.
      */
     void set_running_app_for_tests(const ctx_t &app);
+    /// Adopt a real, already-exited child for running() cleanup tests; never spawns a process.
+    void set_exited_app_child_for_tests(boost::process::v1::child child);
     void clear_running_app_for_tests();
+    /// Stop admission is held; the observer runs without the metadata mutex, before media claim.
+    void set_stop_before_media_observer_for_tests(std::function<void()> observer);
     /// Observe real shutdown before/after terminate_impl; the before callback may hold a test barrier.
     void set_session_shutdown_observer_for_tests(std::function<void(bool)> observer);
 #endif
@@ -1319,6 +1325,10 @@ namespace proc {
       // Protected by mutex; binds the launch metadata to its admission identity.
       std::shared_ptr<const char> metadata_capture_owner {capture_owner.load()};
       std::weak_ptr<rtsp_stream::launch_session_t> capture_launch;
+#ifdef __linux__
+      // Mutex-protected scoped Console stop owner; only that stop may clean up during its drain.
+      const void *console_cleanup_owner = nullptr;
+#endif
       /// Set while a stop runs because someone ended the session on purpose.
       std::atomic<bool> stop_ends_session {false};
       // Exact accepted native-End ticket identity; not a cleanup-completion flag.
@@ -1331,9 +1341,10 @@ namespace proc {
       std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
       bool no_active_sessions_at_launch
     );
-    void terminate_impl(bool immediate, bool needs_refresh);
+    void terminate_impl(bool immediate, bool needs_refresh,
+                        const std::function<bool(const rtsp_stream::launch_session_t &)> &prepared_matches = {});
     /// terminate() and end_session(): take the lifecycle gate, then tear down.
-    void stop(bool immediate, bool needs_refresh, bool ends_session);
+    void stop(bool immediate, bool needs_refresh, bool ends_session, bool retire_owned_media = false);
 #ifdef __linux__
     bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
     /// Ask the private session app rooted at app_root_pid to close its windows; returns how many were asked.
@@ -1372,6 +1383,7 @@ namespace proc {
 
 #ifdef POLARIS_TESTS
     std::function<void(bool)> _session_shutdown_observer_for_tests;
+    std::function<void()> _stop_before_media_observer_for_tests;
 #endif
     int _app_id = 0;
     std::string _app_name;

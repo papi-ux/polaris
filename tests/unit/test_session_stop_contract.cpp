@@ -368,9 +368,9 @@ TEST(SessionStopContractTests, TerminateSessionsUsesGracefulStopBeforeJoin) {
   // clear()/terminate_sessions must graceful_stop every live slot first.
   const auto source = read_rtsp_source_for_contract();
   ASSERT_FALSE(source.empty());
-  const auto clear_start = source.find("void clear(bool all = true)");
+  const auto clear_start = source.find("void clear(bool all = true,");
   ASSERT_NE(clear_start, std::string::npos);
-  const auto clear_end = source.find("void remove(", clear_start);
+  const auto clear_end = source.find("void terminate_owned_host_sessions(", clear_start);
   ASSERT_NE(clear_end, std::string::npos);
   const auto clear_body = source.substr(clear_start, clear_end - clear_start);
   const auto graceful = clear_body.find("stream::session::graceful_stop(");

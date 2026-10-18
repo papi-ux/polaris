@@ -880,8 +880,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_EQ(rtsp_snapshot_body.find("break;"), std::string::npos);
   const auto rtsp_clear_body = function_source_between(
     rtsp_source,
-    "void clear(bool all = true)",
-    "/**\n     * @brief Removes the provided session"
+    "void clear(bool all = true,",
+    "void terminate_owned_host_sessions("
   );
   const auto clear_lock = rtsp_clear_body.find("_session_slots.lock()");
   const auto clear_unlock = rtsp_clear_body.find("}\n#ifdef POLARIS_TESTS", clear_lock);
@@ -1261,7 +1261,7 @@ TEST(ProcessRuntimeConfigTests, RefreshPreservesLifecycleSynchronizationObjects)
   EXPECT_NE(refresh_body.find("proc.reload_configuration_from_file(file_name)"), std::string::npos);
   EXPECT_EQ(refresh_body.find("proc = std::move(*proc_opt)"), std::string::npos);
 
-  const auto terminate_start = source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh)");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
   ASSERT_NE(terminate_start, std::string::npos);
   ASSERT_NE(terminate_end, std::string::npos);
@@ -5616,7 +5616,7 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
     << "the host left Game Mode in between, so the title went with the session";
 
   const auto source = read_source_file_for_contract("src/process.cpp");
-  const auto terminate_start = source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(terminate_start, std::string::npos);
   const auto terminate_end = source.find("\n  bool proc_t::reload_configuration_from_file(", terminate_start);
   ASSERT_NE(terminate_end, std::string::npos);
@@ -5664,12 +5664,17 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   EXPECT_LT(marked, stopped);
   // end_session() marks its stop only once that stop owns the gate: a request that loses the race
   // to another stop must neither mark it nor clear the mark that stop set.
-  const auto stop_body = source.substr(source.find("void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session) {"));
+  const auto stop_start = source.find("void proc_t::stop(");
+  ASSERT_NE(stop_start, std::string::npos);
+  const auto stop_end = source.find("\n  bool proc_t::terminate_if(", stop_start);
+  ASSERT_NE(stop_end, std::string::npos);
+  const auto stop_body = source.substr(stop_start, stop_end - stop_start);
   const auto gate = stop_body.find("_session_lifecycle_gate->begin_stop(");
   const auto lost = stop_body.find("return;", gate);
   const auto mark = stop_body.find("ending.emplace(session_lifecycle_sync().stop_ends_session);");
-  const auto teardown = stop_body.find("terminate_impl(immediate, needs_refresh);");
+  const auto teardown = stop_body.find("terminate_impl(immediate, needs_refresh, prepared_matches);");
   ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(lost, std::string::npos);
   ASSERT_NE(mark, std::string::npos);
   ASSERT_NE(teardown, std::string::npos);
   EXPECT_LT(lost, mark);
@@ -5680,7 +5685,14 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   EXPECT_EQ(timeout.find("stop_ends_session"), std::string::npos) << "the resume timeout is not someone ending the session";
   const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
   const auto close_app = confighttp.substr(confighttp.find("void closeApp(resp_https_t response, req_https_t request)"), 700);
-  EXPECT_NE(close_app.find("proc::proc.end_session();"), std::string::npos);
+  EXPECT_NE(close_app.find("proc::proc.end_session_and_retire_owned_media();"), std::string::npos);
+  const auto owned_end_start = source.find("void proc_t::end_session_and_retire_owned_media()");
+  ASSERT_NE(owned_end_start, std::string::npos);
+  const auto owned_end_stop = source.find("void proc_t::stop(", owned_end_start);
+  ASSERT_NE(owned_end_stop, std::string::npos);
+  const auto owned_console_end = source.substr(owned_end_start, owned_end_stop - owned_end_start);
+  EXPECT_NE(owned_console_end.find("stop(false, true, true, true);"), std::string::npos)
+    << "Console Close still marks its admitted stop as an intentional End";
   // The console's Disconnect force-stops when the owner's shutdown does not stop, and Browser
   // Stream's Stop ends the app it owns: both are someone ending the session on purpose.
   EXPECT_NE(confighttp.find("WebUI disconnect: force-stop after outcome="), std::string::npos);
@@ -5785,7 +5797,9 @@ TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGame
 
   // A stream that started in Game Mode opened no Steam of its own, so its cleanup does not stop the
   // desktop Steam if the host has gone back to the desktop by the time the stream ends.
-  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto terminate = source.substr(terminate_start);
   EXPECT_NE(terminate.find("const bool steam_is_not_this_streams = game_mode_live || _session_started_in_game_mode;"), std::string::npos);
 
   const auto retry = source.substr(source.find("bool proc_t::retry_retained_steam_shutdown() {"));

@@ -928,7 +928,7 @@ namespace rtsp_stream {
      * clear(false);
      * @examples_end
      */
-    void clear(bool all = true) {
+    void clear(bool all = true, const std::function<bool(const stream::session_t &)> &matches = {}) {
 #ifdef POLARIS_TESTS
       ++cleanup_call_counter_for_tests;
 #endif
@@ -937,7 +937,8 @@ namespace rtsp_stream {
         auto lg = _session_slots.lock();
         for (auto i = _session_slots->begin(); i != _session_slots->end();) {
           const auto &slot = *i;
-          if (slot && (all || stream::session::state(*slot) == stream::session::state_e::STOPPING)) {
+          if (slot && (all || stream::session::state(*slot) == stream::session::state_e::STOPPING) &&
+              (!matches || matches(*slot))) {
             sessions_to_join.emplace_back(slot);
             i = _session_slots->erase(i);
           } else {
@@ -970,6 +971,30 @@ namespace rtsp_stream {
 #endif
         stream::session::join(*slot);
       }
+    }
+
+    void terminate_owned_host_sessions(std::string_view unique_id, std::string_view token,
+                                       std::uint64_t lifecycle_generation) {
+      if (unique_id.empty() || token.empty()) return;
+      std::shared_ptr<launch_session_t> discarded;
+      {
+        std::lock_guard timer_lock(_launch_timer_mutex);
+        const auto pending = launch_event.view(0s);
+        if (pending && !pending->worker_connection_requirement()->load() &&
+            pending->unique_id == unique_id && pending->session_token == token &&
+            pending->lifecycle_generation == lifecycle_generation && pending->is_pending_or_handoff()) {
+          pending->cancel();
+          ++_raised_timer_generation;
+          raised_timer.cancel();
+          discarded = launch_event.pop_if([&](const auto &candidate) { return candidate == pending; });
+        }
+      }
+      if (discarded) cancel_registered_multiseat_launch(discarded);
+      clear(true, [&](const stream::session_t &session) {
+        return stream::session::uses_host_process(session) &&
+          stream::session::uuid_match(session, unique_id) && stream::session::session_token(session) == token &&
+          stream::session::launch_lifecycle_generation(session) == lifecycle_generation;
+      });
     }
 
     /**
@@ -1362,6 +1387,11 @@ namespace rtsp_stream {
   void terminate_sessions() {
     server.cancel_pending_session();
     server.clear(true);
+  }
+
+  void terminate_owned_host_sessions(std::string_view unique_id, std::string_view token,
+                                    std::uint64_t lifecycle_generation) {
+    server.terminate_owned_host_sessions(unique_id, token, lifecycle_generation);
   }
 
   int send(tcp::socket &sock, const std::string_view &sv) {
