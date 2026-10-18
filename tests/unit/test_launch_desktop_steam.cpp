@@ -1128,6 +1128,51 @@ TEST_F(LaunchDesktopSteamTest, ConsoleClosePreservesPreparedPendingWithoutExactO
   }
 }
 
+TEST_F(LaunchDesktopSteamTest, ConsoleCloseWithoutReturnTransitionCancelsPreparedPendingAndAdmitsNextLaunch) {
+  const auto apps_file = directory / "console-close-ordinary-pending-apps.json";
+  write_file(apps_file, R"({"version":15,"apps":[]})");
+  console_routes_t console {host.cert.string(), host.key.string(), apps_file};
+  console_return_launch_t owned;
+  owned.app = desktop();
+  platf::game_mode_host::set_session_live_for_tests(false);
+  const auto admitted = proc::proc.capture_session_launch_generation();
+  ASSERT_TRUE(admitted && proc::proc.try_begin_session_launch(*admitted));
+  auto pending = std::make_shared<rtsp_stream::launch_session_t>();
+  {
+    auto finish_launch = util::fail_guard([]() { proc::proc.finish_session_launch(); });
+    owned.launch->id = 42906;
+    owned.launch->unique_id = "ordinary-console-owner";
+    owned.launch->session_token = "ordinary-console-token";
+    owned.launch->lifecycle_generation = *admitted;
+    proc::proc.set_active_launch_for_tests(owned.app, owned.launch);
+    proc::proc.set_running_app_for_tests(owned.app);
+    pending->id = 42907;
+    pending->unique_id = "ordinary-console-pending-viewer";
+    pending->session_token = owned.launch->session_token;
+    pending->lifecycle_generation = *admitted;
+    pending->watch_only = true;
+    ASSERT_EQ(proc::proc.prepare_capture_for_admitted_launch(pending), 0);
+    ASSERT_TRUE(rtsp_stream::launch_session_raise(pending));
+  }
+  ASSERT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 1);
+  ASSERT_FALSE(prelaunch::coordinator().receipt().committed);
+
+  const auto [status, reply] = console.request("POST", "/api/apps/close", "{}");
+  prelaunch::coordinator().wait_for_restore();
+
+  EXPECT_EQ(status, 200);
+  EXPECT_EQ(reply, (nlohmann::json {{"status", true}}));
+  EXPECT_TRUE(pending->is_cancelled());
+  EXPECT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 0);
+  EXPECT_EQ(proc::proc.running(), 0);
+  EXPECT_TRUE(owned.adapter.starts.empty());
+  const auto next = proc::proc.capture_session_launch_generation();
+  ASSERT_TRUE(next.has_value());
+  const bool next_admitted = proc::proc.try_begin_session_launch(*next);
+  EXPECT_TRUE(next_admitted) << "ordinary Close must not leave stale RTSP publication blocking launch";
+  if (next_admitted) proc::proc.finish_session_launch();
+}
+
 TEST_F(LaunchDesktopSteamTest, ConsoleCloseDefersExitedChildCleanupBeforeAndAfterMediaClaim) {
   const auto apps_file = directory / "console-return-exited-child-apps.json";
   write_file(apps_file, R"({"version":15,"apps":[]})");

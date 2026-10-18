@@ -11895,12 +11895,14 @@ namespace proc {
     if (retire_owned_media) {
       std::string owner, token;
       std::optional<std::uint64_t> generation;
+      bool owns_transition = false;
       {
         auto &sync = session_lifecycle_sync();
         std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
         // Only the launch that owns a Game Mode transition needs this ordering. Freeze its
         // admitted identity before teardown clears it; a display/app label is never authority.
-        if (_prelaunch_transition_generation && _launch_session &&
+        owns_transition = _prelaunch_transition_generation != 0;
+        if (owns_transition && _launch_session &&
             !_launch_session->worker_connection_requirement()->load()) {
           owner = _launch_session->unique_id;
           token = _launch_session->session_token;
@@ -11910,11 +11912,15 @@ namespace proc {
       // The prepared request may be a different Resume/Watch object from _launch_session. Apply
       // the same frozen authority when terminate_impl retires preparation, including refusal when
       // the owner tuple is incomplete. Clearing a weak metadata reference never cancels RTSP.
-      prepared_matches = [owner, token, generation](const rtsp_stream::launch_session_t &pending) {
-        return !owner.empty() && !token.empty() && generation &&
-          !pending.worker_connection_requirement()->load() && pending.unique_id == owner &&
-          pending.session_token == token && pending.lifecycle_generation == generation;
-      };
+      // An ordinary Console Close has no return transition: retain its existing cancellation
+      // so a stale published request cannot block the next launch after stop advances the gate.
+      if (owns_transition) {
+        prepared_matches = [owner, token, generation](const rtsp_stream::launch_session_t &pending) {
+          return !owner.empty() && !token.empty() && generation &&
+            !pending.worker_connection_requirement()->load() && pending.unique_id == owner &&
+            pending.session_token == token && pending.lifecycle_generation == generation;
+        };
+      }
       // Stop admission already fences every host launch/SETUP. Claim matching ordinary host
       // media before the one-shot restore, but join it with no process metadata lock held.
       // Unbound, foreign or independent-worker media stays visible to the restore refusal.
