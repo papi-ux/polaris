@@ -68,7 +68,7 @@ explicit:
   capture will copy frames through system memory; during one, a Tailscale peer
   readout from the host's own tailscaled.
 - **Experimental and off by default.** Source-paced VRR and leaving Steam Deck
-  Game Mode before launch, each hands-on checked once, and host Recording with
+  Game Mode before launch, each hands-on checked, and host Recording with
   unqualified playback ([release notes](docs/release-notes/v1.5.0.md)).
 - **Launches are deterministic.** Auto, Quality, High FPS and Stability resolve
   into one app- and topology-bound envelope that Nova sends back unchanged.
