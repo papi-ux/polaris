@@ -6522,18 +6522,32 @@ namespace proc {
       return !steam_double->running;
     }
 #endif
-    const auto pipe_path = steam_instance_pipe_path();
+    std::optional<std::string> home_env;
+    if (const char *home = getenv("HOME"); home != nullptr && *home != '\0') {
+      home_env = home;
+    }
+    const auto account_home = account_home_directory();
+    const auto account_home_value = account_home.empty() ?
+      std::nullopt : std::optional<std::string> {account_home};
+    const auto pipe_path = steam_instance_pipe_path(home_env, account_home_value);
     if (!pipe_path) {
       BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing Steam shutdown handoff";
       return false;
     }
 
-    const auto command = canonical_steam_shutdown_command("steam");
-    BOOST_LOG(info) << "process: explicit request closing active Steam client before protected configuration change using [" << command << "]";
+    const auto remote_path = steam_remote_command_path(home_env, account_home_value);
+    if (!remote_path || access(remote_path->c_str(), X_OK) != 0) {
+      BOOST_LOG(warning) << "process: Steam forwarding client is unavailable; refusing Steam shutdown handoff";
+      return false;
+    }
+    // The singleton can disappear after admission. The forwarding client can
+    // only deliver -shutdown; unlike the Steam launcher it cannot bootstrap a
+    // replacement when that happens. The same process/FIFO wait decides success.
+    BOOST_LOG(info) << "process: explicit request closing active Steam client before protected configuration change using no-launch forwarding client [" << *remote_path << "]";
     auto env = boost::this_process::environment();
-    boost::system::error_code ec;
-    boost::filesystem::path working_dir {};
-    auto child = platf::run_command(false, true, command, working_dir, env, nullptr, ec, nullptr);
+    std::error_code ec;
+    boost::filesystem::path working_dir {home_env.value_or(account_home)};
+    auto child = run_steam_remote_shutdown_without_launch(*remote_path, working_dir, env, nullptr, ec);
     if (ec) {
       BOOST_LOG(warning) << "process: Steam shutdown command failed: " << ec.message();
       return false;
