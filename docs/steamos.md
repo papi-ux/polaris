@@ -6,7 +6,7 @@ Install the package for the release your Deck runs, which `VERSION_ID` in `/etc/
 
 ## Validation Status
 
-The SteamOS 3.8 package is proven on a Steam Deck OLED on SteamOS 3.8.16, in Desktop Mode and in Game Mode. In Game Mode the host streams the Game Mode screen: a Steam title launched from a client opens there, a controller reaches it as a virtual DualSense, touch lands where it is aimed, and ending the session closes only the title the stream opened. The Steam Deck LCD, OLED 90 Hz behavior, suspend and resume, and persistence across SteamOS updates are not certified yet; those claims need their own hardware evidence. The SteamOS 3.9 package has not been run on a Deck yet. [Handhelds and Game Mode](handhelds.md) explains what a Deck can do in each mode and how to keep Polaris reachable when it returns to Game Mode.
+The SteamOS 3.8 package is proven on a Steam Deck OLED on SteamOS 3.8.16, in Desktop Mode and in Game Mode. In Game Mode the host streams the Game Mode screen: a Steam title launched from a client opens there, a controller reaches it as a virtual DualSense, touch lands where it is aimed, and ending the session closes only the title the stream opened. The Steam Deck LCD, OLED 90 Hz behavior, suspend and resume, and persistence across SteamOS updates are not certified yet; those claims need their own hardware evidence. The SteamOS 3.9 package runs on a docked Steam Deck OLED on SteamOS 3.9.2, where [Leave Game Mode Before Launch](#leave-game-mode-before-launch) had one hands-on check: an opted-in launch from Moonlight on a PC left Game Mode, picture, sound and controls worked for five minutes and again after a disconnect, and ending the session returned the Deck to Game Mode by itself. That stream ran H.264 at about 60 fps through the Gamescope portal; HEVC, 120 fps and HDR on the Deck were not checked. [Handhelds and Game Mode](handhelds.md) explains what a Deck can do in each mode and how to keep Polaris reachable when it returns to Game Mode.
 
 Continuous integration builds and validates each package inside a clean root of its own SteamOS release, bootstrapped from Valve's repositories. A clean root has none of the packages a shipped SteamOS image already carries, so that gate proves the package builds and its libraries resolve. It does not prove the install transaction is conflict-free on a device, and it did not catch the `libdisplay-info` conflict described under Stream Paths on SteamOS.
 
@@ -88,7 +88,7 @@ Polaris does not depend on labwc for this reason, and links nothing from it. Pri
 
 ## Leave Game Mode Before Launch
 
-An app can opt in to leaving Game Mode before its own private launch with `"leave-game-mode-before-launch": true`. It is off for every app unless set, and it never applies to resume, watch-only, input-only, profile or Space launches. This build implements the switch on Linux builds with GIO. It has not been accepted on Steam Deck hardware, so it is a source implementation, not a certified feature.
+An app can opt in to leaving Game Mode before its own private launch with `"leave-game-mode-before-launch": true`. It is off for every app unless set, and it never applies to resume, watch-only, input-only, profile or Space launches. This build implements the switch on Linux builds with GIO. It has had one hands-on check on a Steam Deck OLED on SteamOS 3.9.2, described under [Validation Status](#validation-status); that is not certification.
 
 The switch needs SteamOS Manager 26.4.1, which ships with SteamOS 3.9. SteamOS 3.8 carries 26.2.1, so on SteamOS 3.8 an opted-in launch is refused before anything changes.
 
@@ -132,7 +132,7 @@ Source and native fixtures cover all of the following:
 - a `/bin/sh` stand-in for `steamosctl`;
 - descriptor closure, process group termination, the lifecycle gate's fence, and stop handling.
 
-These are physical SteamOS assumptions that remain unqualified until a Steam Deck run:
+These physical SteamOS assumptions held in one run on a Steam Deck OLED on SteamOS 3.9.2, where an opted-in launch passed every check above, left Game Mode and returned to it. They have not been checked on other devices or SteamOS releases:
 
 - Game Mode and Desktop Mode are distinct logind sessions started by `sddm-autologin`.
 - `gamescope-session.service` marks Game Mode.
