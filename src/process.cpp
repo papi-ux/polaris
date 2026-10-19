@@ -4159,14 +4159,15 @@ namespace proc {
       const std::function<steam_shutdown_clock_t::time_point()> &now,
       const std::function<void(steam_shutdown_clock_t::duration)> &sleep_for,
       steam_shutdown_clock_t::duration timeout,
-      steam_shutdown_clock_t::duration poll_interval
+      steam_shutdown_clock_t::duration poll_interval,
+      std::optional<steam_shutdown_clock_t::time_point> absolute_deadline = std::nullopt
     ) {
       if (timeout < steam_shutdown_clock_t::duration::zero() ||
           poll_interval <= steam_shutdown_clock_t::duration::zero()) {
         return false;
       }
 
-      const auto deadline = now() + timeout;
+      const auto deadline = absolute_deadline ? *absolute_deadline : now() + timeout;
       for (;;) {
         // Recheck the process state after observing the FIFO as released. This
         // prevents a Steam instance that starts during the FIFO probe from
@@ -6540,6 +6541,39 @@ namespace proc {
       BOOST_LOG(warning) << "process: Steam forwarding client is unavailable; refusing Steam shutdown handoff";
       return false;
     }
+    // Leaving Game Mode can expose Desktop Steam before its command receiver
+    // exists. One early nonblocking forward is lost; waiting afterwards cannot
+    // deliver it. Wait before the single request, sharing the original budget
+    // with final process/FIFO quiescence rather than adding another timeout.
+    const auto shutdown_deadline = steam_shutdown_clock_t::now() + 10s;
+    const steam_shutdown_clock_t::duration poll_interval = 100ms;
+    bool readiness_wait_logged = false;
+    while (desktop_steam_client_active_impl() && !steam_instance_pipe_listener_active(*pipe_path)) {
+      if (platf::game_mode_host::session_live_fresh()) {
+        BOOST_LOG(warning) << "process: Game Mode returned while waiting for Steam's command receiver; refusing shutdown";
+        return false;
+      }
+      const auto current = steam_shutdown_clock_t::now();
+      if (current >= shutdown_deadline) {
+        BOOST_LOG(warning) << "process: Steam command receiver was not ready before the shutdown deadline; no request sent";
+        return false;
+      }
+      if (!readiness_wait_logged) {
+        BOOST_LOG(info) << "process: waiting for the starting Desktop Steam command receiver before the single shutdown request";
+        readiness_wait_logged = true;
+      }
+      std::this_thread::sleep_for(std::min(poll_interval, shutdown_deadline - current));
+    }
+    // The cached mode answer can predate the wait. A returning Game Mode Steam
+    // must never receive the delayed desktop shutdown request.
+    if (platf::game_mode_host::session_live_fresh()) {
+      BOOST_LOG(warning) << "process: refusing delayed Steam shutdown because Game Mode is running";
+      return false;
+    }
+    if (steam_shutdown_clock_t::now() >= shutdown_deadline) {
+      BOOST_LOG(warning) << "process: Steam shutdown readiness exhausted the original deadline; no request sent";
+      return false;
+    }
     // The singleton can disappear after admission. The forwarding client can
     // only deliver -shutdown; unlike the Steam launcher it cannot bootstrap a
     // replacement when that happens. The same process/FIFO wait decides success.
@@ -6552,8 +6586,6 @@ namespace proc {
       BOOST_LOG(warning) << "process: Steam shutdown command failed: " << ec.message();
       return false;
     }
-    child.detach();
-
     const bool quiescent = wait_for_desktop_steam_quiescence(
       []() {
         return desktop_steam_client_active_impl();
@@ -6568,8 +6600,21 @@ namespace proc {
         std::this_thread::sleep_for(duration);
       },
       10s,
-      100ms
+      100ms,
+      shutdown_deadline
     );
+    // Observe an available exit result without adding a wait or treating it as
+    // delivery proof. The process/FIFO/process predicate still decides success.
+    std::error_code status_error;
+    const bool forwarding_running = child.running(status_error);
+    if (status_error) {
+      BOOST_LOG(info) << "process: Steam forwarding client exit status unavailable: " << status_error.message();
+    } else if (forwarding_running) {
+      BOOST_LOG(info) << "process: Steam forwarding client is still running after the shutdown observation";
+    } else {
+      BOOST_LOG(info) << "process: Steam forwarding client exit status=" << child.exit_code();
+    }
+    child.detach();
     if (!quiescent) {
       BOOST_LOG(warning) << "process: Steam client did not reach process/FIFO quiescence before shutdown deadline";
     }
