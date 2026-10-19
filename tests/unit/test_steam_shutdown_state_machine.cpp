@@ -438,6 +438,62 @@ TEST_F(DesktopSteamShutdownRequestTest, StartingClientReceivesOneShutdownAfterIt
   EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(fifo.string()));
 }
 
+TEST_F(DesktopSteamShutdownRequestTest, ReadinessAndQuiescenceShareTheOriginalTenSecondBudget) {
+  start_client(4000000);
+  ASSERT_FALSE(HasFatalFailure());
+  write_remote("printf 'call\\n' >> \"$HOME/forward-count\"\n"
+               "[ -f \"$HOME/listener-ready\" ] || : > \"$HOME/forwarded-before-listener\"\n"
+               "exit 1\n");
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(proc::request_desktop_steam_shutdown_for_private_stream());
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  expect_no_bootstrap();
+  EXPECT_TRUE(std::filesystem::exists(root / "listener-ready"));
+  EXPECT_FALSE(std::filesystem::exists(root / "forwarded-before-listener"));
+  std::ifstream calls {root / "forward-count"};
+  std::string first, extra;
+  ASSERT_TRUE(static_cast<bool>(std::getline(calls, first)));
+  EXPECT_EQ(first, "call");
+  EXPECT_FALSE(static_cast<bool>(std::getline(calls, extra)));
+  EXPECT_TRUE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
+  EXPECT_TRUE(proc::steam_instance_pipe_listener_active_for_tests(fifo.string()));
+  EXPECT_GE(elapsed, std::chrono::milliseconds(9900));
+  EXPECT_LT(elapsed, std::chrono::seconds(12));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, NeverReadyClientRefusesWithoutSendingShutdown) {
+  start_client(20000000);
+  ASSERT_FALSE(HasFatalFailure());
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(proc::request_desktop_steam_shutdown_for_private_stream());
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  expect_no_bootstrap();
+  EXPECT_FALSE(std::filesystem::exists(root / "remote-called"));
+  EXPECT_FALSE(std::filesystem::exists(root / "listener-ready"));
+  EXPECT_TRUE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
+  EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(fifo.string()));
+  EXPECT_GE(elapsed, std::chrono::milliseconds(9900));
+  EXPECT_LT(elapsed, std::chrono::seconds(12));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, ReturningGameModeRefusesBeforeTheDelayedDispatch) {
+  start_client(500000);
+  ASSERT_FALSE(HasFatalFailure());
+  platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+  platf::game_mode_host::set_session_scan_for_tests([&]() {
+    return std::filesystem::exists(root / "listener-ready");
+  });
+  auto restore_scan = util::fail_guard([]() {
+    platf::game_mode_host::set_session_live_for_tests(false);
+    platf::game_mode_host::set_session_scan_for_tests({});
+  });
+  EXPECT_FALSE(proc::request_desktop_steam_shutdown_for_private_stream());
+  expect_no_bootstrap();
+  EXPECT_TRUE(std::filesystem::exists(root / "listener-ready"));
+  EXPECT_FALSE(std::filesystem::exists(root / "remote-called"));
+  EXPECT_TRUE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
+}
+
 TEST_F(DesktopSteamShutdownRequestTest, ForwardingFailureKeepsTheTenSecondQuiescenceDeadline) {
   start_client();
   ASSERT_FALSE(HasFatalFailure());
