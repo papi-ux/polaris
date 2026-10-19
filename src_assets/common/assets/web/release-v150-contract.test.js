@@ -18,13 +18,26 @@ const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
   'Polaris-fedora44-x86_64.rpm',
   'Polaris-steamos3.8-x86_64.pkg.tar.zst',
+  'Polaris-steamos3.9-x86_64.pkg.tar.zst',
   'Polaris-ubuntu24.04-x86_64.deb',
 ].sort()
 
 const debugAssets = [
   'Polaris-debug-arch-x86_64.pkg.tar.zst',
   'Polaris-debug-steamos3.8-x86_64.pkg.tar.zst',
+  'Polaris-debug-steamos3.9-x86_64.pkg.tar.zst',
 ]
+
+const assetsOn = (line) => (line.match(/`Polaris-[^`]+`/g) || []).map((name) => name.slice(1, -1))
+
+// The release job refuses a tag whose finalized assets lack one of these binaries.
+const requiredBinaryAssets = () => {
+  const workflow = read('.github/workflows/build.yml')
+  const start = workflow.indexOf('required_binary_assets=(')
+  expect(start).toBeGreaterThanOrEqual(0)
+  const list = workflow.slice(workflow.indexOf('(', start) + 1, workflow.indexOf(')', start))
+  return list.trim().split(/\s+/).sort()
+}
 
 describe('v1.5.0 release contract', () => {
   // These four are what the source says it builds, not what the last release was. Two of them are
@@ -48,7 +61,7 @@ describe('v1.5.0 release contract', () => {
     expect(notes.trim().length).toBeGreaterThan(0)
   })
 
-  it('ships exactly the four supported packages and installs them from this tag', () => {
+  it('ships exactly the five supported packages and installs them from this tag', () => {
     const notes = currentNotes()
     for (const asset of expectedAssets) {
       expect(notes).toContain(asset)
@@ -75,6 +88,24 @@ describe('v1.5.0 release contract', () => {
     for (const asset of debugAssets) {
       expect(debugLine).toContain(asset)
     }
+  })
+
+  // Containment alone lets a release row go missing unseen, which is how the SteamOS 3.9 package was
+  // built for a while before these notes named it. The three asset lines name exactly the binaries
+  // the release job requires.
+  it('names exactly the thirteen binaries the release job requires, each once', () => {
+    const lines = currentNotes().split('\n')
+    const lineFor = (prefix) => {
+      const line = lines.find((candidate) => candidate.startsWith(prefix))
+      expect(line).toBeDefined()
+      return line
+    }
+    const named = ['**Assets:**', '**DRM/KMS capture', '**Debug symbols'].flatMap((prefix) => assetsOn(lineFor(prefix)))
+    expect(named).toHaveLength(13)
+    expect(new Set(named).size).toBe(named.length)
+    expect([...named].sort()).toEqual(requiredBinaryAssets())
+    expect(assetsOn(lineFor('**Assets:**')).sort()).toEqual(expectedAssets)
+    expect(assetsOn(lineFor('**Debug symbols')).sort()).toEqual([...debugAssets].sort())
   })
 
   // A beta publishes these notes, and the stable tag publishes them again as they stand then.
