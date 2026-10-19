@@ -440,15 +440,26 @@ TEST(SteamShutdownStateMachineTests, ProductionShutdownUsesSingleMonotonicQuiesc
   );
   ASSERT_FALSE(shutdown.empty());
 
-  const auto path_resolution = shutdown.find("const auto pipe_path = steam_instance_pipe_path()");
+  const auto path_resolution = shutdown.find("const auto pipe_path = steam_instance_pipe_path(home_env, account_home_value)");
   const auto fail_closed = shutdown.find("if (!pipe_path)", path_resolution);
-  const auto shutdown_command = shutdown.find("canonical_steam_shutdown_command", fail_closed);
+  const auto remote_resolution = shutdown.find("const auto remote_path = steam_remote_command_path(home_env, account_home_value)", fail_closed);
+  const auto remote_guard = shutdown.find("if (!remote_path || access(remote_path->c_str(), X_OK) != 0)", remote_resolution);
+  const auto shutdown_command = shutdown.find("run_steam_remote_shutdown_without_launch(", remote_guard);
+  const auto quiescence = shutdown.find("wait_for_desktop_steam_quiescence(", shutdown_command);
   ASSERT_NE(path_resolution, std::string::npos);
   ASSERT_NE(fail_closed, std::string::npos);
+  ASSERT_NE(remote_resolution, std::string::npos);
+  ASSERT_NE(remote_guard, std::string::npos);
   ASSERT_NE(shutdown_command, std::string::npos);
+  ASSERT_NE(quiescence, std::string::npos);
   EXPECT_LT(path_resolution, fail_closed);
-  EXPECT_LT(fail_closed, shutdown_command);
-  EXPECT_NE(shutdown.find("wait_for_desktop_steam_quiescence("), std::string::npos);
+  EXPECT_LT(fail_closed, remote_resolution);
+  EXPECT_LT(remote_resolution, remote_guard);
+  EXPECT_LT(remote_guard, shutdown_command);
+  EXPECT_LT(shutdown_command, quiescence);
+  EXPECT_NE(shutdown.find("10s,\n      100ms", quiescence), std::string::npos);
+  EXPECT_EQ(shutdown.find("canonical_steam_shutdown_command"), std::string::npos);
+  EXPECT_EQ(shutdown.find("platf::run_command"), std::string::npos);
   EXPECT_EQ(shutdown.find("for (int i = 0; i < 50; ++i)"), std::string::npos);
 }
 

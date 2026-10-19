@@ -5478,12 +5478,18 @@ TEST(ProcessRuntimeConfigTests, NothingClosesTheSteamThatIsRunningGameMode) {
   EXPECT_FALSE(closed);
 
   const auto source = read_source_file_for_contract("src/process.cpp");
-  const auto shutdown = source.substr(source.find("bool request_desktop_steam_shutdown_for_private_stream()"));
+  const auto shutdown_start = source.find("bool request_desktop_steam_shutdown_for_private_stream()");
+  ASSERT_NE(shutdown_start, std::string::npos);
+  const auto shutdown_end = source.find("bool ensure_steam_client_quiescent_for_doctor()", shutdown_start);
+  ASSERT_NE(shutdown_end, std::string::npos);
+  const auto shutdown = source.substr(shutdown_start, shutdown_end - shutdown_start);
   const auto refusal = shutdown.find("if (platf::game_mode_host::session_live()) {");
-  const auto command = shutdown.find("canonical_steam_shutdown_command");
+  const auto command = shutdown.find("run_steam_remote_shutdown_without_launch(");
   ASSERT_NE(refusal, std::string::npos);
   ASSERT_NE(command, std::string::npos);
-  EXPECT_LT(refusal, command) << "the refusal comes before anything that could run steam -shutdown, for every caller";
+  EXPECT_LT(refusal, command) << "the Game Mode refusal comes before any shutdown dispatch, for every caller";
+  EXPECT_EQ(shutdown.find("canonical_steam_shutdown_command"), std::string::npos);
+  EXPECT_EQ(shutdown.find("platf::run_command"), std::string::npos);
 }
 
 TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) {
