@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -14,6 +15,7 @@
 #include <src/process.h>
 
 #if defined(__linux__)
+  #include <src/platform/linux/game_mode_host.h>
   #include <fcntl.h>
   #include <poll.h>
   #include <set>
@@ -217,6 +219,215 @@ TEST(SteamShutdownStateMachineTests, FifoProbeTracksReaderLifetime) {
   EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(
     (test_dir / "missing-steam.pipe").string()
   ));
+}
+
+namespace {
+  // Exercise the real request, not desktop_steam_double_t's early return. Every
+  // Steam executable and FIFO it can contact belongs to this scratch HOME/PATH. The
+  // fake launcher records the bootstrap that the forwarding client must avoid.
+  class DesktopSteamShutdownRequestTest: public testing::Test {
+  protected:
+    void SetUp() override {
+      const auto save_env = [](const char *name) -> std::optional<std::string> {
+        const char *value = std::getenv(name);
+        return value ? std::make_optional<std::string>(value) : std::nullopt;
+      };
+      previous_home = save_env("HOME");
+      previous_path = save_env("PATH");
+      root = std::filesystem::temp_directory_path() /
+             ("polaris-quit-request-" + std::to_string(getpid()) + "-" +
+              std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+      std::filesystem::create_directories(root / ".steam");
+      std::filesystem::create_directories(root / "bin");
+      std::filesystem::permissions(root, std::filesystem::perms::owner_all);
+      fifo = root / ".steam/steam.pipe";
+      const auto remote_path = proc::steam_remote_command_path_for_tests(root.string(), std::nullopt);
+      ASSERT_TRUE(remote_path);
+      remote = *remote_path;
+      std::filesystem::create_directories(remote.parent_path());
+      write_executable(root / "bin/steam", "printf 'bootstrap\\n' > \"$HOME/launcher-called\"\nexit 0\n");
+      write_remote("exit 1\n");
+      ASSERT_EQ(setenv("HOME", root.c_str(), 1), 0);
+      ASSERT_EQ(setenv("PATH", (root / "bin").c_str(), 1), 0);
+      proc::set_desktop_steam_double_for_tests(nullptr);
+      platf::game_mode_host::set_session_live_for_tests(false);
+    }
+
+    void TearDown() override {
+      // Reap the one test-owned reader before removing any of its files.
+      if (client.pid > 0 && !client.reaped) {
+        (void) kill(client.pid, SIGKILL);
+        int status = 0;
+        (void) client.wait(&status, 0);
+      }
+      platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+      const auto restore_env = [](const char *name, const std::optional<std::string> &value) {
+        if (value) setenv(name, value->c_str(), 1);
+        else unsetenv(name);
+      };
+      restore_env("HOME", previous_home);
+      restore_env("PATH", previous_path);
+      std::error_code ec;
+      std::filesystem::remove_all(root, ec);
+    }
+
+    void write_executable(const std::filesystem::path &path, const std::string &body) {
+      std::ofstream output {path};
+      output << "#!/bin/sh\n" << body;
+      output.close();
+      ASSERT_TRUE(output);
+      std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+    }
+
+    void write_remote(const std::string &body) {
+      write_executable(remote,
+        "printf 'forwarded\\n' > \"$HOME/remote-called\"\n"
+        "[ \"$#\" -eq 1 ] && [ \"$1\" = '-shutdown' ] || exit 64\n" + body);
+    }
+
+    template<class Predicate>
+    bool wait_until(Predicate predicate) {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      do {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      } while (std::chrono::steady_clock::now() < deadline);
+      return predicate();
+    }
+
+    void wait_for_invocation() {
+      ASSERT_TRUE(wait_until([&]() {
+        return std::filesystem::exists(root / "remote-called") ||
+               std::filesystem::exists(root / "launcher-called");
+      })) << "one real executable must receive the production request";
+    }
+
+    void start_client() {
+      ASSERT_EQ(mkfifo(fifo.c_str(), 0600), 0);
+      const auto exit_request = root / "client-exit";
+      int ready[2];
+      ASSERT_EQ(pipe2(ready, O_CLOEXEC), 0);
+      fd_guard_t ready_read {ready[0]};
+      fd_guard_t ready_write {ready[1]};
+      client.pid = fork();
+      ASSERT_GE(client.pid, 0);
+      if (client.pid == 0) {
+        close(ready[0]);
+        const int reader = open(fifo.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (reader < 0 || prctl(PR_SET_NAME, "steam", 0, 0, 0) != 0) _exit(125);
+        const char byte = 'R';
+        if (write(ready[1], &byte, 1) != 1) _exit(126);
+        close(ready[1]);
+        while (access(exit_request.c_str(), F_OK) != 0) usleep(10000);
+        close(reader);
+        _exit(0);
+      }
+      close(ready_write.fd);
+      ready_write.fd = -1;
+      pollfd descriptor {ready_read.fd, POLLIN, 0};
+      ASSERT_EQ(poll(&descriptor, 1, 2000), 1);
+      char byte = 0;
+      ASSERT_EQ(read(ready_read.fd, &byte, 1), 1);
+      ASSERT_EQ(byte, 'R');
+      ASSERT_TRUE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
+      ASSERT_TRUE(proc::steam_instance_pipe_listener_active_for_tests(fifo.string()));
+    }
+
+    void expect_no_bootstrap() {
+      EXPECT_FALSE(std::filesystem::exists(root / "launcher-called"));
+    }
+
+    std::filesystem::path root, fifo, remote;
+    std::optional<std::string> previous_home, previous_path;
+    child_guard_t client;
+  };
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, MissingFifoNeverBootstrapsSteam) {
+  ASSERT_FALSE(std::filesystem::exists(fifo));
+  EXPECT_TRUE(proc::request_desktop_steam_shutdown_for_private_stream());
+  wait_for_invocation();
+  expect_no_bootstrap();
+  EXPECT_TRUE(std::filesystem::exists(root / "remote-called"));
+  EXPECT_FALSE(std::filesystem::exists(fifo));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, ForwarderTargetDisappearsWithoutBootstrapFallback) {
+  start_client();
+  ASSERT_FALSE(HasFatalFailure());
+  write_remote("/bin/rm -- \"$HOME/.steam/steam.pipe\"\n"
+               ": > \"$HOME/client-exit\"\nexit 1\n");
+  EXPECT_TRUE(proc::request_desktop_steam_shutdown_for_private_stream());
+  wait_for_invocation();
+  expect_no_bootstrap();
+  EXPECT_TRUE(std::filesystem::exists(root / "remote-called"));
+  EXPECT_FALSE(std::filesystem::exists(fifo));
+  EXPECT_FALSE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, MissingForwarderRefusesWithoutLauncherFallback) {
+  ASSERT_TRUE(std::filesystem::remove(remote));
+  const bool result = proc::request_desktop_steam_shutdown_for_private_stream();
+  if (result) wait_for_invocation(); // Flush the old detached launcher before inspecting its marker.
+  EXPECT_FALSE(result);
+  expect_no_bootstrap();
+  EXPECT_FALSE(std::filesystem::exists(root / "remote-called"));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, NonExecutableForwarderRefusesWithoutLauncherFallback) {
+  std::filesystem::permissions(remote, std::filesystem::perms::owner_read);
+  const bool result = proc::request_desktop_steam_shutdown_for_private_stream();
+  if (result) wait_for_invocation();
+  EXPECT_FALSE(result);
+  expect_no_bootstrap();
+  EXPECT_FALSE(std::filesystem::exists(root / "remote-called"));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, NormalForwardingWaitsForProcessAndFifoRelease) {
+  start_client();
+  ASSERT_FALSE(HasFatalFailure());
+  write_remote(": > \"$HOME/client-exit\"\nexit 0\n");
+  EXPECT_TRUE(proc::request_desktop_steam_shutdown_for_private_stream());
+  wait_for_invocation();
+  expect_no_bootstrap();
+  EXPECT_TRUE(std::filesystem::exists(root / "remote-called"));
+  EXPECT_FALSE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
+  EXPECT_FALSE(proc::steam_instance_pipe_listener_active_for_tests(fifo.string()));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, ForwardingFailureKeepsTheTenSecondQuiescenceDeadline) {
+  start_client();
+  ASSERT_FALSE(HasFatalFailure());
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(proc::request_desktop_steam_shutdown_for_private_stream());
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  wait_for_invocation();
+  expect_no_bootstrap();
+  EXPECT_TRUE(std::filesystem::exists(root / "remote-called"));
+  EXPECT_TRUE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
+  EXPECT_TRUE(proc::steam_instance_pipe_listener_active_for_tests(fifo.string()));
+  EXPECT_GE(elapsed, std::chrono::milliseconds(9900));
+  EXPECT_LT(elapsed, std::chrono::seconds(13));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, UnknownFifoErrorStillRefusesAtTheSameDeadline) {
+  ASSERT_TRUE(std::filesystem::create_directory(fifo)); // open(O_WRONLY) fails with EISDIR, not ENOENT.
+  write_remote("exit 0\n");
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(proc::request_desktop_steam_shutdown_for_private_stream());
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  wait_for_invocation();
+  expect_no_bootstrap();
+  EXPECT_TRUE(proc::steam_instance_pipe_listener_active_for_tests(fifo.string()));
+  EXPECT_GE(elapsed, std::chrono::milliseconds(9900));
+  EXPECT_LT(elapsed, std::chrono::seconds(13));
+}
+
+TEST_F(DesktopSteamShutdownRequestTest, GameModeRefusesBeforeEitherExecutable) {
+  platf::game_mode_host::set_session_live_for_tests(true);
+  EXPECT_FALSE(proc::request_desktop_steam_shutdown_for_private_stream());
+  expect_no_bootstrap();
+  EXPECT_FALSE(std::filesystem::exists(root / "remote-called"));
 }
 
 TEST(SteamShutdownStateMachineTests, ProductionShutdownUsesSingleMonotonicQuiescenceLoop) {
