@@ -3118,6 +3118,7 @@ TEST(VideoPyroWaveRouteTests, TheEncodeLoopRecordsTheRouteOfEveryFrameItAccepts)
   // Where the call sits. What it records is held below, by running it.
   const std::string accepted =
     "          record_capture_source(config, frame, reported_source);\n"
+    "          accepted_capture.record(config, frame.provenance);\n"
     "#ifdef POLARIS_BUILD_PYROWAVE\n"
     "          record_pyrowave_route(config, *session, reported_pyrowave_route);\n"
     "#endif\n";
@@ -3137,11 +3138,32 @@ TEST(VideoPyroWaveRouteTests, LiveTuningIsNotHandedEncodeTimeABitrateCutCannotSh
   ASSERT_FALSE(video.empty());
   EXPECT_NE(video.find("const double bitrate_relievable_encode_ms = encode_duration - codec_time_in_convert;"),
             std::string::npos);
-  const auto health = video.find("adaptive_bitrate::update_stream_health(");
-  ASSERT_NE(health, std::string::npos);
-  const auto call = video.substr(health, video.find(");", health) - health);
-  EXPECT_NE(call.find("bitrate_relievable_encode_ms"), std::string::npos) << call;
-  EXPECT_EQ(call.find("encode_duration"), std::string::npos) << call;
+  // Source pacing forwards the same bitrate-relievable time through its neutral cadence inputs.
+  // Check both paths, rather than assuming the first call is the direct one.
+  const std::string health_call = "adaptive_bitrate::update_stream_health(";
+  std::size_t calls = 0;
+  auto health = video.find(health_call);
+  while (health != std::string::npos) {
+    const auto end = video.find(");", health);
+    ASSERT_NE(end, std::string::npos);
+    const auto call = video.substr(health, end - health);
+    EXPECT_EQ(call.find("encode_duration"), std::string::npos) << call;
+    if (call.find("inputs.encode_time_ms") != std::string::npos) {
+      const auto inputs = video.rfind("const auto inputs = vrr_pacing::source_health_inputs(", health);
+      ASSERT_NE(inputs, std::string::npos);
+      const auto inputs_end = video.find(");", inputs);
+      ASSERT_NE(inputs_end, std::string::npos);
+      ASSERT_LT(inputs_end, health);
+      const auto forwarded = video.substr(inputs, inputs_end - inputs);
+      EXPECT_NE(forwarded.find("bitrate_relievable_encode_ms"), std::string::npos) << forwarded;
+      EXPECT_EQ(forwarded.find("encode_duration"), std::string::npos) << forwarded;
+    } else {
+      EXPECT_NE(call.find("bitrate_relievable_encode_ms"), std::string::npos) << call;
+    }
+    ++calls;
+    health = video.find(health_call, end + 2);
+  }
+  EXPECT_EQ(calls, 2u) << "every controller call must retain the bitrate-relievable timing contract";
 }
 
 /**

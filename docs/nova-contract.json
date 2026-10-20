@@ -233,7 +233,8 @@
         "source",
         "steam_appid",
         "steam_big_picture",
-        "steam_launch"
+        "steam_launch",
+        "steam_lifecycle"
       ],
       "optional": [
         "beat_time",
