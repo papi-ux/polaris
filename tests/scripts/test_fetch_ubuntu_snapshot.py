@@ -30,6 +30,17 @@ if name == 'sudo':
     if args[0] in ('chown', 'chmod'):
         sys.exit(0)
     os.execvp(args[0], args)
+if name == 'stat':
+    print(Path(args[-1]).stat().st_size + config.get('binding_size_delta', 0))
+    sys.exit(0)
+if name == 'sha256sum':
+    print(config.get('binding_digest', hashlib.sha256(Path(args[-1]).read_bytes()).hexdigest())
+          + '  ' + args[-1])
+    sys.exit(0)
+if name == 'dpkg-deb':
+    print({'Package': 'polaris-kms', 'Version': '1.5.0', 'Architecture': 'amd64',
+           'Depends': 'polaris (= 1.5.0), libcap2-bin, passwd'}[args[-1]])
+    sys.exit(0)
 if name == 'apt-cache':
     print('libcurl4-openssl-dev | 8.5.0-2ubuntu10.7 | pinned snapshot')
 elif name == 'apt-get':
@@ -44,11 +55,30 @@ elif name == 'apt-get':
             print('All needed archives already cached')
             sys.exit(0)
         plan = config['plan']
+        if config.get('local_row', False):
+            # Captured APT2.8.3 local-only schema: file:/absolute/path, cache
+            # name, size, trailing empty hash. DestFile need not equal basename.
+            local = next(arg for arg in args if arg.startswith('./artifacts/'))
+            p = Path(local).resolve()
+            row = [config.get('local_uri', 'file:' + str(p)),
+                   'owned-smoke_1.0_all.deb', str(p.stat().st_size + config.get('local_row_size_delta', 0))]
+            if 'local_row_hash' in config:
+                row.append(config['local_row_hash'].replace('{SHA256}', hashlib.sha256(p.read_bytes()).hexdigest()))
+            # APT always quotes the URI, even when it contains no spaces.
+            local_line = "'" + row[0] + "' " + ' '.join(row[1:])
+            if len(row) == 3:
+                local_line += ' '
+            plan = local_line + '\n' + plan
+            if config.get('repeat_local_row'):
+                plan = local_line + '\n' + plan
         # Actual APT 2.8.3 print-uris defaults to MD5 for compatibility.
         if 'Acquire::ForceHash=SHA256' not in args:
             plan = re.sub(r'SHA(?:256|512):[0-9a-f]+',
                           'MD5Sum:' + hashlib.md5(bytes.fromhex(config['payload'])).hexdigest(), plan)
         print(plan)
+        if config.get('mutate_local_during_plan'):
+            p = root / 'artifacts/polaris.deb'
+            p.write_bytes(b'x' * p.stat().st_size)
         sys.exit(config.get('plan_exit', 0))
     if '--no-download' in args:
         for filename in config['required_cache']:
@@ -63,6 +93,15 @@ elif name == 'apt-get':
 elif name == 'curl':
     location = 'snapshot' if args[-1].startswith('https://snapshot.ubuntu.com/') else 'archive'
     response = config[location]
+    if config.get('mutate_local_during_fetch'):
+        p = root / 'artifacts/polaris.deb'
+        p.write_bytes(b'x' * p.stat().st_size)
+    if (int(args[args.index('--max-time') + 1]) < response.get('seconds', 0)
+            or ('--speed-time' in args and
+                response.get('stall_seconds', 0) >= int(args[args.index('--speed-time') + 1]))):
+        Path(args[args.index('--output') + 1]).write_bytes(b'partial')
+        print('000', end='')
+        sys.exit(28)
     Path(args[args.index('--output') + 1]).write_bytes(bytes.fromhex(response['body']))
     print(response['status'], end='')
     sys.exit(response['exit'])
@@ -84,6 +123,14 @@ def install_step(job):
             break
         body.append(line[10:] if line else '')
     return '\n'.join(body)
+
+
+def local_smoke_step():
+    """Use the tag smoke's actual two install calls and metadata assertions."""
+    text = WORKFLOW.read_text()
+    start = text.index('          snapshot_sources=', text.index('dpkg-deb --info "$deb_path"'))
+    end = text.index('          helper=/usr/libexec/polaris/polaris-kms', start)
+    return '\n'.join(line[10:] if line else '' for line in text[start:end].splitlines())
 
 
 class SnapshotPayloadTests(unittest.TestCase):
@@ -135,7 +182,11 @@ class SnapshotPayloadTests(unittest.TestCase):
                 if name == 'curl':
                     self.assertIn('--proto', args)
                     self.assertEqual(args[args.index('--proto') + 1], '=https')
-                    self.assertEqual(args[args.index('--max-time') + 1], '30')
+                    size = int(args[args.index('--max-filesize') + 1])
+                    self.assertEqual(int(args[args.index('--max-time') + 1]),
+                                     min(600, 60 + (size + 65535) // 65536))
+                    self.assertEqual(args[args.index('--speed-limit') + 1], '1024')
+                    self.assertEqual(args[args.index('--speed-time') + 1], '30')
                     self.assertFalse(set(args) & {'-k', '--insecure', '--retry', '--location'})
             return result, calls, files
 
@@ -263,6 +314,166 @@ class SnapshotPayloadTests(unittest.TestCase):
         self.assertEqual(files[NAME], PAYLOAD)
         actual = [args for name, args in calls if name == 'apt-get' and '--print-uris' not in args]
         self.assertFalse(any('ForceHash' in arg for args in actual for arg in args))
+
+
+class LocalDebSmokeTests(unittest.TestCase):
+    def run_smoke(self, *, config_changes=None, before=None, bound_path=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for child in ('cache/partial', 'bin', 'runner/polaris-ubuntu-source-parts',
+                          'runner/polaris-ubuntu-lists/partial', 'artifacts'):
+                (root / child).mkdir(parents=True)
+            (root / 'runner/polaris-ubuntu-snapshot.sources').write_text('owned fixture')
+            for name in ('polaris', 'polaris-kms'):
+                (root / 'artifacts' / (name + '.deb')).write_bytes(PAYLOAD + name.encode())
+            if before is not None:
+                before(root)
+            for command in ('sudo', 'apt-get', 'curl', 'stat', 'sha256sum', 'dpkg-deb'):
+                path = root / 'bin' / command
+                path.write_text(f'#!{sys.executable}\n' + FAKE)
+                path.chmod(0o755)
+            plan = f"'{URI}' {NAME} {len(PAYLOAD)} SHA256:{hashlib.sha256(PAYLOAD).hexdigest()}"
+            config = {'plan': plan, 'payload': PAYLOAD.hex(), 'required_cache': [NAME], 'local_row': True,
+                      'snapshot': {'status': '503', 'exit': 22, 'body': ''},
+                      'archive': {'status': '200', 'exit': 0, 'body': PAYLOAD.hex()}}
+            config.update(config_changes or {})
+            (root / 'config.json').write_text(json.dumps(config))
+            script = local_smoke_step().replace('/var/tmp/polaris-ubuntu-archives', str(root / 'cache'))
+            script = script.replace('scripts/ci/fetch-ubuntu-snapshot.py',
+                                    str(ROOT / 'scripts/ci/fetch-ubuntu-snapshot.py'))
+            if bound_path is not None:
+                script = script.replace('--local-deb "./$deb_path"', f'--local-deb "{bound_path}"')
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script],
+                cwd=root, env=os.environ | {
+                    'PATH': str(root / 'bin') + os.pathsep + os.environ['PATH'],
+                    'RUNNER_TEMP': str(root / 'runner'), 'UBUNTU_APT_SNAPSHOT': STAMP,
+                    'FAKE_APT_ROOT': str(root), 'deb_path': 'artifacts/polaris.deb',
+                    'kms_deb_path': 'artifacts/polaris-kms.deb', 'expected_package_version': '1.5.0'},
+                capture_output=True, text=True, timeout=10)
+            calls_path = root / 'calls.jsonl'
+            calls = [json.loads(line) for line in calls_path.read_text().splitlines()] if calls_path.exists() else []
+            self.assertEqual((root / 'artifacts/polaris-kms.deb').read_bytes(), PAYLOAD + b'polaris-kms')
+            self.assertFalse(any(p.name.startswith('.polaris-payload-') for p in (root / 'cache').iterdir()))
+            self.assertEqual(sorted(p.name for p in (root / 'cache').glob('*.deb')),
+                             [NAME] if (root / 'cache' / NAME).exists() else [])
+            return result, calls
+
+    def test_both_local_smoke_calls_prefetch_runtime_dependencies(self):
+        result, calls = self.run_smoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installs = [args for name, args in calls if name == 'apt-get' and '--no-download' in args]
+        self.assertEqual(len(installs), 2)
+        self.assertEqual([args[-1] for args in installs],
+                         ['./artifacts/polaris.deb', './artifacts/polaris-kms.deb'])
+        plans = [args for name, args in calls if name == 'apt-get' and '--print-uris' in args]
+        self.assertEqual(len(plans), 2)
+        for plan, install in zip(plans, installs):
+            self.assertIn('Acquire::ForceHash=SHA256', plan)
+            self.assertNotIn('Acquire::ForceHash=SHA256', install)
+            self.assertEqual(plan[plan.index('install'):plan.index('--print-uris')],
+                             install[install.index('install'):])
+
+    def test_caller_binding_rejects_wrong_preplan_size_or_sha256(self):
+        for changes in ({'binding_size_delta': 1}, {'binding_digest': '0' * 64}):
+            with self.subTest(changes=changes):
+                result, calls = self.run_smoke(config_changes=changes)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(name in ('apt-get', 'curl') for name, _ in calls))
+
+    def test_local_symlink_nonfile_or_multiple_links_refuse_before_planning(self):
+        def symlink(root):
+            p = root / 'artifacts/polaris.deb'
+            p.rename(root / 'original.deb')
+            p.symlink_to(root / 'original.deb')
+        def directory(root):
+            p = root / 'artifacts/polaris.deb'
+            p.unlink()
+            p.mkdir()
+        def hardlink(root):
+            os.link(root / 'artifacts/polaris.deb', root / 'other.deb')
+        for before in (symlink, directory, hardlink):
+            with self.subTest(kind=before.__name__):
+                result, calls = self.run_smoke(before=before)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(name in ('apt-get', 'curl') for name, _ in calls))
+
+    def test_local_same_size_change_during_plan_refuses_real_install(self):
+        result, calls = self.run_smoke(config_changes={'mutate_local_during_plan': True})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(name == 'apt-get' and '--no-download' in args for name, args in calls))
+
+    def test_local_binding_must_match_the_actual_install_argument(self):
+        result, calls = self.run_smoke(bound_path='./artifacts/polaris-kms.deb')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(name in ('apt-get', 'curl') for name, _ in calls))
+
+    def test_local_same_size_change_during_fetch_refuses_real_install(self):
+        result, calls = self.run_smoke(config_changes={'mutate_local_during_fetch': True})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(name == 'apt-get' and '--no-download' in args for name, args in calls))
+
+    def test_local_install_still_refuses_tampered_remote_dependency(self):
+        result, calls = self.run_smoke(config_changes={
+            'archive': {'status': '200', 'exit': 0, 'body': (b'x' * len(PAYLOAD)).hex()}})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(any(name == 'curl' for name, _ in calls))
+        self.assertFalse(any(name == 'apt-get' and '--no-download' in args for name, args in calls))
+
+    def test_local_row_hash_if_present_must_equal_preplan_sha256(self):
+        result, _ = self.run_smoke(config_changes={'local_row_hash': 'SHA256:{SHA256}'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for digest in ('SHA256:' + '0' * 64, 'MD5Sum:' + '0' * 32, 'SHA1:' + '0' * 40):
+            with self.subTest(digest=digest):
+                result, calls = self.run_smoke(config_changes={'local_row_hash': digest})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(name == 'curl' for name, _ in calls))
+
+    def test_local_row_wrong_size_duplicate_or_unlisted_uri_refuses_before_fetch(self):
+        for changes in ({'local_row_size_delta': 1}, {'repeat_local_row': True},
+                        {'local_uri': 'file:/tmp/not-the-allowed.deb'},
+                        {'local_uri': 'https://foreign.example/local.deb'}):
+            with self.subTest(changes=changes):
+                result, calls = self.run_smoke(config_changes=changes)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(name == 'curl' for name, _ in calls))
+
+    def test_local_argument_may_resolve_to_strong_snapshot_row(self):
+        # Actual ROOT xtrans-copy fixture selected its same-version repository
+        # row rather than a local row. Do not require a local row to be printed.
+        result, _ = self.run_smoke(config_changes={'local_row': False})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class DownloadBudgetTests(unittest.TestCase):
+    def test_large_slow_payload_succeeds_but_stalled_transfer_is_bounded(self):
+        cases = [(14400000, {'seconds': 160}, 0), (14400000, {'stall_seconds': 31}, 1),
+                 (1024 * 1024 * 1024, {'seconds': 590}, 0)]
+        for size, response, expected in cases:
+            with self.subTest(size=size, response=response), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'bin').mkdir()
+                curl = root / 'bin/curl'
+                curl.write_text(f'#!{sys.executable}\n' + FAKE)
+                curl.chmod(0o755)
+                (root / 'config.json').write_text(json.dumps({
+                    'snapshot': {'status': '200', 'exit': 0, 'body': PAYLOAD.hex(), **response}}))
+                # Exercise production download(), with curl alone replaced. No wall-clock sleep/network.
+                script = ('import runpy,sys; from pathlib import Path; '
+                          'module=runpy.run_path(sys.argv[1]); '
+                          'module["download"](sys.argv[2], Path(sys.argv[3]), int(sys.argv[4]))')
+                result = subprocess.run([
+                    sys.executable, '-c', script, str(ROOT / 'scripts/ci/fetch-ubuntu-snapshot.py'),
+                    URI, str(root / 'payload.deb'), str(size)], capture_output=True, text=True, timeout=10,
+                    env=os.environ | {'FAKE_APT_ROOT': str(root),
+                                      'PATH': str(root / 'bin') + os.pathsep + os.environ['PATH']})
+                self.assertEqual(result.returncode, expected, result.stderr)
+                calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
+                self.assertEqual(len(calls), 1)
+                args = calls[0][1]
+                self.assertLessEqual(int(args[args.index('--max-time') + 1]), 600)
+                self.assertEqual(args[args.index('--speed-limit') + 1], '1024')
+                self.assertEqual(args[args.index('--speed-time') + 1], '30')
 
 
 if __name__ == '__main__':

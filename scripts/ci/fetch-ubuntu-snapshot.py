@@ -18,15 +18,27 @@ class Unavailable(RuntimeError):
     """A transport failure may use the identical official archive payload."""
 
 
-def parse_plan(text, snapshot):
+def parse_plan(text, snapshot, local_deb=None):
     prefix = f'/ubuntu/{snapshot}/'
     rows, names = [], set()
+    local_seen = False
     for line in text.splitlines():
         if not line.startswith("'"):
             if '://' in line or '.deb' in line:
                 raise ValueError('Unrecognized APT payload row')
             continue
         fields = shlex.split(line)
+        # APT 2.8.3 emits file:/absolute/path, cache name, size, with no hash
+        # for a local-only DEB. Only this caller-bound file may lack that hash.
+        if local_deb is not None and fields and fields[0] == 'file:' + str(local_deb[0].resolve(strict=True)):
+            if (len(fields) not in (3, 4) or local_seen
+                    or not re.fullmatch(r'[a-z0-9][A-Za-z0-9_+~.%:-]*\.deb', fields[1])
+                    or fields[1] in names or fields[2] != str(local_deb[1])
+                    or (len(fields) == 4 and fields[3] != local_deb[2])):
+                raise ValueError('Local APT row does not match the bound DEB')
+            names.add(fields[1])
+            local_seen = True
+            continue  # Never fetch or admit the local DEB into APT's cache.
         if len(fields) != 4:
             raise ValueError('APT payload row needs URI, filename, size and a strong hash')
         uri, filename, size, digest = fields
@@ -71,9 +83,13 @@ def verify(path, size, digest):
 
 
 def download(uri, target, size):
+    # APT's timeout is inactivity-based: allow a healthy large payload time to
+    # finish, while bounding both stalls and total time (at most ten minutes).
+    total_seconds = min(600, 60 + (size + 65535) // 65536)
     result = subprocess.run([
         'curl', '--fail', '--silent', '--show-error', '--proto', '=https',
-        '--connect-timeout', '30', '--max-time', '30', '--max-filesize', str(size),
+        '--connect-timeout', '30', '--max-time', str(total_seconds),
+        '--speed-limit', '1024', '--speed-time', '30', '--max-filesize', str(size),
         '--output', str(target), '--write-out', '%{http_code}', uri,
     ], stdout=subprocess.PIPE, text=True)
     status = result.stdout.strip()
@@ -115,6 +131,7 @@ def acquire(row, archives):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--local-deb', nargs=3, metavar=('PATH', 'SIZE', 'SHA256'))
     parser.add_argument('snapshot')
     parser.add_argument('archives', type=Path)
     parser.add_argument('apt_arguments', nargs=argparse.REMAINDER)
@@ -128,6 +145,16 @@ def main():
         command = command[1:]
     if 'install' not in command:
         raise ValueError('The unchanged APT install arguments are required')
+    local_deb = None
+    if args.local_deb is not None:
+        path, size, digest = args.local_deb
+        if (command[command.index('install'):] != ['install', '-y', path]
+                or not path.startswith('./') or not path.endswith('.deb')
+                or not re.fullmatch(r'[1-9][0-9]*', size)
+                or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+            raise ValueError('Local DEB must bind the one explicit smoke install argument')
+        local_deb = (Path(path), int(size), 'SHA256:' + digest)
+        verify(*local_deb)
     # An empty planning cache makes APT list *all* required payloads, including
     # restored files it would otherwise skip on size alone. It changes neither
     # authenticated lists nor installed state, preferences or dependency inputs.
@@ -142,11 +169,15 @@ def main():
         ], stdout=subprocess.PIPE, text=True, env=os.environ | {'LC_ALL': 'C'})
     print(plan.stdout, end='', flush=True)
     plan.check_returncode()
-    rows = parse_plan(plan.stdout, args.snapshot)
+    rows = parse_plan(plan.stdout, args.snapshot, local_deb)
+    if local_deb is not None:
+        verify(*local_deb)
     # Validate the whole plan before acquiring anything. Four bounded transfers
     # keep a snapshot outage from serializing hundreds of per-payload timeouts.
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(lambda row: acquire(row, args.archives), rows))
+    if local_deb is not None:
+        verify(*local_deb)
 
 
 if __name__ == '__main__':
