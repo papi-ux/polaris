@@ -7,9 +7,9 @@
 
 **Stream games from your Linux PC without giving up your desktop.**
 
-Polaris turns a Linux gaming PC or a Steam Deck into a private streaming host.
-Play on Nova, Moonlight or another compatible client while your own desktop
-stays exactly as you left it.
+Polaris turns a Linux gaming PC or a Steam Deck into your own game-streaming
+host. Play on Nova for Android, Moonlight or another compatible client while
+your desktop stays exactly as you left it.
 
 [![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1f1d31)](https://github.com/papi-ux/polaris/stargazers)
 [![Matrix](https://img.shields.io/badge/Matrix-Join_chat-0dbd8b?style=for-the-badge&logo=matrix&logoColor=white&labelColor=1f1d31)](https://matrix.to/#/#papi-ux:papi-ux.com)
@@ -25,7 +25,7 @@ stays exactly as you left it.
 
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
-![Polaris Mission Control in the Polaris Aurora theme, with Control Ultimate Edition up next and the host ready for clients](docs/screenshots/beta2/polaris-mission-control-aurora.webp)
+![Polaris Mission Control in the default Aurora theme: Control Ultimate Edition is next up, 5 of 5 launch checks are ready and the mode is Private Stream](docs/screenshots/beta2/polaris-mission-control-aurora.webp)
 
 ## Why Polaris
 
@@ -40,11 +40,11 @@ its own and tells you plainly how the stream is going.
 - **You can see what's happening.** Mission Control, the web console, shows
   what's playing, who's connected, how healthy the stream is, and which
   capture path and encoder Polaris really chose. When the network struggles,
-  Doctor can step the bitrate down and check that it helped.
+  Doctor can offer a lower bitrate, check whether it helped and undo it.
 - **Your library comes along.** Steam, Heroic, Lutris and ROM collections
   arrive with their artwork, and each game keeps a launch check you can see
   before you press play.
-- **Stepping away is safe.** Disconnect keeps the game running so you can pick
+- **Step away without losing your place.** Disconnect keeps the game running so you can pick
   it up later. End Session stops only the game that session started. A second
   device can watch without taking over.
 - **It works with what you have.** Nova gets the richest experience, and
@@ -52,9 +52,9 @@ its own and tells you plainly how the stream is going.
   no cloud account or subscription: pairing, settings and your library stay on
   your PC.
 
-Prefer charcoal and red? `< Congratulations, Director >` is a separate theme
-in the 1.5.0 beta, so nothing changes until you pick it. Polaris Aurora stays
-the default.
+Prefer charcoal and red? 1.5.0-beta.2 adds `< Congratulations, Director >`, a
+theme shared with Nova. Nothing changes until you pick it, and Polaris Aurora
+stays the default.
 
 ![Polaris Mission Control in the < Congratulations, Director > theme: charcoal, warm white and red](docs/screenshots/beta2/polaris-mission-control-director.webp)
 
@@ -66,11 +66,11 @@ the right package. If you'd rather choose yourself:
 | Your Linux host | Start here |
 | --- | --- |
 | Fedora 44, Arch Linux, CachyOS | [Quick start](https://papi-ux.com/docs/quickstart/), with signed package repositories |
-| SteamOS 3.8 on a Steam Deck | [SteamOS guide](https://papi-ux.com/docs/steamos/) |
-| Bazzite | [Bazzite guide](docs/bazzite.md) |
-| Ubuntu 24.04 | [Ubuntu guide](docs/ubuntu.md), a tester package |
-| NixOS | [Flake and module guide](nix/README.md), community tested |
-| Something else | [Compatibility](https://papi-ux.com/docs/compatibility/) and [building from source](docs/building.md) |
+| SteamOS 3.8 or 3.9 on a Steam Deck | [SteamOS guide](https://papi-ux.com/docs/steamos/); stable has a 3.8 package, and 1.5.0-beta.2 adds a separate 3.9 package |
+| Bazzite | [Bazzite guide](https://papi-ux.com/docs/bazzite/) |
+| Ubuntu 24.04 | [Ubuntu guide](https://papi-ux.com/docs/ubuntu/), a tester package |
+| NixOS | [NixOS guide](https://papi-ux.com/docs/nixos/), a source build with community validation |
+| Something else | [Compatibility](https://papi-ux.com/docs/compatibility/) and [building from source](https://papi-ux.com/docs/building/) |
 
 Most packages then need a one-time host setup:
 
@@ -96,25 +96,27 @@ play.
 - **Graphics.** NVIDIA is the most tested. AMD and Intel work through VAAPI,
   with software encoding as a fallback.
 - **Stable or beta.** [Latest](https://github.com/papi-ux/polaris/releases/latest)
-  is always stable. A beta is opt-in and published as its own prerelease. This
-  page follows the source, which can be ahead of the newest package; the
-  [1.5.0 release notes](docs/release-notes/v1.5.0.md) say what's new and what's
-  still being checked.
+  is always stable; betas are opt-in prereleases. This page follows the source,
+  which can be ahead of the newest package. The
+  [1.5.0 release notes](docs/release-notes/v1.5.0.md) cover 1.5.0-beta.2 and
+  what's still being checked.
 - **Experimental and preview.** PyroWave runs only when a client asks for it.
-  Source-paced VRR and Recording stay off until you turn them on. Spaces is a
-  preview.
+  Source-paced VRR (Nova doesn't request it yet) and Recording (video only, no
+  audio) stay off until you turn them on. Spaces is a preview.
 
-Looking for the client? [Nova](https://github.com/papi-ux/nova/releases/latest)
-runs on Android, with native Linux and Steam Deck builds in alpha.
+Looking for the client? [Get Nova](https://papi-ux.com/downloads/?product=nova)
+for Android, or take its [latest release](https://github.com/papi-ux/nova/releases/latest).
+Its native Linux and Steam Deck builds are alphas, and Steam Frame has a
+separate experimental alpha.
 
 ## Learn more
 
-- [Documentation](https://papi-ux.com/docs/) · [How the runtime works](https://papi-ux.com/docs/runtime/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Mission Control](docs/mission-control.md) · [Doctor](https://papi-ux.com/docs/doctor/) · [Spaces](https://papi-ux.com/docs/spaces/) · [Emulators](https://papi-ux.com/docs/emulators/) · [Play with Moonlight](https://papi-ux.com/docs/moonlight/) · [FAQ](https://papi-ux.com/docs/faq/)
+- [Documentation](https://papi-ux.com/docs/) · [How the runtime works](https://papi-ux.com/docs/runtime/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Mission Control](https://papi-ux.com/docs/mission-control/) · [Doctor](https://papi-ux.com/docs/doctor/) · [Spaces](https://papi-ux.com/docs/spaces/) · [Emulators](https://papi-ux.com/docs/emulators/) · [Play with Moonlight](https://papi-ux.com/docs/moonlight/) · [FAQ](https://papi-ux.com/docs/faq/)
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [Changelog](docs/changelog.md) · [Releases](https://github.com/papi-ux/polaris/releases)
 - [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions) · [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md)
 
-Screenshot sources: [these 1.5.0-beta.2 captures](docs/screenshots/beta2/provenance.json)
-and [the website gallery](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json).
+<sub>Screenshots: 1.5.0-beta.2 ([details](docs/screenshots/beta2/provenance.json)).
+Website gallery: [image sources](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json).</sub>
 
 ## Acknowledgments
 
