@@ -10,6 +10,11 @@ let
   cfg = config.services.polaris;
 in
 {
+  # nixpkgs ships an unrelated `services.polaris` (music streaming server) in
+  # nixos/modules/services/misc/polaris.nix; without this the option is
+  # declared twice and evaluation fails.
+  disabledModules = [ "services/misc/polaris.nix" ];
+
   options.services.polaris = import ./options.nix { inherit lib pkgs; };
 
   config = lib.mkIf cfg.enable {
@@ -41,6 +46,7 @@ in
       47998
       47999
       48000
+      48002
       48010
     ];
 
