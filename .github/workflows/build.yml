@@ -44,6 +44,9 @@ jobs:
       - name: Verify bounded Arch CUDA download
         run: python3 -m unittest discover -s tests/scripts -p 'test_download_arch_cuda.py'
 
+      - name: Verify pinned Ubuntu payload acquisition
+        run: python3 -m unittest discover -s tests/scripts -p 'test_fetch_ubuntu_snapshot.py'
+
       - name: Verify recorder fixture evidence wiring
         run: python3 -m unittest discover -s tests/scripts -p 'test_recorder_ci_evidence.py'
 
@@ -284,7 +287,7 @@ jobs:
             echo "::error::Pinned Ubuntu snapshot does not contain libcurl4-openssl-dev"
             exit 1
           fi
-          sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
+          snapshot_packages=(
             build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
@@ -297,6 +300,11 @@ jobs:
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             glslang-tools libvulkan-dev \
             wayland-protocols
+          )
+          sudo python3 scripts/ci/fetch-ubuntu-snapshot.py \
+            "$UBUNTU_APT_SNAPSHOT" "$snapshot_archives" -- \
+            "${apt_options[@]}" install -y --allow-downgrades "${snapshot_packages[@]}"
+          sudo apt-get "${apt_options[@]}" --no-download install -y --allow-downgrades "${snapshot_packages[@]}"
           test -r /usr/share/pipewire/client.conf
           sudo chmod -R a+rX "$snapshot_archives"
 
@@ -1273,7 +1281,7 @@ jobs:
             echo "::error::Pinned Ubuntu snapshot does not contain libcurl4-openssl-dev"
             exit 1
           fi
-          sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
+          snapshot_packages=(
             build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
@@ -1287,6 +1295,11 @@ jobs:
             glslang-tools libvulkan-dev \
             golang-go \
             wayland-protocols
+          )
+          sudo python3 scripts/ci/fetch-ubuntu-snapshot.py \
+            "$UBUNTU_APT_SNAPSHOT" "$snapshot_archives" -- \
+            "${apt_options[@]}" install -y --allow-downgrades "${snapshot_packages[@]}"
+          sudo apt-get "${apt_options[@]}" --no-download install -y --allow-downgrades "${snapshot_packages[@]}"
           test -r /usr/share/pipewire/client.conf
           sudo chmod -R a+rX "$snapshot_archives"
 
