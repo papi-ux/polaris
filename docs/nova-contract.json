@@ -233,7 +233,8 @@
         "source",
         "steam_appid",
         "steam_big_picture",
-        "steam_launch"
+        "steam_launch",
+        "steam_lifecycle"
       ],
       "optional": [
         "beat_time",
@@ -927,7 +928,7 @@
         "request_kbps is below 90% of raise_goal_kbps. assumes names the FEC share and audio cost the",
         "requests were grossed up for: the stream's own, as its bitrate_units carry them, and the",
         "host's FEC share with stereo in high quality until its handshake is recorded. No",
-        "nova_reader yet: Nova builds against it for 1.4.14."
+        "nova_reader yet: Nova builds against it for 1.5.0."
       ],
       "fields": [
         "advice_far_kbps",
@@ -1033,7 +1034,7 @@
         "here gets the first stream that recorded its handshake. A Space's stream carries none yet.",
         "features.manual_bitrate_max_kbps, a number rather than a flag, is the most a client may set",
         "by hand through client settings, a live bitrate, a resolved launch, a Space's resolver or the",
-        "launch profile route: 500000 from 1.4.14. A host without it takes 300000, so a client offers",
+        "launch profile route: 500000 from 1.5.0. A host without it takes 300000, so a client offers",
         "more only to a host that announces it. No nova_reader yet."
       ],
       "fields": [

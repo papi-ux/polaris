@@ -22,6 +22,21 @@ if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [[ ! "$POLARIS_PRERELEASE_LABEL" =~ ^(b
   exit 1
 fi
 export POLARIS_PRERELEASE_LABEL
+# The SteamOS release run-steamos-build.sh bootstrapped this root from. Unset means 3.8.
+POLARIS_STEAMOS_TARGET="${POLARIS_STEAMOS_TARGET-3.8}"
+if [ "$POLARIS_STEAMOS_TARGET" != 3.8 ] && [ "$POLARIS_STEAMOS_TARGET" != 3.9 ]; then
+  printf '%s\n' 'POLARIS_STEAMOS_TARGET must be 3.8 or 3.9' >&2
+  exit 1
+fi
+STEAMOS_PACKAGE="Polaris-steamos$POLARIS_STEAMOS_TARGET-x86_64.pkg.tar.zst"
+STEAMOS_KMS_PACKAGE="Polaris-kms-steamos$POLARIS_STEAMOS_TARGET-x86_64.pkg.tar.zst"
+STEAMOS_DEBUG_PACKAGE="Polaris-debug-steamos$POLARIS_STEAMOS_TARGET-x86_64.pkg.tar.zst"
+RECEIPT_PREFIX="$OUTPUT_ROOT/steamos$POLARIS_STEAMOS_TARGET"
+# Each release's toolchain reports its own namcap findings, so each has its own reviewed list.
+NAMCAP_REVIEWED_LIST="$SOURCE_ROOT/packaging/linux/SteamOS/namcap-reviewed-warnings.txt"
+if [ "$POLARIS_STEAMOS_TARGET" != 3.8 ]; then
+  NAMCAP_REVIEWED_LIST="$SOURCE_ROOT/packaging/linux/SteamOS/namcap-reviewed-warnings-steamos$POLARIS_STEAMOS_TARGET.txt"
+fi
 git config --global --add safe.directory "$SOURCE_ROOT"
 SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
 SOURCE_TREE="$(git -C "$SOURCE_ROOT" rev-parse 'HEAD^{tree}')"
@@ -44,7 +59,8 @@ CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
 export CMAKE_BUILD_PARALLEL_LEVEL
 
 STEAMOS_PKGBUILD_DIR="$BUILD_ROOT/packaging/linux/SteamOS"
-cmake -S "$SOURCE_ROOT" -B "$BUILD_ROOT" -DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON -DPOLARIS_CONFIGURE_ONLY=ON
+cmake -S "$SOURCE_ROOT" -B "$BUILD_ROOT" -DPOLARIS_CONFIGURE_STEAMOS_PKGBUILD=ON -DPOLARIS_CONFIGURE_ONLY=ON \
+  "-DPOLARIS_STEAMOS_TARGET=$POLARIS_STEAMOS_TARGET"
 test -f "$STEAMOS_PKGBUILD_DIR/PKGBUILD"
 cd "$STEAMOS_PKGBUILD_DIR"
 makepkg --noconfirm --cleanbuild
@@ -67,7 +83,7 @@ PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_IDENTITY="$PACKAGE_NAME|$PACKAGE_VERSION|$PACKAGE_ARCH"
 # The release this tree builds, with a prerelease's label joined straight onto the number, which
 # pacman sorts below that release (cmake/prep/prerelease_versions.cmake).
-EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"
+EXPECTED_PKGVER="1.5.0${POLARIS_PRERELEASE_LABEL}-1"
 if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then
   printf 'unexpected SteamOS package identity: %s\n' "$PACKAGE_IDENTITY" >&2
   exit 1
@@ -77,7 +93,7 @@ if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(vercmp "$PACKAGE_VERSION" "$BUILD_
     "$PACKAGE_VERSION" "$BUILD_VERSION" >&2
   exit 1
 fi
-cp "$PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-steamos3.8-x86_64.pkg.tar.zst"
+cp "$PACKAGE_PATH" "$OUTPUT_ROOT/$STEAMOS_PACKAGE"
 
 # The DRM/KMS capture helper is its own package. The glob above ends in a digit, so it never picks
 # this one up, and this one is checked on its own terms: what it contains is the whole point of
@@ -110,19 +126,19 @@ fi
 test -f "$KMS_RECEIPT_ROOT/usr/libexec/polaris/polaris-kms"
 test -f "$KMS_RECEIPT_ROOT/usr/lib/sysusers.d/polaris-kms.conf"
 test ! -e "$KMS_RECEIPT_ROOT/usr/bin/polaris"
-pacman -Qlp "$KMS_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-kms-package-files.txt"
+pacman -Qlp "$KMS_PACKAGE_PATH" > "$RECEIPT_PREFIX-kms-package-files.txt"
 # Directory entries end in a slash. Matched with awk rather than a grep end-of-line pattern,
 # because the packaging analyzer forbids a dollar immediately followed by a quote anywhere in
 # the script, including inside a comment like this one.
-KMS_PAYLOAD_COUNT="$(awk '!/[/]$/' "$OUTPUT_ROOT/steamos3.8-kms-package-files.txt" | wc -l)"
+KMS_PAYLOAD_COUNT="$(awk '!/[/]$/' "$RECEIPT_PREFIX-kms-package-files.txt" | wc -l)"
 if [ "$KMS_PAYLOAD_COUNT" -ne 2 ]; then
   printf 'polaris-kms should carry exactly two files, found %s\n' "$KMS_PAYLOAD_COUNT" >&2
-  awk '!/[/]$/' "$OUTPUT_ROOT/steamos3.8-kms-package-files.txt" >&2
+  awk '!/[/]$/' "$RECEIPT_PREFIX-kms-package-files.txt" >&2
   exit 1
 fi
-cp "$KMS_PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
-sha256sum "$OUTPUT_ROOT/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" \
-  > "$OUTPUT_ROOT/steamos3.8-kms-package-sha256.txt"
+cp "$KMS_PACKAGE_PATH" "$OUTPUT_ROOT/$STEAMOS_KMS_PACKAGE"
+sha256sum "$OUTPUT_ROOT/$STEAMOS_KMS_PACKAGE" \
+  > "$RECEIPT_PREFIX-kms-package-sha256.txt"
 
 # makepkg splits the host's detached symbols into polaris-debug. Keep that package
 # attached to the same version and ELF build ID as both copies of the host binary.
@@ -134,12 +150,12 @@ fi
 DEBUG_PACKAGE_PATH="${DEBUG_PACKAGE_PATHS[0]}"
 python3 "$SOURCE_ROOT/scripts/ci/validate-pacman-debug.py" \
   --main "$PACKAGE_PATH" --kms "$KMS_PACKAGE_PATH" --debug "$DEBUG_PACKAGE_PATH" \
-  > "$OUTPUT_ROOT/steamos3.8-debug-build-id.txt"
-cp "$DEBUG_PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst"
-pacman -Qip "$DEBUG_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-debug-package-info.txt"
-pacman -Qlp "$DEBUG_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-debug-package-files.txt"
-sha256sum "$OUTPUT_ROOT/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst" \
-  > "$OUTPUT_ROOT/steamos3.8-debug-package-sha256.txt"
+  > "$RECEIPT_PREFIX-debug-build-id.txt"
+cp "$DEBUG_PACKAGE_PATH" "$OUTPUT_ROOT/$STEAMOS_DEBUG_PACKAGE"
+pacman -Qip "$DEBUG_PACKAGE_PATH" > "$RECEIPT_PREFIX-debug-package-info.txt"
+pacman -Qlp "$DEBUG_PACKAGE_PATH" > "$RECEIPT_PREFIX-debug-package-files.txt"
+sha256sum "$OUTPUT_ROOT/$STEAMOS_DEBUG_PACKAGE" \
+  > "$RECEIPT_PREFIX-debug-package-sha256.txt"
 
 FINAL_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
 FINAL_TREE="$(git -C "$SOURCE_ROOT" rev-parse 'HEAD^{tree}')"
@@ -149,19 +165,19 @@ if [ "$FINAL_COMMIT" != "$SOURCE_COMMIT" ] || [ "$FINAL_TREE" != "$SOURCE_TREE" 
   exit 1
 fi
 
-printf 'commit=%s\ntree=%s\npackage=%s\n' \
-  "$FINAL_COMMIT" "$FINAL_TREE" Polaris-steamos3.8-x86_64.pkg.tar.zst \
-  > "$OUTPUT_ROOT/steamos3.8-build-metadata.txt"
-pacman -Q > "$OUTPUT_ROOT/steamos3.8-installed-packages.txt"
-sha256sum /var/lib/pacman/sync/*.db > "$OUTPUT_ROOT/steamos3.8-repository-sha256.txt"
-pacman -Qip "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-package-info.txt"
-pacman -Qlp "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-package-files.txt"
-sha256sum "$OUTPUT_ROOT/Polaris-steamos3.8-x86_64.pkg.tar.zst" \
-  > "$OUTPUT_ROOT/steamos3.8-package-sha256.txt"
+printf 'commit=%s\ntree=%s\npackage=%s\nsteamos=%s\n' \
+  "$FINAL_COMMIT" "$FINAL_TREE" "$STEAMOS_PACKAGE" "$POLARIS_STEAMOS_TARGET" \
+  > "$RECEIPT_PREFIX-build-metadata.txt"
+pacman -Q > "$RECEIPT_PREFIX-installed-packages.txt"
+sha256sum /var/lib/pacman/sync/*.db > "$RECEIPT_PREFIX-repository-sha256.txt"
+pacman -Qip "$PACKAGE_PATH" > "$RECEIPT_PREFIX-package-info.txt"
+pacman -Qlp "$PACKAGE_PATH" > "$RECEIPT_PREFIX-package-files.txt"
+sha256sum "$OUTPUT_ROOT/$STEAMOS_PACKAGE" \
+  > "$RECEIPT_PREFIX-package-sha256.txt"
 
 sed -n 's/^depend = //p' "$RECEIPT_ROOT/.PKGINFO" \
-  > "$OUTPUT_ROOT/steamos3.8-package-dependencies.txt"
-test -s "$OUTPUT_ROOT/steamos3.8-package-dependencies.txt"
+  > "$RECEIPT_PREFIX-package-dependencies.txt"
+test -s "$RECEIPT_PREFIX-package-dependencies.txt"
 
 HOST_BINARIES=("$RECEIPT_ROOT"/usr/bin/polaris-[0-9]*)
 if [ "${#HOST_BINARIES[@]}" -ne 1 ]; then
@@ -181,25 +197,51 @@ test -d "$RECEIPT_ROOT/usr/share/polaris"
 test -f "$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"
 test -f "$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.terminal.desktop"
 test -f "$RECEIPT_ROOT/usr/lib/systemd/user/polaris.service"
-ldd "$BINARY_PATH" > "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"
-if grep -q 'not found' "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"; then
+ldd "$BINARY_PATH" > "$RECEIPT_PREFIX-binary-needed.txt"
+if grep -q 'not found' "$RECEIPT_PREFIX-binary-needed.txt"; then
   printf '%s\n' 'packaged Polaris binary has unresolved shared-library dependencies' >&2
   exit 1
 fi
-readelf --version-info "$BINARY_PATH" > "$OUTPUT_ROOT/steamos3.8-binary-version-info.txt"
-objdump -p "$BINARY_PATH" >> "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"
+readelf --version-info "$BINARY_PATH" > "$RECEIPT_PREFIX-binary-version-info.txt"
+objdump -p "$BINARY_PATH" >> "$RECEIPT_PREFIX-binary-needed.txt"
 # SteamOS is where gamescope_stream lives, and libei is found at configure time
 # and quietly left out when it is missing. Ask the binary.
-if ! grep -Eq 'NEEDED +libei[.]so[.]1' "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"; then
+if ! grep -Eq 'NEEDED +libei[.]so[.]1' "$RECEIPT_PREFIX-binary-needed.txt"; then
   printf '%s\n' 'packaged Polaris binary was built without libei; gamescope_stream would have no mouse or keyboard' >&2
   exit 1
 fi
+# Boost changes its library names with every release, and a SteamOS release ships exactly one. A
+# package that names boost-libs alone installs on the next SteamOS and then cannot start: the
+# 3.8 package did exactly that on SteamOS 3.9.2. makepkg turns each listed Boost soname into an exact
+# dependency on the version this build linked, which only that release's boost-libs provides. Ask
+# the binary which Boost libraries it needs, then require that exact pin for every one of them.
+awk '$1 == "NEEDED" && $2 ~ /^libboost_/ { print $2 }' "$RECEIPT_PREFIX-binary-needed.txt" \
+  | LC_ALL=C sort -u > "$RECEIPT_PREFIX-boost-sonames.txt"
+if [ ! -s "$RECEIPT_PREFIX-boost-sonames.txt" ]; then
+  printf '%s\n' 'packaged Polaris binary links no Boost library; the Boost ABI check has nothing to bind' >&2
+  exit 1
+fi
+: > "$RECEIPT_PREFIX-boost-abi.txt"
+while IFS= read -r soname; do
+  dependency="${soname%%.so.*}.so"
+  boost_version="${soname#*.so.}"
+  if ! grep -Fqx "depend = ${dependency}=${boost_version}-64" "$RECEIPT_ROOT/.PKGINFO"; then
+    printf 'packaged Polaris binary needs %s but the package does not depend on exactly %s=%s-64\n' \
+      "$soname" "$dependency" "$boost_version" >&2
+    sed -n 's/^depend = /  depends: /p' "$RECEIPT_ROOT/.PKGINFO" >&2
+    exit 1
+  fi
+  printf '%s %s=%s-64\n' "$soname" "$dependency" "$boost_version" >> "$RECEIPT_PREFIX-boost-abi.txt"
+done < "$RECEIPT_PREFIX-boost-sonames.txt"
 "$SOURCE_ROOT/scripts/check-packaged-binary-paths.sh" \
-  "$BINARY_PATH" "$OUTPUT_ROOT/steamos3.8-package-strings.txt"
+  "$BINARY_PATH" "$RECEIPT_PREFIX-package-strings.txt"
 # The Valve toolchain does not emit CET SHSTK notes for every C++/Go object,
 # cgo links libresolv through runtime-selected resolver paths, and namcap cannot
 # see command/runtime-discovered dependencies. Every exception remains exact;
 # additions, removals, or wording changes fail the candidate gate.
+# SteamOS 3.9's namcap 3.6 disables the SHSTK rule, so its separate reviewed list
+# omits those two messages. The archived host and browser ELF notes still lack
+# SHSTK; the missing diagnostics do not establish additional binary hardening.
 #
 # libvulkan is the same class. Polaris resolves every Vulkan entry point it calls from the loader by
 # name at runtime (src/platform/linux/vulkan_loader.cpp), and the compute codec's volk does the same,
@@ -216,19 +258,19 @@ NAMCAP_MISSING="$BUILD_ROOT/namcap-reviewed-missing.txt"
 # produces the contradictory "dependency not needed" and "uninstalled
 # dependency" warnings for valid Bash scripts. Use the canonical user binary
 # paths so interpreter ownership remains deterministic and reviewable.
-PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"
+PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$RECEIPT_PREFIX-namcap-all.txt"
 # Recorded rather than gated: the reviewed list is an exact pin for the main package, and the
 # helper's own findings have not been reviewed yet. What actually matters about that package, its
 # identity, its dependency and its two files, is asserted above and does not need namcap to say so.
-PATH=/usr/bin:/bin namcap "$KMS_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-kms-namcap-all.txt" || true
-LC_ALL=C sort -u "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" > "$NAMCAP_ACTUAL"
-LC_ALL=C sort -u "$SOURCE_ROOT/packaging/linux/SteamOS/namcap-reviewed-warnings.txt" > "$NAMCAP_ALLOWED"
-comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$OUTPUT_ROOT/steamos3.8-namcap.txt"
-comm -12 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$OUTPUT_ROOT/steamos3.8-namcap-reviewed.txt"
+PATH=/usr/bin:/bin namcap "$KMS_PACKAGE_PATH" > "$RECEIPT_PREFIX-kms-namcap-all.txt" || true
+LC_ALL=C sort -u "$RECEIPT_PREFIX-namcap-all.txt" > "$NAMCAP_ACTUAL"
+LC_ALL=C sort -u "$NAMCAP_REVIEWED_LIST" > "$NAMCAP_ALLOWED"
+comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$RECEIPT_PREFIX-namcap.txt"
+comm -12 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$RECEIPT_PREFIX-namcap-reviewed.txt"
 comm -13 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$NAMCAP_MISSING"
-if [ -s "$OUTPUT_ROOT/steamos3.8-namcap.txt" ]; then
+if [ -s "$RECEIPT_PREFIX-namcap.txt" ]; then
   printf '%s\n' 'namcap emitted unreviewed warnings or a reviewed warning disappeared' >&2
-  sed 's/^/namcap: /' "$OUTPUT_ROOT/steamos3.8-namcap.txt" >&2
+  sed 's/^/namcap: /' "$RECEIPT_PREFIX-namcap.txt" >&2
   exit 1
 fi
 if [ -s "$NAMCAP_MISSING" ]; then

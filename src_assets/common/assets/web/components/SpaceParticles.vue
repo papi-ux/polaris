@@ -1,5 +1,5 @@
 <template>
-  <canvas ref="canvas" class="space-particles inset-0 pointer-events-none" :class="absolute ? 'absolute' : 'fixed'" :style="{ zIndex: absolute ? 0 : 0 }" />
+  <canvas aria-hidden="true" ref="canvas" class="space-particles inset-0 pointer-events-none" :class="absolute ? 'absolute max-w-full' : 'fixed'" :style="{ zIndex: absolute ? 0 : 0 }" />
 </template>
 
 <script setup>
@@ -16,6 +16,20 @@ const props = defineProps({
 const canvas = ref(null)
 let ctx = null
 let animId = null
+let backdrop = null
+let backdropCtx = null
+let pixelRatio = 1
+let lastFrameTime = null
+// Two canvases at most, each capped at four million pixels / 8192 per side.
+// Bounded object counts and 30 Hz draws keep the field independent of refresh rate.
+const MAX_DPR = 2
+const MAX_PIXELS = 4_000_000
+const MAX_SIDE = 8192
+const FRAME_INTERVAL = 1000 / 30
+// A mode's star count is its density over a 1280x800 surface. Smaller surfaces
+// draw proportionally fewer stars, never below a quarter of the mode's count.
+const REFERENCE_AREA = 1280 * 800
+const MIN_DENSITY_SHARE = 0.25
 let particles = []
 let shootingStars = []
 let nebulae = []
@@ -27,6 +41,10 @@ let currentTheme = 'polaris'
 let currentConfig = null
 let currentPalette = null
 let resizeObserver = null
+let resizeFrame = null
+let resizePending = false
+let pendingW = 0
+let pendingH = 0
 let motionMediaQuery = null
 let prefersReducedMotion = false
 let pageVisible = true
@@ -54,8 +72,8 @@ function getModeConfig(mode) {
       twinkle: [0.004, 0.012],
       nebulaCount: 9,
       galaxyCount: 6,
-      shootingChance: 0.01,
-      maxShootingStars: 5,
+      shootingChance: 0.0025,
+      maxShootingStars: 2,
       sparkleThreshold: 0.76,
     }
   }
@@ -73,8 +91,8 @@ function getModeConfig(mode) {
       twinkle: [0.004, 0.01],
       nebulaCount: 7,
       galaxyCount: 5,
-      shootingChance: 0.008,
-      maxShootingStars: 4,
+      shootingChance: 0.002,
+      maxShootingStars: 2,
       sparkleThreshold: 0.78,
     }
   }
@@ -91,19 +109,20 @@ function getModeConfig(mode) {
     twinkle: [0.0035, 0.008],
     nebulaCount: 6,
     galaxyCount: 4,
-    shootingChance: 0.005,
-    maxShootingStars: 3,
+    shootingChance: 0.001,
+    maxShootingStars: 1,
     sparkleThreshold: 0.8,
   }
 }
 
 // Per-theme particle strength, mirroring Nova's librarySurfaces particle
-// table: OLED disables the field entirely for true black.
+// table: OLED stays true black; Director keeps its near-black stage still.
 const THEME_PARTICLE_ALPHA = {
   polaris: 1,
   'portable-chrome': 0.44,
   oled: 0,
   miami: 0.68,
+  director: 0,
   'high-contrast': 0.28,
 }
 
@@ -131,7 +150,7 @@ function brighten(rgb, factor) {
 const THEME_ART = {
   polaris: {
     nebulae: (glow) => [glow, [98, 132, 190], [88, 116, 146]],
-    nebulaOpacity: [0.012, 0.028],
+    nebulaOpacity: [0.025, 0.055],
     nebulaRadius: [120, 300],
     galaxyRadius: [66, 150],
     galaxyGlow: [0.04, 0.08],
@@ -141,7 +160,7 @@ const THEME_ART = {
   },
   miami: {
     nebulae: (glow, accent2) => [glow, accent2, [190, 84, 150], [108, 60, 111]],
-    nebulaOpacity: [0.014, 0.032],
+    nebulaOpacity: [0.026, 0.06],
     nebulaRadius: [130, 320],
     galaxyRadius: [70, 160],
     galaxyGlow: [0.05, 0.09],
@@ -153,7 +172,7 @@ const THEME_ART = {
     // The four PlayStation face-button hues (--portable-* tokens), Nova's
     // ambient accents for this theme.
     nebulae: () => [[90, 147, 214], [181, 131, 181], [212, 131, 138], [111, 191, 138]],
-    nebulaOpacity: [0.01, 0.024],
+    nebulaOpacity: [0.022, 0.048],
     nebulaRadius: [120, 280],
     galaxyRadius: [60, 130],
     galaxyGlow: [0.03, 0.06],
@@ -195,6 +214,10 @@ function getThemePalette(theme) {
   }
 }
 
+function mixStar(tint) {
+  return currentPalette.starRgb.map((channel, i) => Math.round(channel * 0.8 + tint[i] * 0.2))
+}
+
 function createParticle() {
   const isBright = Math.random() < currentConfig.brightChance
   return {
@@ -208,6 +231,9 @@ function createParticle() {
     opacity: isBright
       ? randomBetween(currentConfig.brightOpacity[0], currentConfig.brightOpacity[1])
       : randomBetween(currentConfig.dimOpacity[0], currentConfig.dimOpacity[1]),
+    // Warm/cool stars are a restrained mix of the theme's own primary text.
+    color: [currentPalette.starRgb, mixStar([255, 211, 170]), mixStar([165, 195, 255])][Math.floor(Math.random() * 3)],
+    sparkle: isBright && Math.random() < 0.16,
     twinkleSpeed: prefersReducedMotion ? 0 : randomBetween(currentConfig.twinkle[0], currentConfig.twinkle[1]),
     twinklePhase: Math.random() * Math.PI * 2,
     isBright,
@@ -219,7 +245,7 @@ function createShootingStar() {
   return {
     x: Math.random() * w * 0.8,
     y: Math.random() * h * 0.4,
-    speed: Math.random() * 4 + 3,
+    speed: randomBetween(1.5, 2.5),
     angle,
     dx: Math.cos(angle),
     dy: Math.sin(angle),
@@ -236,7 +262,8 @@ function createNebula() {
     radius: randomBetween(currentPalette.nebulaRadius[0], currentPalette.nebulaRadius[1]),
     color: currentPalette.nebulae[Math.floor(Math.random() * currentPalette.nebulae.length)],
     opacity: randomBetween(currentPalette.nebulaOpacity[0], currentPalette.nebulaOpacity[1]),
-    drift: prefersReducedMotion ? 0 : (Math.random() - 0.5) * 0.02,
+    squash: randomBetween(0.45, 0.85),
+    rotation: Math.random() * Math.PI,
   }
 }
 
@@ -248,8 +275,7 @@ function createGalaxyObject() {
     radius,
     squash: randomBetween(0.42, 0.76),
     rotation: Math.random() * Math.PI,
-    driftX: prefersReducedMotion ? 0 : (Math.random() - 0.5) * 0.018,
-    driftY: prefersReducedMotion ? 0 : (Math.random() - 0.5) * 0.012,
+    spiral: Math.random() < 0.6,
     glowOpacity: randomBetween(currentPalette.galaxyGlow[0], currentPalette.galaxyGlow[1]),
     coreOpacity: randomBetween(currentPalette.galaxyCore[0], currentPalette.galaxyCore[1]),
     ringOpacity: randomBetween(currentPalette.galaxyRing[0], currentPalette.galaxyRing[1]),
@@ -257,11 +283,18 @@ function createGalaxyObject() {
   }
 }
 
+// Every mode keeps its full star set; the surface area decides how many draw.
+function activeParticleCount() {
+  const scaled = Math.round(currentConfig.count * (w * h) / REFERENCE_AREA)
+  return Math.max(Math.round(currentConfig.count * MIN_DENSITY_SHARE), Math.min(currentConfig.count, scaled))
+}
+
 function rebuild() {
   particles = Array.from({ length: currentConfig.count }, () => createParticle())
   nebulae = Array.from({ length: currentConfig.nebulaCount }, createNebula)
   galaxyObjects = Array.from({ length: currentConfig.galaxyCount }, createGalaxyObject)
   shootingStars = []
+  paintBackdrop()
 }
 
 function syncVisualMode() {
@@ -280,93 +313,158 @@ function syncReducedMotionPreference() {
   prefersReducedMotion = !!motionMediaQuery?.matches
 }
 
-function resize() {
-  if (!canvas.value) return
+// Size events only measure and keep the CSS box exact; the pane canvas is also
+// clamped to its pane, so a size still in flight never widens the layout. The
+// backing store, backdrop and draw wait for one animation frame.
+function measure() {
   if (props.absolute && canvas.value.parentElement) {
-    w = canvas.value.parentElement.clientWidth
-    h = canvas.value.parentElement.scrollHeight || canvas.value.parentElement.clientHeight
+    pendingW = Math.max(1, canvas.value.parentElement.clientWidth)
+    pendingH = Math.max(1, canvas.value.parentElement.scrollHeight || canvas.value.parentElement.clientHeight)
   } else {
-    w = window.innerWidth
-    h = window.innerHeight
+    pendingW = Math.max(1, window.innerWidth)
+    pendingH = Math.max(1, window.innerHeight)
   }
-  const pixelRatio = window.devicePixelRatio || 1
-  canvas.value.width = Math.max(1, Math.floor(w * pixelRatio))
-  canvas.value.height = Math.max(1, Math.floor(h * pixelRatio))
-  canvas.value.style.width = `${w}px`
-  canvas.value.style.height = `${h}px`
-  if (ctx) {
-    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+  canvas.value.style.width = `${pendingW}px`
+  canvas.value.style.height = `${pendingH}px`
+  resizePending = true
+}
+
+// Applies a measured size to the main backing store. Returns the previous size
+// when anything changed, otherwise null.
+function applyCanvasSize() {
+  if (!resizePending || !canvas.value || !ctx) return null
+  resizePending = false
+  const ratio = Math.min(window.devicePixelRatio || 1, MAX_DPR,
+    Math.sqrt(MAX_PIXELS / (pendingW * pendingH)), MAX_SIDE / pendingW, MAX_SIDE / pendingH)
+  const width = Math.max(1, Math.floor(pendingW * ratio))
+  const height = Math.max(1, Math.floor(pendingH * ratio))
+  if (pendingW === w && pendingH === h && ratio === pixelRatio &&
+    canvas.value.width === width && canvas.value.height === height) return null
+  const previous = { w, h }
+  w = pendingW
+  h = pendingH
+  pixelRatio = ratio
+  canvas.value.width = width
+  canvas.value.height = height
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+  return previous
+}
+
+// A resize keeps every star, nebula and galaxy. Positions scale with the surface,
+// so the field stretches instead of reshuffling, and only the drawn share of the
+// star set follows the new area.
+function applyPendingResize() {
+  const previous = applyCanvasSize()
+  if (!previous) return false
+  const sx = w / previous.w
+  const sy = h / previous.h
+  for (const list of [particles, nebulae, galaxyObjects, shootingStars]) {
+    for (const item of list) {
+      item.x *= sx
+      item.y *= sy
+    }
   }
-  if (prefersReducedMotion && ctx) {
-    restartAnimation()
+  paintBackdrop()
+  return true
+}
+
+function scheduleResize() {
+  if (!canvas.value || !ctx) return
+  measure()
+  // Hidden tabs and particle-free themes apply the size when they draw again.
+  if (!pageVisible || getThemeParticleAlpha(currentTheme) === 0) return
+  // A running loop applies it on its next frame; otherwise one frame is queued.
+  if (animId !== null || resizeFrame !== null) return
+  resizeFrame = requestAnimationFrame(flushResize)
+}
+
+// The window resize event and the pane observer can both report one change; only
+// a size that differs from the last applied one draws again.
+function flushResize() {
+  resizeFrame = null
+  if (animId !== null || !applyPendingResize()) return
+  restartAnimation()
+}
+
+// Ambient layers are static depth, cached on resize/theme/mode changes. Each
+// frame blits one image rather than rebuilding large translucent gradients.
+function paintBackdrop() {
+  if (!backdropCtx || !canvas.value) return
+  backdrop.width = canvas.value.width
+  backdrop.height = canvas.value.height
+  const c = backdropCtx
+  c.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+  c.clearRect(0, 0, w, h)
+  for (const n of nebulae) {
+    c.save()
+    c.translate(n.x, n.y)
+    c.rotate(n.rotation)
+    c.scale(1, n.squash)
+    const grad = c.createRadialGradient(0, 0, 0, 0, 0, n.radius)
+    grad.addColorStop(0, `rgba(${n.color.join(',')}, ${n.opacity})`)
+    grad.addColorStop(0.4, `rgba(${n.color.join(',')}, ${n.opacity * 0.5})`)
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    c.fillStyle = grad
+    c.fillRect(-n.radius, -n.radius, n.radius * 2, n.radius * 2)
+    c.restore()
+  }
+  for (const galaxy of galaxyObjects) {
+    c.save()
+    c.translate(galaxy.x, galaxy.y)
+    c.rotate(galaxy.rotation)
+    c.scale(1, galaxy.squash)
+    const grad = c.createRadialGradient(0, 0, 0, 0, 0, galaxy.radius)
+    grad.addColorStop(0, `rgba(${currentPalette.headRgb.join(',')}, ${galaxy.coreOpacity})`)
+    grad.addColorStop(0.12, `rgba(${currentPalette.glowRgb.join(',')}, ${galaxy.glowOpacity})`)
+    grad.addColorStop(0.45, `rgba(${galaxy.color.join(',')}, ${galaxy.glowOpacity * 0.4})`)
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    c.fillStyle = grad
+    c.beginPath()
+    c.arc(0, 0, galaxy.radius, 0, Math.PI * 2)
+    c.fill()
+    // Sparse, faint spiral arms or an elliptical halo; no bright orbit rings.
+    if (galaxy.spiral) {
+      c.strokeStyle = `rgba(${galaxy.color.join(',')}, ${galaxy.ringOpacity * 0.35})`
+      c.lineWidth = 1
+      for (let arm = 0; arm < 2; arm++) {
+        c.beginPath()
+        for (let i = 0; i <= 24; i++) {
+          const t = i / 24
+          const angle = t * Math.PI * 1.6 + arm * Math.PI
+          const radius = galaxy.radius * (0.08 + t * 0.62)
+          const x = Math.cos(angle) * radius, y = Math.sin(angle) * radius
+          if (i === 0) c.moveTo(x, y)
+          else c.lineTo(x, y)
+        }
+        c.stroke()
+      }
+    }
+    c.restore()
   }
 }
 
-function animate(staticFrame = false) {
-  if (!ctx || !pageVisible) return
+function animate(timestamp = 0, staticFrame = false) {
+  animId = null
+  if (!ctx || !pageVisible || getThemeParticleAlpha(currentTheme) === 0) return
+  // A resized surface draws on this frame rather than waiting out the 30 Hz gate.
+  const resized = applyPendingResize()
+  if (!resized && !staticFrame && lastFrameTime !== null && timestamp - lastFrameTime < FRAME_INTERVAL) {
+    animId = requestAnimationFrame(animate)
+    return
+  }
+  // Capped elapsed time prevents a catch-up jump after a stalled/hidden tab.
+  const step = staticFrame || lastFrameTime === null ? 0 : Math.min(50, timestamp - lastFrameTime) / (1000 / 60)
+  lastFrameTime = timestamp
   ctx.clearRect(0, 0, w, h)
-
-  for (const n of nebulae) {
-    if (!staticFrame) {
-      n.x += n.drift
-    }
-    const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.radius)
-    grad.addColorStop(0, `rgba(${n.color[0]}, ${n.color[1]}, ${n.color[2]}, ${n.opacity})`)
-    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-    ctx.fillStyle = grad
-    ctx.fillRect(n.x - n.radius, n.y - n.radius, n.radius * 2, n.radius * 2)
-  }
-
-  for (const galaxy of galaxyObjects) {
-    if (!staticFrame) {
-      galaxy.x += galaxy.driftX
-      galaxy.y += galaxy.driftY
-    }
-
-    if (galaxy.x < -galaxy.radius) galaxy.x = w + galaxy.radius
-    if (galaxy.x > w + galaxy.radius) galaxy.x = -galaxy.radius
-    if (galaxy.y < -galaxy.radius) galaxy.y = h + galaxy.radius
-    if (galaxy.y > h + galaxy.radius) galaxy.y = -galaxy.radius
-
-    ctx.save()
-    ctx.translate(galaxy.x, galaxy.y)
-    ctx.rotate(galaxy.rotation)
-    ctx.scale(1, galaxy.squash)
-
-    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, galaxy.radius)
-    grad.addColorStop(0, `rgba(${currentPalette.glowRgb[0]}, ${currentPalette.glowRgb[1]}, ${currentPalette.glowRgb[2]}, ${galaxy.coreOpacity})`)
-    grad.addColorStop(0.35, `rgba(${galaxy.color[0]}, ${galaxy.color[1]}, ${galaxy.color[2]}, ${galaxy.glowOpacity})`)
-    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-    ctx.fillStyle = grad
-    ctx.beginPath()
-    ctx.arc(0, 0, galaxy.radius, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.fillStyle = `rgba(${currentPalette.headRgb[0]}, ${currentPalette.headRgb[1]}, ${currentPalette.headRgb[2]}, ${galaxy.coreOpacity * 0.95})`
-    ctx.beginPath()
-    ctx.arc(0, 0, galaxy.radius * 0.08, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.strokeStyle = `rgba(${currentPalette.starRgb[0]}, ${currentPalette.starRgb[1]}, ${currentPalette.starRgb[2]}, ${galaxy.ringOpacity})`
-    ctx.lineWidth = 0.75
-    ctx.beginPath()
-    ctx.ellipse(0, 0, galaxy.radius * 0.7, galaxy.radius * 0.2, 0, 0, Math.PI * 2)
-    ctx.stroke()
-
-    ctx.strokeStyle = `rgba(${currentPalette.glowRgb[0]}, ${currentPalette.glowRgb[1]}, ${currentPalette.glowRgb[2]}, ${galaxy.ringOpacity * 0.5})`
-    ctx.lineWidth = 0.5
-    ctx.beginPath()
-    ctx.ellipse(0, 0, galaxy.radius * 0.48, galaxy.radius * 0.14, 0, 0, Math.PI * 2)
-    ctx.stroke()
-
-    ctx.restore()
-  }
+  if (backdropCtx) ctx.drawImage(backdrop, 0, 0, w, h)
 
   // Stars
-  for (const p of particles) {
+  const activeCount = activeParticleCount()
+  for (let i = 0; i < activeCount; i++) {
+    const p = particles[i]
     if (!staticFrame) {
-      p.x += p.speedX
-      p.y += p.speedY
+      p.x += p.speedX * step
+      p.y += p.speedY * step
     }
 
     if (p.x < -5) p.x = w + 5
@@ -375,14 +473,14 @@ function animate(staticFrame = false) {
     if (p.y > h + 5) p.y = -5
 
     if (!staticFrame) {
-      p.twinklePhase += p.twinkleSpeed
+      p.twinklePhase += p.twinkleSpeed * step
     }
     const twinkle = staticFrame ? 1 : Math.sin(p.twinklePhase) * 0.3 + 0.7
     const alpha = p.opacity * twinkle
 
     ctx.beginPath()
     ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-    ctx.fillStyle = `rgba(${currentPalette.starRgb[0]}, ${currentPalette.starRgb[1]}, ${currentPalette.starRgb[2]}, ${alpha})`
+    ctx.fillStyle = `rgba(${p.color.join(',')}, ${alpha})`
     ctx.fill()
 
     if (p.isBright && alpha > 0.3) {
@@ -391,7 +489,7 @@ function animate(staticFrame = false) {
       ctx.fillStyle = `rgba(${currentPalette.glowRgb[0]}, ${currentPalette.glowRgb[1]}, ${currentPalette.glowRgb[2]}, ${alpha * currentPalette.starBloom})`
       ctx.fill()
 
-      if (p.size > 1.3 && twinkle > currentConfig.sparkleThreshold) {
+      if (p.sparkle && p.size > 1.3 && twinkle > currentConfig.sparkleThreshold) {
         ctx.strokeStyle = `rgba(${currentPalette.starRgb[0]}, ${currentPalette.starRgb[1]}, ${currentPalette.starRgb[2]}, ${alpha * 0.32})`
         ctx.lineWidth = 0.5
         const len = p.size * 4
@@ -405,16 +503,16 @@ function animate(staticFrame = false) {
     }
   }
 
-  if (!staticFrame && Math.random() < currentConfig.shootingChance && shootingStars.length < currentConfig.maxShootingStars) {
+  if (!staticFrame && Math.random() < 1 - (1 - currentConfig.shootingChance) ** step && shootingStars.length < currentConfig.maxShootingStars) {
     shootingStars.push(createShootingStar())
   }
 
   for (let i = shootingStars.length - 1; i >= 0; i--) {
     const s = shootingStars[i]
     if (!staticFrame) {
-      s.x += s.dx * s.speed
-      s.y += s.dy * s.speed
-      s.life++
+      s.x += s.dx * s.speed * step
+      s.y += s.dy * s.speed * step
+      s.life += step
     }
 
     const progress = s.life / s.maxLife
@@ -442,37 +540,53 @@ function animate(staticFrame = false) {
   }
 
   if (!staticFrame) {
-    animId = requestAnimationFrame(() => animate(false))
+    animId = requestAnimationFrame(animate)
   }
 }
 
 function restartAnimation() {
-  if (animId) {
+  if (animId !== null) {
     cancelAnimationFrame(animId)
     animId = null
   }
+  // The frame drawn below applies any pending size itself.
+  if (resizeFrame !== null) {
+    cancelAnimationFrame(resizeFrame)
+    resizeFrame = null
+  }
+  lastFrameTime = null
   if (!pageVisible) return
   if (getThemeParticleAlpha(currentTheme) === 0) return
-  animate(prefersReducedMotion)
+  animate(0, prefersReducedMotion)
 }
 
 function handleVisibilityChange() {
   pageVisible = typeof document === 'undefined' || !document.hidden
   if (!pageVisible) {
-    if (animId) {
+    if (animId !== null) {
       cancelAnimationFrame(animId)
       animId = null
+    }
+    // A size queued while visible waits too; it is applied when the tab returns.
+    if (resizeFrame !== null) {
+      cancelAnimationFrame(resizeFrame)
+      resizeFrame = null
     }
     return
   }
   restartAnimation()
 }
 
-watch(() => [props.dense, props.mode], () => {
+// Mode, theme and motion changes recreate the field, so a pending size is applied
+// first and the new field is built at the surface it will draw on.
+function rebuildField() {
   syncVisualMode()
+  applyCanvasSize()
   rebuild()
   restartAnimation()
-})
+}
+
+watch(() => [props.dense, props.mode], rebuildField)
 
 // The field re-skins itself on theme swaps; no prop threading needed.
 let unsubscribeTheme = null
@@ -480,31 +594,37 @@ let unsubscribeTheme = null
 onMounted(() => {
   if (!canvas.value) return
   ctx = canvas.value.getContext('2d')
+  if (!ctx) return
+  backdrop = document.createElement('canvas')
+  backdropCtx = backdrop.getContext('2d')
   pageVisible = typeof document === 'undefined' || !document.hidden
   motionMediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
   syncReducedMotionPreference()
   syncVisualMode()
-  resize()
+  measure()
+  applyCanvasSize()
   rebuild()
-  window.addEventListener('resize', resize)
+  window.addEventListener('resize', scheduleResize)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery.addEventListener('change', handleReducedMotionChange)
   if (props.absolute && canvas.value.parentElement && typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(() => resize())
+    resizeObserver = new ResizeObserver(() => scheduleResize())
     resizeObserver.observe(canvas.value.parentElement)
   }
-  unsubscribeTheme = onThemeChange(() => {
-    syncVisualMode()
-    rebuild()
-    restartAnimation()
-  })
+  unsubscribeTheme = onThemeChange(rebuildField)
   restartAnimation()
 })
 
 onUnmounted(() => {
   if (unsubscribeTheme) unsubscribeTheme()
-  if (animId) cancelAnimationFrame(animId)
-  window.removeEventListener('resize', resize)
+  if (animId !== null) cancelAnimationFrame(animId)
+  animId = null
+  if (resizeFrame !== null) cancelAnimationFrame(resizeFrame)
+  resizeFrame = null
+  backdrop = null
+  backdropCtx = null
+  ctx = null
+  window.removeEventListener('resize', scheduleResize)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery?.removeEventListener('change', handleReducedMotionChange)
   if (resizeObserver) resizeObserver.disconnect()
@@ -512,7 +632,6 @@ onUnmounted(() => {
 
 function handleReducedMotionChange() {
   syncReducedMotionPreference()
-  rebuild()
-  restartAnimation()
+  rebuildField()
 }
 </script>

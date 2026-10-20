@@ -105,6 +105,7 @@ TEST(ProcessMigrationTests, LaunchAsFixtureNormalizationAndWritesDeriveConsisten
 
 #ifdef __linux__
   #include <csignal>
+  #include <fcntl.h>
   #include <poll.h>
   #include <pthread.h>
   #include <sys/prctl.h>
@@ -201,6 +202,20 @@ namespace {
     }
 
     int fd = -1;
+  };
+
+  // A fixture descendant can leave its root's process group. Keep its exact
+  // pidfd alive until all assertions unwind, including a failed cleanup call.
+  struct linux_pidfd_child_guard_t: linux_fd_guard_t {
+    explicit linux_pidfd_child_guard_t(int descriptor): linux_fd_guard_t(descriptor) {}
+    linux_pidfd_child_guard_t(const linux_pidfd_child_guard_t &) = delete;
+    linux_pidfd_child_guard_t &operator=(const linux_pidfd_child_guard_t &) = delete;
+
+    ~linux_pidfd_child_guard_t() {
+      if (fd >= 0) {
+        (void) syscall(SYS_pidfd_send_signal, fd, SIGKILL, nullptr, 0);
+      }
+    }
   };
 
   bool wait_for_fd_event(int fd, short events, std::chrono::milliseconds timeout) {
@@ -516,7 +531,7 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   // else still needs the token to match when they supplied one.
   EXPECT_NE(
     collapse_whitespace(cancel_handler)
-      .find("request_session_shutdown( named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner )"),
+      .find("prepare_session_shutdown( named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner )"),
     std::string::npos
   );
   EXPECT_NE(
@@ -865,8 +880,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_EQ(rtsp_snapshot_body.find("break;"), std::string::npos);
   const auto rtsp_clear_body = function_source_between(
     rtsp_source,
-    "void clear(bool all = true)",
-    "/**\n     * @brief Removes the provided session"
+    "void clear(bool all = true,",
+    "void terminate_owned_host_sessions("
   );
   const auto clear_lock = rtsp_clear_body.find("_session_slots.lock()");
   const auto clear_unlock = rtsp_clear_body.find("}\n#ifdef POLARIS_TESTS", clear_lock);
@@ -910,8 +925,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   const auto rtsp_snapshot = stop_impl.find("rtsp_stream::session_snapshot(unique_id)", claim);
   const auto rtsp_terminate = stop_impl.find("rtsp_stream::terminate_sessions()");
   const auto process_terminate = stop_impl.find("terminate_impl(");
-  const auto stop_commit = stop_impl.find("stop_committed = true");
-  const auto release = stop_impl.rfind("finish_stop(stop_committed)");
+  const auto stop_commit = stop_impl.find("finish_stop(true, &owned.sync->native_end_ticket");
+  const auto release = stop_impl.find("owned.owns_gate = false", stop_commit);
   ASSERT_NE(claim, std::string::npos);
   ASSERT_NE(authorization, std::string::npos);
   EXPECT_LT(authorization, claim);
@@ -925,7 +940,11 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_LT(rtsp_terminate, process_terminate);
   EXPECT_LT(process_terminate, stop_commit);
   EXPECT_LT(stop_commit, release);
-  EXPECT_NE(stop_impl.find("bool stop_committed = false"), std::string::npos);
+  EXPECT_NE(stop_impl.find("owned.owns_gate = true"), std::string::npos);
+  const auto ticket_state = function_source_between(source,
+    "struct proc_t::session_shutdown_ticket_t::state_t", "proc_t::session_shutdown_ticket_t::session_shutdown_ticket_t(");
+  EXPECT_NE(ticket_state.find("bool owns_gate = false"), std::string::npos);
+  EXPECT_NE(ticket_state.find("bool consumed = false"), std::string::npos);
 
   const auto lifecycle_handoff = function_source_between(
     source,
@@ -934,7 +953,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   );
   EXPECT_NE(header.find("bool _launch_to_stop_handoff = false"), std::string::npos);
   EXPECT_NE(header.find("bool _last_stop_committed = false"), std::string::npos);
-  EXPECT_NE(header.find("void finish_stop(bool committed = true)"), std::string::npos);
+  EXPECT_NE(header.find("void finish_stop(bool committed = true,"), std::string::npos);
   EXPECT_NE(lifecycle_handoff.find("_launch_to_stop_handoff = true"), std::string::npos);
   EXPECT_NE(lifecycle_handoff.find("if (_last_stop_committed)"), std::string::npos);
   EXPECT_NE(lifecycle_handoff.find("_state = state_e::stopping"), std::string::npos);
@@ -948,7 +967,14 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
        }) {
     EXPECT_NE(body.find("_launch_to_stop_handoff"), std::string::npos);
   }
-  EXPECT_NE(stop_impl.find("[this, &stop_committed, &pending_cancel]"), std::string::npos);
+  const auto ticket_release = function_source_between(source,
+    "proc_t::session_shutdown_ticket_t::~session_shutdown_ticket_t()", "bool proc_t::session_shutdown_ticket_t::publish_native_end()");
+  const auto pending_release = ticket_release.find("_state->pending_cancel.reset()");
+  const auto gate_release = ticket_release.find("_state->gate->finish_stop(false, &_state->sync->native_end_ticket, _state.get())");
+  ASSERT_NE(pending_release, std::string::npos);
+  ASSERT_NE(gate_release, std::string::npos);
+  EXPECT_LT(pending_release, gate_release);
+  EXPECT_NE(ticket_release.find("if (_state->owns_gate)"), std::string::npos);
 
   const auto terminate_start = source.find("void proc_t::terminate_impl(");
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
@@ -1008,7 +1034,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   EXPECT_NE(
-    launch_handler.find("execute_and_raise(*app_iter, launch_session, [&]()"),
+    launch_handler.find("execute_and_raise(admitted_app, launch_session, [&]()"),
     std::string::npos
   );
   EXPECT_NE(
@@ -1235,7 +1261,7 @@ TEST(ProcessRuntimeConfigTests, RefreshPreservesLifecycleSynchronizationObjects)
   EXPECT_NE(refresh_body.find("proc.reload_configuration_from_file(file_name)"), std::string::npos);
   EXPECT_EQ(refresh_body.find("proc = std::move(*proc_opt)"), std::string::npos);
 
-  const auto terminate_start = source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh)");
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
   const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
   ASSERT_NE(terminate_start, std::string::npos);
   ASSERT_NE(terminate_end, std::string::npos);
@@ -2027,6 +2053,21 @@ TEST(ProcessRuntimeConfigTests, SteamPidfdCaptureRejectsStartTimeMismatch) {
   EXPECT_FALSE(proc::steam_pidfd_capture_identity_matches_for_tests(4242, std::nullopt));
 }
 
+TEST(ProcessRuntimeConfigTests, ProcGroupSessionParserAcceptsInitNamespaceIdentifiers) {
+  EXPECT_TRUE(proc::proc_group_session_from_stat_matches_for_tests("42 (wrapper) S 1 1 1", 1, 1));
+  EXPECT_TRUE(proc::proc_group_session_from_stat_matches_for_tests("42 (helper (worker)) S 1 42 1", 42, 1));
+  EXPECT_TRUE(proc::proc_group_session_from_stat_matches_for_tests("42 (private) S 1 42 42", 42, 42));
+  EXPECT_FALSE(proc::proc_group_session_from_stat_matches_for_tests("42 (wrapper) S 1 1 1", 42, 42));
+}
+
+TEST(ProcessRuntimeConfigTests, ProcGroupSessionParserRejectsUnavailableOrInvalidMembership) {
+  for (const auto stat : {"malformed", "42 (wrapper) S 1", "42 (wrapper) S 1 0 1",
+                          "42 (wrapper) S 1 1 0", "42 (wrapper) S 1 -1 1", "42 (wrapper) S 1 1 -1"}) {
+    SCOPED_TRACE(stat);
+    EXPECT_FALSE(proc::proc_group_session_from_stat_matches_for_tests(stat, 1, 1));
+  }
+}
+
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedAuthorityFailsClosedAndRetriesTransientEmptyEnviron) {
   test_log_capture_t log;
   int ready_pipe[2] {-1, -1};
@@ -2109,6 +2150,16 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedUnreadableLiveProcessFailsClose
   char ready = 0;
   ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
   close(ready_pipe[0]);
+  // Privileged runners may read even a nondumpable child's environment. Verify
+  // this kernel-permission fixture's precondition, rather than assuming EACCES.
+  const auto environ_path = "/proc/" + std::to_string(child) + "/environ";
+  const int environ_fd = open(environ_path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (environ_fd >= 0) {
+    close(environ_fd);
+    GTEST_SKIP() << "Fixture reader can access a nondumpable child's environ";
+  }
+  ASSERT_TRUE(errno == EACCES || errno == EPERM)
+    << "Fixture environment probe failed for a reason other than denied access";
   EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
   EXPECT_EQ(kill(child, 0), 0);
 }
@@ -2190,13 +2241,23 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsStrippedExactGener
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateGroupDescendant) {
   int ready_pipe[2] {-1, -1};
   ASSERT_EQ(pipe(ready_pipe), 0);
+  linux_fd_guard_t ready_read {ready_pipe[0]};
+  linux_fd_guard_t ready_write {ready_pipe[1]};
   setenv("POLARIS_SESSION_INSTANCE_ID", "gamescope-attached-test", 1);
   const pid_t root = fork();
   ASSERT_GE(root, 0);
   if (root == 0) {
-    close(ready_pipe[0]);
-    if (setsid() < 0 || dup2(ready_pipe[1], 3) < 0) _exit(124);
-    close(ready_pipe[1]);
+    close(ready_read.fd);
+    if (setsid() < 0) _exit(124);
+    if (ready_write.fd != 3) {
+      if (dup2(ready_write.fd, 3) < 0) _exit(124);
+      close(ready_write.fd);
+    }
+    // A failed fixture must not keep CTest's output pipes open through an
+    // escaped child. Readiness still travels through its private descriptor.
+    const int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd < 0 || dup2(null_fd, STDOUT_FILENO) < 0 || dup2(null_fd, STDERR_FILENO) < 0) _exit(125);
+    if (null_fd > 3) close(null_fd);
     const char *program =
       "import os,signal,time\n"
       "middle=os.fork()\n"
@@ -2206,6 +2267,7 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateG
       "  time.sleep(0.05)\n"
       "  os.setpgid(0,0)\n"
       "  os.write(3, str(os.getpid()).encode()+b'\\n')\n"
+      "  os.close(3)\n"
       "  os.environ.clear()\n"
       "  signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
       "  while True: time.sleep(1)\n"
@@ -2220,10 +2282,12 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateG
     );
     _exit(127);
   }
-  close(ready_pipe[1]);
+  linux_child_guard_t root_guard {root};
+  close(ready_write.fd);
+  ready_write.fd = -1;
+  ASSERT_TRUE(wait_for_fd_event(ready_read.fd, POLLIN, std::chrono::seconds(2)));
   char descendant_text[32] {};
-  ASSERT_GT(read(ready_pipe[0], descendant_text, sizeof(descendant_text) - 1), 0);
-  close(ready_pipe[0]);
+  ASSERT_GT(read(ready_read.fd, descendant_text, sizeof(descendant_text) - 1), 0);
   const pid_t descendant = static_cast<pid_t>(std::strtol(descendant_text, nullptr, 10));
   ASSERT_GT(descendant, 1);
   const int descendant_fd = static_cast<int>(syscall(SYS_pidfd_open, descendant, 0));
@@ -2233,13 +2297,13 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateG
     (void) kill(root, SIGKILL);
     FAIL() << "pidfd_open failed for descendant " << descendant << ": " << std::strerror(pidfd_error);
   }
-  linux_fd_guard_t descendant_pidfd {descendant_fd};
+  linux_pidfd_child_guard_t descendant_pidfd {descendant_fd};
   const bool terminated = proc::terminate_gamescope_attached_clients_for_tests("4242");
   if (!terminated) {
     (void) kill(-root, SIGKILL);
   }
   EXPECT_TRUE(terminated);
-  EXPECT_EQ(waitpid(root, nullptr, 0), root);
+  EXPECT_EQ(root_guard.wait(nullptr, 0), root);
   EXPECT_TRUE(wait_for_pidfd_exit(descendant_pidfd.fd, std::chrono::seconds(2)));
 }
 
@@ -3237,22 +3301,38 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationCleanupLeavesUnownedControlProces
     return;
   }
 
-  const auto owned_environ = "/proc/" + std::to_string(owned) + "/environ";
-  bool token_visible = false;
-  for (int i = 0; i < 40 && !token_visible; ++i) {
-    std::ifstream in(owned_environ, std::ios::binary);
-    const std::string environ((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    token_visible = environ.find("POLARIS_SESSION_INSTANCE_ID=" + token) != std::string::npos;
-    if (!token_visible) {
+  // Both children must finish exec before this ownership assertion. A control
+  // child with a transient zero-byte environ is deliberately ambiguous to the
+  // production sweep, even when the owned child's token is already readable.
+  const auto sleep_environ = [](pid_t pid) -> std::optional<std::string> {
+    const auto directory = "/proc/" + std::to_string(pid) + '/';
+    std::ifstream comm_file(directory + "comm");
+    std::string comm;
+    if (!std::getline(comm_file, comm) || comm != "sleep") {
+      return std::nullopt;
+    }
+    std::ifstream environ_file(directory + "environ", std::ios::binary);
+    std::string environ((std::istreambuf_iterator<char>(environ_file)), std::istreambuf_iterator<char>());
+    if (!environ_file.is_open() || environ.empty()) {
+      return std::nullopt;
+    }
+    return environ;
+  };
+  bool children_ready = false;
+  for (int i = 0; i < 40 && !children_ready; ++i) {
+    const auto owned_environment = sleep_environ(owned);
+    const auto control_environment = sleep_environ(control);
+    children_ready = owned_environment && control_environment &&
+                     owned_environment->find("POLARIS_SESSION_INSTANCE_ID=" + token + '\0') != std::string::npos &&
+                     control_environment->find("POLARIS_SESSION_INSTANCE_ID=") == std::string::npos;
+    if (!children_ready) {
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
   }
-  if (!token_visible) {
-    FAIL() << "exact generation token did not become visible in child environ";
-    return;
-  }
+  ASSERT_TRUE(children_ready) << "owned and control sleep children did not finish exec";
 
-  EXPECT_TRUE(proc::terminate_exact_generation_processes_for_tests(token));
+  // Unwind the child guards on refusal instead of blocking on sleep's 60s exit.
+  ASSERT_TRUE(proc::terminate_exact_generation_processes_for_tests(token));
 
   int owned_status = 0;
   EXPECT_EQ(owned_guard.wait(&owned_status, 0), owned);
@@ -4174,6 +4254,15 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationUnreadableEnvironFailsClosedAndLe
   ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
   close(ready_pipe[0]);
 
+  const auto environ_path = "/proc/" + std::to_string(child) + "/environ";
+  const int environ_fd = open(environ_path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (environ_fd >= 0) {
+    close(environ_fd);
+    GTEST_SKIP() << "Fixture reader can access a nondumpable child's environ";
+  }
+  ASSERT_TRUE(errno == EACCES || errno == EPERM)
+    << "Fixture environment probe failed for a reason other than denied access";
+
   EXPECT_FALSE(proc::terminate_exact_generation_processes_for_tests(token));
   EXPECT_TRUE(proc::exact_generation_unknown_ancestry_fails_closed_for_tests(token, child));
   int status = 0;
@@ -4744,6 +4833,30 @@ TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorIgnoresTransientShutdownClie
     "steam",
     "/usr/bin/steam",
     std::string("steam") + char(0) + "-shutdown"
+  ));
+}
+
+TEST(ProcessRuntimeConfigTests, DesktopSteamDetectorRecognizesPersistentSteamRT3LoggerClient) {
+  // Model the persistent SteamOS Desktop autostart client holding steam.pipe.
+  // Use a synthetic path with the recorded runtime flags and NUL boundaries.
+  constexpr char client_argv[] =
+    "/fixture/Steam/steamrt64/steam\0"
+    "-srt-logger-opened\0-steamdeck\0-pipewire\0-silent\0";
+  const std::string cmdline {client_argv, sizeof(client_argv) - 1};
+  const std::string running_status = "Name:\tsteam\nState:\tS (sleeping)\n";
+  const auto active = [&](std::string_view args, std::string_view status = {}, std::string_view environ = {}) {
+    return proc::desktop_steam_client_process_for_tests(
+      "steam", "/fixture/Steam/steamrt64/steam", args, status, environ
+    );
+  };
+  EXPECT_TRUE(active(cmdline, running_status));
+  EXPECT_FALSE(active(cmdline + "-shutdown" + char(0), running_status));
+  EXPECT_FALSE(active(cmdline + "-child-update-ui" + char(0), running_status));
+  EXPECT_FALSE(active(cmdline, "Name:\tsteam\nState:\tZ (zombie)\n"));
+  EXPECT_FALSE(active(cmdline, running_status, std::string("POLARIS_PRIVATE_SESSION=1") + char(0)));
+  EXPECT_TRUE(active(cmdline, running_status, std::string("POLARIS_PRIVATE_SESSION=0") + char(0)));
+  EXPECT_FALSE(proc::desktop_steam_client_process_for_tests(
+    "srt-logger", "/usr/bin/srt-logger", std::string("srt-logger") + char(0) + "-srt-logger-opened", running_status
   ));
 }
 
@@ -5365,12 +5478,18 @@ TEST(ProcessRuntimeConfigTests, NothingClosesTheSteamThatIsRunningGameMode) {
   EXPECT_FALSE(closed);
 
   const auto source = read_source_file_for_contract("src/process.cpp");
-  const auto shutdown = source.substr(source.find("bool request_desktop_steam_shutdown_for_private_stream()"));
+  const auto shutdown_start = source.find("bool request_desktop_steam_shutdown_for_private_stream()");
+  ASSERT_NE(shutdown_start, std::string::npos);
+  const auto shutdown_end = source.find("bool ensure_steam_client_quiescent_for_doctor()", shutdown_start);
+  ASSERT_NE(shutdown_end, std::string::npos);
+  const auto shutdown = source.substr(shutdown_start, shutdown_end - shutdown_start);
   const auto refusal = shutdown.find("if (platf::game_mode_host::session_live()) {");
-  const auto command = shutdown.find("canonical_steam_shutdown_command");
+  const auto command = shutdown.find("run_steam_remote_shutdown_without_launch(");
   ASSERT_NE(refusal, std::string::npos);
   ASSERT_NE(command, std::string::npos);
-  EXPECT_LT(refusal, command) << "the refusal comes before anything that could run steam -shutdown, for every caller";
+  EXPECT_LT(refusal, command) << "the Game Mode refusal comes before any shutdown dispatch, for every caller";
+  EXPECT_EQ(shutdown.find("canonical_steam_shutdown_command"), std::string::npos);
+  EXPECT_EQ(shutdown.find("platf::run_command"), std::string::npos);
 }
 
 TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) {
@@ -5503,18 +5622,33 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
     << "the host left Game Mode in between, so the title went with the session";
 
   const auto source = read_source_file_for_contract("src/process.cpp");
-  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto terminate_end = source.find("\n  bool proc_t::reload_configuration_from_file(", terminate_start);
+  ASSERT_NE(terminate_end, std::string::npos);
+  const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
+  const auto close_guard = terminate.find("if (should_close_game_mode_title(_game_mode_launched_appid, game_mode_live, session_ended_on_request)) {");
   const auto close_call = terminate.find("platf::steam_title::ask_to_close(_game_mode_launched_appid)");
   const auto forgotten = terminate.find("_game_mode_launched_appid.clear();");
+  ASSERT_NE(close_guard, std::string::npos);
   ASSERT_NE(close_call, std::string::npos);
   ASSERT_NE(forgotten, std::string::npos);
+  EXPECT_LT(close_guard, close_call);
   EXPECT_LT(close_call, forgotten) << "asked once, then forgotten, so a later stop cannot ask a title that a new launch did not open";
 
+  // Desktop Steam has its own title owner and close helper. Count the Game Mode
+  // target across the file, and all direct close calls inside this teardown.
   std::size_t callers = 0;
-  for (auto at = source.find("steam_title::ask_to_close("); at != std::string::npos; at = source.find("steam_title::ask_to_close(", at + 1)) {
+  for (auto at = source.find("steam_title::ask_to_close(_game_mode_launched_appid)"); at != std::string::npos;
+       at = source.find("steam_title::ask_to_close(_game_mode_launched_appid)", at + 1)) {
     ++callers;
   }
-  EXPECT_EQ(callers, 1u) << "the only thing that closes a title in Game Mode is End Session";
+  EXPECT_EQ(callers, 1u) << "the Game Mode title has exactly one close caller";
+  const auto first_close = terminate.find("platf::steam_title::ask_to_close(");
+  ASSERT_NE(first_close, std::string::npos);
+  EXPECT_EQ(first_close, close_call);
+  EXPECT_EQ(terminate.find("platf::steam_title::ask_to_close(", first_close + 1), std::string::npos)
+    << "only the guarded Game Mode title close is called directly by End Session";
 
   // What counts as ending on purpose: a stop through request_session_shutdown (End Session from a
   // client, the Polaris session stop, the console's Disconnect), the terminate app, and end_session
@@ -5536,12 +5670,17 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   EXPECT_LT(marked, stopped);
   // end_session() marks its stop only once that stop owns the gate: a request that loses the race
   // to another stop must neither mark it nor clear the mark that stop set.
-  const auto stop_body = source.substr(source.find("void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session) {"));
+  const auto stop_start = source.find("void proc_t::stop(");
+  ASSERT_NE(stop_start, std::string::npos);
+  const auto stop_end = source.find("\n  bool proc_t::terminate_if(", stop_start);
+  ASSERT_NE(stop_end, std::string::npos);
+  const auto stop_body = source.substr(stop_start, stop_end - stop_start);
   const auto gate = stop_body.find("_session_lifecycle_gate->begin_stop(");
   const auto lost = stop_body.find("return;", gate);
   const auto mark = stop_body.find("ending.emplace(session_lifecycle_sync().stop_ends_session);");
-  const auto teardown = stop_body.find("terminate_impl(immediate, needs_refresh);");
+  const auto teardown = stop_body.find("terminate_impl(immediate, needs_refresh, prepared_matches);");
   ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(lost, std::string::npos);
   ASSERT_NE(mark, std::string::npos);
   ASSERT_NE(teardown, std::string::npos);
   EXPECT_LT(lost, mark);
@@ -5552,7 +5691,14 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   EXPECT_EQ(timeout.find("stop_ends_session"), std::string::npos) << "the resume timeout is not someone ending the session";
   const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
   const auto close_app = confighttp.substr(confighttp.find("void closeApp(resp_https_t response, req_https_t request)"), 700);
-  EXPECT_NE(close_app.find("proc::proc.end_session();"), std::string::npos);
+  EXPECT_NE(close_app.find("proc::proc.end_session_and_retire_owned_media();"), std::string::npos);
+  const auto owned_end_start = source.find("void proc_t::end_session_and_retire_owned_media()");
+  ASSERT_NE(owned_end_start, std::string::npos);
+  const auto owned_end_stop = source.find("void proc_t::stop(", owned_end_start);
+  ASSERT_NE(owned_end_stop, std::string::npos);
+  const auto owned_console_end = source.substr(owned_end_start, owned_end_stop - owned_end_start);
+  EXPECT_NE(owned_console_end.find("stop(false, true, true, true);"), std::string::npos)
+    << "Console Close still marks its admitted stop as an intentional End";
   // The console's Disconnect force-stops when the owner's shutdown does not stop, and Browser
   // Stream's Stop ends the app it owns: both are someone ending the session on purpose.
   EXPECT_NE(confighttp.find("WebUI disconnect: force-stop after outcome="), std::string::npos);
@@ -5562,11 +5708,47 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   EXPECT_NE(browser_stop.find("proc::proc.end_session(false, false);"), std::string::npos);
 
   // And both reach proc::execute without nvhttp, so they bring the Game Mode hold in line first.
-  const auto console_launch = confighttp.substr(confighttp.find("nvhttp::reconcile_game_mode_host();"), 300);
-  EXPECT_NE(console_launch.find("nvhttp::make_launch_session(true, false, launch_args, &named_cert);"), std::string::npos);
+  // Judged inside each launch function's own body: an opted-in #204 launch reconciles once more
+  // earlier in the same function, so the reconcile that matters is the last one before the launch
+  // session is built, and it must be the statement right before it, ahead of the execute call.
+  const auto reconciled_before_launch = [](const std::string &file, const std::string &begin, const std::string &end,
+                                           const std::string &constructor, const std::string &execute) {
+    const auto start = file.find(begin);
+    ASSERT_NE(start, std::string::npos) << begin;
+    const auto stop = file.find(end, start);
+    ASSERT_NE(stop, std::string::npos) << end;
+    const auto body = file.substr(start, stop - start);
+    const auto built = body.find(constructor);
+    ASSERT_NE(built, std::string::npos) << constructor;
+    const auto reconciled = body.rfind("nvhttp::reconcile_game_mode_host();", built);
+    ASSERT_NE(reconciled, std::string::npos) << "no reconcile before " << constructor;
+    const auto statement_end = reconciled + std::string_view {"nvhttp::reconcile_game_mode_host();"}.size();
+    EXPECT_EQ(body.substr(statement_end, built - statement_end).find(';'), std::string::npos)
+      << "the reconcile is not the statement right before " << constructor;
+    const auto executed = body.find(execute, built);
+    ASSERT_NE(executed, std::string::npos) << execute;
+    EXPECT_LT(reconciled, built);
+    EXPECT_LT(built, executed);
+  };
+  reconciled_before_launch(
+    confighttp,
+    "void launchApp(resp_https_t response, req_https_t request) {",
+    "void disconnect(resp_https_t response, req_https_t request) {",
+    "auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);",
+    "proc::proc.execute"
+  );
   const auto browser = read_source_file_for_contract("src/browser_stream.cpp");
-  const auto browser_launch = browser.substr(browser.find("nvhttp::reconcile_game_mode_host();"), 200);
-  EXPECT_NE(browser_launch.find("browser_launch_session();"), std::string::npos);
+  // Browser Stream's create_session reaches the app through launch_isolated_app.
+  const auto create_session_begin = browser.find("nlohmann::json create_session(");
+  ASSERT_NE(create_session_begin, std::string::npos);
+  EXPECT_NE(browser.find("launch_isolated_app(*app, launch_error)", create_session_begin), std::string::npos);
+  reconciled_before_launch(
+    browser,
+    "bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {",
+    "bool helper_running_locked() {",
+    "auto launch_session = browser_launch_session();",
+    "proc::proc.execute"
+  );
 }
 
 TEST(ProcessRuntimeConfigTests, ASteamTitleIsOneDirectLaunchInGameMode) {
@@ -5621,7 +5803,9 @@ TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGame
 
   // A stream that started in Game Mode opened no Steam of its own, so its cleanup does not stop the
   // desktop Steam if the host has gone back to the desktop by the time the stream ends.
-  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto terminate = source.substr(terminate_start);
   EXPECT_NE(terminate.find("const bool steam_is_not_this_streams = game_mode_live || _session_started_in_game_mode;"), std::string::npos);
 
   const auto retry = source.substr(source.find("bool proc_t::retry_retained_steam_shutdown() {"));

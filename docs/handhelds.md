@@ -16,7 +16,7 @@ handheld edition, and any host that installs a gamescope Steam session next to i
 | Polaris staying reachable after switching to Game Mode | Works once Polaris starts at boot. See below. |
 | Streaming what Game Mode shows | Works, with keyboard, mouse, a controller and touch. See [Streaming from Game Mode](#streaming-from-game-mode). |
 | Launching a Steam title into Game Mode from a client | Works. The launch goes to the Steam that is running Game Mode. |
-| A Private Stream while Game Mode is running | Not possible. Game Mode owns the one screen and the one Steam. The configured mode comes back in Desktop Mode. |
+| A Private Stream while Game Mode is running | Not possible while Game Mode runs: it owns the one screen and the one Steam, and the configured mode comes back in Desktop Mode. From 1.5.0 an app can opt in to [leaving Game Mode before its launch](steamos.md#leave-game-mode-before-launch), not yet checked on a Deck. |
 
 ## Why Polaris disappears in Game Mode
 
@@ -44,6 +44,11 @@ systemctl --user enable --now polaris
 The first command enables lingering for your account and hooks the Polaris user service into
 `default.target`, so it starts at boot before any login. Run it from Desktop Mode's terminal or
 over SSH, as your normal user through sudo. `--disable-headless-boot` undoes the hook later.
+
+The headless-boot service skips the desktop tray so logging out cannot end the host through the
+tray's display connection. Control it from the web console. If Polaris was already running when
+you enabled headless boot, end any streams and run `systemctl --user restart polaris` once to apply
+that startup policy. Direct launches and desktop services without headless boot keep their tray setting.
 
 Verify after a reboot. Over SSH from another machine:
 

@@ -680,10 +680,44 @@ support bundles carry the same thing as `client_network_path`: `lan`, `cgnat` (t
 `public` or `loopback`. It stays after the stream ends, so a support bundle exported afterwards
 still has it, and it never records the address itself.
 
-A tailnet stream is fine while Tailscale connects the two machines directly. When it cannot, it
-relays the traffic through its DERP servers, and the stream stutters and its latency climbs. Run
-`tailscale ping` with the host's name on the client: `via DERP` in the answer means the stream is
-relayed, an address and port mean it is direct.
+The **Tailscale peer** readout checks the active client's address against the host's local
+Tailscale daemon. It distinguishes direct, DERP relay and peer relay when recent peer activity
+supports that answer. A missing or inaccessible daemon, stale activity or ambiguous match stays
+unknown. It does not verify the route taken by video and audio, and it never changes bitrate or
+grades a stream merely because the connection is relayed. Use measured latency and confirmed
+video frame loss to assess quality. The readout is included in redacted support exports without
+peer names, addresses or keys.
+
+Nova for Android's **Host connection** readout in Play Setup describes its paired HTTPS connection, which can differ from
+the media route. `GET /polaris/v1/network/connection` is advertised by
+`features.network_connection_v1`; this flag means the read-only route exists, not that Tailscale
+is installed or available. Confirmation requires the actual request's local address to belong
+to this host's tailnet node and its remote address to match one online peer. Request parameters
+cannot select a different peer. Shared CGNAT addresses, MagicDNS names and an installed VPN app
+alone are insufficient. Other hosts/platforms and Android split tunneling retain an unknown
+fallback. Existing access restrictions and encryption policies are unchanged.
+
+Both readouts ask the host's Tailscale daemon through its fixed local socket,
+`/var/run/tailscale/tailscaled.sock`, and stay **unknown** when that is not possible:
+
+- the daemon is stopped, logged out or still starting, or does not answer within about a second;
+- the daemon uses a different socket path (a custom `--socket`, a userspace or containerized
+  daemon), or Polaris runs sandboxed without access to that socket;
+- the daemon's status is larger than 512 KiB, which a tailnet of several hundred devices can reach;
+- many readouts are already waiting for the daemon at once.
+
+Reading the daemon never holds Polaris's other requests: a slow daemon delays only these readouts,
+and several readouts at once share one read instead of one of them reporting it unavailable.
+Nothing read from the daemon is kept after the answer.
+
+The Doctor's **Tailscale peer** readout is an administrator view of the current stream's peer
+(`/api/network/connection`, scope `peer_status`). It is not the paired route Nova uses and does not
+describe a TLS connection; when the stream ends or changes while the daemon is being read, it says
+so (`stream_changed`) rather than describing a stream that is no longer current.
+
+You can also run `tailscale ping` with the host's name on the client. The answer distinguishes
+direct, DERP and peer-relay connections. Tailscale may upgrade a relay to a direct connection
+after negotiation, so one startup answer is not a permanent description of the stream.
 
 ## A launch was refused
 
@@ -738,14 +772,19 @@ for a host stuck restoring a changed display configuration.
 The self tests on the Doctor & Support page answer three player questions without opening the raw
 evidence.
 
-- **Network Path Tester** reads the live round trip and packet loss for the current client, checks
-  whether the control and stream ports answer, and suggests a bitrate ceiling the measured path can
-  carry. Open **Advanced evidence** for the per-check detail and the native probe output.
+- **Network Path Tester** checks local listeners and records native UDP reachability hints, even
+  when no stream is active. It does not measure the client's media path or recommend a bitrate
+  ceiling. Open **Advanced evidence** for per-check detail and ungraded native probe samples.
 - **Controller/Input Tester** shows whether the browser or the host sees a controller. **Detect
   controller** samples the browser gamepad API, **Log A press** records a manual button sample, and
   **Test rumble** pulses haptics when the browser exposes them.
-- **Post-session Stream Report** summarises the last completed stream: the loudest signal, who owned
-  the issue, and the launch profile to try next.
+- **Post-session Stream Report** summarises a completed stream observed by this page. Quality is
+  historical, with availability recorded when the sample was captured, so it does not expire just
+  because you read the report later. Idle defaults, disconnected cached telemetry and simultaneous
+  clients do not establish a completed quality sample or assign client blame. Reopening the page
+  without observed telemetry can still show the host's retained capture facts; media quality stays
+  unavailable. Capture preference, requested route, initialization and delivered-frame metadata are
+  separate, as are a mode override and an actual fallback. Initialization alone proves no delivery.
 
 **Copy self-test summary** puts all three results on the clipboard in the same form the support
 bundle uses.

@@ -268,6 +268,20 @@ for package in ("shaderc", "vulkan-headers"):
 require_package(shell_array(arch, "depends"), "libei", "Arch runtime dependencies")
 steamos = read("packaging/linux/SteamOS/PKGBUILD")
 require_package(shell_array(steamos, "depends"), "libei", "SteamOS runtime dependencies")
+# boost-libs alone let the SteamOS 3.8 package install on SteamOS 3.9, whose Boost it cannot load.
+# Each soname entry becomes an exact dependency on the Boost this build linked.
+for boost_library in (
+    "libboost_filesystem.so",
+    "libboost_locale.so",
+    "libboost_log.so",
+    "libboost_program_options.so",
+    "libboost_thread.so",
+):
+    require_package(
+        shell_array(steamos, "depends"),
+        boost_library,
+        "SteamOS versioned Boost runtime dependencies",
+    )
 
 fedora = read("packaging/linux/fedora/Polaris.spec")
 for package in ("glslc", "libei-devel", "pipewire-devel", "vulkan-loader-devel"):
@@ -426,6 +440,7 @@ for job_name in (
     "arch-build",
     "fedora-clang-build",
     "steamos-build",
+    "steamos-3-9-build",
     "ubuntu-build",
     "fedora-rpm-build",
     "release-assets",
@@ -809,17 +824,22 @@ for exact_verify_tokens in (
 # Then the two debug packages, for the two formats built from source here. A crash is read with
 # coredumpctl debug against symbols from the same release, so publishing without them leaves the
 # documented debugging path pointing at nothing, and it fails silently: the release looks complete.
+#
+# SteamOS has one package per supported release, because each links its own release's Boost.
 expected_required_binaries = [
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-steamos3.8-x86_64.pkg.tar.zst",
+    "Polaris-steamos3.9-x86_64.pkg.tar.zst",
     "Polaris-ubuntu24.04-x86_64.deb",
     "Polaris-kms-arch-x86_64.pkg.tar.zst",
     "Polaris-kms-fedora44-x86_64.rpm",
     "Polaris-kms-steamos3.8-x86_64.pkg.tar.zst",
+    "Polaris-kms-steamos3.9-x86_64.pkg.tar.zst",
     "Polaris-kms-ubuntu24.04-x86_64.deb",
     "Polaris-debug-arch-x86_64.pkg.tar.zst",
     "Polaris-debug-steamos3.8-x86_64.pkg.tar.zst",
+    "Polaris-debug-steamos3.9-x86_64.pkg.tar.zst",
 ]
 if executable_array(release_verify_tokens, "required_binary_assets") != expected_required_binaries:
     raise AssertionError(
@@ -920,6 +940,9 @@ optional_native_job_needs = {
     "steamos-build": (
         "needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]"
     ),
+    "steamos-3-9-build": (
+        "needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]"
+    ),
     "ubuntu-build": (
         "needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]"
     ),
@@ -994,6 +1017,42 @@ for job_name, job in (("Arch", arch_job), ("Ubuntu DEB", ubuntu_job), ("Fedora R
 steamos_package_script = read("scripts/ci/build-steamos-package.sh")
 if steamos_package_script.count("NEEDED +libei[.]so[.]1") != 1:
     raise AssertionError("SteamOS packaging must check that the packaged binary links libei")
+for boost_contract in (
+    """awk '$1 == "NEEDED" && $2 ~ /^libboost_/ { print $2 }' "$RECEIPT_PREFIX-binary-needed.txt" \\\n""",
+    'dependency="${soname%%.so.*}.so"\n',
+    'boost_version="${soname#*.so.}"\n',
+    'if ! grep -Fqx "depend = ${dependency}=${boost_version}-64" "$RECEIPT_ROOT/.PKGINFO"; then\n',
+    'done < "$RECEIPT_PREFIX-boost-sonames.txt"\n',
+):
+    if steamos_package_script.count(boost_contract) != 1:
+        raise AssertionError(
+            "SteamOS packaging must bind every Boost NEEDED entry to an exact soname dependency"
+        )
+# One job per SteamOS release, each with a literal name: a skipped matrix job would report its check
+# unexpanded and leave the required "SteamOS 3.8 build" check unreported.
+for steamos_job_name, steamos_release in (("steamos-build", "3.8"), ("steamos-3-9-build", "3.9")):
+    steamos_job = workflow_job(workflow, steamos_job_name)
+    if "${{ matrix" in steamos_job or "\n    strategy:" in steamos_job:
+        raise AssertionError(f"{steamos_job_name} must not be a matrix job")
+    for release_contract in (
+        f"    name: SteamOS {steamos_release} build\n",
+        f"          POLARIS_STEAMOS_TARGET: '{steamos_release}'\n",
+        '            --env "POLARIS_STEAMOS_TARGET=$POLARIS_STEAMOS_TARGET" \\\n',
+        f"          name: Polaris-steamos{steamos_release}-package\n",
+        f"            ${{{{ runner.temp }}}}/polaris-steamos-output/Polaris-steamos{steamos_release}-x86_64.pkg.tar.zst\n",
+    ):
+        if steamos_job.count(release_contract) != 1:
+            raise AssertionError(f"the SteamOS {steamos_release} build is missing: {release_contract.strip()}")
+if release_job.count("      - steamos-3-9-build\n") != 1:
+    raise AssertionError("release publication must wait for the SteamOS 3.9 build")
+for steamos_release in ("3.8", "3.9"):
+    download = workflow_step(release_job, f"Download SteamOS {steamos_release} package")
+    for download_contract in (
+        f"          name: Polaris-steamos{steamos_release}-package\n",
+        f"          path: release-assets/raw/steamos{steamos_release}\n",
+    ):
+        if download.count(download_contract) != 1:
+            raise AssertionError(f"release assembly must download the SteamOS {steamos_release} package")
 steamos_pacstrap = re.search(r"(?m)^pacstrap (?:.*\\\n)*.*$", read("scripts/ci/run-steamos-build.sh"))
 if not steamos_pacstrap or "libei" not in steamos_pacstrap.group(0).replace("\\\n", " ").split():
     raise AssertionError("SteamOS build root must install libei")
@@ -1111,7 +1170,7 @@ for context, script, blocks in (
 
 steamos_build_script = read("scripts/ci/build-steamos-package.sh")
 for block in (
-    'EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"\n'
+    'EXPECTED_PKGVER="1.5.0${POLARIS_PRERELEASE_LABEL}-1"\n'
     'if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then\n'
     "  printf 'unexpected SteamOS package identity: %s\\n' \"$PACKAGE_IDENTITY\" >&2\n"
     '  exit 1\n'
@@ -1136,14 +1195,14 @@ for block in (
 require_block(
     read("scripts/ci/run-steamos-build.sh"),
     'chroot "$STEAMOS_ROOT" /usr/bin/polaris --version \\\n'
-    '  > /output/steamos3.8-installed-version.txt\n'
+    '  > "$STEAMOS_RECEIPT_PREFIX-installed-version.txt"\n'
     '# The binary reports the release number, and a prerelease\'s label the way the host spells it,\n'
     '# X.Y.Z-beta.N. The package version alone cannot show that the build itself had the label.\n'
     'EXPECTED_RUNTIME_VERSION="$(grep -Pom1 \'^project\\(Polaris VERSION \\K[^ ]+\' /workspace/CMakeLists.txt)"\n'
     'if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then\n'
     '  EXPECTED_RUNTIME_VERSION="$EXPECTED_RUNTIME_VERSION-$POLARIS_PRERELEASE_LABEL"\n'
     'fi\n'
-    'if ! grep -Fq "Polaris version: $EXPECTED_RUNTIME_VERSION commit:" /output/steamos3.8-installed-version.txt; then\n'
+    'if ! grep -Fq "Polaris version: $EXPECTED_RUNTIME_VERSION commit:" "$STEAMOS_RECEIPT_PREFIX-installed-version.txt"; then\n'
     "  printf 'installed SteamOS binary reports a version other than %s\\n' \"$EXPECTED_RUNTIME_VERSION\" >&2\n"
     '  exit 1\n'
     'fi\n',

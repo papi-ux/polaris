@@ -1,6 +1,13 @@
-// Polaris Theme System. Five skins matching the Nova client's theme catalog
-// (labels, ordering, and palettes from Nova's colors_nova.xml / arrays.xml);
-// Nova's Material You is Android-only and has no web analogue.
+// Polaris Theme System. Six skins matching the Nova client's theme catalog
+// (ids, ordering, and most labels and palettes from Nova's colors_nova.xml /
+// arrays.xml); Nova's Material You is Android-only and has no web analogue.
+// Director is named for Control's "< Congratulations, Director >" and runs charcoal: near-black
+// grounds, warm-white copy, red as a signal. Nova's Director matches it from Nova #311.
+//
+// Inside Nova's Host Console, the theme Nova asked for is shown for the visit (client-embed.js)
+// without touching the saved choice; a theme picked in the console still saves as usual.
+
+import { embeddedTheme, forgetEmbeddedTheme } from './client-embed.js'
 
 const STORAGE_KEY = 'polaris-theme'
 
@@ -37,6 +44,13 @@ export const THEMES = [
     preview: { window: '#130817', card: '#241429', accent: '#ff5cab' },
   },
   {
+    id: 'director',
+    label: '< Congratulations, Director >',
+    shortLabel: '< Congratulations, Director >',
+    subtitle: 'Charcoal stage · warm white copy · red signals',
+    preview: { window: '#0b0a0a', card: '#191716', accent: '#f04e4b' },
+  },
+  {
     id: 'high-contrast',
     label: 'High Contrast',
     shortLabel: 'Contrast',
@@ -55,6 +69,8 @@ function currentAppliedTheme() {
 }
 
 export function getTheme() {
+  const visitTheme = embeddedTheme()
+  if (THEME_IDS.includes(visitTheme)) return visitTheme
   const storedTheme = localStorage.getItem(STORAGE_KEY)
   return THEME_IDS.includes(storedTheme) ? storedTheme : DEFAULT_THEME
 }
@@ -66,6 +82,7 @@ export function getThemeMeta(theme) {
 export function setTheme(theme) {
   if (!THEME_IDS.includes(theme)) return
   localStorage.setItem(STORAGE_KEY, theme)
+  forgetEmbeddedTheme()
   applyTheme(theme)
 }
 

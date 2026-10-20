@@ -21,7 +21,9 @@ export function summarizeDashboardSpaces(state, { loaded = false, error = false,
   const jobFailed = state.runtime_move_job?.state === 'failed'
   const attention = stale || (enabled && (state.failed || !state.available || mismatch > 0 || unsupported > 0 || jobFailed))
   return {
-    visible: Boolean(enabled || stale), enabled, stale, loaded, activityKnown,
+    // Mission Control shows Spaces only when there is something to act on: a session, a change
+    // in progress, or a problem. A healthy idle Spaces stays on its own page.
+    visible: sessions.length > 0 || attention || Boolean(enabled && state.changing), enabled, stale, loaded, activityKnown,
     hasActivity: sessions.length > 0, total: sessions.length, sessions: sessions.slice(0, 100),
     remaining: Math.max(0, sessions.length - 100), attention, mismatch, unsupported, jobFailed,
     changing: Boolean(state.changing), failed: Boolean(state.failed), available: Boolean(state.available),

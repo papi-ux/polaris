@@ -1,8 +1,10 @@
 <template>
   <Teleport to="body">
+    <!-- The overlay scrolls, and the dialog is centred only while it fits, so a short landscape
+         screen or enlarged text never pushes Cancel or Confirm past the screen edge. -->
     <div
       v-if="modelValue"
-      class="fixed inset-0 z-[80] flex items-center justify-center bg-void/80 px-4 py-6 backdrop-blur-sm"
+      class="fixed inset-0 z-[80] flex items-start justify-center overflow-y-auto overscroll-contain bg-void/80 px-4 py-6 backdrop-blur-sm"
       @click.self="requestCancel"
     >
       <section
@@ -12,7 +14,7 @@
         :aria-labelledby="titleId"
         :aria-describedby="descriptionId"
         tabindex="-1"
-        class="w-full max-w-lg rounded-2xl border border-storm/30 bg-deep p-5 text-silver shadow-2xl"
+        class="my-auto w-full max-w-lg rounded-2xl border border-storm/30 bg-deep p-5 text-silver shadow-2xl"
         @keydown="handleKeydown"
       >
         <div class="flex items-start justify-between gap-4">

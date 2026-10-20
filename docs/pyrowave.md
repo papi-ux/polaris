@@ -1,7 +1,7 @@
 # PyroWave
 
 PyroWave is an experimental video codec for a wired gigabit local network, and of the published
-clients the Nova for Android beta can play it; the standard Nova Linux 1.4.14 beta also includes
+clients the Nova for Android beta can play it; the standard Nova Linux 1.5.0 beta also includes
 the decoder, subject to its device check. Nova is the client built alongside Polaris.
 Moonlight cannot play it on any platform, and no iPhone, iPad, Mac or Windows client can: if you
 stream from one of those, nothing changes and there is nothing to turn on. Every frame is a key
@@ -14,13 +14,13 @@ It suits you if fast decoding, or sharp text on a streamed desktop (Nova for And
 4:4:4), matters more to you than bandwidth. It does not work in a [Space](spaces.md), which exists
 only if you set one up. You will need:
 
-- **The Polaris 1.4.13 release on a Linux host**, not a Polaris beta, which reports the same
-  version. If you install from the package repositories and never installed a beta by hand, you
+- **The Polaris 1.4.13 release or the 1.5.0 beta on a Linux host**, not a 1.4.13 beta, which
+  reports the same version as the release. If you install from the package repositories and never installed a beta by hand, you
   have the release ([otherwise, check](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)).
 - **Nova for Android 1.4.13-beta.3 or newer on the phone or handheld**, a beta that installs beside
   stable Nova ([below](#nova-for-android)). So: the Polaris release on the host, a Nova beta on
   the client.
-- **Or, on Linux or a Steam Deck, the standard Nova Linux 1.4.14 beta**, which includes PyroWave
+- **Or, on Linux or a Steam Deck, the standard Nova Linux 1.5.0 beta**, which includes PyroWave
   and checks the device before launch. The separate 1.4.13 PyroWave Alpha is an older package
   ([version-specific steps](pyrowave-reference.md#nova-for-linux)). Vulkan version alone is not
   proof that a device can decode a chosen stream size.
@@ -77,7 +77,7 @@ reaches the host, the adapter is carrying the stream.
 You choose PyroWave in the beta, not on the host: the Polaris web console has no PyroWave setting.
 Nova for Linux has [its own steps](pyrowave-reference.md#turn-it-on-in-nova-for-linux).
 
-These steps describe Nova for Android 1.4.13-beta.3. In Nova's 1.4.14 beta, prefer the
+These steps describe Nova for Android 1.4.13-beta.3. In Nova's 1.5.0 beta, prefer the
 host's recommendation for the selected size, frame rate and colour format; see the current
 [bitrate advice](pyrowave-reference.md#bitrate-advice). The older flat figures below do not
 include the new calibrated advice.
@@ -115,12 +115,12 @@ host memory; either works ([what each frame costs](pyrowave-reference.md#what-ea
 On Polaris 1.4.13, its "CPU color conversion" label shows for every PyroWave stream; ignore it.
 Newer builds say where the encoder converted colour.
 
-**Bitrate.** Plan the link for the full bitrate you set. Polaris 1.4.14 and newer quote PyroWave's
+**Bitrate.** Plan the link for the full bitrate you set. Polaris 1.5.0 and newer quote PyroWave's
 own figure, from its author's quality model, with the target for a phone's or handheld's own screen
 set by a check on a Retroid Pocket 6. On such a screen, set about 101 Mbps for 1920x1080 at 60 fps
 in 4:2:0, 109 Mbps in 4:4:4, which Nova for Android streams, and 215 Mbps at 120 fps in 4:4:4, at
 the host's default 10% FEC with stereo audio. The exact 1080p120 4:4:4 request is 214.898 Mbps,
-which leaves 192.396 Mbps for video; Nova's 1.4.14 beta reads the host advice first and uses the
+which leaves 192.396 Mbps for video; Nova's 1.5.0 beta reads the host advice first and uses the
 same 31 dB model when it needs a fallback. Auto and Use recommended stay at or below 300 Mbps.
 A number entered by hand can reach 500 Mbps only when the host advertises that limit; older
 hosts without it keep 300 Mbps
@@ -137,7 +137,7 @@ stream above your setting only to its 2 Mbps floor, and stops cutting at half th
 |---|---|---|
 | No PyroWave in the codec list. | You opened stable Nova, or an older Nova beta. | Open the beta app, 1.4.13-beta.3 or newer ([Nova for Android](#nova-for-android)). |
 | No codec choice in Play Setup. | Nova for Android 1.4.13-beta.3's Play Setup has none. | Use **Settings > Client Stream Defaults > Change codec settings**. |
-| Nova for Linux: no PyroWave in **Video Codec**, or Play Setup says it cannot start. | The standard 1.4.14 beta includes the decoder; older 1.4.13 packages differ. The device may still lack the required profile or decoder features. | Check your package version and [Play Setup's message](pyrowave-reference.md#turn-it-on-in-nova-for-linux); the [1.4.13 instructions](pyrowave-reference.md#nova-for-linux) describe the separate historical Alpha. |
+| Nova for Linux: no PyroWave in **Video Codec**, or Play Setup says it cannot start. | The standard 1.5.0 beta includes the decoder; older 1.4.13 packages differ. The device may still lack the required profile or decoder features. | Check your package version and [Play Setup's message](pyrowave-reference.md#turn-it-on-in-nova-for-linux); the [1.4.13 instructions](pyrowave-reference.md#nova-for-linux) describe the separate historical Alpha. |
 | Nova says "This host does not offer the PyroWave profile this build of Nova can decode." | The host runs Polaris older than 1.4.13, 1.4.13-beta.1 or a build without the encoder, or its GPU lacks what the encoder needs. Or the stream is a Space. | Install the release ([over a beta](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)), then [check the host's GPU](pyrowave-reference.md#check-the-hosts-gpu). For a Space, choose another codec. |
 | Nova says "Failed to start video stream establishment (error -2)" or "Video decoder failed to initialize...". | The phone's decoder could not start at this size, or the phone cannot decode PyroWave. | Lower the resolution; otherwise choose another codec ([the phone's GPU](pyrowave-reference.md#the-phones-gpu)). |
 | No picture ever, and `systemctl --user status polaris` on the host shows Polaris failed or restarted. | A Polaris 1.4.13-beta.2 or beta.3 package, whose Vulkan video encoder crashes as a stream starts. | [Reinstall the release](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta). |

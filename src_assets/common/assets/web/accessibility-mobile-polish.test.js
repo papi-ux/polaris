@@ -90,13 +90,44 @@ describe('cross-cutting accessibility and mobile polish', () => {
     expect(css).toContain('top: auto')
   })
 
-  it('keeps compact actions and state labels readable instead of wrapping them into tall pills', () => {
+  it('keeps compact state labels readable while Doctor actions can wrap within their cards', () => {
     const css = webSource('app.css')
     const audioVideo = webSource('configs/tabs/AudioVideo.vue')
 
     expect(css).toMatch(/\.system-footer-link\s*\{[^}]*gap:\s*0\.375rem[^}]*white-space:\s*nowrap/s)
-    expect(css).toMatch(/\.troubleshooting-action-button\s*\{[^}]*whitespace-nowrap/s)
+    // Long translated or enlarged Doctor actions must stay inside their card.
+    // The browser regressions check both font preferences and CSS-root scaling.
+    expect(css).toMatch(/\.troubleshooting-action-button\s*\{[^}]*min-h-9 max-w-full[^}]*whitespace-normal/s)
     expect(audioVideo).toContain('class="shrink-0 whitespace-nowrap rounded-full')
+  })
+
+  it('wraps Doctor controls and shared subtle cards at whole words, dropping controls below headings', () => {
+    const css = webSource('app.css')
+    const doctor = webSource('views/TroubleshootingView.vue')
+    const rule = selector => css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`))?.[1] ?? ''
+
+    // break-word only splits a token wider than its box; anywhere also shrinks the
+    // min-content width, which let flex rows squeeze words into single syllables.
+    for (const selector of ['.surface-subtle', '.troubleshooting-action-button', '[data-session-snapshot] .meta-pill', '.troubleshooting-page-header .meta-pill']) {
+      expect(rule(selector), selector).toMatch(/overflow-wrap:\s*break-word/)
+      expect(rule(selector), selector).not.toContain('anywhere')
+    }
+    expect(rule('[data-session-snapshot] .meta-pill')).toMatch(/line-height:\s*1\.25[\s\S]*border-radius:\s*1rem/)
+    // Rows only wrap where they run horizontally; the copy keeps a readable floor
+    // and the controls move to their own line instead of narrowing it.
+    expect(css).toMatch(/@media \(min-width: 64rem\)\s*\{\s*\.troubleshooting-action-row\s*\{\s*flex-wrap:\s*wrap;\s*\}\s*\.troubleshooting-action-row > :first-child\s*\{\s*flex:\s*1 1 24rem;\s*min-width:\s*0;/)
+    expect(css).toMatch(/@media \(min-width: 80rem\)\s*\{\s*\.troubleshooting-page-header\s*\{\s*flex-wrap:\s*wrap;\s*\}\s*\.troubleshooting-page-header > \.page-heading\s*\{\s*flex:\s*1 1 24rem;/)
+    expect(doctor.match(/class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"/g)).toHaveLength(5)
+    expect(doctor).toContain('<section class="page-header troubleshooting-page-header">')
+    // Card titles and their status badges share a row until enlarged text needs
+    // both lines; then the badge drops below instead of pushing out of the card.
+    expect(doctor.match(/<div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">/g)).toHaveLength(10)
+    expect(doctor).not.toContain('<div class="flex items-center justify-between gap-3">')
+    expect(rule('.troubleshooting-card-header > *')).toMatch(/max-width:\s*100%/)
+    // Self-test columns are sized in text units: three at desktop sizes, one when
+    // enlarged text would leave three slivers.
+    expect(doctor).toContain('<div class="troubleshooting-card-grid grid gap-3">')
+    expect(css).toMatch(/@media \(min-width: 80rem\)\s*\{\s*\.troubleshooting-card-grid\s*\{\s*grid-template-columns:\s*repeat\(auto-fit, minmax\(min\(100%, max\(16rem, 30%\)\), 1fr\)\);/)
   })
 
   it('lays out pairing context as separate readable groups and stacks them on phones', () => {

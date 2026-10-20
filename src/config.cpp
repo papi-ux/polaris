@@ -777,6 +777,7 @@ namespace config {
     {},  // server commands
     false,  // benchmark_mode_enabled
     false,  // host_sleep_enabled
+    false,  // keep_desktop_steam_running
   };
 
   recording_t recording {
@@ -1070,6 +1071,14 @@ namespace config {
     }
 
     return std::nullopt;
+  }
+
+  bool source_pacing_setting(std::unordered_map<std::string, std::string> &vars) {
+    const auto option = vars.find("vrr_source_pacing");
+    if (option == vars.end()) return false;
+    const auto enabled = parse_bool(option->second).value_or(false);
+    vars.erase(option);
+    return enabled;
   }
 
   bool to_bool(std::string &boolean) {
@@ -1469,6 +1478,7 @@ namespace config {
     }
 
     bool_f(vars, "limit_framerate", video.limit_framerate);
+    video.vrr_source_pacing = source_pacing_setting(vars);
     bool_f(vars, "double_refreshrate", video.double_refreshrate);
     int_f(vars, "qp", video.qp);
     int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});
@@ -1743,6 +1753,7 @@ namespace config {
     bool_f(vars, "legacy_ordering", sunshine.legacy_ordering);
     bool_f(vars, "benchmark_mode_enabled", sunshine.benchmark_mode_enabled);
     bool_f(vars, "host_sleep_enabled", sunshine.host_sleep_enabled);
+    bool_f(vars, "keep_desktop_steam_running", sunshine.keep_desktop_steam_running);
     bool_f(vars, "forward_rumble", input.forward_rumble);
 
     int port = sunshine.port;

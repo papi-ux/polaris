@@ -48,6 +48,7 @@ extern "C" {
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
 #include "stream_stats.h"
+#include "vrr_rtp_timestamp.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -615,6 +616,9 @@ namespace stream {
     std::string display_mode_applied;
     bool display_mode_pinned_by_host = false;
     crypto::PERM permission;
+    // This generation's variable-refresh request, copied from its admission in alloc() and never
+    // changed afterwards. An input to reporting only; nothing here changes how frames are paced.
+    vrr_policy::record_t vrr;
 
     std::list<crypto::command_entry_t> do_cmds;
     std::list<crypto::command_entry_t> undo_cmds;
@@ -1875,18 +1879,33 @@ namespace stream {
       }
       auto session = static_cast<session_t *>(delivery.get());
       auto lowseq = session->video.lowseq;
+      std::optional<std::uint32_t> source_rtp_timestamp;
+      if (packet->source_clock_timestamp) {
+        if (!packet->frame_timestamp) continue;
+        source_rtp_timestamp = vrr_pacing::rtp_timestamp(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(packet->frame_timestamp->time_since_epoch()).count(),
+          std::chrono::duration_cast<std::chrono::nanoseconds>(video_epoch.time_since_epoch()).count());
+        if (!source_rtp_timestamp) continue;
+      }
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
 
       // Feed raw encoded frame to the stream recorder (before any header modifications).
       // Path-agnostic (labwc / gamescope / portal): same post-encode tap.
       if (stream_recorder::is_recording() || stream_recorder::current_mode() == stream_recorder::mode_t::replay_buffer) {
-        stream_recorder::push_packet(
+        // Passive provenance (#359): the index and frame_timestamp exactly as they are here,
+        // before the send path below may fill a missing timestamp. Evidence only, never PTS.
+        stream_recorder::packet_provenance_t provenance;
+        provenance.frame_index = packet->frame_index();
+        provenance.frame_timestamp = packet->frame_timestamp;
+        provenance.source_clock_timestamp = packet->source_clock_timestamp;
+        provenance.source_time_paced = packet->source_time_paced;
+        stream_recorder::push_video(
           packet->data(), packet->data_size(),
-          true,  // is_video
           packet->is_idr(),
-          packet->frame_index(),
-          session->config.monitor.videoFormat
+          session->session_generation,
+          session->config.monitor.videoFormat,
+          provenance
         );
       }
 
@@ -2118,7 +2137,8 @@ namespace stream {
             frame_is_dupe = true;
           }
           using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
-          uint32_t timestamp = std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
+          uint32_t timestamp = source_rtp_timestamp ? *source_rtp_timestamp :
+            std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
 
           // set FEC info now that we know for sure what our percentage will be for this frame
           for (auto x = 0; x < shards.size(); ++x) {
@@ -2783,6 +2803,10 @@ namespace stream {
       return session.mail;
     }
 
+    const video::config_t &frozen_video_config_for_tests(const session_t &session) {
+      return session.config.monitor;
+    }
+
 #ifdef __linux__
     std::shared_ptr<multiseat::input::worker_launch_connection_t>
     worker_connection_for_tests(const session_t &session) {
@@ -3061,6 +3085,12 @@ namespace stream {
         stream_generation_boundary_mutex
       };
 
+      // Producers have joined and packet_owner.close_and_wait() has drained
+      // admitted deliveries. Retire replay input here so late queued packets
+      // cannot repopulate this generation's buffer. Admission uses this same
+      // generation boundary lock.
+      stream_recorder::session_ended(session.session_generation);
+
       // Remove this client from multi-client stats
       doctor_actions::session_ended(session.device_uuid, session.session_generation);
       stream_stats::remove_client(
@@ -3272,6 +3302,15 @@ namespace stream {
         }
       }
 
+      // Select replay input from admitted lifecycle state before a producer can
+      // publish a packet. This is host recorder policy, not client permission.
+      // Watchers/input-only sessions are never the sole eligible replay source;
+      // any overlap suspends replay until only one eligible session remains.
+      stream_recorder::session_started(
+        session.session_generation,
+        !session.watch_only && !session.vrr.watch_or_input_only,
+        session.config.monitor.videoFormat
+      );
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
@@ -3285,6 +3324,8 @@ namespace stream {
         addr_string, session.device_name, session.session_generation,
         stream_stats::client_family_for_stream(session.client_family)
       );
+      // Frozen in alloc(); recorded once against this generation's own entry.
+      stream_stats::record_vrr_session(session.vrr);
       stream_stats::start_session_timing(
         session.device_uuid, session.session_generation, session.session_token
       );
@@ -3429,12 +3470,23 @@ namespace stream {
       session->permission = launch_session.perm;
       session->watch_only = launch_session.watch_only;
       session->temporary_authorization = launch_session.temporary_authorization;
+      session->vrr = vrr_policy::make_record(
+        session->session_generation,
+        launch_session.vrr_requested,
+        launch_session.vrr_admission,
+        launch_session.watch_only,
+        launch_session.input_only
+      );
 
       session->do_cmds = std::move(launch_session.client_do_cmds);
       session->undo_cmds = std::move(launch_session.client_undo_cmds);
 
       session->config = config;
       session->config.monitor.session_generation = session->session_generation;
+      session->vrr.host_source_pacing = config::video.vrr_source_pacing;
+      session->config.monitor.vrr_pacing = {
+        session->vrr.host_source_pacing, session->vrr.requested, session->vrr.watch_or_input_only
+      };
 
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);

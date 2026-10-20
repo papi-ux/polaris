@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures/mocked.js'
 
 const first = { id: 'a'.repeat(32), name: 'Same name', address: '192.0.2.1' }
 const second = { id: 'b'.repeat(32), name: 'Same name', address: '192.0.2.2' }

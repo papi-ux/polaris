@@ -61,6 +61,9 @@ elseif(UNIX)  # Linux
             "Configure files required for AUR. Recommended to use with POLARIS_CONFIGURE_ONLY" OFF)
     option(POLARIS_CONFIGURE_STEAMOS_PKGBUILD
             "Configure SteamOS PKGBUILD. Recommended with POLARIS_CONFIGURE_ONLY" OFF)
+    set(POLARIS_STEAMOS_TARGET "3.8" CACHE STRING
+            "SteamOS release the SteamOS PKGBUILD is configured for: 3.8 or 3.9")
+    set_property(CACHE POLARIS_STEAMOS_TARGET PROPERTY STRINGS 3.8 3.9)
 
     # Linux capture methods
     option(POLARIS_ENABLE_CUDA

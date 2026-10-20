@@ -4,6 +4,9 @@
  */
 #pragma once
 
+#include "pipewire_buffer_generation.h"
+
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -22,6 +25,8 @@
 #include <spa/param/video/raw.h>
 #include <spa/utils/hook.h>
 
+#include "src/capture_producer_binding.h"
+#include "src/pipewire_producer_binding.h"
 #include "src/platform/common.h"
 #include "src/platform/linux/pipewire_rate.h"
 #include "src/platform/linux/graphics.h"
@@ -66,6 +71,9 @@ namespace pipewire_capture {
     bool prefer_sdr_formats = false;
     AVRational requested_rate {0, 1};
     bool request_fixed_rate = false;
+    // Watch this capture core's own registry so producer_binding() can name the process behind the
+    // actual linked source. Off by default: a capture that does not ask creates no registry.
+    bool track_producer = false;
   };
 
   struct egl_dmabuf_format_t {
@@ -217,22 +225,44 @@ namespace pipewire_capture {
     frame_info_t frame_info() const;
     wait_result_e wait_for_frame(std::chrono::milliseconds timeout);
     bool fill_frame(std::shared_ptr<platf::img_t> &image);
+    /**
+     * @brief Bind this capture's actual linked source to its producer's server credentials.
+     *
+     * Runs one pw_core_sync on THIS capture's core and resolves its own registry after the done
+     * event, bounded by @p timeout and woken early by stop() or shutdown(). Returns an unverified
+     * binding with a fixed reason code whenever anything is missing, ambiguous, changed or late.
+     * Never call it from the PipeWire loop thread or the frame path.
+     */
+    capture_producer::binding_t producer_binding(std::chrono::milliseconds timeout);
 
   private:
 #ifdef POLARIS_TESTS
     friend struct capture_test_access;
+    friend struct capture_lease_test_access;
+    friend struct capture_graph_test_access;
+    friend struct capture_producer_test_access;
+    // Observe the actual enqueue boundary without connecting a producer.
+    std::function<void(struct pw_buffer *)> queue_buffer_for_test_;
 #endif
     static void on_process(void *userdata) noexcept;
     static void on_add_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
     static void on_remove_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
     static void on_param_changed(void *userdata, std::uint32_t id, const struct spa_pod *param) noexcept;
     static void on_state_changed(void *userdata, enum pw_stream_state old, enum pw_stream_state state, const char *errmsg) noexcept;
+    static void on_registry_global(void *userdata, std::uint32_t id, std::uint32_t permissions, const char *type, std::uint32_t version, const struct spa_dict *props) noexcept;
+    static void on_registry_global_remove(void *userdata, std::uint32_t id) noexcept;
+    static void on_core_info(void *userdata, const struct pw_core_info *info) noexcept;
+    static void on_core_done(void *userdata, std::uint32_t id, int seq) noexcept;
+    static void on_core_error(void *userdata, std::uint32_t id, int seq, int res, const char *message) noexcept;
 
     bool connect_stream(bool use_max_framerate);
-    bool process_buffer(struct pw_buffer *buffer);
+    bool start_producer_tracking();
+    void stop_producer_tracking();
+    bool process_buffer(struct pw_buffer *buffer, std::uint64_t generation);
     void set_terminal(wait_result_e result);
-    void queue_buffer(struct pw_buffer *buffer);
-    void release_buffer_lease(struct pw_buffer *buffer);
+    void queue_buffer_locked(struct pw_buffer *buffer, std::uint64_t generation);
+    void queue_buffer(struct pw_buffer *buffer, std::uint64_t generation);
+    void release_buffer_lease(struct pw_buffer *buffer, std::uint64_t generation);
 
     capture_options_t options_;
     int remote_fd_ = -1;
@@ -241,7 +271,24 @@ namespace pipewire_capture {
     pw_core *core_ = nullptr;
     pw_stream *stream_ = nullptr;
     spa_hook stream_listener_ {};
+
+    // Producer tracking. Every field below except producer_cancel_ is touched only under the
+    // PipeWire loop lock or on the loop thread; the registry dies before the core.
+    pw_registry *registry_ = nullptr;
+    spa_hook registry_listener_ {};
+    spa_hook core_listener_ {};
+    bool core_listener_added_ = false;
+    pipewire_producer_binding::graph_t producer_graph_;
+    std::string server_version_;           ///< core info version (the running server)
+    std::string registry_core_version_;    ///< the Core global's core.version, the same server value
+    int producer_sync_seq_ = -1;
+    bool producer_sync_done_ = false;
+    bool producer_core_error_ = false;
+    // Bumped whenever the stream (and so the capture node) is replaced.
+    std::uint64_t stream_generation_ = 0;
+    std::atomic<bool> producer_cancel_ {false};
     std::unordered_map<struct pw_buffer *, std::uint64_t> buffer_keys_;
+    buffer_generation_t buffer_generations_;
 
     std::mutex shutdown_mtx_;
     std::mutex start_stop_mtx_;
@@ -255,6 +302,7 @@ namespace pipewire_capture {
     std::chrono::steady_clock::time_point front_dmabuf_timestamp_ {};
     std::uint64_t front_dmabuf_sequence_ = 0;
     std::uint64_t front_dmabuf_buffer_key_ = 0;
+    std::uint64_t front_dmabuf_generation_ = 0;
     struct pw_buffer *front_dmabuf_buffer_ = nullptr;
     std::size_t active_dmabuf_leases_ = 0;
     frame_info_t front_info_;

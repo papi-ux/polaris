@@ -30,11 +30,11 @@ function flushAppsViewLoad() {
   return Promise.resolve().then(() => Promise.resolve()).then(() => nextTick())
 }
 
-function mountAppsView({ apps, currentApp = '' }) {
+function mountAppsView({ apps, currentApp = '', currentAppAvailable }) {
   global.fetch = vi.fn((url) => {
     if (String(url).includes('./api/apps')) {
       return Promise.resolve({
-        json: () => Promise.resolve({ apps, current_app: currentApp, host_name: 'Test Host', host_uuid: 'host-1' }),
+        json: () => Promise.resolve({ apps, current_app: currentApp, current_app_available: currentAppAvailable, host_name: 'Test Host', host_uuid: 'host-1' }),
       })
     }
 
@@ -65,6 +65,53 @@ describe('AppsView Library Quick Launch rail', () => {
     vi.restoreAllMocks()
     delete global.fetch
     document.body.innerHTML = ''
+  })
+
+  it('blocks launch and stop during unavailable app identity and recovers with the new app', async () => {
+    const appA = { uuid: 'app-a', name: 'Control A', cmd: 'run-a' }
+    const appB = { uuid: 'app-b', name: 'Control B', cmd: 'run-b' }
+    const wrapper = mountAppsView({ apps: [appA], currentApp: appA.uuid })
+    await flushAppsViewLoad()
+    wrapper.vm.requestCloseApp(appA)
+    await nextTick()
+    expect(wrapper.text()).toContain('Confirm stop')
+    global.fetch.mockResolvedValueOnce({ json: async () => ({ apps: [appA], current_app: '', current_app_available: false }) })
+    await wrapper.vm.loadApps()
+    await nextTick()
+    const before = global.fetch.mock.calls.length
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    wrapper.vm.launchApp({ target: { href: '' } }, appA)
+    wrapper.vm.requestCloseApp(appA)
+    wrapper.vm.closeApp({ confirmFirst: false })
+    await flushAppsViewLoad()
+    expect(global.fetch.mock.calls).toHaveLength(before)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('Confirm stop')
+    expect(wrapper.find('[data-quick-launch-app="app-a"] .control-chip').text()).toBe('Checking status')
+    expect(wrapper.find('[data-quick-launch-app="app-a"] a').attributes('aria-disabled')).toBe('true')
+
+    let resolveLate
+    const lateBody = new Promise(resolve => { resolveLate = resolve })
+    global.fetch.mockResolvedValueOnce({ json: () => lateBody })
+    const staleRead = wrapper.vm.loadApps()
+    global.fetch.mockResolvedValueOnce({ json: async () => ({ apps: [appA], current_app: '', current_app_available: false }) })
+    await wrapper.vm.loadApps()
+    resolveLate({ apps: [appA], current_app: appA.uuid })
+    await staleRead
+    expect(wrapper.vm.currentAppAvailable).toBe(false)
+    expect(wrapper.vm.currentApp).toBe('')
+
+    global.fetch.mockRejectedValueOnce(new Error('fixture read failed'))
+    await wrapper.vm.loadApps()
+    expect(wrapper.vm.currentAppAvailable).toBe(false)
+    global.fetch.mockResolvedValueOnce({ json: async () => ({ apps: [appB], current_app: '', current_app_available: true }) })
+    await wrapper.vm.loadApps()
+    await nextTick()
+    expect(wrapper.find('[data-quick-launch-app="app-a"]').exists()).toBe(false)
+    expect(wrapper.find('[data-quick-launch-app="app-b"] .control-chip').text()).toBe('Ready')
+    await wrapper.find('[data-quick-launch-app="app-b"] a').trigger('click')
+    expect(global.fetch.mock.calls.some(([url, options]) => url === './api/apps/launch' && JSON.parse(options.body).uuid === appB.uuid)).toBe(true)
+    wrapper.unmount()
   })
 
   it('renders a compact quick launch rail before the published app list', async () => {

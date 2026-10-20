@@ -189,8 +189,8 @@ A release is sometimes published early as a beta, tagged `v1.4.13-beta.1` and
 marked as a prerelease on GitHub. A beta reuses the notes of the release it
 precedes. Its packages carry a version that sorts below that release, so the
 release replaces the beta through an ordinary upgrade: a tag like
-`v1.4.14-beta.1` builds `1.4.14~beta.1` for RPM and DEB and `1.4.14beta.1` for
-pacman, and the host reports `1.4.14-beta.1`. The 1.4.13 betas predate this and
+`v1.5.0-beta.2` builds `1.5.0~beta.2` for RPM and DEB and `1.5.0beta.2` for
+pacman, and the host reports `1.5.0-beta.2`. The 1.4.13 betas predate this and
 carry `1.4.13` itself, so dnf treats the 1.4.13 release as already installed on
 them and a repository upgrade leaves them in place.
 [Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) has the reinstall commands

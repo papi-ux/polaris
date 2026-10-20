@@ -44,6 +44,12 @@ jobs:
       - name: Verify bounded Arch CUDA download
         run: python3 -m unittest discover -s tests/scripts -p 'test_download_arch_cuda.py'
 
+      - name: Verify pinned Ubuntu payload acquisition
+        run: python3 -m unittest discover -s tests/scripts -p 'test_fetch_ubuntu_snapshot.py'
+
+      - name: Verify recorder fixture evidence wiring
+        run: python3 -m unittest discover -s tests/scripts -p 'test_recorder_ci_evidence.py'
+
       - name: Verify matching debug package assets
         run: python3 -m unittest discover -s tests/scripts -p 'test_debug_package_assets.py'
 
@@ -281,7 +287,7 @@ jobs:
             echo "::error::Pinned Ubuntu snapshot does not contain libcurl4-openssl-dev"
             exit 1
           fi
-          sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
+          snapshot_packages=(
             build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
@@ -294,6 +300,11 @@ jobs:
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             glslang-tools libvulkan-dev \
             wayland-protocols
+          )
+          sudo python3 scripts/ci/fetch-ubuntu-snapshot.py \
+            "$UBUNTU_APT_SNAPSHOT" "$snapshot_archives" -- \
+            "${apt_options[@]}" install -y --allow-downgrades "${snapshot_packages[@]}"
+          sudo apt-get "${apt_options[@]}" --no-download install -y --allow-downgrades "${snapshot_packages[@]}"
           test -r /usr/share/pipewire/client.conf
           sudo chmod -R a+rX "$snapshot_archives"
 
@@ -330,7 +341,22 @@ jobs:
         # executable in both this build list and the anchored ctest expression;
         # narrow deliberately only if a suite earns it.
         run: |
+          recorder_evidence="$(mktemp -d "$GITHUB_WORKSPACE/build-sanitize/recorder-fixture-evidence.XXXXXX")"
+          mkdir -m 700 "$recorder_evidence/negative" "$recorder_evidence/window" \
+            "$recorder_evidence/expiry" "$recorder_evidence/timing"
+          export POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR="$recorder_evidence/negative"
+          export POLARIS_RECORDER_WINDOW_EVIDENCE_DIR="$recorder_evidence/window"
+          export POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR="$recorder_evidence/expiry"
+          export POLARIS_RECORDER_TIMING_EVIDENCE_DIR="$recorder_evidence/timing"
           ctest --test-dir build-sanitize/tests --output-on-failure -R '^(test_inputtino_phys|test_inputtino_device|test_inputtino_reports|test_multiseat_runtime|test_polaris|test_polaris_audio|test_polaris_audit|test_polaris_config|test_polaris_http|test_polaris_input|test_polaris_network|test_polaris_pairing|test_polaris_platform|test_polaris_steam_shutdown|test_polaris_stream|test_polaris_video|polaris_gamescope_runtime_shell|polaris_gamescope_session_stop_shell|polaris_gamescope_session_geometry_shell|polaris_gamescope_primary_child_shell|polaris_gamescope_composite_cursor_shell)$'
+
+      - name: Upload sanitizer recorder fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sanitizer-recorder-fixtures
+          path: build-sanitize/recorder-fixture-evidence.*
+          if-no-files-found: warn
 
   arch-build:
     name: Arch build
@@ -503,21 +529,57 @@ jobs:
           useradd --user-group --no-create-home --home-dir "$test_root/home" polaris-tests
           install -d -m 700 -o polaris-tests -g polaris-tests \
             "$test_root" "$test_root/home" "$test_root/tmp" "$test_root/runtime" \
-            "$test_root/config" "$test_root/cache" "$test_root/go-cache"
+            "$test_root/config" "$test_root/cache" "$test_root/go-cache" \
+            "$test_root/recorder-evidence" "$test_root/recorder-evidence/negative" \
+            "$test_root/recorder-evidence/window" "$test_root/recorder-evidence/expiry" \
+            "$test_root/recorder-evidence/timing"
           chown -hR polaris-tests:polaris-tests build/tests
           test "$(runuser -u polaris-tests -- id -u)" -ne 0
+          # Keep only synthetic recorder fixtures before removing the private
+          # HOME/runtime tree. The upload action reads copies owned by its UID.
+          recorder_artifact="$(mktemp -d "$GITHUB_WORKSPACE/build/recorder-fixture-evidence.XXXXXX")"
+          finish_tests() {
+            suite_exit=$?
+            trap - EXIT
+            if cp -R -- "$test_root/recorder-evidence/." "$recorder_artifact/" && \
+                chmod -R u+rwX,go-rwx "$recorder_artifact"; then
+              if ! rm -rf -- "$test_root"; then
+                [ "$suite_exit" -ne 0 ] || suite_exit=1
+              fi
+            else
+              printf 'Failed to stage recorder fixtures; retaining original at %s\n' "$test_root/recorder-evidence" >&2
+              [ "$suite_exit" -ne 0 ] || suite_exit=1
+            fi
+            exit "$suite_exit"
+          }
+          trap finish_tests EXIT
           run_test_suite() {
+            local suite_pattern="$1"
+            shift
             runuser -u polaris-tests -- env -i \
               PATH=/usr/local/bin:/usr/bin USER=polaris-tests LOGNAME=polaris-tests \
               HOME="$test_root/home" TMPDIR="$test_root/tmp" \
               XDG_RUNTIME_DIR="$test_root/runtime" XDG_CONFIG_HOME="$test_root/config" \
               XDG_CACHE_HOME="$test_root/cache" GOCACHE="$test_root/go-cache" \
+              "$@" \
               ctest --test-dir "$GITHUB_WORKSPACE/build/tests" \
-                --output-on-failure --no-tests=error -R "$1"
+                --output-on-failure --no-tests=error -R "$suite_pattern"
           }
           run_test_suite '^test_multiseat_runtime$'
-          run_test_suite '^test_polaris_stream$'
+          run_test_suite '^test_polaris_stream$' \
+            POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR="$test_root/recorder-evidence/negative" \
+            POLARIS_RECORDER_WINDOW_EVIDENCE_DIR="$test_root/recorder-evidence/window" \
+            POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR="$test_root/recorder-evidence/expiry" \
+            POLARIS_RECORDER_TIMING_EVIDENCE_DIR="$test_root/recorder-evidence/timing"
           run_test_suite '^polaris_multiseat_worker_go$'
+
+      - name: Upload arch recorder fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: arch-recorder-fixtures
+          path: build/recorder-fixture-evidence.*
+          if-no-files-found: warn
 
       - name: Generate Arch package files
         env:
@@ -976,6 +1038,10 @@ jobs:
         run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
 
   steamos-build:
+    # One package per SteamOS release: each links the Boost and other libraries of its own release's
+    # repositories, so a 3.8 package installs on 3.9 and then cannot start. Separate jobs rather than
+    # a matrix: a skipped matrix job reports one check with its name unexpanded, which would leave the
+    # required "SteamOS 3.8 build" check unreported on a pull request that builds no native package.
     name: SteamOS 3.8 build
     needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
     if: needs.resolve-source.outputs.native_required == 'true'
@@ -1008,11 +1074,13 @@ jobs:
       - name: Build and validate SteamOS 3.8 package
         env:
           POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
+          POLARIS_STEAMOS_TARGET: '3.8'
         run: |
           mkdir -p "$RUNNER_TEMP/polaris-steamos-output"
           sudo docker run --privileged --rm \
             --env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT" \
             --env "POLARIS_PRERELEASE_LABEL=$POLARIS_PRERELEASE_LABEL" \
+            --env "POLARIS_STEAMOS_TARGET=$POLARIS_STEAMOS_TARGET" \
             --volume "$GITHUB_WORKSPACE:/workspace:rw" \
             --volume "$RUNNER_TEMP/polaris-steamos-output:/output:rw" \
             archlinux:latest \
@@ -1038,6 +1106,74 @@ jobs:
         with:
           name: Polaris-steamos3.8-receipts
           path: ${{ runner.temp }}/polaris-steamos-output/steamos3.8-*.txt
+          if-no-files-found: error
+
+  steamos-3-9-build:
+    # The same build for SteamOS 3.9, from Valve's 3.9 repositories. See steamos-build.
+    name: SteamOS 3.9 build
+    needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
+    if: needs.resolve-source.outputs.native_required == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-source.outputs.commit }}
+
+      - name: Resolve exact SteamOS source commit
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}
+        run: |
+          # The branch may advance while prerequisite jobs run. Build the same
+          # resolved source as every other package; release publication still
+          # revalidates the release tag against that exact source.
+          POLARIS_BUILD_COMMIT="$(git rev-parse 'HEAD^{commit}')"
+          test "$POLARIS_BUILD_COMMIT" = "$EXPECTED_SOURCE_COMMIT"
+          printf 'POLARIS_BUILD_COMMIT=%s\n' "$POLARIS_BUILD_COMMIT" >> "$GITHUB_ENV"
+
+      - name: Initialize submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule sync --recursive
+          # Trees from before the build-deps submodule removal still pin its
+          # dead commit; skip it instead of gambling on the orphaned object.
+          git -c submodule.third-party/build-deps.update=none submodule update --init --recursive
+
+      - name: Build and validate SteamOS 3.9 package
+        env:
+          POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
+          POLARIS_STEAMOS_TARGET: '3.9'
+        run: |
+          mkdir -p "$RUNNER_TEMP/polaris-steamos-output"
+          sudo docker run --privileged --rm \
+            --env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT" \
+            --env "POLARIS_PRERELEASE_LABEL=$POLARIS_PRERELEASE_LABEL" \
+            --env "POLARIS_STEAMOS_TARGET=$POLARIS_STEAMOS_TARGET" \
+            --volume "$GITHUB_WORKSPACE:/workspace:rw" \
+            --volume "$RUNNER_TEMP/polaris-steamos-output:/output:rw" \
+            archlinux:latest \
+            bash /workspace/scripts/ci/run-steamos-build.sh
+
+      - name: Upload SteamOS 3.9 package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Polaris-steamos3.9-package
+          # All three, or the release job has nothing to publish from. Naming one file here is
+          # what broke the first tag build after the polaris-kms split: the script builds the helper,
+          # asserts it carries exactly two files, and the upload dropped it. The debug symbols joined
+          # the same list for the same reason, so the host, the KMS helper and the matching symbols
+          # travel through release assembly together.
+          path: |
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.9-x86_64.pkg.tar.zst
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst
+          if-no-files-found: error
+
+      - name: Upload SteamOS 3.9 validation receipts
+        uses: actions/upload-artifact@v7
+        with:
+          name: Polaris-steamos3.9-receipts
+          path: ${{ runner.temp }}/polaris-steamos-output/steamos3.9-*.txt
           if-no-files-found: error
 
   ubuntu-build:
@@ -1145,7 +1281,7 @@ jobs:
             echo "::error::Pinned Ubuntu snapshot does not contain libcurl4-openssl-dev"
             exit 1
           fi
-          sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
+          snapshot_packages=(
             build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
@@ -1159,6 +1295,11 @@ jobs:
             glslang-tools libvulkan-dev \
             golang-go \
             wayland-protocols
+          )
+          sudo python3 scripts/ci/fetch-ubuntu-snapshot.py \
+            "$UBUNTU_APT_SNAPSHOT" "$snapshot_archives" -- \
+            "${apt_options[@]}" install -y --allow-downgrades "${snapshot_packages[@]}"
+          sudo apt-get "${apt_options[@]}" --no-download install -y --allow-downgrades "${snapshot_packages[@]}"
           test -r /usr/share/pipewire/client.conf
           sudo chmod -R a+rX "$snapshot_archives"
 
@@ -1321,11 +1462,37 @@ jobs:
             -o Acquire::http::Timeout=30
             -o Acquire::https::Timeout=30
           )
-          sudo apt-get "${apt_options[@]}" install -y "./$deb_path"
+          snapshot_archives=/var/tmp/polaris-ubuntu-archives
+          test -d "$snapshot_archives/partial"
+          test -f "$deb_path"
+          test ! -L "$deb_path"
+          deb_size="$(stat -c %s -- "$deb_path")"
+          deb_sha256="$(sha256sum -- "$deb_path" | cut -d ' ' -f 1)"
+          sudo python3 scripts/ci/fetch-ubuntu-snapshot.py \
+            --local-deb "./$deb_path" "$deb_size" "$deb_sha256" \
+            "$UBUNTU_APT_SNAPSHOT" "$snapshot_archives" -- \
+            "${apt_options[@]}" install -y "./$deb_path"
+          test -f "$deb_path"
+          test ! -L "$deb_path"
+          test "$(stat -c %s -- "$deb_path")" = "$deb_size"
+          test "$(sha256sum -- "$deb_path" | cut -d ' ' -f 1)" = "$deb_sha256"
+          sudo apt-get "${apt_options[@]}" -o "Dir::Cache::archives=$snapshot_archives" --no-download install -y "./$deb_path"
           kms_identity="$(dpkg-deb --field "$kms_deb_path" Package)|$(dpkg-deb --field "$kms_deb_path" Version)|$(dpkg-deb --field "$kms_deb_path" Architecture)"
           test "$kms_identity" = "polaris-kms|${expected_package_version}|amd64"
           test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${expected_package_version}), libcap2-bin, passwd"
-          sudo apt-get "${apt_options[@]}" install -y "./$kms_deb_path"
+          test -f "$kms_deb_path"
+          test ! -L "$kms_deb_path"
+          kms_deb_size="$(stat -c %s -- "$kms_deb_path")"
+          kms_deb_sha256="$(sha256sum -- "$kms_deb_path" | cut -d ' ' -f 1)"
+          sudo python3 scripts/ci/fetch-ubuntu-snapshot.py \
+            --local-deb "./$kms_deb_path" "$kms_deb_size" "$kms_deb_sha256" \
+            "$UBUNTU_APT_SNAPSHOT" "$snapshot_archives" -- \
+            "${apt_options[@]}" install -y "./$kms_deb_path"
+          test -f "$kms_deb_path"
+          test ! -L "$kms_deb_path"
+          test "$(stat -c %s -- "$kms_deb_path")" = "$kms_deb_size"
+          test "$(sha256sum -- "$kms_deb_path" | cut -d ' ' -f 1)" = "$kms_deb_sha256"
+          sudo apt-get "${apt_options[@]}" -o "Dir::Cache::archives=$snapshot_archives" --no-download install -y "./$kms_deb_path"
           helper=/usr/libexec/polaris/polaris-kms
           test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
           test "$(getcap "$helper")" = "$helper cap_sys_admin=ep"
@@ -1888,6 +2055,7 @@ jobs:
       - arch-build
       - arch-current-compatibility
       - steamos-build
+      - steamos-3-9-build
       - ubuntu-build
       - ubuntu-minimal-install
       - fedora-rpm-build
@@ -1926,6 +2094,12 @@ jobs:
         with:
           name: Polaris-steamos3.8-package
           path: release-assets/raw/steamos3.8
+
+      - name: Download SteamOS 3.9 package
+        uses: actions/download-artifact@v8
+        with:
+          name: Polaris-steamos3.9-package
+          path: release-assets/raw/steamos3.9
       - name: Prepare release asset names
         run: |
           mkdir -p release-assets/staged release-assets/final
@@ -1933,6 +2107,10 @@ jobs:
             --main release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst \
             --kms release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst \
             --debug release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
+          python3 scripts/ci/validate-pacman-debug.py \
+            --main release-assets/raw/steamos3.9/Polaris-steamos3.9-x86_64.pkg.tar.zst \
+            --kms release-assets/raw/steamos3.9/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst \
+            --debug release-assets/raw/steamos3.9/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst
           shopt -s nullglob
           steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)
           if [ "${#steamos_packages[@]}" -ne 3 ]; then
@@ -1942,6 +2120,14 @@ jobs:
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst"
+          steamos_packages=(release-assets/raw/steamos3.9/*.pkg.tar.zst)
+          if [ "${#steamos_packages[@]}" -ne 3 ]; then
+            exit 1
+          fi
+          cp "release-assets/raw/steamos3.9/Polaris-steamos3.9-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.9-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.9/Polaris-steamos3.9-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.9-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.9/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst" "release-assets/final/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.9/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst" "release-assets/final/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst"
 
           arch_packages=()
           arch_kms_packages=()
@@ -2203,13 +2389,16 @@ jobs:
             Polaris-arch-x86_64.pkg.tar.zst
             Polaris-fedora44-x86_64.rpm
             Polaris-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-steamos3.9-x86_64.pkg.tar.zst
             Polaris-ubuntu24.04-x86_64.deb
             Polaris-kms-arch-x86_64.pkg.tar.zst
             Polaris-kms-fedora44-x86_64.rpm
             Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-kms-steamos3.9-x86_64.pkg.tar.zst
             Polaris-kms-ubuntu24.04-x86_64.deb
             Polaris-debug-arch-x86_64.pkg.tar.zst
             Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-debug-steamos3.9-x86_64.pkg.tar.zst
           )
           for required_asset in "${required_binary_assets[@]}"; do
             if [[ ! " ${expected_assets[*]} " =~ " ${required_asset} " ]]; then

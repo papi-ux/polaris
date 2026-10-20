@@ -19,6 +19,7 @@ import {
 import { buildResolutionPlanner } from '../../display-resolution-planner'
 import { provenanceLabel, useConfigProjection } from '../../composables/useConfigProjection'
 import LiveTuningControl from '../../components/LiveTuningControl.vue'
+import { launchModeReadout } from '../../launch-mode-readout.js'
 import { useLiveTuning } from '../../composables/useLiveTuning'
 
 const $t = inject('i18n').t;
@@ -202,6 +203,9 @@ const streamDisplayModes = computed(() => streamDisplayModeDefinitions.map((base
     hostBadge: Boolean(hostBadge),
   }
 }))
+
+const modeReadout = (mode) => launchModeReadout(mode, config.value, streamDisplayModes.value)
+const alternativeMode = (mode) => streamDisplayModes.value.find(candidate => candidate.id === modeReadout(mode).alternative)
 
 const plannedStreamDisplayModes = [
   {
@@ -489,9 +493,7 @@ function updateDisplayPlannerSource(event) {
               class="overflow-hidden rounded-lg border transition"
               :class="[
                 streamDisplayMode === mode.id ? 'border-ice bg-ice/12 shadow-[0_0_0_1px_rgba(224,230,237,0.18)]' : 'border-storm/40 bg-deep/40',
-                mode.available === false
-                  ? 'opacity-60'
-                  : 'hover:border-storm/70',
+                mode.available !== false ? 'hover:border-storm/70' : '',
               ]"
             >
               <SelectableCard
@@ -533,6 +535,19 @@ function updateDisplayPlannerSource(event) {
                   {{ $t('config.av_mode_unavailable', { reason: mode.unavailableReason }) }}
                 </span>
               </SelectableCard>
+              <div class="space-y-2 px-4 pb-4 text-xs leading-relaxed text-storm" data-launch-mode-impact>
+                <p v-if="mode.id === 'host_virtual_display'" data-virtual-display-provider>
+                  <span class="font-medium text-silver">{{ $t('config.launch_mode_provider') }}</span>
+                  {{ modeReadout(mode.id).provider || $t(modeReadout(mode.id).noProvider ? 'config.launch_mode_provider_none' : 'config.launch_mode_provider_unknown') }}
+                </p>
+                <p><span class="font-medium text-silver">{{ $t('config.launch_mode_screens') }}</span> {{ $t(`config.launch_mode_screens_${modeReadout(mode.id).physical}`) }}</p>
+                <p v-if="modeReadout(mode.id).monitorOffAlternative">{{ $t('config.launch_mode_monitor_off_alternative') }}</p>
+                <button v-if="mode.available === false && alternativeMode(mode.id)" type="button"
+                  class="focus-ring rounded-md border border-storm/40 px-3 py-2 text-silver hover:border-ice"
+                  :data-launch-mode-alternative="mode.id" @click="setStreamDisplayMode(alternativeMode(mode.id).id)">
+                  {{ $t('config.launch_mode_use_alternative', { mode: alternativeMode(mode.id).title }) }}
+                </button>
+              </div>
             </article>
           </div>
 
@@ -860,6 +875,19 @@ function updateDisplayPlannerSource(event) {
           :config="config"
         />
       </div>
+    </section>
+
+    <section v-if="isLinux" class="settings-section" id="stream-pacing" data-stream-pacing-settings>
+      <div class="settings-section-header">
+        <h3 class="settings-section-title">{{ $t('config.stream_pacing_title') }}</h3>
+        <p class="settings-summary-copy">{{ $t('config.stream_pacing_help') }}</p>
+      </div>
+      <Checkbox id="vrr_source_pacing" v-model="config.vrr_source_pacing" :default="'disabled'"
+        :label="$t('config.vrr_source_pacing')" :desc="$t('config.stream_pacing_permission_help')" />
+      <p class="mt-2 text-xs leading-relaxed text-storm">{{ $t('config.stream_pacing_scope') }}</p>
+      <p v-if="!['headless_stream', 'windowed_stream'].includes(streamDisplayMode)" class="mt-2 text-xs leading-relaxed text-storm">
+        {{ $t('config.stream_pacing_route_help') }}
+      </p>
     </section>
 
     <section class="settings-section">

@@ -6,7 +6,9 @@
 
 #ifdef __linux__
 
+#include <chrono>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -72,6 +74,15 @@ namespace platf::game_mode_host {
   bool session_live();
 
   /**
+   * @brief A scan taken now, on the caller's thread, that also becomes the kept answer.
+   *
+   * For a decision that follows a session change, such as a launch that has just left Game Mode:
+   * it never returns a kept answer, and a background refresh that started before it is discarded
+   * rather than replacing it.
+   */
+  bool session_live_fresh();
+
+  /**
    * @brief Whether a stream is a stream of the Game Mode screen itself.
    *
    * That is a mirror of "the desktop" on a host whose one screen belongs to the session's
@@ -88,6 +99,14 @@ namespace platf::game_mode_host {
 
   /// Tests pin the answer; nullopt returns to the real scan.
   void set_session_live_for_tests(std::optional<bool> live);
+  /// Tests replace the /proc walk itself, keeping the caching; empty returns to the real walk.
+  void set_session_scan_for_tests(std::function<bool()> scan);
+  /// Tests make the kept answer older by `age`.
+  void age_session_live_answer_for_tests(std::chrono::steady_clock::duration age);
+  /// Whether a background refresh is still out.
+  bool session_live_refresh_pending_for_tests();
+  /// The kept answer, if any.
+  std::optional<bool> session_live_answer_for_tests();
 
   /// The first signal plus a count of the rest, for one line of terminal output.
   std::string headline_evidence(const detection_t &detection);
@@ -125,6 +144,17 @@ namespace platf::game_mode_host {
   };
 
   boot_readiness_t boot_readiness(const boot_paths_t &paths);
+
+  /**
+   * @brief Keep a headless-boot service independent of the desktop tray's display connection.
+   *
+   * Ordinary desktop services and interactive launches keep their configured tray.
+   * Checking the service cgroup also covers an ExecStart override for the KMS helper.
+   */
+  bool suppress_tray_for_headless_boot(std::string_view self_cgroup, const boot_paths_t &paths);
+
+  /// The startup decision for the calling process, using its passwd account and cgroup.
+  bool suppress_tray_for_headless_boot();
 
   struct guidance_t {
     std::string status;

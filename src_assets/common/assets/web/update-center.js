@@ -7,10 +7,14 @@ const BUILT_CONSOLE_VERSION = typeof __POLARIS_CONSOLE_VERSION__ === 'string' ? 
 
 const PACKAGE_LABELS = {
   arch: 'Arch/CachyOS package',
-  steamos: 'SteamOS 3.8 package',
+  steamos: 'SteamOS package',
   fedora: 'Fedora RPM package',
   ubuntu: 'Ubuntu 24.04 DEB package',
 }
+
+// Each SteamOS release has its own package: it links that release's Boost, so the 3.8 package
+// installs on 3.9 and then cannot start. A host gets the package for its own release or none.
+const STEAMOS_RELEASES = ['3.8', '3.9']
 
 function normalizeToken(value) {
   return String(value || '').trim().toLowerCase()
@@ -33,9 +37,19 @@ function hasToken(tokens, value) {
   return tokens.includes(value)
 }
 
-function isSteamOs38(host = {}) {
+function steamOsRelease(host = {}) {
   const versionId = normalizeToken(host.distro?.version_id)
-  return versionId === '3.8' || versionId.startsWith('3.8.')
+  return STEAMOS_RELEASES.find((release) => versionId === release || versionId.startsWith(`${release}.`)) || ''
+}
+
+function steamOsPackageName(host = {}) {
+  const release = steamOsRelease(host)
+  return release ? `Polaris-steamos${release}-x86_64.pkg.tar.zst` : ''
+}
+
+function packageLabel(packageFamily, host = {}) {
+  if (packageFamily === 'steamos' && steamOsRelease(host)) return `SteamOS ${steamOsRelease(host)} package`
+  return PACKAGE_LABELS[packageFamily] || ''
 }
 
 export function inferPackageFamily(host = {}) {
@@ -60,8 +74,8 @@ export function inferPackageFamily(host = {}) {
 // is no second place for a Fedora version to be got wrong.
 const packageNamePatterns = {
   steamos: {
-    base: /^Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst$/,
-    kms: /^Polaris-kms-steamos3\.8-x86_64\.pkg\.tar\.zst$/,
+    base: /^Polaris-steamos3\.[89]-x86_64\.pkg\.tar\.zst$/,
+    kms: /^Polaris-kms-steamos3\.[89]-x86_64\.pkg\.tar\.zst$/,
   },
   arch: {
     base: /^Polaris-arch-x86_64\.pkg\.tar\.zst$/,
@@ -85,8 +99,7 @@ function kmsNameForBase(baseName) {
 function preferredAssetName(host = {}) {
   const family = inferPackageFamily(host)
   const versionId = String(host.distro?.version_id || '').trim()
-  if (family === 'steamos' && isSteamOs38(host)) return 'Polaris-steamos3.8-x86_64.pkg.tar.zst'
-  if (family === 'steamos') return ''
+  if (family === 'steamos') return steamOsPackageName(host)
   if (host.recommended_asset_name) return host.recommended_asset_name
   if (family === 'arch') return 'Polaris-arch-x86_64.pkg.tar.zst'
   if (family === 'fedora' && versionId) return `Polaris-fedora${versionId}-x86_64.rpm`
@@ -100,8 +113,9 @@ export function selectReleaseAsset(release, host = {}) {
   const assets = release.assets
   const family = inferPackageFamily(host)
   if (family === 'steamos') {
-    if (!isSteamOs38(host)) return null
-    return assets.find((asset) => asset.name === 'Polaris-steamos3.8-x86_64.pkg.tar.zst') || null
+    const wanted = steamOsPackageName(host)
+    if (!wanted) return null
+    return assets.find((asset) => asset.name === wanted) || null
   }
   const preferredName = preferredAssetName(host)
   if (preferredName) {
@@ -499,7 +513,7 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     asset,
     assetDigest: asset?.digest || '',
     packageFamily,
-    packageLabel: PACKAGE_LABELS[packageFamily] || '',
+    packageLabel: packageLabel(packageFamily, host),
     installCommand,
     canCopyInstallCommand: Boolean(installCommand),
     manualInstallOnly: true,

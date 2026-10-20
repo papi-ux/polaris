@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
 
@@ -143,8 +144,20 @@ TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {
 
   EXPECT_EQ(callbacks.find("cap->queue_buffer("), std::string::npos);
   EXPECT_EQ(callbacks.find("\n        queue_buffer("), std::string::npos);
-  EXPECT_NE(callbacks.find("pw_stream_queue_buffer(stream_, replaced_buffer)"), std::string::npos);
-  EXPECT_NE(callbacks.find("pw_stream_queue_buffer(cap->stream_, replaced_buffer)"), std::string::npos);
+  EXPECT_NE(callbacks.find("queue_buffer_locked(replaced_buffer, replaced_generation)"), std::string::npos);
+  EXPECT_NE(callbacks.find("cap->queue_buffer_locked(replaced_buffer, replaced_generation)"), std::string::npos);
+
+  // Callbacks already hold the loop lock. Their shared return helper must
+  // enqueue directly, without acquiring shutdown_mtx_ or calling the wrapper
+  // that does so. Otherwise shutdown's opposite lock order deadlocks.
+  const auto helper_start = source.find("void capture_t::queue_buffer_locked(");
+  const auto helper_end = source.find("void capture_t::queue_buffer(", helper_start);
+  ASSERT_NE(helper_start, std::string::npos);
+  ASSERT_NE(helper_end, std::string::npos);
+  const auto helper = source.substr(helper_start, helper_end - helper_start);
+  EXPECT_EQ(helper.find("shutdown_mtx_"), std::string::npos);
+  EXPECT_FALSE(std::regex_search(helper, std::regex(R"(queue_buffer\s*\()")));
+  EXPECT_NE(helper.find("pw_stream_queue_buffer(stream_, buffer)"), std::string::npos);
 }
 
 TEST(LinuxStreamContractTests, RootMediaFenceSurvivesThroughCompositorTermination) {

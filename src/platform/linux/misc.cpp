@@ -75,6 +75,9 @@
 #include "stream_display_policy.h"
 #include "vaapi.h"
 #include "virtual_display.h"
+#ifdef POLARIS_BUILD_VULKAN
+  #include "vulkan_encode.h"
+#endif
 
 #include <linux/rtnetlink.h>
 
@@ -1975,6 +1978,9 @@ std::string get_local_ip_for_gateway() {
 #ifdef POLARIS_BUILD_PORTAL
       ::portal::shutdown();
 #endif
+#ifdef POLARIS_BUILD_VULKAN
+      vk::shutdown_discovery();
+#endif
     }
   };
 
@@ -2235,10 +2241,17 @@ std::string get_local_ip_for_gateway() {
     if (!override || override->reason == stream_display_policy::k_capture_override_substituted) {
       return;
     }
-    BOOST_LOG(warning) << stream_display_policy::describe_capture_override(
+    const auto line = stream_display_policy::describe_capture_override(
       *override,
       config::video.linux_display.stream_mode
     );
+    if (override->reason == stream_display_policy::k_capture_override_private_compositor) {
+      // Private labwc sessions require wlroots; this is the selected mode's normal route.
+      BOOST_LOG(info) << line;
+    }
+    else {
+      BOOST_LOG(warning) << line;
+    }
   }
 
   void reevaluate_capture_sources() {

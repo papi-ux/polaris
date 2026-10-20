@@ -548,10 +548,88 @@ describe('Update Center release awareness', () => {
 
     expect(selectReleaseAsset(release, steamOsHost)?.name)
       .toBe('Polaris-steamos3.8-x86_64.pkg.tar.zst')
+    // This release has no 3.9 package, and a 3.9 host must never be offered the 3.8 one: it
+    // installs, then cannot load SteamOS 3.9's Boost.
     expect(selectReleaseAsset(release, {
       ...steamOsHost,
       distro: { ...steamOsHost.distro, version_id: '3.9' },
     })).toBeNull()
+  })
+
+  describe('SteamOS release packages', () => {
+    const steamOsAsset = (name) => ({ name, browser_download_url: `https://example.test/${name}`, digest: `sha256:${name}` })
+    const bothReleases = {
+      ...release,
+      assets: [
+        ...release.assets,
+        steamOsAsset('Polaris-steamos3.9-x86_64.pkg.tar.zst'),
+        steamOsAsset('Polaris-kms-steamos3.8-x86_64.pkg.tar.zst'),
+        steamOsAsset('Polaris-kms-steamos3.9-x86_64.pkg.tar.zst'),
+      ],
+    }
+    const steamOsHost = (versionId, extra = {}) => ({
+      platform: 'linux',
+      package_family: 'arch',
+      recommended_asset_name: 'Polaris-arch-x86_64.pkg.tar.zst',
+      distro: { id: 'steamos', id_like: 'arch', version_id: versionId },
+      ...extra,
+    })
+
+    it('offers each host the package for its own SteamOS release', () => {
+      for (const [versionId, expected] of [
+        ['3.8', 'Polaris-steamos3.8-x86_64.pkg.tar.zst'],
+        ['3.8.16', 'Polaris-steamos3.8-x86_64.pkg.tar.zst'],
+        ['3.9', 'Polaris-steamos3.9-x86_64.pkg.tar.zst'],
+        ['3.9.2', 'Polaris-steamos3.9-x86_64.pkg.tar.zst'],
+      ]) {
+        expect(selectReleaseAsset(bothReleases, steamOsHost(versionId))?.name, versionId).toBe(expected)
+      }
+    })
+
+    it('offers nothing to a SteamOS release without its own package', () => {
+      for (const versionId of ['', '3.7.13', '3.10', '3.10.1', '3.80', '3.90.1', '4.0']) {
+        expect(selectReleaseAsset(bothReleases, steamOsHost(versionId)), versionId).toBeNull()
+      }
+      // Neither release falls back to the other's package when its own is missing.
+      const only38 = { ...release, assets: release.assets }
+      const only39 = { ...release, assets: [...release.assets.filter((asset) => !asset.name.startsWith('Polaris-steamos')), steamOsAsset('Polaris-steamos3.9-x86_64.pkg.tar.zst')] }
+      expect(selectReleaseAsset(only38, steamOsHost('3.9.2'))).toBeNull()
+      expect(selectReleaseAsset(only39, steamOsHost('3.8.16'))).toBeNull()
+      // Polaris builds 3.8 and 3.9 only, so a host on a later release gets nothing even when a
+      // release happens to carry an asset named for it.
+      const stray = { ...bothReleases, assets: [...bothReleases.assets, steamOsAsset('Polaris-steamos3.10-x86_64.pkg.tar.zst')] }
+      expect(selectReleaseAsset(stray, steamOsHost('3.10.1'))).toBeNull()
+    })
+
+    it('names the host release and builds the 3.9 install with both packages and the read-only dance', () => {
+      const state = buildUpdateCenterState({
+        currentVersion: '1.2.1',
+        latestRelease: bothReleases,
+        host: steamOsHost('3.9.2', { boot_start_enabled: true, kms_helper_installed: true }),
+      })
+      expect(state.packageFamily).toBe('steamos')
+      expect(state.packageLabel).toBe('SteamOS 3.9 package')
+      expect(state.asset.name).toBe('Polaris-steamos3.9-x86_64.pkg.tar.zst')
+      expect(state.kmsAsset?.name).toBe('Polaris-kms-steamos3.9-x86_64.pkg.tar.zst')
+      const commandLines = state.installCommand.split('\n')
+      expect(commandLines).toContain('sudo steamos-readonly disable || exit $?')
+      expect(commandLines).toContain('sudo pacman -U ./Polaris-steamos3.9-x86_64.pkg.tar.zst ./Polaris-kms-steamos3.9-x86_64.pkg.tar.zst || exit $?')
+      expect(commandLines).toContain('sudo steamos-readonly enable || exit $?')
+      expect(state.installCommand).not.toContain('steamos3.8')
+    })
+
+    it('accepts only the two SteamOS release package names in a direct install', () => {
+      for (const [name, accepted] of [
+        ['Polaris-steamos3.8-x86_64.pkg.tar.zst', true],
+        ['Polaris-steamos3.9-x86_64.pkg.tar.zst', true],
+        ['Polaris-steamos3.10-x86_64.pkg.tar.zst', false],
+        ['Polaris-steamos3.7-x86_64.pkg.tar.zst', false],
+        ['Polaris-steamos3.9-x86_64.pkg.tar.zst.sig', false],
+      ]) {
+        const command = buildManualInstallCommand({ ...steamOsAsset(name), packageFamily: 'steamos' })
+        expect(Boolean(command), name).toBe(accepted)
+      }
+    })
   })
 
   it('rejects shell-unsafe release metadata and mismatched direct SteamOS assets', () => {

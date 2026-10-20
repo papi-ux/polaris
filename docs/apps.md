@@ -10,7 +10,8 @@ in the app editor. Artwork sources and fixes are on
 **Quick Launch** ranks favourite, recent, and launch-ready apps first so the list feels familiar
 from the couch, while still surfacing entries that need attention.
 
-**Published apps** is the list clients see. Drag rows to reorder what appears first. Reordering,
+**Published apps** is the list clients see. Each row has a **Launch** button and **Move up** and
+**Move down** controls; moves stay on the page until you press **Save order**. Saving the order,
 like any change to the published list, makes Polaris rebuild it, which can interrupt a running
 session. Open an entry to edit it or to export its `.art` launcher file for front ends that want a
 direct launch.
@@ -130,6 +131,10 @@ used, so an entry SteamGridDB does not know keeps its own image. Desktop, Low Re
 other entry that streams the desktop never look anything up, and artwork an earlier version
 downloaded for them is removed.
 
+The host serves Mission Control the same background and logo for its stage. A request for a Steam title's missing one
+fetches it from Steam in the background, never from SteamGridDB, so it is there the next time;
+Desktop entries and entries after **Remove artwork** fetch nothing.
+
 **Remove artwork** deletes every picture Polaris downloaded for a saved entry, and any you picked
 in Nova, and stops Polaris looking up new ones. The entry's own image stays, and Nova shows it the
 next time its library loads. **Find artwork again** turns the lookup back on; it does not bring the
@@ -178,9 +183,11 @@ Older apps.json files: **Mirror the host desktop** became Mirror Desktop. **Alwa
 | **Continue streaming until all app processes exit** | Keeps streaming until every process the app started has ended, instead of stopping when the first one does. |
 | **Continue streaming if the application exits quickly** | Detects launcher-type apps that close right after starting something else and treats them as detached. |
 | **Terminate on Pause** | Ends the app when the last client disconnects instead of keeping it paused for the resume window. |
+| **Steam after End Session** | Linux, Host Virtual Display and Mirror Desktop only. **Use host default** follows **Keep Desktop Steam Running After End Session** on the General tab; **Keep desktop Steam running** closes only the game this stream launched; **Close Steam started for this stream** closes the Steam the stream started as well. Private streams clean up as before, and custom undo scripts still run ([Desktop Steam and End Session](steam-lifecycle.md)). |
 | **Close desktop Steam for private launches** | When desktop Steam is running as a private stream starts, quits it and waits for it to exit instead of refusing the launch. Unsaved state in that Steam session is lost. Each device's **Close Steam on the host to start games** switch, off by default, does the same for every app that device launches ([Editing a device](devices.md#editing-a-device)). |
 | **Per Client App Identity** | Gives the app a separate identity per client, so one app can carry different virtual display configurations for different devices. |
 | **Use App Identity** | Creates virtual displays under the app's own identity instead of the client's, so each app gets its own display configuration. |
+| **Leave Game Mode before launch** | Not in the editor: set `"leave-game-mode-before-launch": true` on the app in `apps.json`. On a Steam Deck in Game Mode, the app's private launch switches to Desktop Mode first and back afterwards. Off unless set; not yet checked on a Deck ([SteamOS](steamos.md#leave-game-mode-before-launch)). |
 | **Enforce Virtual Display Primary** | Makes the virtual display primary when the app starts. Kept on by default; known broken on Windows 11 24H2. |
 
 ### Environment variables

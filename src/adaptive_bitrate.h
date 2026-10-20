@@ -11,10 +11,12 @@
 #include <functional>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace adaptive_bitrate {
 
@@ -27,6 +29,78 @@ namespace adaptive_bitrate {
     double max_change_rate = 0.20;     // Max 20% change per adjustment
     double ewma_alpha = 0.3;           // EWMA smoothing factor (0-1, higher = more responsive)
     int adjustment_interval_ms = 1000; // How often to adjust
+  };
+
+  /// Live Tuning history keeps at most this many entries per stream scope.
+  inline constexpr std::size_t HISTORY_CAPACITY = 64;
+
+  /**
+   * One observed controller or encoder transition, recorded under the controller's own lock.
+   *
+   * Times are host steady-clock milliseconds since the history's scope began. They are never client,
+   * media or wall-clock times, and no entry says which bitrate any client media interval was encoded
+   * at. kind is one of:
+   * - decision: the requested target, controller state or reason changed;
+   * - encoder_applied: the encoder backend reported it applied the exact current request;
+   * - encoder_update_not_applied: the backend was asked to apply the exact current request and did not;
+   * - stale_encoder_request: an encoder callback named a request that was no longer current, so the
+   *   backend was not asked;
+   * - applied_proof_invalidated: the encoder is being recreated, so no applied rate is proven;
+   * - recreation_superseded: a recreation was refused because a newer request won;
+   * - encoder_acknowledged: the encoder confirmed it runs at the exact current request without a
+   *   backend update in that call (for example after recreation);
+   * - stale_acknowledgement: a confirmation for a request that was no longer current was ignored;
+   * - revision_reaffirmed: a newer controller revision adopted the already applied rate; nothing
+   *   reached the encoder backend;
+   * - encoder_initialized: a new encoder reported its initial rate;
+   * - applied_unknown: live updates stopped or the controller reset, so no applied rate is proven;
+   * - scope_started: this history began for its stream scope. It is a snapshot of the controller as the
+   *   scope found it; nothing recorded before the scope began is kept or attributed to it.
+   */
+  struct history_entry_t {
+    std::uint64_t sequence = 0;
+    std::int64_t host_elapsed_ms = 0;
+    /// Host steady-clock time of the latest repeat folded into this entry.
+    std::int64_t last_host_elapsed_ms = 0;
+    /// Identical consecutive observations are folded into one entry and counted here.
+    std::uint64_t repeat_count = 1;
+    std::string kind;
+    std::string cause;
+    std::string state;
+    std::string reason;
+    /// The controller's requested encoder target after the event.
+    int requested_bitrate_kbps = 0;
+    /// The encoder-confirmed rate after the event, meaningful only when applied_known.
+    int applied_bitrate_kbps = 0;
+    bool applied_known = false;
+    std::uint64_t operator_revision = 0;
+    std::uint64_t applied_revision = 0;
+    /// The request an encoder callback named, for encoder entries; zero otherwise.
+    int callback_bitrate_kbps = 0;
+    std::uint64_t callback_revision = 0;
+    bool feedback_initialized = false;
+    double ewma_packet_loss = 0.0;
+    double ewma_rtt_ms = 0.0;
+    /// The newest network feedback sample the controller had received, when it had one.
+    bool input_available = false;
+    double input_packet_loss_percent = 0.0;
+    double input_rtt_ms = 0.0;
+  };
+
+  /** A bounded, oldest-first copy of one stream scope's history. */
+  struct history_t {
+    /// The stream scope these entries belong to. A history that never had one, or whose stream ended,
+    /// is unscoped and must not be attributed to any stream.
+    bool scoped = false;
+    std::uint64_t session_generation = 0;
+    /// Used only to match a stats snapshot's scope; never exported.
+    std::string app_session_id;
+    std::size_t capacity = HISTORY_CAPACITY;
+    /// Entries this scope recorded that no longer fit.
+    std::uint64_t dropped = 0;
+    /// Host steady-clock milliseconds since the scope began, when this copy was taken.
+    std::int64_t host_elapsed_ms_at_copy = 0;
+    std::vector<history_entry_t> entries;
   };
 
   struct state_t {
@@ -54,6 +128,8 @@ namespace adaptive_bitrate {
     double ewma_rtt_ms = 0.0;
     std::string state = "disabled";
     std::string reason = "disabled";
+    /// Filled only by get_state_with_history(), from the same locked snapshot as the fields above.
+    history_t history;
   };
 
   /**
@@ -167,6 +243,14 @@ namespace adaptive_bitrate {
    * @brief Get the current controller state for status APIs and HUDs.
    */
   state_t get_state();
+
+  /**
+   * @brief get_state() plus a copy of the current Live Tuning history, taken under the same lock.
+   *
+   * The history is observational: recording it never changes a controller decision, and it does not
+   * say which bitrate any client media interval was encoded at.
+   */
+  state_t get_state_with_history();
 
   /** Return a coherent snapshot for a conditional Doctor transaction. */
   doctor_state_t get_doctor_state();

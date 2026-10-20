@@ -327,7 +327,7 @@ behaviour (pre-release update notifications, the tray icon, and whether the tray
 stop, restart, and quit controls), and metadata integrations (a SteamGridDB key for artwork on
 non-Steam entries, and whether Polaris may ask How Long To Beat for titles missing from its local
 completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`,
-`hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`, `host_sleep_enabled`.
+`hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`, `keep_desktop_steam_running`, `host_sleep_enabled`.
 
 | Field | What it does |
 | --- | --- |
@@ -336,10 +336,11 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **Log Level** (`min_log_level`) | The minimum log level printed to standard out |
 | **Server Commands** (`server_cmd`) | Configure a list of commands to be executed when called from client during streaming. |
 | **Include beta releases** (`notify_pre_releases`) | Offer newer beta and release-candidate packages in Update Center. Off by default; also available in **System → Update Center**. Older versions label it **PreRelease Notifications**. See [updates and beta releases](updates.md). |
-| **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray |
+| **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray. The Linux headless-boot user service keeps it off so the host survives desktop logout; direct launches and ordinary desktop services still honor this setting. |
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
 | **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
+| **Keep Desktop Steam Running After End Session** (`keep_desktop_steam_running`) | Linux only, off by default. In Host Virtual Display or Mirror Host Desktop, close the game this stream launched and leave managed Steam open. Applications can override this default; custom undo scripts still run. Private streams retain runtime cleanup. See [desktop Steam lifecycle](steam-lifecycle.md). |
 | **Allow Clients To Sleep This Host** (`host_sleep_enabled`) | Let a paired Nova client put this machine to sleep; Nova for Android and Nova for Linux have the control, and Moonlight has none. Watch-only clients cannot. Polaris refuses while a stream is running. Waking it again is Wake-on-LAN. |
 
 ### Input tab
@@ -439,6 +440,16 @@ its saved value. `adaptive_bitrate_max` no longer limits anything. Polaris still
 it, so a settings file that sets it loads as before, and logs a warning that names `max_bitrate` as
 the cap to use. The settings page no longer shows it. See [Live Tuning](live-tuning.md#range).
 
+**Stream pacing** holds **Allow source-paced VRR (experimental)** (`vrr_source_pacing`), off by
+default. With it on, a client that asks for VRR on a Private Stream gets frames at the cadence the
+game produces them, when the capture path can prove its timing: a supported Private Stream capture
+path, H.264 or HEVC, SDR. AV1, HDR and PyroWave keep fixed-rate pacing, and so does any stream
+whose capture timing cannot be verified; the section names the reason for each client. The switch
+applies to streams started after a restart. It reports host frame pacing only: it does not verify
+VRR on the client's display or adaptive sync on the host's. Nothing about it has been checked on
+a VRR display yet. How Doctor grades these streams is in
+[Doctor source cadence evidence](doctor-source-cadence.md).
+
 ### Advanced tab
 
 Load handling (limit the capture frame rate to what the client asked for), compatibility switches
@@ -477,6 +488,65 @@ credentials separately from the state file. The defaults are listed under [Files
 | **Credentials File** (`credentials_file`) | Store Username/Password separately from Polaris's state file. |
 | **Private Key** (`pkey`) | The private key used for the web UI and Moonlight client pairing. For best compatibility, this should be an RSA-2048 private key. |
 | **Certificate** (`cert`) | The certificate used for the web UI and Moonlight client pairing. For best compatibility, this should have an RSA-2048 public key. |
+
+### Recording tab
+
+Experimental and host only. Polaris saves the stream's raw elementary video: no audio, no
+container, no timestamps, and playback is not qualified. Every file stays on the host. Keys:
+`recording_enabled`, `recording_replay_buffer`, `recording_replay_buffer_minutes`,
+`recording_output_dir`. These settings take effect after Polaris restarts.
+
+The tab offers one **Recording policy** over the first two keys:
+
+| Policy | Keys | What it does |
+| --- | --- | --- |
+| **Off** (default) | `recording_enabled = disabled` | No replay buffer is kept. A signed-in host admin can still start a continuous file on purpose through the host recording API; Off does not block that. |
+| **Manual continuous** | `recording_enabled = enabled`, `recording_replay_buffer = disabled` | Choosing it does not start a file. A file is written only after a signed-in host admin starts one. |
+| **Replay buffer** | `recording_enabled = enabled`, `recording_replay_buffer = enabled` | Keeps recent video of the one eligible stream in memory, from a video keyframe onward. Nothing is written until a signed-in host admin saves it. See **Replay window and keyframes** below. |
+
+| Field | What it does |
+| --- | --- |
+| **Replay length (minutes)** (`recording_replay_buffer_minutes`) | 1 to 60 minutes, default 5, best effort: the buffer also stops at 128 MiB or 32,768 packets, whichever comes first, and always starts at a keyframe. Reaching a limit can remove that starting keyframe and clear the buffer until the next keyframe arrives (see below). |
+| **Output directory** (`recording_output_dir`) | Where saved files are written. Empty means the `recordings` folder in the Polaris data directory. |
+
+The settings page has no start, stop or save button, and choosing a policy or opening the tab
+never calls the recorder. Starting, stopping and saving stay host-admin requests to
+`/api/recording/start`, `/api/recording/stop` and `/api/recording/save-replay`.
+
+#### Replay window and keyframes
+
+The replay buffer keeps one run of the selected stream's encoded video, and a run must begin at a
+video keyframe because the frames after it depend on it. Polaris requests keyframes at the start
+of a stream and on demand. Its encoders use long or effectively unlimited keyframe intervals,
+so a stream can run for a long time without a fresh keyframe.
+
+When the replay length, the 128 MiB payload limit or the 32,768-packet limit removes the run's
+starting keyframe, the recorder also drops the dependent frames that followed it. If the run held no
+later keyframe, that clears the whole buffer, and it stays empty until the stream sends a fresh keyframe;
+a save during that time reports the outcome `empty` and creates no file. As arithmetic on the fixed
+limit, not a measurement, 128 MiB holds about 54 seconds of a 20 Mbps stream, so at common bitrates
+the size limit is reached before a five-minute length. Polaris does not request a keyframe for the
+replay buffer.
+
+`GET /api/recording/status` reports this state: `replay.awaiting_keyframe` is true while replay is
+enabled, one stream is selected and the buffer is empty, and `replay.last_window_limit` names what
+last removed video or reset the run (`duration`, `payload_cap`, `entry_cap`, `configuration`,
+`selection`, `codec`, `discontinuity`, or `none`). These are packet-accounting facts about the
+host's buffer. They say nothing about playback, which remains unqualified.
+
+#### Device recording approval
+
+Each paired device can carry a stored **Approve recordings for this device** choice, edited in the
+device editor on the pairing page. It is a host admin's approval and nothing more:
+
+- No client can ask Polaris to record yet. The approval is stored for a later, separately
+  negotiated feature and changes nothing today.
+- It is separate from device permissions. No access preset (including Full Control), pairing,
+  re-pairing the same certificate, or a one-time PIN grants it, and it grants no launch, view,
+  input or command permission.
+- A temporary (guest) device cannot hold it. Making a device temporary clears it, and making it
+  permanent again does not bring it back.
+- Saved devices keep it across restarts; devices saved before the setting existed load with it off.
 
 ### AI and Encoder Profiles tabs
 

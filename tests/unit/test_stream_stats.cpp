@@ -9,10 +9,13 @@
 #include <src/configuration_store.h>
 #include <src/platform/common.h>
 #include <src/doctor_actions.h>
+#include <src/doctor_cadence.h>
 #include <src/adaptive_bitrate.h>
 #include <src/live_tuning.h>
 #include <src/private_state_file.h>
 #include <src/utility.h>
+#include <src/vrr_clock_proof.h>
+#include <src/vrr_source_time.h>
 #include "../tests_events.h"
 
 #include <gtest/gtest.h>
@@ -22,14 +25,19 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 #ifdef __linux__
   #include <src/platform/linux/kms_capture_readiness.h>
   #include <src/platform/linux/misc.h>
@@ -41,6 +49,63 @@
 #endif
 
 namespace {
+#ifdef __linux__
+  /**
+   * PATH holds only these stand-ins, labwc and wlr-randr unless a test names others, for as long
+   * as the object lives; the previous PATH comes back after. The Doctor reads the configured mode's
+   * availability from PATH, so a case about something else in a private mode makes the mode
+   * available here instead of depending on what the runner has installed. Same shape as the fixture
+   * in test_stream_display_policy.cpp; kept local so this file needs no new seam or dependency.
+   */
+  class ScopedPrivateRuntimePath {
+  public:
+    explicit ScopedPrivateRuntimePath(std::initializer_list<const char *> binaries = {"labwc", "wlr-randr"}) {
+      if (const char *current = std::getenv("PATH")) {
+        had_previous = true;
+        previous = current;
+      }
+
+      char path_template[] = "/tmp/polaris-stream-stats-runtime-XXXXXX";
+      const char *created = mkdtemp(path_template);
+      if (!created) {
+        throw std::runtime_error("failed to create stream-stats runtime test directory");
+      }
+      directory = created;
+
+      for (const char *binary : binaries) {
+        const auto path = std::filesystem::path {directory} / binary;
+        std::ofstream script {path};
+        script << "#!/bin/sh\nexit 0\n";
+        script.close();
+        if (!script || chmod(path.c_str(), 0700) != 0) {
+          throw std::runtime_error("failed to create stream-stats runtime test executable");
+        }
+      }
+      if (setenv("PATH", directory.c_str(), 1) != 0) {
+        throw std::runtime_error("failed to set stream-stats runtime test PATH");
+      }
+    }
+
+    ScopedPrivateRuntimePath(const ScopedPrivateRuntimePath &) = delete;
+    ScopedPrivateRuntimePath &operator=(const ScopedPrivateRuntimePath &) = delete;
+
+    ~ScopedPrivateRuntimePath() {
+      if (had_previous) {
+        setenv("PATH", previous.c_str(), 1);
+      } else {
+        unsetenv("PATH");
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
+
+  private:
+    bool had_previous = false;
+    std::string previous;
+    std::string directory;
+  };
+#endif
+
   struct LinuxDisplayConfigGuard {
     LinuxDisplayConfigGuard():
         adapter_name {config::video.adapter_name},
@@ -244,6 +309,11 @@ TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
 
 TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNativeCapture) {
   LinuxDisplayConfigGuard guard;
+#ifdef __linux__
+  // headless + cage is Private Stream, whose labwc runtime the Doctor looks for on PATH; this case
+  // is about the CUDA advice alone, so the runtime is there.
+  ScopedPrivateRuntimePath runtime_path;
+#endif
   config::video.encoder = "nvenc";
   config::video.linux_display.headless_mode = true;
   config::video.linux_display.use_cage_compositor = true;
@@ -2356,6 +2426,21 @@ TEST(StreamStatsDoctorTests, PointsATailnetClientAtTheRelayCheck) {
   EXPECT_EQ(row->at("value"), "cgnat");
   EXPECT_EQ(row->at("status"), "info");
   EXPECT_NE(row->at("detail").get<std::string>().find("tailscale ping"), std::string::npos);
+  EXPECT_NE(row->at("detail").get<std::string>().find("does not verify"), std::string::npos);
+}
+
+TEST(StreamStatsDoctorTests, CurrentStreamIdentityIsOpaqueStableAndRetiredAtDisconnect) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.session_generation = 920001;
+  const auto first = nlohmann::json::parse(stats.to_json()).at("stream_instance_id").get<std::string>();
+  EXPECT_FALSE(first.empty());
+  EXPECT_EQ(first, stream_stats::stream_instance_id(stats.session_generation));
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("stream_instance_id"), first);
+  stats.session_generation = 920002;
+  EXPECT_NE(nlohmann::json::parse(stats.to_json()).at("stream_instance_id"), first);
+  stats.streaming = false;
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("stream_instance_id"), "");
 }
 
 namespace {
@@ -2772,6 +2857,321 @@ TEST(StreamStatsDoctorTests, SaysNothingAboutTheKmsCapabilityUnlessKmsWasRefused
 
   platf::set_capture_backend_substitution_for_tests("");
 }
+
+#ifdef __linux__
+namespace {
+  /**
+   * Process state the #152 findings read. Saved here and restored on exit: the live linux_display
+   * settings, capture and output_name, and polaris.conf's loaded capture setting (put back by
+   * loading it again, the only way it is written). Reset to the state a test binary starts in,
+   * not restored, through the existing seams: the substitution note (empty), the KMS refusal
+   * (false), the capture evaluation record (nothing evaluated), the virtual display test probe
+   * (none), and the held host default with any session capture rewrite (forgotten).
+   */
+  struct DoctorHostConfigurationGuard {
+    config::video_t::linux_display_t linux_display {config::video.linux_display};
+    std::string capture {config::video.capture};
+    std::string output_name {config::video.output_name};
+    std::string loaded {stream_display_policy::loaded_capture_setting()};
+
+    DoctorHostConfigurationGuard() = default;
+    DoctorHostConfigurationGuard(const DoctorHostConfigurationGuard &) = delete;
+    DoctorHostConfigurationGuard &operator=(const DoctorHostConfigurationGuard &) = delete;
+
+    ~DoctorHostConfigurationGuard() {
+      // Reset, as a test binary starts: these seams have no "previous value" to put back.
+      platf::set_capture_backend_substitution_for_tests("");
+      platf::set_kms_capture_refused_for_tests(false);
+      platf::set_capture_sources_missing_for_tests(false);
+      virtual_display::set_host_stream_probe_for_tests(std::nullopt);
+      stream_display_policy::forget_host_default();
+      // Restored: only a load writes the loaded setting, so load the old one, then put the live
+      // values back as they were.
+      config::video.linux_display = linux_display;
+      config::video.capture = loaded;
+      stream_display_policy::normalize_config_from_load();
+      stream_display_policy::log_config_load_notes();
+      config::video.linux_display = linux_display;
+      config::video.capture = capture;
+      config::video.output_name = output_name;
+    }
+  };
+
+  /// Load a host configuration the way a polaris.conf read does: the capture setting becomes the
+  /// loaded one, and the mode's booleans and any rewrite the load makes follow the mode.
+  void load_host_configuration(std::string_view stream_mode, std::string_view capture) {
+    config::video.linux_display.stream_mode = std::string {stream_mode};
+    config::video.capture = std::string {capture};
+    stream_display_policy::normalize_config_from_load();
+    stream_display_policy::log_config_load_notes();
+  }
+
+  /// The Doctor's configuration findings for a host that is not streaming.
+  nlohmann::json idle_configuration_warnings() {
+    stream_stats::stats_t stats {};
+    return stream_stats::build_doctor_json(stats, nlohmann::json::object())
+      .at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings");
+  }
+
+  std::vector<nlohmann::json> findings_with_id(const nlohmann::json &warnings, std::string_view id) {
+    std::vector<nlohmann::json> found;
+    for (const auto &warning : warnings) {
+      if (warning.value("id", std::string {}) == id) {
+        found.push_back(warning);
+      }
+    }
+    return found;
+  }
+
+  /// A source without the field fails here as an assertion the report records, not as a JSON
+  /// exception thrown out of the test.
+  void expect_stale(const nlohmann::json &finding, bool expected, const std::string &context) {
+    ASSERT_TRUE(finding.contains("stale")) << context << ": the finding has no stale field";
+    EXPECT_EQ(finding.at("stale"), expected) << context;
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideBeforeAnyStream) {
+  // #152: capture = kms with linux_stream_mode = windowed_stream is a valid pair that a private
+  // labwc session resolves to wlroots. Until now the host said so only while a stream was being
+  // set up, in the log, and the Doctor read clean before that.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("windowed_stream", "kms");
+  platf::set_capture_backend_substitution_for_tests("");
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "no_active_stream");
+  EXPECT_EQ(doctor.at("simple_state"), "Waiting for a stream");
+  EXPECT_EQ(doctor.at("status"), "unknown");
+  EXPECT_EQ(doctor.at("severity"), "info");
+
+  const auto &warnings = doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings");
+  const auto found = findings_with_id(warnings, "capture_set_aside_by_mode");
+  ASSERT_EQ(found.size(), 1u);
+  const auto &finding = found.front();
+  EXPECT_EQ(finding.at("severity"), "info");
+  EXPECT_EQ(finding.at("stream_mode"), "windowed_stream");
+  EXPECT_EQ(finding.at("configured_capture"), "kms");
+  EXPECT_EQ(finding.at("effective_capture"), "wlr");
+  EXPECT_EQ(finding.at("reason").get<std::string>(), stream_display_policy::k_capture_override_private_compositor);
+  const auto message = finding.at("message").get<std::string>();
+  EXPECT_NE(message.find("stream mode [windowed_stream] asks for [wlr], not the configured [kms]"), std::string::npos);
+  EXPECT_NE(message.find("a private labwc session can only be captured through wlroots"), std::string::npos);
+  EXPECT_NE(message.find("Nothing is wrong with this pairing"), std::string::npos);
+  EXPECT_NE(finding.at("action").get<std::string>().find("Keep capture = kms"), std::string::npos);
+  EXPECT_FALSE(finding.contains("stale")) << "a mode rule is read from configuration, not from the capture evaluation";
+  EXPECT_TRUE(findings_with_id(warnings, "capture_backend_substituted").empty());
+  EXPECT_TRUE(findings_with_id(warnings, "kms_capture_needs_capability").empty());
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideNotForAnUnsetOrAutoCapture) {
+  // Auto asked the host to choose, so the host choosing is no override, and a capture the dongle
+  // or a Gamescope launch fills with the portal was never an explicit choice either.
+  DoctorHostConfigurationGuard guard;
+  for (const auto &[mode, capture] : std::initializer_list<std::pair<const char *, const char *>> {
+         {"windowed_stream", ""},
+         {"windowed_stream", "auto"},
+         {"headless_stream", ""},
+         {"gamescope_stream", ""},
+         {"headless_dongle", ""},
+         {"headless_dongle", "auto"},
+       }) {
+    load_host_configuration(mode, capture);
+    EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty())
+      << mode << " capture=[" << capture << "]";
+  }
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideNotWhereTheModeKeepsKms) {
+  // The finding agrees with the launch rule: where a launch keeps kms, there is nothing to say.
+  DoctorHostConfigurationGuard guard;
+  for (const auto mode : {"desktop_display", "headless_dongle", "gamescope_stream"}) {
+    load_host_configuration(mode, "kms");
+    EXPECT_TRUE(platf::kms_readiness::kms_possible_in_mode(mode)) << mode;
+    EXPECT_EQ(config::video.capture, "kms") << mode << " keeps the explicit backend";
+    EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty()) << mode;
+  }
+  for (const auto mode : {"windowed_stream", "headless_stream"}) {
+    load_host_configuration(mode, "kms");
+    EXPECT_FALSE(platf::kms_readiness::kms_possible_in_mode(mode)) << mode;
+    const auto found = findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode");
+    ASSERT_EQ(found.size(), 1u) << mode;
+    EXPECT_EQ(found.front().at("stream_mode"), mode);
+    EXPECT_EQ(found.front().at("effective_capture"), "wlr") << mode;
+  }
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideMeasuresAgainstPolarisConfNotTheLoadsReplacement) {
+  // A Host Virtual Display load rewrites the live capture setting to what its backend exposes, so
+  // by the time Doctor reads it the live value already is the replacement. The finding names what
+  // polaris.conf chose, as the load note does, rather than telling a host set to kms that it had
+  // chosen portal.
+  DoctorHostConfigurationGuard guard;
+  virtual_display::set_host_stream_probe_for_tests(virtual_display::host_stream_probe_for_tests_t {
+    .backend = virtual_display::backend_e::EVDI,
+  });
+  load_host_configuration("host_virtual_display", "kms");
+  EXPECT_EQ(stream_display_policy::loaded_capture_setting(), "kms");
+  EXPECT_EQ(config::video.capture, "portal") << "the load captures the EVDI output through the portal";
+
+  const auto found = findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode");
+  ASSERT_EQ(found.size(), 1u);
+  const auto &finding = found.front();
+  EXPECT_EQ(finding.at("severity"), "info");
+  EXPECT_EQ(finding.at("stream_mode"), "host_virtual_display");
+  EXPECT_EQ(finding.at("configured_capture"), "kms");
+  EXPECT_EQ(finding.at("effective_capture"), "portal");
+  EXPECT_EQ(finding.at("reason").get<std::string>(), stream_display_policy::k_capture_override_virtual_display_backend);
+  EXPECT_NE(finding.at("message").get<std::string>().find("asks for [portal], not the configured [kms]"), std::string::npos);
+
+  // polaris.conf naming what the backend exposes is no override, and neither is leaving it unset.
+  for (const auto capture : {"portal", ""}) {
+    load_host_configuration("host_virtual_display", capture);
+    EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty())
+      << "capture=[" << capture << "]";
+  }
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideAndASubstitutionAreSeparateFindings) {
+  // A mode rule and a capture evaluation are two different things to know. The private mode
+  // sets kms aside whatever the evaluation found; the substitution is what the evaluation found.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("windowed_stream", "kms");
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+
+  const auto warnings = idle_configuration_warnings();
+  const auto substituted = findings_with_id(warnings, "capture_backend_substituted");
+  const auto set_aside = findings_with_id(warnings, "capture_set_aside_by_mode");
+  ASSERT_EQ(substituted.size(), 1u);
+  ASSERT_EQ(set_aside.size(), 1u);
+  EXPECT_EQ(substituted.front().at("severity"), "warning");
+  EXPECT_EQ(set_aside.front().at("severity"), "info");
+  EXPECT_EQ(set_aside.front().at("reason").get<std::string>(), stream_display_policy::k_capture_override_private_compositor);
+  EXPECT_NE(substituted.front().at("message"), set_aside.front().at("message"));
+  EXPECT_EQ(set_aside.front().at("message").get<std::string>().find("substitut"), std::string::npos)
+    << "the mode's explanation does not describe the evaluation";
+  EXPECT_TRUE(substituted.front().contains("stale"));
+  EXPECT_FALSE(set_aside.front().contains("stale"));
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideStaysSilentForAPinnedAppMode) {
+  // An app pinned to Private Stream on a Mirror Desktop host set to kms streams through wlroots for
+  // that launch. That is the launch's own choice, carried on the session as its mode override
+  // reason, and the host finding does not report it as the host's configuration.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("desktop_display", "kms");
+  EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty());
+
+  stream_display_policy::apply_capture_for_session_transition("desktop_display", "windowed_stream");
+  EXPECT_EQ(config::video.capture, "wlr") << "the launch's rewrite stands for the session";
+  EXPECT_EQ(stream_display_policy::loaded_capture_setting(), "kms");
+  EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty())
+    << "a per-app or per-session mode is that launch's own choice";
+
+  // The host setting comes back at teardown, and the finding stays silent.
+  config::video.capture = "kms";
+  stream_display_policy::forget_host_default();
+  EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty());
+}
+
+TEST(StreamStatsDoctorTests, MarksACaptureFindingTheHostHasNotVerifiedForTheCurrentSettings) {
+  // The capture evaluation stands until the next launch. After a capture or mode change in
+  // Settings its findings describe settings the host no longer has, and before any evaluation
+  // they describe nothing at all, so each one says whether it was verified for the settings the
+  // host holds now. The host keeps the finding's own grade and text; the console decides how to
+  // show an unverified one.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("desktop_display", "wlr");
+  platf::set_capture_backend_substitution_for_tests("wlr -> portal");
+  platf::set_capture_sources_missing_for_tests(false);
+  EXPECT_TRUE(platf::capture_sources_stale()) << "nothing has been evaluated yet";
+
+  auto substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  expect_stale(substituted.front(), true, "no recorded evaluation");
+
+  platf::mark_capture_sources_evaluated_for_current_config_for_tests();
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  expect_stale(substituted.front(), false, "evaluated for these settings");
+  EXPECT_EQ(substituted.front().at("severity"), "warning");
+  const auto verified_message = substituted.front().at("message");
+  const auto verified_action = substituted.front().at("action");
+
+  config::video.capture = "kms";
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  expect_stale(substituted.front(), true, "the capture setting moved since the evaluation");
+  EXPECT_EQ(substituted.front().at("severity"), "warning") << "the host keeps the grade";
+  EXPECT_EQ(substituted.front().at("message"), verified_message);
+  EXPECT_EQ(substituted.front().at("action"), verified_action);
+
+  config::video.capture = "wlr";
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  expect_stale(substituted.front(), false, "the settings the evaluation was built for are back");
+
+  config::video.linux_display.stream_mode = "headless_stream";
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  expect_stale(substituted.front(), true, "the mode moved since the evaluation");
+}
+
+TEST(StreamStatsDoctorTests, EveryCaptureEvaluationFindingSaysWhetherItIsVerifiedAndNothingElseDoes) {
+  // The three findings the evaluation produces go stale together; a finding read from
+  // configuration or from a stream has no evaluation to be stale against.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("desktop_display", "kms");
+  platf::set_capture_backend_substitution_for_tests("");
+  platf::set_capture_sources_missing_for_tests(true);
+  platf::set_kms_capture_refused_for_tests(true);
+  platf::mark_capture_sources_evaluated_for_current_config_for_tests();
+
+  auto warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    expect_stale(found.front(), false, id);
+    EXPECT_EQ(found.front().at("severity"), "fail") << id;
+  }
+  for (const auto &warning : warnings) {
+    const auto id = warning.value("id", std::string {});
+    const bool evaluation_finding = id == "no_capture_backend" ||
+                                    id == "capture_backend_substituted" ||
+                                    id == "kms_capture_needs_capability";
+    EXPECT_EQ(warning.contains("stale"), evaluation_finding) << id;
+  }
+
+  // drm is kms under another name to dispatch, and another setting to the evaluation record.
+  config::video.capture = "drm";
+  warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    expect_stale(found.front(), true, id);
+    EXPECT_EQ(found.front().at("severity"), "fail") << id << " keeps its own grade";
+  }
+
+  // A substitution noted by the same evaluation is verified with it. (The test seams record an
+  // evaluation that found nothing, so the missing-backend finding stands beside these two here.)
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+  platf::mark_capture_sources_evaluated_for_current_config_for_tests();
+  warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "capture_backend_substituted", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    expect_stale(found.front(), false, id);
+  }
+  config::video.linux_display.stream_mode = "desktop_takeover";
+  warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "capture_backend_substituted", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    expect_stale(found.front(), true, std::string {id} + " goes stale with the others");
+  }
+}
+#endif
 
 TEST(StreamStatsDoctorTests, HdrFindingNamesTheRecipeAndTheCapabilityWhenKmsWasRefused) {
   // Explaining why HDR did not engage is only half of it; the person wants to know what to
@@ -7608,6 +8008,11 @@ TEST(StreamStatsDoctorTests, KeepsHealthyVaapiShmFallbackInformational) {
 
 TEST(StreamStatsDoctorTests, KeepsNvidiaHeadlessWarningsInAdvancedEvidence) {
   LinuxDisplayConfigGuard guard;
+#ifdef __linux__
+  // headless + cage is Private Stream, whose labwc runtime the Doctor looks for on PATH; this case
+  // reads the CUDA advice as the first finding, so the runtime is there.
+  ScopedPrivateRuntimePath runtime_path;
+#endif
   config::video.encoder = "nvenc";
   config::video.linux_display.headless_mode = true;
   config::video.linux_display.use_cage_compositor = true;
@@ -7729,6 +8134,29 @@ TEST(StreamStatsDoctorTests, CaptureMissingNeedsTelemetryBeforeTuning) {
   EXPECT_EQ(doctor.at("primary_issue"), "capture_missing");
   EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Start stream");
   EXPECT_TRUE(doctor.at("redaction").at("applied"));
+}
+
+TEST(StreamStatsDoctorTests, IdleHostWaitsWithoutGradingUnavailableTelemetry) {
+  const auto doctor = stream_stats::build_doctor_json(stream_stats::stats_t {}, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "no_active_stream");
+  EXPECT_EQ(doctor.at("status"), "unknown");
+  EXPECT_EQ(doctor.at("severity"), "info");
+  EXPECT_EQ(doctor.at("simple_state"), "Waiting for a stream");
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
+  const auto *latency = find_evidence_row(doctor, "latency");
+  ASSERT_NE(latency, nullptr);
+  EXPECT_TRUE(latency->at("value").is_null());
+}
+
+TEST(StreamStatsDoctorTests, RecentConnectionTimeoutDoesNotBecomeNeutralIdle) {
+  const auto doctor = stream_stats::build_doctor_json(
+    after_last_start("no_ping", "hevc", std::chrono::minutes {1}), nlohmann::json::object());
+  EXPECT_EQ(doctor.at("severity"), "warning");
+  EXPECT_EQ(doctor.at("simple_state"), "Needs attention");
+  const auto *start = find_evidence_row(doctor, "last_stream_start");
+  ASSERT_NE(start, nullptr);
+  EXPECT_EQ(start->at("status"), "watch");
 }
 
 // The tests below exercise the global stats_t singleton (update_*() /
@@ -10844,6 +11272,568 @@ TEST(BenchmarkRunHotPathTests, RecordDuringDrainAcceptsInWindowStartsAndExcludes
   EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
 }
 
+namespace {
+  struct BenchmarkTtlRunFixture {
+    std::string run_id;
+
+    BenchmarkTtlRunFixture(std::string id, stream_stats::benchmark_run_state_e state,
+                          std::chrono::steady_clock::time_point terminal_time):
+        run_id {std::move(id)} {
+      stream_stats::benchmark_run_t run {2};
+      run.run_id = run_id;
+      run.state = state;
+      run.frozen_monotonic = terminal_time;
+      run.label = "retained-ttl-metadata";
+      run.owning_device_uuid = "ttl-fixture-owner";
+      run.owning_session_generation = 8101;
+      for (auto *stage : {&run.capture_to_encode, &run.encode_to_send_release, &run.capture_to_send_release}) {
+        stage->record(1, 5, 1000);
+      }
+      stream_stats::insert_benchmark_run(std::move(run));
+    }
+
+    ~BenchmarkTtlRunFixture() {
+      stream_stats::erase_benchmark_run(run_id);
+    }
+  };
+
+  void expect_ttl_payload(const stream_stats::benchmark_run_t &run, bool present) {
+    EXPECT_EQ(run.label, "retained-ttl-metadata");
+    EXPECT_EQ(run.owning_device_uuid, "ttl-fixture-owner");
+    EXPECT_EQ(run.owning_session_generation, 8101u);
+    for (const auto *stage : {&run.capture_to_encode, &run.encode_to_send_release, &run.capture_to_send_release}) {
+      EXPECT_EQ(stage->accepted_count, 1u) << "expiry preserves the tombstone counts";
+      EXPECT_EQ(stage->start_offset_us.size(), present ? 1u : 0u);
+      EXPECT_EQ(stage->end_offset_us.size(), present ? 1u : 0u);
+      EXPECT_EQ(stage->duration_us.size(), present ? 1u : 0u);
+    }
+  }
+}  // namespace
+
+TEST(BenchmarkRunRetentionTests, AuthorizedGetExpiresStaleTerminalPayloadBeforeItsVisitor) {
+  BenchmarkControlPlaneGuard guard {true};
+  const auto terminal_time = std::chrono::steady_clock::now() - std::chrono::minutes(31);
+  for (const auto state : {stream_stats::benchmark_run_state_e::frozen, stream_stats::benchmark_run_state_e::aborted}) {
+    BenchmarkTtlRunFixture fixture {"ttl-get-old-" + std::to_string(static_cast<int>(state)), state, terminal_time};
+    bool visited = false;
+    const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &run) {
+      visited = true;
+      EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::expired);
+      EXPECT_EQ(run.frozen_monotonic, terminal_time);
+      expect_ttl_payload(run, false);
+    });
+    EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+    EXPECT_TRUE(visited) << "the expired tombstone remains readable";
+  }
+}
+
+TEST(BenchmarkRunRetentionTests, AuthorizedGetPreservesFreshTerminalAndArmedPayloads) {
+  BenchmarkControlPlaneGuard guard {true};
+  for (const auto state : {stream_stats::benchmark_run_state_e::frozen, stream_stats::benchmark_run_state_e::aborted,
+                           stream_stats::benchmark_run_state_e::armed}) {
+    // A stale timestamp alone cannot expire an armed row: terminal state is required.
+    const auto age = state == stream_stats::benchmark_run_state_e::armed ? std::chrono::minutes(31) : std::chrono::minutes(1);
+    BenchmarkTtlRunFixture fixture {"ttl-get-fresh-" + std::to_string(static_cast<int>(state)), state,
+                                   std::chrono::steady_clock::now() - age};
+    bool visited = false;
+    EXPECT_EQ(stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &run) {
+      visited = true;
+      EXPECT_EQ(run.state, state);
+      expect_ttl_payload(run, true);
+    }), stream_stats::benchmark_run_get_result_e::found);
+    EXPECT_TRUE(visited);
+  }
+}
+
+TEST(BenchmarkRunRetentionTests, UnauthorizedGetCannotExpirePayloadOrInvokeItsVisitor) {
+  BenchmarkControlPlaneGuard guard {true};
+  BenchmarkTtlRunFixture fixture {"ttl-get-unauthorized", stream_stats::benchmark_run_state_e::frozen,
+                                 std::chrono::steady_clock::now() - std::chrono::minutes(31)};
+  bool visited = false;
+  EXPECT_EQ(stream_stats::get_benchmark_run(fixture.run_id, false, [&](stream_stats::benchmark_run_t &) {
+    visited = true;
+  }), stream_stats::benchmark_run_get_result_e::rejected_caller_not_authorized_as_harness);
+  EXPECT_FALSE(visited);
+  ASSERT_TRUE(stream_stats::with_benchmark_run(fixture.run_id, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::frozen);
+    expect_ttl_payload(run, true);
+  }));
+}
+
+TEST(BenchmarkRunRetentionTests, DisabledGetCannotExpirePayloadOrInvokeItsVisitor) {
+  BenchmarkControlPlaneGuard guard {false};
+  BenchmarkTtlRunFixture fixture {"ttl-get-disabled", stream_stats::benchmark_run_state_e::aborted,
+                                 std::chrono::steady_clock::now() - std::chrono::minutes(31)};
+  bool visited = false;
+  EXPECT_EQ(stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &) {
+    visited = true;
+  }), stream_stats::benchmark_run_get_result_e::rejected_control_plane_not_enabled);
+  EXPECT_FALSE(visited);
+  ASSERT_TRUE(stream_stats::with_benchmark_run(fixture.run_id, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::aborted);
+    expect_ttl_payload(run, true);
+  }));
+}
+
+namespace {
+  // One owner's stats client and timing scopes. Removes exactly what this test made on scope exit,
+  // including after a failed assertion: its runs, every timing generation it registered and its client.
+  struct BenchmarkReconnectFixture {
+    std::string ip;
+    std::string device_uuid;
+    std::vector<std::uint64_t> generations;
+    std::vector<std::string> run_ids;
+
+    BenchmarkReconnectFixture(std::string ip_in, std::string device_uuid_in):
+        ip(std::move(ip_in)), device_uuid(std::move(device_uuid_in)) {
+      stream_stats::add_client(ip, device_uuid);
+    }
+
+    void register_generation(std::uint64_t generation) {
+      stream_stats::start_session_timing(device_uuid, generation);
+      generations.push_back(generation);
+    }
+
+    stream_stats::benchmark_run_create_result_e create(const std::string &run_id, std::uint64_t generation,
+                                                       bool authorized = true) {
+      return create(make_valid_create_request(run_id), generation, authorized);
+    }
+
+    stream_stats::benchmark_run_create_result_e create(const stream_stats::benchmark_run_create_request_t &request,
+                                                       std::uint64_t generation, bool authorized = true) {
+      run_ids.push_back(request.run_id);
+      return stream_stats::create_benchmark_run(request, device_uuid, generation, authorized);
+    }
+
+    void own_row(const std::string &run_id) {
+      run_ids.push_back(run_id);
+    }
+
+    ~BenchmarkReconnectFixture() {
+      for (const auto &run_id : run_ids) {
+        stream_stats::erase_benchmark_run(run_id);
+      }
+      for (const auto generation : generations) {
+        stream_stats::stop_session_timing(device_uuid, generation);
+      }
+      stream_stats::remove_client(ip);
+    }
+  };
+
+  struct BenchmarkRunSnapshot {
+    stream_stats::benchmark_run_state_e state;
+    stream_stats::benchmark_abort_reason_e abort_reason;
+    std::optional<std::chrono::steady_clock::time_point> frozen_monotonic;
+    std::uint64_t owning_session_generation;
+  };
+
+  std::optional<BenchmarkRunSnapshot> snapshot_benchmark_run(const std::string &run_id) {
+    std::optional<BenchmarkRunSnapshot> snapshot;
+    stream_stats::with_benchmark_run(run_id, [&](stream_stats::benchmark_run_t &run) {
+      snapshot = BenchmarkRunSnapshot {run.state, run.abort_reason, run.frozen_monotonic, run.owning_session_generation};
+    });
+    return snapshot;
+  }
+
+  void expect_open_and_untouched(const std::string &run_id, stream_stats::benchmark_run_state_e state) {
+    const auto snapshot = snapshot_benchmark_run(run_id);
+    ASSERT_TRUE(snapshot.has_value()) << run_id;
+    EXPECT_EQ(snapshot->state, state) << run_id;
+    EXPECT_EQ(snapshot->abort_reason, stream_stats::benchmark_abort_reason_e::none) << run_id;
+    EXPECT_FALSE(snapshot->frozen_monotonic.has_value()) << run_id;
+  }
+
+  void insert_test_row(const std::string &run_id, const std::string &device_uuid, std::uint64_t generation,
+                       stream_stats::benchmark_run_state_e state) {
+    stream_stats::benchmark_run_t run {4};
+    run.run_id = run_id;
+    run.state = state;
+    run.owning_device_uuid = device_uuid;
+    run.owning_session_generation = generation;
+    if (state == stream_stats::benchmark_run_state_e::frozen || state == stream_stats::benchmark_run_state_e::aborted) {
+      run.frozen_monotonic = std::chrono::steady_clock::now();
+    }
+    stream_stats::insert_benchmark_run(std::move(run));
+  }
+}  // namespace
+
+TEST(BenchmarkRunReconnectTests, ANewerGenerationArmsAndAbortsTheSupersededArmedRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.10", "device-reconnect-armed");
+  fixture.register_generation(11);
+  ASSERT_EQ(fixture.create("reconnect-armed-old", 11), stream_stats::benchmark_run_create_result_e::created);
+  // Another owner's open row is outside this change and must stay exactly as it is.
+  insert_test_row("reconnect-armed-other-owner", "device-reconnect-armed-other", 5, stream_stats::benchmark_run_state_e::armed);
+  fixture.own_row("reconnect-armed-other-owner");
+
+  fixture.register_generation(12);  // the reconnect: start_session_timing replaces this owner's scope
+  const auto before = std::chrono::steady_clock::now();
+  ASSERT_EQ(fixture.create("reconnect-armed-new", 12), stream_stats::benchmark_run_create_result_e::created);
+  const auto after = std::chrono::steady_clock::now();
+
+  const auto old_run = snapshot_benchmark_run("reconnect-armed-old");
+  ASSERT_TRUE(old_run.has_value());
+  EXPECT_EQ(old_run->state, stream_stats::benchmark_run_state_e::aborted);
+  EXPECT_EQ(old_run->abort_reason, stream_stats::benchmark_abort_reason_e::session_generation_changed);
+  ASSERT_TRUE(old_run->frozen_monotonic.has_value()) << "the abort is a terminal transition";
+  EXPECT_GE(*old_run->frozen_monotonic, before);
+  EXPECT_LE(*old_run->frozen_monotonic, after);
+  EXPECT_EQ(old_run->owning_session_generation, 11u);
+
+  expect_open_and_untouched("reconnect-armed-new", stream_stats::benchmark_run_state_e::armed);
+  expect_open_and_untouched("reconnect-armed-other-owner", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-armed-new", fixture.device_uuid, 12, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunReconnectTests, AnUntouchedActiveOrDrainingOldGenerationNoLongerBlocks) {
+  BenchmarkControlPlaneGuard guard(true);
+  for (const bool draining : {false, true}) {
+    SCOPED_TRACE(draining ? "draining" : "active");
+    const std::string suffix = draining ? "draining" : "active";
+    BenchmarkReconnectFixture fixture(draining ? "192.0.2.12" : "192.0.2.11", "device-reconnect-" + suffix);
+    fixture.register_generation(21);
+    ASSERT_EQ(fixture.create("reconnect-" + suffix + "-old", 21), stream_stats::benchmark_run_create_result_e::created);
+    ASSERT_EQ(stream_stats::start_benchmark_run("reconnect-" + suffix + "-old", fixture.device_uuid, 21, true),
+              stream_stats::benchmark_run_start_result_e::started);
+    if (draining) {
+      // Draining needs either a full-length run or its deadline; set the state directly, as storage tests do.
+      ASSERT_TRUE(stream_stats::with_benchmark_run("reconnect-draining-old", [](stream_stats::benchmark_run_t &run) {
+        run.state = stream_stats::benchmark_run_state_e::draining;
+        run.stopped_monotonic = std::chrono::steady_clock::now();
+      }));
+    }
+
+    fixture.register_generation(22);  // nobody reads the old run between the reconnect and the create
+    ASSERT_EQ(fixture.create("reconnect-" + suffix + "-new", 22), stream_stats::benchmark_run_create_result_e::created);
+    const auto old_run = snapshot_benchmark_run("reconnect-" + suffix + "-old");
+    ASSERT_TRUE(old_run.has_value());
+    EXPECT_EQ(old_run->state, stream_stats::benchmark_run_state_e::aborted);
+    EXPECT_EQ(old_run->abort_reason, stream_stats::benchmark_abort_reason_e::session_generation_changed);
+    EXPECT_TRUE(old_run->frozen_monotonic.has_value());
+    EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-" + suffix + "-new", fixture.device_uuid, 22, true),
+              stream_stats::benchmark_run_start_result_e::started);
+  }
+}
+
+TEST(BenchmarkRunReconnectTests, AReusedRunIdIsRejectedWithoutTouchingTheSupersededRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.13", "device-reconnect-reused-id");
+  fixture.register_generation(31);
+  ASSERT_EQ(fixture.create("reconnect-reused-old", 31), stream_stats::benchmark_run_create_result_e::created);
+  insert_test_row("reconnect-reused-unrelated-terminal", "device-reconnect-reused-other", 3,
+                  stream_stats::benchmark_run_state_e::frozen);
+  fixture.own_row("reconnect-reused-unrelated-terminal");
+  fixture.register_generation(32);
+
+  // The superseded run's own ID, then an unrelated terminal row's ID: both rejected, nothing changed.
+  EXPECT_EQ(stream_stats::create_benchmark_run(make_valid_create_request("reconnect-reused-old"), fixture.device_uuid, 32, true),
+            stream_stats::benchmark_run_create_result_e::rejected_run_id_already_used);
+  expect_open_and_untouched("reconnect-reused-old", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_EQ(stream_stats::create_benchmark_run(make_valid_create_request("reconnect-reused-unrelated-terminal"),
+                                               fixture.device_uuid, 32, true),
+            stream_stats::benchmark_run_create_result_e::rejected_run_id_already_used);
+  expect_open_and_untouched("reconnect-reused-old", stream_stats::benchmark_run_state_e::armed);
+  const auto unrelated = snapshot_benchmark_run("reconnect-reused-unrelated-terminal");
+  ASSERT_TRUE(unrelated.has_value());
+  EXPECT_EQ(unrelated->state, stream_stats::benchmark_run_state_e::frozen);
+  EXPECT_EQ(unrelated->abort_reason, stream_stats::benchmark_abort_reason_e::none);
+}
+
+TEST(BenchmarkRunReconnectTests, ASameGenerationDuplicateIsStillRejectedAndTheLiveArmStillStarts) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.14", "device-reconnect-same-generation");
+  fixture.register_generation(41);
+  ASSERT_EQ(fixture.create("reconnect-same-generation-live", 41), stream_stats::benchmark_run_create_result_e::created);
+
+  EXPECT_EQ(fixture.create("reconnect-same-generation-second", 41),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  // Both conflicts at once keep the existing precedence: the session check comes first.
+  EXPECT_EQ(fixture.create("reconnect-same-generation-live", 41),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-same-generation-live", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_FALSE(snapshot_benchmark_run("reconnect-same-generation-second").has_value());
+  EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-same-generation-live", fixture.device_uuid, 41, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunReconnectTests, RejectedPreconditionsNeverReconcile) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.15", "device-reconnect-preconditions");
+  fixture.register_generation(51);
+  ASSERT_EQ(fixture.create("reconnect-preconditions-old", 51), stream_stats::benchmark_run_create_result_e::created);
+  fixture.register_generation(52);
+
+  EXPECT_EQ(fixture.create("reconnect-preconditions-unauthorized", 52, /*authorized=*/false),
+            stream_stats::benchmark_run_create_result_e::rejected_caller_not_authorized_as_harness);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  EXPECT_EQ(fixture.create("reconnect-preconditions-disabled", 52),
+            stream_stats::benchmark_run_create_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  auto invalid = make_valid_create_request("reconnect-preconditions-invalid");
+  invalid.target_fps = 1;
+  EXPECT_EQ(fixture.create(invalid, 52), stream_stats::benchmark_run_create_result_e::rejected_target_fps_out_of_range);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  stream_stats::add_client("192.0.2.16", "device-reconnect-preconditions-second-client");
+  const auto two_clients = fixture.create("reconnect-preconditions-two-clients", 52);
+  stream_stats::remove_client("192.0.2.16");
+  EXPECT_EQ(two_clients, stream_stats::benchmark_run_create_result_e::rejected_not_exactly_one_active_session);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  for (const auto *run_id : {"reconnect-preconditions-unauthorized", "reconnect-preconditions-disabled",
+                             "reconnect-preconditions-invalid", "reconnect-preconditions-two-clients"}) {
+    EXPECT_FALSE(snapshot_benchmark_run(run_id).has_value()) << run_id;
+  }
+}
+
+TEST(BenchmarkRunReconnectTests, WithoutARegisteredTimingScopeTheOldRejectionStands) {
+  BenchmarkControlPlaneGuard guard(true);
+  // No start_session_timing at all, like the existing create tests: nothing proves which generation is
+  // current, so nothing is reconciled.
+  BenchmarkReconnectFixture fixture("192.0.2.17", "device-reconnect-untimed");
+  ASSERT_EQ(fixture.create("reconnect-untimed-old", 61), stream_stats::benchmark_run_create_result_e::created);
+  EXPECT_EQ(fixture.create("reconnect-untimed-new", 62),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-untimed-old", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_FALSE(snapshot_benchmark_run("reconnect-untimed-new").has_value());
+}
+
+TEST(BenchmarkRunReconnectTests, AStaleCallerNeverAbortsTheNewerLiveArm) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.18", "device-reconnect-stale-caller");
+  fixture.register_generation(73);
+  ASSERT_EQ(fixture.create("reconnect-stale-caller-live", 73), stream_stats::benchmark_run_create_result_e::created);
+
+  // A caller still holding generation 72 is not the registered scope.
+  EXPECT_EQ(fixture.create("reconnect-stale-caller-old", 72),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-stale-caller-live", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-stale-caller-live", fixture.device_uuid, 73, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunReconnectTests, ACurrentOlderCallerNeverAbortsANewerRow) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.19", "device-reconnect-newer-row");
+  fixture.register_generation(82);
+  // Insert a newer row directly to bound the strictly-older rule: it must survive a positively current
+  // older caller, regardless of how the fixture arrived at this state.
+  insert_test_row("reconnect-newer-row", fixture.device_uuid, 83, stream_stats::benchmark_run_state_e::armed);
+  fixture.own_row("reconnect-newer-row");
+
+  EXPECT_EQ(fixture.create("reconnect-newer-row-caller", 82),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-newer-row", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_FALSE(snapshot_benchmark_run("reconnect-newer-row-caller").has_value());
+}
+
+namespace {
+  // Registers one more timing generation for a device and stops exactly that generation on scope exit,
+  // even after a fatal ASSERT. ArmedRunFixture only stops the generation it registered itself.
+  struct TimingRegistrationGuard {
+    std::string device_uuid;
+    std::uint64_t session_generation;
+
+    TimingRegistrationGuard(std::string device_uuid_in, std::uint64_t session_generation_in):
+        device_uuid(std::move(device_uuid_in)), session_generation(session_generation_in) {
+      stream_stats::start_session_timing(device_uuid, session_generation);
+    }
+
+    ~TimingRegistrationGuard() {
+      stream_stats::stop_session_timing(device_uuid, session_generation);
+    }
+  };
+
+  // One more stats client for the scope of a test; it changes the population revision both ways.
+  struct ExtraClientGuard {
+    std::string ip;
+
+    ExtraClientGuard(std::string ip_in, const std::string &name): ip(std::move(ip_in)) {
+      stream_stats::add_client(ip, name);
+    }
+
+    ~ExtraClientGuard() {
+      stream_stats::remove_client(ip);
+    }
+  };
+
+  // Everything start_benchmark_run could change on a run it rejects.
+  struct ArmedStateSnapshot {
+    stream_stats::benchmark_run_state_e state;
+    stream_stats::benchmark_abort_reason_e abort_reason;
+    std::uint64_t owning_session_generation;
+    std::chrono::steady_clock::time_point armed_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> started_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> stopped_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> frozen_monotonic;
+    std::uint64_t client_population_revision_at_arm;
+    std::vector<std::size_t> stage_sizes;
+    std::vector<std::size_t> stage_capacities;
+    std::vector<std::size_t> stage_counts;
+
+    bool operator==(const ArmedStateSnapshot &) const = default;
+  };
+
+  std::optional<ArmedStateSnapshot> armed_state_of(const std::string &run_id) {
+    std::optional<ArmedStateSnapshot> snapshot;
+    stream_stats::with_benchmark_run(run_id, [&](stream_stats::benchmark_run_t &run) {
+      ArmedStateSnapshot s {run.state, run.abort_reason, run.owning_session_generation, run.armed_monotonic,
+                            run.started_monotonic, run.stopped_monotonic, run.frozen_monotonic,
+                            run.client_population_revision_at_arm, {}, {}, {}};
+      for (const auto *stage : {&run.capture_to_encode, &run.encode_to_send_release, &run.capture_to_send_release}) {
+        for (const auto *samples : {&stage->start_offset_us, &stage->end_offset_us, &stage->duration_us}) {
+          s.stage_sizes.push_back(samples->size());
+          s.stage_capacities.push_back(samples->capacity());
+        }
+        for (const auto count : {stage->accepted_count, stage->excluded_started_before_window,
+                                 stage->excluded_completed_after_window, stage->overflow_count, stage->invalid_count}) {
+          s.stage_counts.push_back(count);
+        }
+      }
+      snapshot = std::move(s);
+    });
+    return snapshot;
+  }
+}  // namespace
+
+TEST(BenchmarkRunStartGenerationTests, AStaleGenerationAfterAReconnectIsRejectedAndLeavesTheArmUntouched) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.40", "device-start-stale-generation", 2, "start-stale-generation");
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+  ASSERT_EQ(before->state, stream_stats::benchmark_run_state_e::armed);
+
+  // The same device reconnects: generation 3 replaces generation 2. A session for this device is
+  // active, but it is not the run's session.
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before) << "a rejected start changes nothing on the armed run";
+  EXPECT_FALSE(after->started_monotonic.has_value());
+}
+
+TEST(BenchmarkRunStartGenerationTests, TheCurrentGenerationOnAnOlderArmKeepsWrongSessionPrecedence) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.41", "device-start-current-on-old", 2, "start-current-on-old");
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+
+  // The route passes the current identity; the run's owner check still answers first.
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 3, true),
+            stream_stats::benchmark_run_start_result_e::rejected_wrong_session);
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before);
+}
+
+TEST(BenchmarkRunStartGenerationTests, TheExactRegisteredGenerationStartsEvenWhenItIsNotTheLargestSeen) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.42", "device-start-exact-generation", 5, "start-exact-generation");
+  {
+    TimingRegistrationGuard newer(fixture.device_uuid, 6);
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 5, true),
+              stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+  }
+  // Test-only order: generation 5 registered again after 6. The check is exact equality with the
+  // registered scope, not "newest generation wins".
+  TimingRegistrationGuard exact(fixture.device_uuid, 5);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 5, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunStartGenerationTests, AnotherDeviceRegisteredAtTheSameGenerationDoesNotCount) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.43", "device-start-missing-timing", 9, "start-missing-timing");
+  stream_stats::stop_session_timing(fixture.device_uuid, 9);
+  // A different device holds a timing scope with the very same generation number.
+  TimingRegistrationGuard other(fixture.device_uuid + "-other", 9);
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 9, true),
+            stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before);
+}
+
+TEST(BenchmarkRunStartGenerationTests, AGenerationMismatchIsRejectedInEitherDirectionUpToTheMaximum) {
+  BenchmarkControlPlaneGuard guard(true);
+  constexpr std::uint64_t max_generation = UINT64_MAX;
+  {
+    // Registered generation newer than the run's.
+    ArmedRunFixture fixture("192.0.2.44", "device-start-mismatch-newer", max_generation - 1, "start-mismatch-newer");
+    TimingRegistrationGuard registered(fixture.device_uuid, max_generation);
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, max_generation - 1, true),
+              stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+    EXPECT_EQ(armed_state_of(fixture.run_id)->state, stream_stats::benchmark_run_state_e::armed);
+  }
+  {
+    // Registered generation older than the run's (test-only order).
+    ArmedRunFixture fixture("192.0.2.45", "device-start-mismatch-older", max_generation, "start-mismatch-older");
+    TimingRegistrationGuard registered(fixture.device_uuid, max_generation - 1);
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, max_generation, true),
+              stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+    EXPECT_EQ(armed_state_of(fixture.run_id)->state, stream_stats::benchmark_run_state_e::armed);
+  }
+  {
+    // The maximum itself, registered exactly, starts.
+    ArmedRunFixture fixture("192.0.2.46", "device-start-maximum", max_generation, "start-maximum");
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, max_generation, true),
+              stream_stats::benchmark_run_start_result_e::started);
+  }
+}
+
+TEST(BenchmarkRunStartGenerationTests, EarlierRejectionsKeepPrecedenceOverAStaleGeneration) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.47", "device-start-precedence", 2, "start-precedence");
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, false),
+            stream_stats::benchmark_run_start_result_e::rejected_caller_not_authorized_as_harness);
+  EXPECT_EQ(stream_stats::start_benchmark_run("start-precedence-missing", fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_run_not_found);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid + "-other", 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_wrong_session);
+  {
+    ExtraClientGuard second_client("192.0.2.48", "device-start-precedence-second");
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+              stream_stats::benchmark_run_start_result_e::rejected_population_changed_since_arm);
+  }
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before) << "no earlier rejection mutates the armed run either";
+}
+
+TEST(BenchmarkRunStartGenerationTests, ANonArmedRunAnswersNotArmedBeforeTheGenerationCheck) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.49", "device-start-not-armed", 2, "start-not-armed");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::started);
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  // The active run is reconciled first (aborted for the generation change), so it is no longer armed.
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_run_not_in_armed_state);
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->state, stream_stats::benchmark_run_state_e::aborted);
+  EXPECT_EQ(after->abort_reason, stream_stats::benchmark_abort_reason_e::session_generation_changed);
+}
+
 #ifdef __linux__
 TEST(StreamStatsDoctorTests, ForecastStaysSilentUntilCaptureSourcesWereEvaluated) {
   // Nothing has been looked at: no backend, no forecast, no finding. The Doctor must never
@@ -11331,4 +12321,1961 @@ TEST(StreamStatsHotFieldTests, EncoderSamplesFollowCodecChangesAndResetAtStreamE
   stream_stats::update_stream_active(false);
   EXPECT_TRUE(stream_stats::get_current().encoder_backend.empty());
   EXPECT_TRUE(stream_stats::get_current().codec.empty());
+}
+
+namespace {
+  vrr_policy::record_t vrr_record(std::uint64_t generation, vrr_policy::requested_e requested, bool watch = false) {
+    return vrr_policy::make_record(generation, requested, vrr_policy::admission_e::launch, watch, false);
+  }
+}  // namespace
+
+TEST(StreamStatsVrrTests, AGenerationsRequestIsFrozenOnceAndOnlyForALiveEntry) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(0, vrr_policy::requested_e::on)));
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::on))) << "no entry yet";
+
+  stream_stats::add_client("10.0.0.5", "Owner", 401);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::on)));
+  // A later write cannot replace the request this generation was admitted with.
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::off)));
+
+  const auto vrr = stream_stats::vrr_json(stream_stats::get_current(), 401);
+  ASSERT_TRUE(vrr.is_object()) << vrr.dump();
+  EXPECT_EQ(vrr["schema"], 1);
+  EXPECT_EQ(vrr["session_generation"], 401u);
+  EXPECT_EQ(vrr["requested"], "true");
+  EXPECT_EQ(vrr["requested_from"], "launch");
+  EXPECT_EQ(vrr["effective"], false);
+  EXPECT_EQ(vrr["pacing_mode"], "fixed_grid");
+  EXPECT_EQ(vrr["fallback_reason"], "route_unreported");
+  EXPECT_EQ(vrr["capture_pacing"], "unknown");
+
+  // After the generation is gone, a late write for it lands nowhere.
+  stream_stats::remove_client("10.0.0.5", 401);
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::off)));
+  EXPECT_TRUE(stream_stats::vrr_json(stream_stats::get_current(), 401).is_null());
+}
+
+TEST(StreamStatsVrrTests, HostPermissionReceiptIsFrozenPerGenerationInLiveAndEndedRows) {
+  stream_stats::update_stream_active(false);
+  const bool previous_permission = config::video.vrr_source_pacing;
+  auto reset = util::fail_guard([&] {
+    config::video.vrr_source_pacing = previous_permission;
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::add_client("10.0.0.5", "Default off", 461);
+  stream_stats::add_client("10.0.0.6", "Permitted", 462);
+  auto permitted = vrr_record(462, vrr_policy::requested_e::on);
+  permitted.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(461, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(permitted));
+  // A later settings change cannot relabel a stream's admission permission.
+  for (const bool configured : {false, true}) {
+    config::video.vrr_source_pacing = configured;
+    const auto stats = stream_stats::get_current();
+    EXPECT_EQ(stream_stats::vrr_json(stats, 461)["host_permission"], false);
+    EXPECT_EQ(stream_stats::vrr_json(stats, 462)["host_permission"], true);
+    const auto rows = current_stats_json()["clients"];
+    EXPECT_EQ(rows[0]["vrr"]["host_permission"], false);
+    EXPECT_EQ(rows[1]["vrr"]["host_permission"], true);
+  }
+  stream_stats::remove_client("10.0.0.5", 461);
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"]["host_permission"], false);
+  stream_stats::remove_client("10.0.0.6", 462);
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"]["host_permission"], true);
+}
+
+TEST(StreamStatsVrrTests, EachGenerationReadsOnlyItsOwnRecordAndNeverTheOwnersForAWatcher) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 411);
+  stream_stats::add_client("10.0.0.6", "Viewer", 412);
+  stream_stats::add_client("10.0.0.7", "No record", 413);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(411, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(412, vrr_policy::requested_e::off, true)));
+  // A process-wide capture label is not proof of any one generation's route.
+  stream_stats::update_capture_pacing("source_driven");
+
+  const auto stats = stream_stats::get_current();
+  const auto owner = stream_stats::vrr_json(stats, 411);
+  const auto viewer = stream_stats::vrr_json(stats, 412);
+  EXPECT_EQ(owner["session_generation"], 411u);
+  EXPECT_EQ(owner["requested"], "true");
+  EXPECT_EQ(owner["capture_pacing"], "unknown");
+  EXPECT_EQ(owner["fallback_reason"], "route_unreported");
+  EXPECT_EQ(owner["effective"], false);
+  EXPECT_EQ(viewer["session_generation"], 412u);
+  EXPECT_EQ(viewer["requested"], "false") << "the watcher keeps its own request, not the owner's";
+  EXPECT_EQ(viewer["fallback_reason"], "watch_or_input_only");
+  EXPECT_TRUE(stream_stats::vrr_json(stats, 413).is_null()) << "no record means no vrr evidence";
+  EXPECT_TRUE(stream_stats::vrr_json(stats, 0).is_null());
+  EXPECT_TRUE(stream_stats::vrr_json(stats, 999).is_null());
+}
+
+TEST(StreamStatsVrrTests, ActiveClientRowsCarryOnlyTheirOwnRecordUnderOpaqueIdentity) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 441);
+  stream_stats::add_client("10.0.0.6", "Viewer", 442);
+  stream_stats::add_client("10.0.0.7", "No record", 443);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(441, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(442, vrr_policy::requested_e::malformed, true)));
+  stream_stats::update_capture_pacing("source_driven");
+  stream_stats::note_source_presentation(vrr_policy::presentation_status_e::valid);
+
+  const auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 3u) << json.dump();
+  std::size_t with_vrr = 0;
+  for (const auto &client : json["clients"]) {
+    if (!client.contains("vrr")) {
+      EXPECT_EQ(client["name"], "No record");
+      continue;
+    }
+    ++with_vrr;
+    const auto &vrr = client["vrr"];
+    EXPECT_EQ(vrr["stream_instance_id"], client["stream_instance_id"]);
+    EXPECT_FALSE(vrr.contains("session_generation")) << vrr.dump();
+    EXPECT_FALSE(vrr.contains("source_presentation")) << vrr.dump();
+    EXPECT_FALSE(vrr.contains("host_capture_presentation")) << vrr.dump();
+    EXPECT_EQ(vrr["capture_pacing"], "unknown");
+    EXPECT_EQ(vrr["effective"], false);
+    if (client["name"] == "Owner") {
+      EXPECT_EQ(vrr["requested"], "true");
+      EXPECT_EQ(vrr["fallback_reason"], "route_unreported");
+    } else {
+      EXPECT_EQ(client["name"], "Viewer");
+      EXPECT_EQ(vrr["requested"], "malformed") << "the watcher's own request, not the owner's";
+      EXPECT_EQ(vrr["fallback_reason"], "watch_or_input_only");
+    }
+  }
+  EXPECT_EQ(with_vrr, 2u);
+}
+
+TEST(StreamStatsVrrTests, PresentationCountsAreHostCaptureEvidenceOnly) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 421);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(421, vrr_policy::requested_e::on)));
+  for (int frame = 0; frame < 3; ++frame) {
+    stream_stats::note_source_presentation(vrr_policy::presentation_status_e::valid);
+  }
+  stream_stats::note_source_presentation(vrr_policy::presentation_status_e::nonmonotonic);
+
+  const auto json = current_stats_json();
+  const auto &host = json["host_capture_presentation"];
+  EXPECT_EQ(host["scope"], "host_capture");
+  EXPECT_EQ(host["source"], "ext_image_copy_ready");
+  EXPECT_EQ(host["valid"], 3u);
+  EXPECT_EQ(host["nonmonotonic"], 1u);
+  EXPECT_EQ(host["missing"], 0u);
+
+  // No frame is attributed to a generation, and valid host counts change nothing about its policy.
+  const auto vrr = stream_stats::vrr_json(stream_stats::get_current(), 421);
+  EXPECT_FALSE(vrr.contains("source_presentation")) << vrr.dump();
+  EXPECT_FALSE(vrr.contains("host_capture_presentation")) << vrr.dump();
+  EXPECT_EQ(vrr["effective"], false);
+  EXPECT_EQ(vrr["fallback_reason"], "route_unreported");
+
+  stream_stats::remove_client("10.0.0.5", 421);
+  EXPECT_FALSE(current_stats_json()["last_session"]["vrr"].contains("source_presentation"));
+}
+
+TEST(StreamStatsVrrTests, LastSessionKeepsTheFrozenRecordUnderItsOpaqueInstanceIdentity) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 431);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_policy::make_record(
+    431, vrr_policy::requested_e::malformed, vrr_policy::admission_e::resume, false, false)));
+  stream_stats::update_capture_pacing("fixed_interval");
+  stream_stats::remove_client("10.0.0.5", 431);
+
+  const auto json = current_stats_json();
+  ASSERT_TRUE(json.contains("last_session")) << json.dump();
+  const auto &vrr = json["last_session"]["vrr"];
+  EXPECT_EQ(vrr["requested"], "malformed");
+  EXPECT_EQ(vrr["requested_from"], "resume");
+  EXPECT_EQ(vrr["fallback_reason"], "request_malformed");
+  EXPECT_EQ(vrr["capture_pacing"], "unknown") << "the global label is not this session's route";
+  EXPECT_EQ(vrr["effective"], false);
+  EXPECT_EQ(vrr["stream_instance_id"], json["last_session"]["stream_instance_id"]);
+  EXPECT_FALSE(vrr.contains("session_generation")) << "the public record names streams by opaque instance id";
+
+  // A later session's record does not rewrite the ended one.
+  stream_stats::add_client("10.0.0.5", "Next", 432);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(432, vrr_policy::requested_e::on)));
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"]["requested"], "malformed");
+}
+
+namespace {
+  class StreamStatsCaptureTimingTests : public ::testing::Test {
+  protected:
+    void SetUp() override { stream_stats::update_stream_active(false); }
+    void TearDown() override { stream_stats::update_stream_active(false); }
+
+    static platf::image_provenance_t image(std::uint64_t epoch = 71, std::uint64_t sequence = 1) {
+      platf::image_provenance_t result;
+      result.capture_generation_id = 901;
+      result.capture_epoch_id = epoch;
+      result.source_sequence = sequence;
+      result.route.pacing = platf::capture_pacing_e::source_driven;
+      result.route.presentation = platf::presentation_clock_e::ext_image_copy_monotonic;
+      result.ready_at = std::chrono::steady_clock::time_point {std::chrono::seconds {4}};
+      result.presentation.status = vrr_policy::presentation_status_e::valid;
+      result.presentation.ns = 3'999'999'000;
+      return result;
+    }
+
+    static std::shared_ptr<const vrr_clock::proof_t> proof(std::uint64_t epoch, bool identity = false) {
+      vrr_clock::mapping_t mapping;
+      mapping.valid = true;
+      mapping.samples = 8;
+      mapping.uncertainty_ns = 100;
+      return std::make_shared<const vrr_clock::proof_t>(vrr_clock::make_proof(
+        epoch, {vrr_clock::namespace_e::same, "same_dev_and_inode"}, identity,
+        identity ? "expected_identity" : "no_authoritative_compositor_identity", mapping, 0));
+    }
+
+    static nlohmann::json timing(std::uint64_t generation = 501) {
+      return stream_stats::capture_timing_json(stream_stats::get_current(), generation);
+    }
+  };
+}
+
+TEST_F(StreamStatsCaptureTimingTests, RefusedPreRegistrationWritesCanRetryButRetiredWritesNeverLand) {
+  auto frame = image();
+  EXPECT_FALSE(stream_stats::record_accepted_capture(0, frame));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_TRUE(timing().is_null());
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  EXPECT_TRUE(timing().is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+  stream_stats::remove_client("10.0.0.5", 501);
+  const auto ended = current_stats_json()["last_session"];
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, image(71, 2)));
+  EXPECT_TRUE(timing().is_null());
+  EXPECT_EQ(current_stats_json()["last_session"], ended);
+}
+
+namespace {
+  game_mode_adaptive_sync::observation_t host_feedback_observation() {
+    game_mode_adaptive_sync::observation_t value;
+    value.route_bound = value.generation_checked = true;
+    value.reason = "property_read_bracketed";
+    value.generation = {45678, 90, 1, 23, 100, 4};
+    value.properties.capable = value.properties.feedback = {true, true, 32, 1, 0, 1};
+    value.version.producer_exe = "/private/user/fixture/gamescope";
+    value.version.os_release = {{"ID", "steamos"}, {"BUILD_ID", "fixture-build"}};
+    value.observed_at = std::chrono::steady_clock::now();
+    value.generation_checked_at = value.observed_at;
+    return value;
+  }
+}
+
+TEST_F(StreamStatsCaptureTimingTests, HostAdaptiveSyncIsAssociatedOnlyThroughThisConsumersAcceptedImage) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Other", 502);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["host_adaptive_sync"]["current_state"], "unknown");
+  EXPECT_EQ(timing()["host_adaptive_sync"]["last_known"]["state"], "active");
+  EXPECT_TRUE(timing(502).is_null());
+  const auto public_json = current_stats_json();
+  EXPECT_EQ(public_json["clients"][0]["host_adaptive_sync"]["range_status"], "unmapped");
+  EXPECT_FALSE(public_json["clients"][1].contains("host_adaptive_sync"));
+}
+
+TEST_F(StreamStatsCaptureTimingTests, FrozenCaptureRetainsObservationWhileObserverFailureCannotConfirmCurrentState) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  auto failure = host_feedback_observation(); failure.route_bound = false;
+  failure.reason = "pipewire_graph_changed"; store->publish(failure);
+  const auto readout = timing()["host_adaptive_sync"];
+  EXPECT_EQ(readout["observation_reason"], "pipewire_graph_changed");
+  EXPECT_EQ(readout["last_known"]["state"], "active");
+  EXPECT_EQ(readout["last_known"]["generation_unchanged"], false);
+  EXPECT_EQ(readout["current_state"], "unknown");
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, EndedHostObservationIsFrozenEvenWhenAnotherConsumerKeepsCaptureAlive) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Watch", 502);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, frame));
+  stream_stats::remove_client("10.0.0.5", 501);
+  auto later = host_feedback_observation(); later.properties.feedback.value = 0;
+  store->publish(later);
+  EXPECT_EQ(timing(502)["host_adaptive_sync"]["last_known"]["state"], "inactive");
+  const auto ended = current_stats_json()["last_session"]["host_adaptive_sync"];
+  EXPECT_EQ(ended["last_known"]["state"], "active");
+  EXPECT_EQ(ended["ended"], true);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, ReopenedBackendCannotBorrowAnOldCapturesObserverBeforeItsFirstImage) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  stream_stats::capture_backend_t backend; backend.opened = "portal";
+  ASSERT_TRUE(stream_stats::record_capture_backend(501, backend));
+  EXPECT_TRUE(timing()["host_adaptive_sync"].is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, image(72, 1)));
+  EXPECT_TRUE(timing()["host_adaptive_sync"].is_null());
+}
+
+TEST_F(StreamStatsCaptureTimingTests, HostObservationPublicRowsExcludePrivateProducerFactsAndUnknownReasonText) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto failure = host_feedback_observation(); failure.properties.torn = true;
+  failure.reason = "secret uid=45678 /private/user/fixture";
+  store->publish(failure);
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_FALSE(timing()["host_adaptive_sync"].contains("version_provenance"));
+  EXPECT_EQ(timing()["host_adaptive_sync"].dump().find("/private/user/fixture"), std::string::npos);
+  const auto public_readout = current_stats_json()["clients"][0]["host_adaptive_sync"];
+  EXPECT_EQ(public_readout["observation_reason"], "producer_unbound");
+  EXPECT_EQ(public_readout.dump().find("45678"), std::string::npos);
+  EXPECT_EQ(public_readout.dump().find("/private/user/fixture"), std::string::npos);
+  EXPECT_FALSE(public_readout.contains("version_provenance"));
+  stream_stats::remove_client("10.0.0.5", 501);
+  EXPECT_EQ(current_stats_json()["last_session"]["host_adaptive_sync"].dump().find("45678"), std::string::npos);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, SharedProducerConsumersCountOnlyTheirOwnAcceptedSubsetWithoutWatchAuthority) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Watch", 502);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(501, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(502, vrr_policy::requested_e::on, true)));
+  const auto owner_policy = stream_stats::vrr_json(stream_stats::get_current(), 501);
+  const auto watch_policy = stream_stats::vrr_json(stream_stats::get_current(), 502);
+  auto first = image();
+  first.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, first));
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, first));
+  auto later = first;
+  later.source_sequence = 4;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, later));
+  EXPECT_EQ(timing(501)["accepted_frames"], 2u);
+  EXPECT_EQ(timing(502)["accepted_frames"], 1u);
+  EXPECT_EQ(timing(501)["capture_instance_id"], timing(502)["capture_instance_id"]);
+  EXPECT_FALSE(timing(502)["pacing_authority"].get<bool>());
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(), 501), owner_policy);
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(), 502), watch_policy);
+  EXPECT_EQ(watch_policy["fallback_reason"], "watch_or_input_only");
+}
+
+TEST_F(StreamStatsCaptureTimingTests, NewEpochResetsCountsAndFencesOldImagesDuplicatesAndContradictoryBindings) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto first = image();
+  first.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, first));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, first)) << "a retained source is not a new image";
+  auto changed = first;
+  changed.source_sequence = 2;
+  changed.capture_generation_id++;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, changed));
+  changed = first;
+  changed.source_sequence = 2;
+  changed.route.pacing = platf::capture_pacing_e::fixed_interval;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, changed));
+  changed = first;
+  changed.source_sequence = 2;
+  changed.clock_proof = proof(71);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, changed)) << "proof cannot be replaced inside an epoch";
+  auto next = image(72, 1);
+  next.presentation.status = vrr_policy::presentation_status_e::missing;
+  next.presentation.ns.reset();
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, next));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, image(71, 100)));
+  EXPECT_EQ(timing()["capture_epoch_id"], 72u);
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+  EXPECT_EQ(timing()["presentation_counts"]["valid"], 0u);
+  EXPECT_EQ(timing()["presentation_counts"]["missing"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, MatchingSocketPeerNamespaceWithoutProducerIdentityLeavesRawTimeUnverified) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  const auto readout = timing();
+  EXPECT_EQ(readout["clock"]["time_namespace"], "same");
+  EXPECT_EQ(readout["clock"]["local_mapping_verified"], true);
+  EXPECT_EQ(readout["clock"]["producer_identity_verified"], false);
+  EXPECT_EQ(readout["clock"]["clock_domain_verified"], false);
+  EXPECT_EQ(readout["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(readout["presentation_counts"]["valid"], 1u) << "protocol syntax only";
+  EXPECT_EQ(readout["plausibility_counts"]["valid"], 0u);
+  EXPECT_EQ(readout["plausibility_counts"]["clock_unverified"], 1u);
+  EXPECT_EQ(readout["source_time_eligible"], false);
+  EXPECT_EQ(readout["effective_vrr"], false);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, PrefetchAndProtocolFaultsRemainDiagnosticWithoutCrossClockComparison) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.prefetched_init = true;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "prefetched_init");
+  frame.prefetched_init = false;
+  frame.source_sequence++;
+  frame.presentation.status = vrr_policy::presentation_status_e::nonmonotonic;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "nonmonotonic");
+  EXPECT_EQ(timing()["last_presentation_ns"], *frame.presentation.ns) << "representable bad time survives privately";
+  frame.source_sequence++;
+  frame.presentation.status = vrr_policy::presentation_status_e::invalid_nsec;
+  frame.presentation.ns.reset();
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "invalid");
+  EXPECT_TRUE(timing()["last_presentation_ns"].is_null());
+  EXPECT_EQ(timing()["plausibility_counts"]["prefetched_init"], 1u);
+  EXPECT_EQ(timing()["plausibility_counts"]["nonmonotonic"], 1u);
+  EXPECT_EQ(timing()["plausibility_counts"]["invalid"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, MissingOrContradictoryProvenanceCannotConsumeTheNextSequence) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.capture_epoch_id = 0;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image(71, 0);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.clock_proof = proof(72);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.presentation.ns = -1;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.presentation.ns.reset();
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.presentation.status = static_cast<vrr_policy::presentation_status_e>(99);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.route.presentation = platf::presentation_clock_e::none;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame)) << "an unrelated route cannot inherit protocol metadata";
+  EXPECT_TRUE(timing().is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, image()));
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, PublicAndEndedEvidenceOmitPrivateFactsAndFreezeTheConsumersOwnEpoch) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  auto readout = current_stats_json();
+  const auto live = readout["clients"][0]["capture_timing"];
+  EXPECT_EQ(live["stream_instance_id"], readout["clients"][0]["stream_instance_id"]);
+  for (const auto key : {"session_generation", "capture_generation_id", "capture_epoch_id", "last_source_sequence",
+                         "last_presentation_ns", "epoch_start_mono_ns", "pid", "uid", "namespace_inode", "private_runtime"}) {
+    EXPECT_FALSE(live.contains(key)) << key;
+    EXPECT_FALSE(live["clock"].contains(key)) << key;
+  }
+  EXPECT_FALSE(live.contains("source_cadence"));
+  EXPECT_EQ(live["receiver_presentation_verified"], false);
+  stream_stats::remove_client("10.0.0.5", 501);
+  const auto ended = current_stats_json()["last_session"]["capture_timing"];
+  EXPECT_EQ(ended, live);
+  stream_stats::add_client("10.0.0.5", "Replacement", 502);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, image(72, 1)));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, image(73, 1)));
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"], ended);
+  EXPECT_EQ(timing(502)["capture_epoch_id"], 72u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, HistoricalEpochProofCannotReplaceAPerFrameObservation) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  ASSERT_TRUE(vrr_clock::authorises_clock_comparison(*frame.clock_proof));
+  ASSERT_EQ(vrr_clock::classify(frame.presentation.status, frame.presentation.ns, false,
+                              frame.ready_at, frame.clock_proof.get(), {}), vrr_clock::sample_e::valid);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(timing()["source_time"]["result"], "not_observed");
+  EXPECT_EQ(timing()["clock"]["scope"], "capture_epoch_observation");
+  EXPECT_EQ(timing()["clock"]["clock_domain_verified"], true) << "historical synthetic proof only";
+
+  frame.source_sequence++;
+  frame.source_time.result = vrr_clock::source_time_e::lease_not_current;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(timing()["source_time"]["result"], "lease_not_current");
+  EXPECT_EQ(timing()["source_time"]["mapped_available"], false);
+  EXPECT_FALSE(timing()["source_time"].contains("uncertainty_ns"));
+  EXPECT_EQ(timing()["plausibility_counts"]["valid"], 0u);
+
+  frame.source_sequence++;
+  frame.source_time.result = vrr_clock::source_time_e::regressed_in_epoch;
+  frame.source_time.observed_steady_ns = 4'000'000'000;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "nonmonotonic");
+  EXPECT_EQ(timing()["source_time"]["result_counts"]["regressed_in_epoch"], 1u);
+  EXPECT_EQ(timing()["source_time_eligible"], false);
+  EXPECT_EQ(timing()["effective_vrr"], false);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, PerFrameRefusalsKeepTheirMeaningWithoutBorrowingTheEpochProof) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  for (const auto &[result, expected] : std::array {
+         std::pair {vrr_clock::source_time_e::future, "future"},
+         std::pair {vrr_clock::source_time_e::stale, "stale"},
+         std::pair {vrr_clock::source_time_e::before_epoch, "before_epoch"},
+         std::pair {vrr_clock::source_time_e::ready_unavailable, "missing"},
+         std::pair {vrr_clock::source_time_e::conversion_overflow, "invalid"},
+         std::pair {vrr_clock::source_time_e::mapping_drifted, "clock_unverified"},
+       }) {
+    frame.source_time.result = result;
+    frame.source_time.observed_steady_ns = 4'000'000'000;
+    if (result == vrr_clock::source_time_e::ready_unavailable) frame.ready_at.reset();
+    else frame.ready_at = std::chrono::steady_clock::time_point {std::chrono::seconds {4}};
+    ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+    EXPECT_EQ(timing()["last_plausibility"], expected);
+    EXPECT_EQ(timing()["source_time"]["result_counts"][std::string(vrr_clock::name(result))], 1u);
+    EXPECT_EQ(timing()["source_time"]["mapped_available"], false);
+    frame.source_sequence++;
+  }
+  EXPECT_EQ(timing()["plausibility_counts"]["valid"], 0u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, ContradictoryRefusalsCannotReplaceAcceptedEvidenceOrConsumeASequence) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto valid = image();
+  valid.clock_proof = proof(71, true);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, valid));
+  const auto before = timing();
+  auto candidate = valid;
+  candidate.source_sequence = 2;
+  std::vector<platf::image_provenance_t> refused;
+  for (const auto result : {vrr_clock::source_time_e::missing, vrr_clock::source_time_e::prefetched_init,
+                           vrr_clock::source_time_e::nonmonotonic, vrr_clock::source_time_e::invalid_nsec,
+                           vrr_clock::source_time_e::invalid_overflow, vrr_clock::source_time_e::invalid_status,
+                           vrr_clock::source_time_e::no_presentation_clock, vrr_clock::source_time_e::proof_unavailable,
+                           vrr_clock::source_time_e::namespace_unverified, vrr_clock::source_time_e::identity_unverified,
+                           vrr_clock::source_time_e::mapping_invalid, vrr_clock::source_time_e::clock_domain_unverified,
+                           vrr_clock::source_time_e::ready_unavailable}) {
+    auto bad = candidate;
+    bad.source_time.result = result;
+    refused.push_back(bad);
+  }
+  auto bad = candidate;
+  bad.source_time.result = vrr_clock::source_time_e::lease_not_current;
+  bad.prefetched_init = true;
+  refused.push_back(bad);
+  bad = candidate;
+  bad.source_time.result = vrr_clock::source_time_e::future;
+  bad.source_time.observed_steady_ns = 4'000'000'000;
+  bad.presentation.status = vrr_policy::presentation_status_e::missing;
+  bad.presentation.ns.reset();
+  refused.push_back(bad);
+  bad = candidate;
+  bad.clock_proof.reset();
+  bad.presentation.status = vrr_policy::presentation_status_e::missing;
+  bad.presentation.ns.reset();
+  bad.route.presentation = platf::presentation_clock_e::none;
+  bad.source_time.result = vrr_clock::source_time_e::lease_not_current;
+  refused.push_back(bad);
+  bad = candidate;
+  bad.source_time.result = vrr_clock::source_time_e::mapping_drifted;
+  refused.push_back(bad);  // no live clock read was retained
+  for (const auto &frame : refused) {
+    EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame)) << vrr_clock::name(frame.source_time.result);
+    EXPECT_EQ(timing(), before) << "a contradictory refusal cannot rewrite evidence";
+  }
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, candidate));
+  EXPECT_EQ(timing()["last_source_sequence"], 2u);
+  EXPECT_EQ(timing()["accepted_frames"], 2u);
+  EXPECT_EQ(timing()["source_time"]["result_counts"]["not_observed"], 2u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, ContradictoryMappedReceiptsCannotConsumeASequence) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto valid = image();
+  valid.clock_proof = proof(71, true);
+  valid.source_time.result = vrr_clock::source_time_e::mapped;
+  valid.source_time.source_steady_ns = valid.presentation.ns;
+  valid.source_time.uncertainty_ns = 100;
+  valid.source_time.observed_steady_ns = 4'000'000'000;
+  std::vector<platf::image_provenance_t> refused;
+  auto bad = valid;
+  bad.source_time.result = static_cast<vrr_clock::source_time_e>(255);
+  refused.push_back(bad);
+  bad = valid; bad.source_time.source_steady_ns.reset(); refused.push_back(bad);
+  bad = valid; bad.source_time.source_steady_ns = -1; refused.push_back(bad);
+  bad = valid; (*bad.source_time.source_steady_ns)++; refused.push_back(bad);
+  bad = valid; bad.source_time.uncertainty_ns = UINT64_MAX; refused.push_back(bad);
+  bad = valid; bad.source_time.uncertainty_ns = 0; refused.push_back(bad);
+  bad = valid; bad.source_time.presentation_baseline++; refused.push_back(bad);
+  bad = valid; bad.source_time.observed_steady_ns = -1; refused.push_back(bad);
+  bad = valid; bad.source_time.observed_steady_ns = 0; refused.push_back(bad);
+  bad = valid; bad.ready_at.reset(); refused.push_back(bad);
+  bad = valid; bad.prefetched_init = true; refused.push_back(bad);
+  bad = valid; bad.clock_proof = proof(71, false); refused.push_back(bad);
+  bad = valid; bad.source_time.result = vrr_clock::source_time_e::lease_not_current; refused.push_back(bad);
+  for (const auto &frame : refused) EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_TRUE(timing().is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, valid));
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+  EXPECT_EQ(timing()["last_plausibility"], "valid");
+  EXPECT_EQ(timing()["source_time"]["mapped_available"], true);
+  EXPECT_EQ(timing()["source_time"]["uncertainty_ns"], 100u);
+  EXPECT_EQ(timing()["source_time"]["result_counts"]["mapped"], 1u);
+  EXPECT_EQ(timing()["source_time_eligible"], false);
+  EXPECT_EQ(timing()["pacing_authority"], false);
+  EXPECT_EQ(timing()["receiver_presentation_verified"], false);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, MappedObservationIsPrivateImmutableAndCountedPerConsumer) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Watch", 502);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  frame.source_time.result = vrr_clock::source_time_e::mapped;
+  frame.source_time.source_steady_ns = frame.presentation.ns;
+  frame.source_time.observed_steady_ns = 4'000'000'000;
+  frame.source_time.uncertainty_ns = 100;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, frame));
+  const auto owner = current_stats_json()["clients"][0]["capture_timing"];
+  const auto frozen = owner["source_time"];
+  EXPECT_EQ(frozen["scope"], "per_frame_observation");
+  for (const auto key : {"source_steady_ns", "observed_steady_ns", "presentation_baseline", "lease",
+                         "pid", "uid", "epoch_start_mono_ns", "steady_to_mono_offset_ns"}) {
+    EXPECT_FALSE(frozen.contains(key)) << key;
+  }
+  const auto public_text = owner.dump();
+  EXPECT_EQ(public_text.find("3999999000"), std::string::npos);
+  EXPECT_EQ(public_text.find("4000000000"), std::string::npos);
+  stream_stats::remove_client("10.0.0.5", 501);
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"]["source_time"], frozen);
+  frame.source_sequence++;
+  frame.source_time = {};
+  frame.source_time.result = vrr_clock::source_time_e::lease_not_current;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, frame));
+  EXPECT_EQ(timing(502)["source_time"]["result_counts"]["mapped"], 1u);
+  EXPECT_EQ(timing(502)["source_time"]["result_counts"]["lease_not_current"], 1u);
+  EXPECT_EQ(timing(502)["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"]["source_time"], frozen);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, OtherBackendsAndIdleClientsStayUnknownAndDoNotBorrowHostCounts) {
+  stream_stats::add_client("10.0.0.5", "Unknown path", 501);
+  stream_stats::add_client("10.0.0.6", "No accepted images", 502);
+  stream_stats::update_capture_pacing("source_driven");
+  stream_stats::note_source_presentation(vrr_policy::presentation_status_e::valid);
+  platf::image_provenance_t frame;
+  frame.capture_epoch_id = 71;
+  frame.source_sequence = 1;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["capture_pacing"], "unknown");
+  EXPECT_EQ(timing()["presentation_clock"], "none");
+  EXPECT_EQ(timing()["presentation_counts"]["valid"], 0u);
+  EXPECT_EQ(timing()["presentation_counts"]["missing"], 1u);
+  EXPECT_TRUE(timing(502).is_null());
+  EXPECT_FALSE(current_stats_json()["clients"][1].contains("capture_timing"));
+  EXPECT_TRUE(stream_stats::capture_timing_json(stream_stats::get_current(), 999).is_null());
+}
+
+TEST_F(StreamStatsCaptureTimingTests, DiagnosticWritesLeaveControllerAuthorityAndPolicyRevisionsUntouched) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(501, vrr_policy::requested_e::on)));
+  const auto before = stream_stats::get_current();
+  const auto controller_before = adaptive_bitrate::get_doctor_state();
+  const auto policy_before = stream_stats::vrr_json(before, 501);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  frame.source_sequence++;
+  frame.presentation.ns = 7'000'000'000;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  const auto after = stream_stats::get_current();
+  const auto controller_after = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after.video_sample_revision, before.video_sample_revision);
+  EXPECT_EQ(after.network_sample_revision, before.network_sample_revision);
+  EXPECT_EQ(after.video_policy_sample_count, before.video_policy_sample_count);
+  EXPECT_EQ(after.pacing_warning_streak, before.pacing_warning_streak);
+  EXPECT_EQ(controller_after.revision, controller_before.revision);
+  EXPECT_EQ(controller_after.action_authority_revision, controller_before.action_authority_revision);
+  EXPECT_EQ(stream_stats::vrr_json(after, 501), policy_before);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, PublicIdentityReasonsKeepKnownPolicyNamesWithoutGrantingPacingAuthority) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  const std::array<std::string_view, 9> reasons {
+    "no_authoritative_compositor_identity", "compositor_generation_unavailable",
+    "compositor_generation_changed", "compositor_identity_invalid", "compositor_peer_pid_mismatch",
+    "compositor_peer_uid_mismatch", "compositor_peer_starttime_unavailable",
+    "compositor_peer_starttime_mismatch", "authoritative_compositor_peer_matched",
+  };
+  std::uint64_t epoch = 71;
+  for (const auto reason : reasons) {
+    auto frame = image(epoch++, 1);
+    auto evidence = *proof(frame.capture_epoch_id, reason == "authoritative_compositor_peer_matched");
+    evidence.producer_identity_reason = reason;
+    frame.clock_proof = std::make_shared<const vrr_clock::proof_t>(evidence);
+    ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+    const auto public_clock = current_stats_json()["clients"][0]["capture_timing"];
+    EXPECT_EQ(public_clock["clock"]["producer_identity_reason"], reason);
+    EXPECT_EQ(public_clock["clock"]["producer_identity_verified"], evidence.producer_identity_verified);
+    EXPECT_EQ(public_clock["source_time_eligible"], false);
+    EXPECT_EQ(public_clock["pacing_authority"], false);
+    EXPECT_EQ(public_clock["effective_vrr"], false);
+    EXPECT_EQ(public_clock["receiver_presentation_verified"], false);
+  }
+}
+
+TEST_F(StreamStatsCaptureTimingTests, UnknownIdentityReasonsCannotExposeProcessFactsInLiveOrEndedReadouts) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  auto evidence = *proof(frame.capture_epoch_id);
+  constexpr std::string_view private_reason = "pid=987654321 starttime=8877665544 /private/compositor/socket";
+  evidence.producer_identity_reason = private_reason;
+  frame.clock_proof = std::make_shared<const vrr_clock::proof_t>(evidence);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  const auto live = current_stats_json()["clients"][0]["capture_timing"];
+  EXPECT_EQ(live["clock"]["producer_identity_reason"], "identity_reason_unavailable");
+  EXPECT_EQ(timing()["clock"]["producer_identity_reason"], "identity_reason_unavailable");
+  for (const auto &readout : {live, timing()}) {
+    const auto text = readout.dump();
+    for (const auto secret : {"987654321", "8877665544", "/private/compositor/socket"}) {
+      EXPECT_EQ(text.find(secret), std::string::npos) << secret;
+    }
+  }
+  stream_stats::remove_client("10.0.0.5", 501);
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"], live);
+  stream_stats::add_client("10.0.0.5", "Replacement", 502);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, image(72, 1)));
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"], live);
+  EXPECT_EQ(current_stats_json()["clients"][0]["capture_timing"]["clock"]["producer_identity_reason"], "not_probed");
+}
+
+namespace {
+  std::int64_t pacing_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+}
+
+TEST_F(StreamStatsCaptureTimingTests, SourcePacingRuntimeNeedsItsOwnAcceptedMappedFrame) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on);
+  request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  auto frame = image(); frame.clock_proof = proof(71, true);
+  const auto now = pacing_now_ns();
+  frame.ready_at = std::chrono::steady_clock::time_point {std::chrono::nanoseconds {now}};
+  frame.presentation.ns = now - 1'000'000;
+  frame.source_time = {vrr_clock::source_time_e::mapped, 0, frame.presentation.ns, 100, now};
+  vrr_pacing::receipt_t receipt {501, 901, 71, 1, vrr_pacing::mode_e::source_time,
+    vrr_pacing::event_e::accepted_source, frame.presentation.ns, now};
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt)) << "no accepted capture frame";
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  auto wrong = receipt; wrong.source_sequence = 2;
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(wrong));
+  wrong = receipt; ++*wrong.emitted_source_ns;
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(wrong));
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt));
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt)) << "replay";
+  auto json = stream_stats::vrr_json(stream_stats::get_current(), 501);
+  EXPECT_EQ(json["effective"], true);
+  EXPECT_EQ(json["pacing_mode"], "source_time");
+  EXPECT_EQ(json["host_pacing"]["receiver_presentation_verified"], false);
+  EXPECT_EQ(json["host_pacing"]["receiver_source_cadence_available"], false);
+  EXPECT_EQ(json["host_pacing"]["event_counts"]["accepted_source"], 1u);
+  for (const char *secret : {"emitted_source_ns", "observed_steady_ns", "pid", "lease", "source_sequence", "capture_epoch"}) {
+    EXPECT_EQ(json.dump().find(secret), std::string::npos) << secret;
+  }
+  auto stats = stream_stats::get_current();
+  stats.clients.front().vrr_pacing->last.observed_steady_ns -= 3'000'000'000;
+  EXPECT_EQ(stream_stats::vrr_json(stats, 501)["effective"], false);
+  EXPECT_EQ(stream_stats::vrr_json(stats, 501)["fallback_reason"], "pacing_evidence_stale");
+
+  receipt.mode = vrr_pacing::mode_e::latched_fallback;
+  receipt.event = vrr_pacing::event_e::authority_lost; receipt.emitted_source_ns.reset();
+  receipt.observed_steady_ns = pacing_now_ns();
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt));
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(), 501)["effective"], false);
+  receipt.mode = vrr_pacing::mode_e::source_time; receipt.event = vrr_pacing::event_e::liveness;
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt)) << "cannot re-promote a lost generation";
+  stream_stats::remove_client("10.0.0.5", 501);
+  const auto ended = current_stats_json()["last_session"]["vrr"];
+  EXPECT_EQ(ended["effective"], false);
+  EXPECT_EQ(ended["fallback_reason"], "stream_ended");
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt));
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"], ended);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, UnsupportedPacingKeepsItsTerminalReasonWhenItsObservationAges) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on);
+  request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  for (const auto reason : {vrr_pacing::event_e::unsupported_route, vrr_pacing::event_e::unsupported_codec,
+                           vrr_pacing::event_e::unsupported_loop}) {
+    ASSERT_TRUE(stream_stats::record_vrr_pacing_event({501,0,0,0,vrr_pacing::mode_e::unsupported,
+      reason,std::nullopt,pacing_now_ns()}));
+    auto stats = stream_stats::get_current();
+    stats.clients.front().vrr_pacing->last.observed_steady_ns -= 3'000'000'000;
+    const auto observed = stream_stats::vrr_json(stats,501);
+    EXPECT_FALSE(observed["effective"].get<bool>());
+    EXPECT_EQ(observed["pacing_mode"], "fixed_grid");
+    EXPECT_EQ(observed["fallback_reason"], vrr_pacing::name(reason));
+    EXPECT_FALSE(observed["host_pacing"]["fresh"].get<bool>());
+    const auto cadence = doctor_cadence::evaluate({{"vrr", observed}},501,10000,9000,10000,120);
+    EXPECT_TRUE(cadence.available);
+    EXPECT_EQ(cadence.observation["state"], "fixed_grid");
+    EXPECT_EQ(cadence.observation["reason"], vrr_pacing::name(reason));
+    EXPECT_FALSE(stream_stats::source_pacing_evidence_unavailable(stats,501));
+  }
+}
+
+TEST_F(StreamStatsCaptureTimingTests, RequestedVrrCannotLabelUnprovenPolicySamplesAsSourceRelative) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on); request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  stream_stats::note_doctor_video_policy_sample(120, 90, 0, 0, 0, 0, 1, 501, true, true);
+  EXPECT_FALSE(stream_stats::get_current().video_policy_source_time);
+  auto frame = image(); frame.clock_proof = proof(71, true);
+  const auto now = pacing_now_ns(); frame.presentation.ns = now - 1'000'000;
+  frame.ready_at = std::chrono::steady_clock::time_point {std::chrono::nanoseconds {now}};
+  frame.source_time = {vrr_clock::source_time_e::mapped, 0, frame.presentation.ns, 100, now};
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event({501,901,71,1,vrr_pacing::mode_e::source_time,
+    vrr_pacing::event_e::accepted_source,frame.presentation.ns,now}));
+  for (int i = 0; i < 8; ++i) stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,0,1,501,true,true);
+  auto stats = stream_stats::get_current();
+  EXPECT_TRUE(stats.video_policy_source_time);
+  EXPECT_TRUE(stats.video_policy_cadence_available);
+  EXPECT_EQ(stats.pacing_warning_streak, 0u) << "90 FPS under a 120 FPS ceiling is not pacing pressure";
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,0,9,501,true,true);
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,0,9.9,501,true,true);
+  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore()) << "restore keeps a margin below the 11 ms cut";
+  EXPECT_FALSE(stream_stats::encoder_time_nears_budget(9.9,120,true)) << "restore margin is not a cut finding";
+  for (int i = 0; i < 8; ++i) stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,3,1,501,true,true);
+  EXPECT_GE(stream_stats::get_current().pacing_warning_streak, 2u) << "actual handoff jitter remains visible";
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,99,1,501,true,false);
+  EXPECT_FALSE(stream_stats::get_current().video_policy_cadence_available);
+  EXPECT_EQ(stream_stats::get_current().pacing_warning_streak, 0u) << "missing measurements cannot grade cadence";
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,3,1,999,false,true);
+  EXPECT_FALSE(stream_stats::get_current().video_policy_source_time) << "mixed legacy session clears the source label";
+}
+
+TEST(StreamStatsVrrTests, RuntimeCannotActivateDefaultOffWatchOrMalformedGenerations) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  for (std::uint64_t generation = 601; generation < 604; ++generation) {
+    stream_stats::add_client("10.0.0.5", "Client", generation);
+    auto request = vrr_record(generation, generation == 603 ? vrr_policy::requested_e::malformed : vrr_policy::requested_e::on,
+                              generation == 602);
+    request.host_source_pacing = generation != 601;
+    ASSERT_TRUE(stream_stats::record_vrr_session(request));
+    EXPECT_FALSE(stream_stats::record_vrr_pacing_event({generation,0,0,0,vrr_pacing::mode_e::waiting,
+      vrr_pacing::event_e::readiness,std::nullopt,pacing_now_ns()}));
+    EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(),generation)["effective"],false);
+  }
+}
+
+namespace {
+  adaptive_bitrate::history_entry_t live_tuning_history_entry(std::uint64_t sequence, std::string kind,
+                                                              bool applied_known, int applied_kbps) {
+    adaptive_bitrate::history_entry_t entry;
+    entry.sequence = sequence;
+    entry.host_elapsed_ms = static_cast<std::int64_t>(sequence) * 100;
+    entry.last_host_elapsed_ms = entry.host_elapsed_ms;
+    entry.kind = std::move(kind);
+    entry.cause = "runtime_update";
+    entry.state = "steady";
+    entry.reason = "healthy";
+    entry.requested_bitrate_kbps = 15000;
+    entry.applied_known = applied_known;
+    entry.applied_bitrate_kbps = applied_kbps;
+    entry.operator_revision = sequence + 100;
+    entry.applied_revision = applied_known ? sequence + 100 : 0;
+    return entry;
+  }
+
+  stream_stats::stats_t stats_with_live_tuning_history() {
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.session_generation = 7;
+    stats.app_session_id = "launch-instance-7";
+    auto &history = stats.live_tuning_history;
+    history.scoped = true;
+    history.session_generation = 7;
+    history.app_session_id = "launch-instance-7";
+    history.dropped = 3;
+    history.host_elapsed_ms_at_copy = 5000;
+    auto applied = live_tuning_history_entry(10, "encoder_applied", true, 15000);
+    applied.callback_bitrate_kbps = 15000;
+    applied.callback_revision = 110;
+    history.entries.push_back(applied);
+    history.entries.push_back(live_tuning_history_entry(11, "applied_proof_invalidated", false, 0));
+    auto reaffirmed = live_tuning_history_entry(12, "revision_reaffirmed", true, 15000);
+    reaffirmed.repeat_count = 4;
+    reaffirmed.last_host_elapsed_ms = 1900;
+    reaffirmed.input_available = true;
+    reaffirmed.input_packet_loss_percent = 0.0;
+    reaffirmed.input_rtt_ms = 8.0;
+    history.entries.push_back(reaffirmed);
+    return stats;
+  }
+}  // namespace
+
+TEST(StreamStatsLiveTuningHistory, SerializesTheSnapshotsOwnScopeWithHostClockAndUnknownMediaRate) {
+  const auto stats = stats_with_live_tuning_history();
+  const auto history = stream_stats::live_tuning_history_json(stats);
+
+  EXPECT_TRUE(history.at("available").get<bool>());
+  EXPECT_EQ(history.at("reason"), "recorded");
+  EXPECT_EQ(history.at("clock"), "host_steady_ms");
+  EXPECT_EQ(history.at("actual_media_rate_attribution"), "unknown");
+  EXPECT_EQ(history.at("capacity"), adaptive_bitrate::HISTORY_CAPACITY);
+  EXPECT_EQ(history.at("dropped"), 3);
+  EXPECT_TRUE(history.at("truncated").get<bool>());
+  EXPECT_EQ(history.at("host_elapsed_ms_at_snapshot"), 5000);
+  const auto &entries = history.at("entries");
+  ASSERT_EQ(entries.size(), 3u);
+  EXPECT_EQ(entries[0].at("sequence"), 10);
+  EXPECT_EQ(entries[0].at("kind"), "encoder_applied");
+  EXPECT_EQ(entries[0].at("applied_proof"), "encoder_confirmed");
+  EXPECT_EQ(entries[0].at("applied_bitrate_kbps"), 15000);
+  EXPECT_EQ(entries[0].at("callback").at("revision"), 110);
+  EXPECT_TRUE(entries[0].at("input").is_null());
+  EXPECT_EQ(entries[1].at("kind"), "applied_proof_invalidated");
+  EXPECT_EQ(entries[1].at("applied_proof"), "unknown");
+  EXPECT_TRUE(entries[1].at("applied_bitrate_kbps").is_null());
+  EXPECT_FALSE(entries[1].contains("callback"));
+  EXPECT_EQ(entries[2].at("kind"), "revision_reaffirmed");
+  EXPECT_EQ(entries[2].at("repeat_count"), 4);
+  EXPECT_EQ(entries[2].at("last_host_elapsed_ms"), 1900);
+  EXPECT_EQ(entries[2].at("input").at("rtt_ms"), 8.0);
+
+  // No session identity, address, path or wall-clock time is exported.
+  const auto text = history.dump();
+  EXPECT_EQ(text.find("launch-instance-7"), std::string::npos);
+  EXPECT_FALSE(history.contains("app_session_id"));
+  EXPECT_FALSE(entries[0].contains("app_session_id"));
+
+  // The stream stats and Doctor's advanced evidence serialize the same snapshot, not the live controller.
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("live_tuning_history"), history);
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("advanced_evidence").at("live_tuning_history"), history);
+}
+
+TEST(StreamStatsLiveTuningHistory, WithholdsAnotherOwnersHistoryForTheSameGeneration) {
+  auto stats = stats_with_live_tuning_history();
+  stats.app_session_id = "launch-instance-7-replacement";
+  const auto history = stream_stats::live_tuning_history_json(stats);
+  EXPECT_FALSE(history.at("available").get<bool>());
+  EXPECT_EQ(history.at("reason"), "session_scope_unavailable");
+  EXPECT_TRUE(history.at("entries").empty());
+  EXPECT_EQ(history.at("dropped"), 0);
+  EXPECT_FALSE(history.at("truncated").get<bool>());
+
+  auto unscoped = stats_with_live_tuning_history();
+  unscoped.live_tuning_history.scoped = false;
+  EXPECT_TRUE(stream_stats::live_tuning_history_json(unscoped).at("entries").empty());
+}
+
+TEST(StreamStatsLiveTuningHistory, WithholdsHistoryFromASnapshotThatIsNotStreaming) {
+  auto stats = stats_with_live_tuning_history();
+  stats.streaming = false;
+  const auto history = stream_stats::live_tuning_history_json(stats);
+  EXPECT_FALSE(history.at("available").get<bool>());
+  EXPECT_EQ(history.at("reason"), "no_stream");
+  EXPECT_TRUE(history.at("entries").empty());
+}
+
+TEST(StreamStatsLiveTuningHistory, GetCurrentCopiesTheControllerHistoryWithItsAdaptiveFields) {
+  config::video.adaptive_bitrate.enabled = true;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(20000);
+  adaptive_bitrate::set_session_scope(9001, "history-copy-owner", true);
+  adaptive_bitrate::set_live_bitrate(15000);
+
+  const auto controller = adaptive_bitrate::get_state_with_history();
+  const auto stats = stream_stats::get_current();
+  ASSERT_FALSE(controller.history.entries.empty());
+  ASSERT_EQ(stats.live_tuning_history.entries.size(), controller.history.entries.size());
+  EXPECT_EQ(stats.live_tuning_history.entries.back().sequence, controller.history.entries.back().sequence);
+  EXPECT_EQ(stats.live_tuning_history.session_generation, 9001u);
+  EXPECT_EQ(stats.adaptive_target_bitrate_kbps, controller.target_bitrate_kbps);
+
+  // A copy of the snapshot keeps its own history after the controller moves on.
+  adaptive_bitrate::set_live_bitrate(16000);
+  EXPECT_EQ(stats.live_tuning_history.entries.back().requested_bitrate_kbps, 15000);
+
+  adaptive_bitrate::set_session_scope(0, {}, false);
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_enabled(false);
+  config::video.adaptive_bitrate.enabled = false;
+}
+
+namespace {
+  // One authenticated stream scope with the timing lifecycle the production route uses.
+  struct media_receipt_scope_t {
+    std::string owner;
+    std::uint64_t generation;
+    std::string token;
+
+    media_receipt_scope_t(std::string owner_uuid, std::uint64_t session_generation, std::string session_token):
+        owner(std::move(owner_uuid)), generation(session_generation), token(std::move(session_token)) {
+      adaptive_bitrate::set_enabled(false);
+      stream_stats::update_stream_active(false);
+      stream_stats::start_session_timing(owner, generation, token);
+      stream_stats::update_stream_active(true);
+    }
+
+    ~media_receipt_scope_t() {
+      stream_stats::stop_session_timing(owner, generation);
+      stream_stats::update_stream_active(false);
+    }
+
+    stream_stats::client_media_counters_t sample(std::uint64_t client_ms, std::uint64_t expected, std::uint64_t received) const {
+      return {
+        .owner_uuid = owner, .app_session_id = token, .session_generation = generation,
+        .client_monotonic_ms = client_ms, .frames_expected = expected, .frames_received = received,
+        .frames_lost = expected - received
+      };
+    }
+  };
+
+  stream_stats::client_media_interval_receipt_t current_receipt() {
+    return stream_stats::get_current().client_media_interval_receipt;
+  }
+}  // namespace
+
+TEST(StreamStatsMediaIntervalReceipt, KeepsExactFrameDeltasAndTheTwoClocksApart) {
+  media_receipt_scope_t scope("receipt-owner-a", 71, "receipt-launch-a");
+  const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  ASSERT_EQ(baseline.state, stream_stats::client_media_ingest_state_e::baseline);
+  ASSERT_TRUE(baseline.receipt.has_value());
+  EXPECT_EQ(baseline.receipt->sequence, 0u);
+  EXPECT_FALSE(baseline.receipt->interval_measured);
+  EXPECT_EQ(baseline.receipt->interval_unavailable_reason, "epoch_start");
+
+  const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'250, 200, 196));
+  // The legacy result is unchanged by the receipt.
+  EXPECT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_TRUE(observed.accepted);
+  EXPECT_TRUE(observed.observation_published);
+  EXPECT_DOUBLE_EQ(observed.media_loss_pct, 4.0);
+  EXPECT_EQ(observed.frames_expected, 100u);
+  EXPECT_EQ(observed.frames_lost, 4u);
+
+  ASSERT_TRUE(observed.receipt.has_value());
+  const auto &receipt = *observed.receipt;
+  EXPECT_EQ(receipt.epoch, baseline.receipt->epoch);
+  EXPECT_EQ(receipt.sequence, 1u);
+  EXPECT_TRUE(receipt.interval_measured);
+  EXPECT_TRUE(receipt.network_evidence_published);
+  EXPECT_EQ(receipt.frames_expected, 100u);
+  EXPECT_EQ(receipt.frames_received, 96u);
+  EXPECT_EQ(receipt.frames_lost, 4u);
+  EXPECT_EQ(receipt.client_start_ms, 1'000u);
+  EXPECT_EQ(receipt.client_end_ms, 2'250u);
+  EXPECT_EQ(receipt.client_duration_ms, 1'250u);
+  // Host arrival is measured on the host's own clock, not derived from the client's.
+  EXPECT_GE(receipt.host_duration_ms, 0);
+  EXPECT_LE(receipt.host_duration_ms, 5'000);
+  EXPECT_EQ(receipt.host_duration_ms,
+            std::chrono::duration_cast<std::chrono::milliseconds>(receipt.host_end - receipt.host_start).count());
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 4.0);
+  const auto json = stream_stats::client_media_interval_json(stats);
+  EXPECT_TRUE(json.at("available").get<bool>());
+  EXPECT_EQ(json.at("sequence"), 1);
+  EXPECT_EQ(json.at("ingest_state"), "observed");
+  EXPECT_FALSE(json.at("action_authority").get<bool>());
+  EXPECT_EQ(json.at("media_rate_attribution").at("state"), "unknown");
+  EXPECT_EQ(json.at("media_rate_attribution").at("reason"), "unmeasured_report_timing");
+  const auto &interval = json.at("interval");
+  EXPECT_EQ(interval.at("frames").at("expected"), 100);
+  EXPECT_EQ(interval.at("frames").at("received"), 96);
+  EXPECT_EQ(interval.at("frames").at("lost"), 4);
+  EXPECT_EQ(interval.at("client_counter").at("clock"), "client_monotonic_counter");
+  EXPECT_EQ(interval.at("client_counter").at("duration_ms"), 1'250);
+  EXPECT_EQ(interval.at("host_arrival").at("clock"), "host_steady_arrival");
+  EXPECT_FALSE(interval.contains("encode"));
+  // No owner, app session or stream generation leaves in the receipt.
+  const auto text = json.dump();
+  EXPECT_EQ(text.find("receipt-owner-a"), std::string::npos);
+  EXPECT_EQ(text.find("receipt-launch-a"), std::string::npos);
+  EXPECT_FALSE(json.contains("session_generation"));
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AZeroFrameIntervalIsRecordedButStaysANonObservation) {
+  media_receipt_scope_t scope("receipt-owner-b", 72, "receipt-launch-b");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 50, 50)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(1'400, 50, 50));
+  EXPECT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
+  EXPECT_TRUE(waiting.accepted);
+  EXPECT_FALSE(waiting.observation_published);
+  ASSERT_TRUE(waiting.receipt.has_value());
+  EXPECT_TRUE(waiting.receipt->interval_measured);
+  EXPECT_EQ(waiting.receipt->frames_expected, 0u);
+  EXPECT_FALSE(waiting.receipt->network_evidence_published);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_FALSE(stats.packet_loss_available) << "a zero-frame interval is not network evidence";
+  const auto interval = stream_stats::client_media_interval_json(stats).at("interval");
+  EXPECT_FALSE(interval.at("loss_available").get<bool>());
+}
+
+TEST(StreamStatsMediaIntervalReceipt, BaselineGapAndCounterRegressionEachStartAnEpochWithoutAnInterval) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("receipt-owner-c", 73, "receipt-launch-c");
+  const auto first = stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  const auto counted = stream_stats::ingest_client_media_counters(scope.sample(2'000, 160, 160));
+  ASSERT_TRUE(first.receipt && counted.receipt);
+  EXPECT_EQ(counted.receipt->sequence, 1u);
+
+  const auto regressed = stream_stats::ingest_client_media_counters(scope.sample(3'000, 10, 10));
+  EXPECT_EQ(regressed.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+  ASSERT_TRUE(regressed.receipt.has_value());
+  EXPECT_GT(regressed.receipt->epoch, counted.receipt->epoch);
+  EXPECT_EQ(regressed.receipt->sequence, 0u);
+  EXPECT_FALSE(regressed.receipt->interval_measured);
+
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  const auto gapped = stream_stats::ingest_client_media_counters(scope.sample(3'500, 20, 20));
+  EXPECT_EQ(gapped.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_TRUE(gapped.receipt.has_value());
+  EXPECT_GT(gapped.receipt->epoch, regressed.receipt->epoch);
+  EXPECT_EQ(gapped.receipt->sequence, 0u);
+  EXPECT_FALSE(gapped.receipt->interval_measured);
+  EXPECT_EQ(gapped.receipt->interval_unavailable_reason, "epoch_start");
+
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(4'000, 80, 79));
+  ASSERT_TRUE(resumed.receipt.has_value());
+  EXPECT_EQ(resumed.receipt->epoch, gapped.receipt->epoch);
+  EXPECT_EQ(resumed.receipt->sequence, 1u);
+  EXPECT_EQ(resumed.receipt->frames_expected, 60u);
+  EXPECT_EQ(resumed.receipt->frames_lost, 1u);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, RejectedReportsKeepThePreviousReceiptAndItsTime) {
+  media_receipt_scope_t scope("receipt-owner-d", 74, "receipt-launch-d");
+  stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  const auto counted = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 190));
+  ASSERT_TRUE(counted.receipt.has_value());
+  const auto before = current_receipt();
+
+  auto duplicate = scope.sample(2'000, 200, 190);
+  auto earlier = scope.sample(1'500, 210, 200);
+  auto impossible = scope.sample(2'500, 210, 200);
+  impossible.frames_received = 230;  // more received than expected
+  impossible.frames_lost = 0;
+  auto malformed = scope.sample(2'600, 210, 200);
+  malformed.frames_lost = 3;  // does not add up
+  auto other_token = scope.sample(2'700, 210, 200);
+  other_token.app_session_id = "receipt-launch-other";
+  auto other_generation = scope.sample(2'800, 210, 200);
+  other_generation.session_generation = scope.generation + 1;
+  for (const auto &sample : {duplicate, earlier, impossible, malformed, other_token, other_generation}) {
+    const auto rejected = stream_stats::ingest_client_media_counters(sample);
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_FALSE(rejected.receipt.has_value());
+  }
+  const auto after = current_receipt();
+  EXPECT_EQ(after.epoch, before.epoch);
+  EXPECT_EQ(after.sequence, before.sequence);
+  EXPECT_EQ(after.host_end, before.host_end) << "a rejected report must not refresh the receipt's age";
+  EXPECT_EQ(after.client_end_ms, 2'000u);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, ALifecycleChangeNeverServesThePreviousScope) {
+  {
+    media_receipt_scope_t scope("receipt-owner-e", 75, "receipt-launch-e");
+    stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(scope.sample(2'000, 150, 150)).receipt.has_value());
+
+    // The same lifecycle starts again: the legacy baseline continues, but no receipt crosses it.
+    stream_stats::start_session_timing(scope.owner, scope.generation, scope.token);
+    EXPECT_FALSE(current_receipt().available);
+    const auto continued = stream_stats::ingest_client_media_counters(scope.sample(3'000, 200, 200));
+    EXPECT_EQ(continued.state, stream_stats::client_media_ingest_state_e::observed);
+    EXPECT_TRUE(continued.observation_published);
+    ASSERT_TRUE(continued.receipt.has_value());
+    EXPECT_EQ(continued.receipt->sequence, 0u);
+    EXPECT_FALSE(continued.receipt->interval_measured);
+
+    // Another owner's snapshot, an idle snapshot and an ended one never serve this receipt.
+    auto snapshot = stream_stats::get_current();
+    ASSERT_TRUE(stream_stats::client_media_interval_json(snapshot).at("available").get<bool>());
+    auto other_owner = snapshot;
+    other_owner.app_session_id = "receipt-launch-replacement";
+    EXPECT_EQ(stream_stats::client_media_interval_json(other_owner).at("reason"), "session_scope_unavailable");
+    EXPECT_FALSE(stream_stats::client_media_interval_json(other_owner).at("available").get<bool>());
+    EXPECT_FALSE(stream_stats::client_media_interval_json(other_owner).contains("interval"));
+    auto other_generation = snapshot;
+    other_generation.session_generation = scope.generation + 1;
+    EXPECT_FALSE(stream_stats::client_media_interval_json(other_generation).at("available").get<bool>());
+    auto idle = snapshot;
+    idle.streaming = false;
+    EXPECT_EQ(stream_stats::client_media_interval_json(idle).at("reason"), "no_stream");
+    EXPECT_FALSE(stream_stats::client_media_interval_json(idle).contains("interval"));
+
+    stream_stats::stop_session_timing(scope.owner, scope.generation);
+    EXPECT_FALSE(current_receipt().available);
+  }
+  {
+    // The stream ending clears the receipt even while the timing lifecycle is still registered.
+    media_receipt_scope_t scope("receipt-owner-e1", 74, "receipt-launch-e1");
+    stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+    ASSERT_TRUE(current_receipt().available);
+    stream_stats::update_stream_active(false);
+    EXPECT_FALSE(current_receipt().available);
+  }
+  // A new generation for the same owner inherits nothing.
+  media_receipt_scope_t next("receipt-owner-e", 76, "receipt-launch-e2");
+  EXPECT_FALSE(current_receipt().available);
+  const auto first = stream_stats::ingest_client_media_counters(next.sample(5'000, 10, 10));
+  EXPECT_EQ(first.state, stream_stats::client_media_ingest_state_e::baseline);
+  ASSERT_TRUE(first.receipt.has_value());
+  EXPECT_EQ(first.receipt->session_generation, 76u);
+  EXPECT_FALSE(first.receipt->interval_measured);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AnUnrepresentableIntervalIsNeverReportedAsMeasured) {
+  using namespace std::chrono_literals;
+  {
+    // A client difference past the signed range is still a gap over the bound: it resets coverage,
+    // publishes nothing and starts a new epoch, so the receipt never claims the interval.
+    media_receipt_scope_t scope("receipt-owner-f", 77, "receipt-launch-f");
+    const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100));
+    ASSERT_TRUE(baseline.receipt.has_value());
+    const auto huge = stream_stats::ingest_client_media_counters(scope.sample(1 + (1ull << 63) + 10, 120, 120));
+    EXPECT_EQ(huge.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    EXPECT_TRUE(huge.accepted);
+    EXPECT_FALSE(huge.observation_published);
+    ASSERT_TRUE(huge.receipt.has_value());
+    EXPECT_GT(huge.receipt->epoch, baseline.receipt->epoch);
+    EXPECT_EQ(huge.receipt->sequence, 0u);
+    EXPECT_FALSE(huge.receipt->interval_measured);
+    EXPECT_EQ(huge.receipt->interval_unavailable_reason, "epoch_start");
+    EXPECT_FALSE(huge.receipt->network_evidence_published);
+    EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+    const auto json = stream_stats::client_media_interval_json(stream_stats::get_current());
+    EXPECT_FALSE(json.at("interval").at("measured").get<bool>());
+    EXPECT_FALSE(json.at("interval").contains("frames"));
+    EXPECT_FALSE(json.at("interval").contains("client_counter"));
+  }
+  {
+    // A host arrival that precedes the report before it cannot be a measured interval.
+    media_receipt_scope_t scope("receipt-owner-g", 78, "receipt-launch-g");
+    stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+    stream_stats::age_client_media_counter_baseline_for_tests(-1h);
+    const auto backwards = stream_stats::ingest_client_media_counters(scope.sample(2'000, 160, 160));
+    EXPECT_EQ(backwards.state, stream_stats::client_media_ingest_state_e::observed);
+    ASSERT_TRUE(backwards.receipt.has_value());
+    EXPECT_EQ(backwards.receipt->sequence, 1u);
+    EXPECT_FALSE(backwards.receipt->interval_measured);
+    EXPECT_EQ(backwards.receipt->interval_unavailable_reason, "host_interval_unrepresentable");
+  }
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AClientGapOverTheBoundResetsCoverageAtEveryUnsignedMagnitude) {
+  // The bound is 5000 ms inclusive. The difference is unsigned and untrusted, so every magnitude past
+  // the bound resets, including both sides of the signed range and the unsigned maximum.
+  const std::uint64_t signed_max = (1ull << 63) - 1;
+  const std::uint64_t gaps[] = {4'999, 5'000, 5'001, 6'000, signed_max, signed_max + 1, signed_max + 11, UINT64_MAX - 1};
+  std::uint64_t generation = 90;
+  for (const auto gap : gaps) {
+    SCOPED_TRACE(gap);
+    media_receipt_scope_t scope("receipt-owner-gap", generation++, "receipt-launch-gap");
+    const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100));
+    ASSERT_EQ(baseline.state, stream_stats::client_media_ingest_state_e::baseline);
+    ASSERT_TRUE(baseline.receipt.has_value());
+    const auto next = stream_stats::ingest_client_media_counters(scope.sample(1 + gap, 200, 180));
+    EXPECT_TRUE(next.accepted);
+    ASSERT_TRUE(next.receipt.has_value());
+    if (gap <= 5'000) {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(next.observation_published);
+      EXPECT_EQ(next.frames_expected, 100u);
+      EXPECT_EQ(next.frames_lost, 20u);
+      EXPECT_EQ(next.receipt->epoch, baseline.receipt->epoch);
+      EXPECT_EQ(next.receipt->sequence, 1u);
+      EXPECT_TRUE(next.receipt->interval_measured);
+      EXPECT_EQ(next.receipt->client_duration_ms, gap);
+      EXPECT_TRUE(stream_stats::get_current().packet_loss_available);
+    } else {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+      EXPECT_FALSE(next.observation_published);
+      EXPECT_GT(next.receipt->epoch, baseline.receipt->epoch);
+      EXPECT_EQ(next.receipt->sequence, 0u);
+      EXPECT_FALSE(next.receipt->interval_measured);
+      EXPECT_EQ(next.receipt->interval_unavailable_reason, "epoch_start");
+      EXPECT_FALSE(next.receipt->network_evidence_published);
+      EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+    }
+  }
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AValidReportAfterAHugeClientGapCountsOnlyFromTheNewBaseline) {
+  media_receipt_scope_t scope("receipt-owner-recover", 99, "receipt-launch-recover");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const std::uint64_t reset_ms = 1 + (1ull << 63) + 10;
+  const auto reset = stream_stats::ingest_client_media_counters(scope.sample(reset_ms, 200, 180));
+  ASSERT_EQ(reset.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_TRUE(reset.receipt.has_value());
+
+  // Counted against the reset report (60 expected, 1 lost), never against the first one (160, 21).
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(reset_ms + 1'000, 260, 239));
+  EXPECT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_TRUE(resumed.observation_published);
+  EXPECT_EQ(resumed.frames_expected, 60u);
+  EXPECT_EQ(resumed.frames_lost, 1u);
+  ASSERT_TRUE(resumed.receipt.has_value());
+  EXPECT_EQ(resumed.receipt->epoch, reset.receipt->epoch);
+  EXPECT_EQ(resumed.receipt->sequence, 1u);
+  EXPECT_TRUE(resumed.receipt->interval_measured);
+  EXPECT_TRUE(resumed.receipt->network_evidence_published);
+  EXPECT_EQ(resumed.receipt->frames_expected, 60u);
+  EXPECT_EQ(resumed.receipt->frames_received, 59u);
+  EXPECT_EQ(resumed.receipt->frames_lost, 1u);
+  EXPECT_EQ(resumed.receipt->client_start_ms, reset_ms);
+  EXPECT_EQ(resumed.receipt->client_duration_ms, 1'000u);
+  EXPECT_TRUE(stream_stats::get_current().packet_loss_available);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, LargeClientTimestampsWithSmallDeltasStillCount) {
+  // Only the difference is bounded, never the absolute counter value.
+  const std::uint64_t signed_bound = 1ull << 63;
+  struct span_t { std::uint64_t from; std::uint64_t to; bool counted; };
+  const span_t spans[] = {
+    {signed_bound - 500, signed_bound + 500, true},   // crosses the signed bound
+    {signed_bound - 1, signed_bound, true},
+    {UINT64_MAX - 3'000, UINT64_MAX - 1'000, true},   // near the unsigned maximum
+    {UINT64_MAX - 5'000, UINT64_MAX, true},           // exactly the bound, ending at the maximum
+    {UINT64_MAX - 5'001, UINT64_MAX, false},          // one past the bound
+  };
+  std::uint64_t generation = 100;
+  for (const auto &span : spans) {
+    SCOPED_TRACE(span.from);
+    media_receipt_scope_t scope("receipt-owner-large", generation++, "receipt-launch-large");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(span.from, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    const auto next = stream_stats::ingest_client_media_counters(scope.sample(span.to, 160, 157));
+    ASSERT_TRUE(next.receipt.has_value());
+    if (span.counted) {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(next.observation_published);
+      EXPECT_EQ(next.frames_expected, 60u);
+      EXPECT_EQ(next.frames_lost, 3u);
+      EXPECT_EQ(next.receipt->sequence, 1u);
+      EXPECT_TRUE(next.receipt->interval_measured);
+      EXPECT_EQ(next.receipt->client_start_ms, span.from);
+      EXPECT_EQ(next.receipt->client_end_ms, span.to);
+      EXPECT_EQ(next.receipt->client_duration_ms, span.to - span.from);
+    } else {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+      EXPECT_FALSE(next.observation_published);
+      EXPECT_EQ(next.receipt->sequence, 0u);
+      EXPECT_FALSE(next.receipt->interval_measured);
+    }
+    if (span.to == UINT64_MAX) {
+      // A wrapped counter is a rejected older timestamp, even when unsigned subtraction alone
+      // would produce a small gap. It must not replace or refresh the last accepted receipt.
+      const auto before_wrap = current_receipt();
+      const auto wrapped = stream_stats::ingest_client_media_counters(scope.sample(1, 220, 217));
+      EXPECT_EQ(wrapped.state, stream_stats::client_media_ingest_state_e::non_monotonic);
+      EXPECT_FALSE(wrapped.accepted);
+      EXPECT_FALSE(wrapped.observation_published);
+      EXPECT_FALSE(wrapped.receipt.has_value());
+      const auto after_wrap = current_receipt();
+      EXPECT_EQ(after_wrap.epoch, before_wrap.epoch);
+      EXPECT_EQ(after_wrap.sequence, before_wrap.sequence);
+      EXPECT_EQ(after_wrap.host_end, before_wrap.host_end);
+      EXPECT_EQ(after_wrap.client_end_ms, UINT64_MAX);
+    }
+  }
+}
+
+TEST(StreamStatsMediaIntervalReceipt, TheSerializerReadsItsOwnSnapshotAndAgreesInStatsAndDoctor) {
+  media_receipt_scope_t scope("receipt-owner-h", 79, "receipt-launch-h");
+  stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  stream_stats::ingest_client_media_counters(scope.sample(2'000, 130, 128));
+  const auto snapshot = stream_stats::get_current();
+  const auto as_of = stream_stats::client_media_interval_json(snapshot);
+  ASSERT_EQ(as_of.at("sequence"), 1);
+  EXPECT_EQ(as_of.at("interval").at("frames").at("expected"), 30);
+  EXPECT_EQ(as_of.at("interval").at("frames").at("lost"), 2);
+
+  // Cumulative loss must not fall (2 -> 3), or the legacy validation would correctly start a counter-reset epoch
+  // and this case would no longer test a later receipt in the same epoch.
+  const auto later = stream_stats::ingest_client_media_counters(scope.sample(3'000, 190, 187));
+  ASSERT_EQ(later.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(later.observation_published);
+  EXPECT_EQ(later.frames_expected, 60u);
+  EXPECT_EQ(later.frames_lost, 1u);
+  ASSERT_TRUE(later.receipt.has_value());
+  EXPECT_EQ(later.receipt->epoch, as_of.at("epoch").get<std::uint64_t>());
+  EXPECT_EQ(later.receipt->sequence, 2u);
+  EXPECT_TRUE(later.receipt->interval_measured);
+  EXPECT_TRUE(later.receipt->network_evidence_published);
+  EXPECT_EQ(later.receipt->frames_expected, 60u);
+  EXPECT_EQ(later.receipt->frames_received, 59u);
+  EXPECT_EQ(later.receipt->frames_lost, 1u);
+
+  EXPECT_EQ(stream_stats::client_media_interval_json(snapshot), as_of) << "an old snapshot stays as of its copy";
+  const auto current = stream_stats::client_media_interval_json(stream_stats::get_current());
+  EXPECT_EQ(current.at("sequence"), 2);
+  EXPECT_EQ(current.at("epoch"), as_of.at("epoch"));
+  EXPECT_EQ(current.at("interval").at("frames").at("lost"), 1);
+
+  EXPECT_EQ(nlohmann::json::parse(snapshot.to_json()).at("client_media_interval"), as_of);
+  const auto doctor = stream_stats::build_doctor_json(snapshot, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("advanced_evidence").at("client_media_interval"), as_of);
+
+  stream_stats::stats_t empty {};
+  empty.streaming = true;
+  empty.session_generation = scope.generation;
+  empty.app_session_id = scope.token;
+  const auto none = stream_stats::client_media_interval_json(empty);
+  EXPECT_FALSE(none.at("available").get<bool>());
+  EXPECT_EQ(none.at("reason"), "no_receipt");
+  EXPECT_EQ(none.at("media_rate_attribution").at("state"), "unknown");
+}
+
+TEST(StreamStatsMediaIntervalReceipt, PublicationIsMarkedExactlyWhenTheLegacyResultPublished) {
+  media_receipt_scope_t scope("receipt-owner-p", 80, "receipt-launch-p");
+  const auto expect_marker_matches = [](const stream_stats::client_media_ingest_result_t &result) {
+    ASSERT_TRUE(result.receipt.has_value());
+    EXPECT_EQ(result.receipt->network_evidence_published, result.observation_published);
+    const auto latest = current_receipt();
+    EXPECT_EQ(latest.epoch, result.receipt->epoch);
+    EXPECT_EQ(latest.sequence, result.receipt->sequence);
+    EXPECT_EQ(latest.network_evidence_published, result.observation_published);
+  };
+
+  const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  EXPECT_FALSE(baseline.observation_published);
+  expect_marker_matches(baseline);
+
+  const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'000, 150, 149));
+  ASSERT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(observed.observation_published);
+  expect_marker_matches(observed);
+  EXPECT_TRUE(stream_stats::client_media_interval_json(stream_stats::get_current()).at("network_evidence_published").get<bool>());
+
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(2'500, 150, 149));
+  ASSERT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
+  EXPECT_FALSE(waiting.observation_published);
+  expect_marker_matches(waiting);
+
+  // The same lifecycle starts again: the legacy report is still counted and published, and the receipt
+  // that starts the new diagnostic epoch says so, although it measures no interval.
+  stream_stats::start_session_timing(scope.owner, scope.generation, scope.token);
+  const auto rearmed = stream_stats::ingest_client_media_counters(scope.sample(3'000, 200, 198));
+  ASSERT_EQ(rearmed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(rearmed.observation_published);
+  ASSERT_TRUE(rearmed.receipt.has_value());
+  EXPECT_EQ(rearmed.receipt->sequence, 0u);
+  EXPECT_FALSE(rearmed.receipt->interval_measured);
+  expect_marker_matches(rearmed);
+
+  const auto regressed = stream_stats::ingest_client_media_counters(scope.sample(3'500, 10, 10));
+  ASSERT_EQ(regressed.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+  EXPECT_FALSE(regressed.observation_published);
+  expect_marker_matches(regressed);
+}
+
+namespace {
+  nlohmann::json current_media_interval_json() {
+    return stream_stats::client_media_interval_json(stream_stats::get_current());
+  }
+}  // namespace
+
+// Report cadence evidence beside the receipt: counts and host-arrival timings of the reports the
+// legacy ingest admitted for one scope, through the public ingest, snapshot and JSON interfaces only.
+// On a source without it the receipt is still served and `cadence` is absent, so each case goes red
+// at its first `contains("cadence")` assertion rather than failing to compile.
+TEST(StreamStatsMediaReportCadence, CountsAdmittedReportsFromTheBaselineAndKeepsTheLongestHostInterval) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-a", 201, "cadence-launch-a");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.at("available").get<bool>());
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 1) << "the baseline is an admitted report";
+    EXPECT_EQ(cadence.at("gap_resets"), 0);
+    EXPECT_FALSE(cadence.contains("max_host_interval_ms")) << "one report has no interval";
+    EXPECT_FALSE(cadence.contains("last_gap_host_ms"));
+    EXPECT_FALSE(cadence.contains("last_gap_client_ms"));
+    EXPECT_EQ(cadence.at("host_clock"), "host_steady_arrival");
+    EXPECT_EQ(cadence.at("client_clock"), "client_monotonic_counter");
+    EXPECT_FALSE(cadence.at("loss_evidence").get<bool>());
+  }
+
+  // Three seconds of host arrival before the second report, one before the third: the longest stays.
+  stream_stats::age_client_media_counter_baseline_for_tests(3s);
+  const auto second = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 196));
+  ASSERT_EQ(second.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(second.receipt.has_value());
+  EXPECT_TRUE(second.receipt->interval_measured);
+  std::int64_t longest = 0;
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 2);
+    EXPECT_EQ(cadence.at("gap_resets"), 0);
+    ASSERT_TRUE(cadence.contains("max_host_interval_ms"));
+    longest = cadence.at("max_host_interval_ms").get<std::int64_t>();
+    EXPECT_GE(longest, 3'000);
+    EXPECT_LT(longest, 4'500);
+    EXPECT_EQ(longest, second.receipt->host_duration_ms) << "the only interval so far is the longest";
+  }
+
+  stream_stats::age_client_media_counter_baseline_for_tests(1s);
+  // Loss is cumulative too: four lost frames at the second report become six, not three.
+  const auto third = stream_stats::ingest_client_media_counters(scope.sample(3'000, 300, 294));
+  ASSERT_EQ(third.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(third.receipt.has_value());
+  EXPECT_GE(third.receipt->host_duration_ms, 1'000);
+  EXPECT_LT(third.receipt->host_duration_ms, longest);
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(3'400, 300, 294));
+  ASSERT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 4) << "a zero-frame report is admitted too";
+    EXPECT_EQ(cadence.at("gap_resets"), 0);
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), longest) << "a shorter interval never lowers it";
+    EXPECT_FALSE(cadence.contains("last_gap_host_ms"));
+  }
+  // The receipt's own interval fields keep their latest-report meaning.
+  EXPECT_EQ(current_media_interval_json().at("interval").at("frames").at("expected"), 0);
+  EXPECT_EQ(current_media_interval_json().at("sequence"), 3);
+}
+
+TEST(StreamStatsMediaReportCadence, AHostGapOverTheBoundIsRecordedAndTheCountersSurviveTheEpochReset) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-b", 202, "cadence-launch-b");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 196));
+  ASSERT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(observed.receipt.has_value());
+
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  const auto gapped = stream_stats::ingest_client_media_counters(scope.sample(2'500, 260, 256));
+  ASSERT_EQ(gapped.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_TRUE(gapped.receipt.has_value());
+  EXPECT_GT(gapped.receipt->epoch, observed.receipt->epoch);
+  EXPECT_EQ(gapped.receipt->sequence, 0u);
+  EXPECT_FALSE(gapped.receipt->interval_measured);
+  std::int64_t gap_host_ms = 0;
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 3) << "the reset is an admitted report and the count survives the epoch";
+    EXPECT_EQ(cadence.at("gap_resets"), 1);
+    ASSERT_TRUE(cadence.contains("last_gap_host_ms"));
+    ASSERT_TRUE(cadence.contains("last_gap_client_ms"));
+    gap_host_ms = cadence.at("last_gap_host_ms").get<std::int64_t>();
+    EXPECT_GE(gap_host_ms, 6'000) << "the aged host gap that reset coverage";
+    EXPECT_LT(gap_host_ms, 7'500);
+    EXPECT_EQ(cadence.at("last_gap_client_ms").get<std::uint64_t>(), 500u) << "the client's own small difference";
+    EXPECT_EQ(cadence.at("last_gap_preceding_ingest_state"), "observed");
+    ASSERT_TRUE(cadence.contains("max_host_interval_ms"));
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), gap_host_ms) << "the gap is the longest arrival interval";
+    // Still the receipt of a reset: no interval, no loss figure, nothing published.
+    EXPECT_FALSE(json.at("interval").at("measured").get<bool>());
+    EXPECT_EQ(json.at("ingest_state"), "coverage_gap_reset");
+    EXPECT_FALSE(json.at("network_evidence_published").get<bool>());
+  }
+
+  // The next report measures in the new epoch; the cadence it carries is the scope's, not the epoch's.
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(3'500, 320, 315));
+  ASSERT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(resumed.receipt.has_value());
+  EXPECT_EQ(resumed.receipt->epoch, gapped.receipt->epoch);
+  EXPECT_EQ(resumed.receipt->sequence, 1u);
+  EXPECT_EQ(resumed.receipt->frames_expected, 60u);
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 4);
+    EXPECT_EQ(cadence.at("gap_resets"), 1);
+    EXPECT_EQ(cadence.at("last_gap_host_ms").get<std::int64_t>(), gap_host_ms) << "a measured interval does not rewrite the gap";
+    EXPECT_EQ(cadence.at("last_gap_client_ms").get<std::uint64_t>(), 500u);
+    EXPECT_EQ(cadence.at("last_gap_preceding_ingest_state"), "observed");
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), gap_host_ms);
+    EXPECT_TRUE(json.at("interval").at("measured").get<bool>());
+    EXPECT_EQ(json.at("interval").at("frames").at("expected"), 60);
+  }
+}
+
+TEST(StreamStatsMediaReportCadence, AnUnsignedClientGapIsRecordedBesideItsSmallHostGap) {
+  {
+    // The client difference past the signed range: the legacy ingest resets coverage on it, and the
+    // cadence keeps that unsigned magnitude beside a host gap that was well inside the bound.
+    media_receipt_scope_t scope("cadence-owner-c", 203, "cadence-launch-c");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    const std::uint64_t client_gap = (1ull << 63) + 10;
+    const auto huge = stream_stats::ingest_client_media_counters(scope.sample(1 + client_gap, 120, 120));
+    ASSERT_EQ(huge.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    EXPECT_FALSE(huge.observation_published);
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 2);
+    EXPECT_EQ(cadence.at("gap_resets"), 1);
+    EXPECT_EQ(cadence.at("last_gap_client_ms").get<std::uint64_t>(), client_gap);
+    const auto host_gap = cadence.at("last_gap_host_ms").get<std::int64_t>();
+    EXPECT_GE(host_gap, 0);
+    EXPECT_LT(host_gap, 5'000) << "the host saw no pause; only the client's counter jumped";
+    EXPECT_EQ(cadence.at("last_gap_preceding_ingest_state"), "baseline");
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), host_gap);
+    EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+  }
+  {
+    // The largest difference the counter can express is kept exactly.
+    media_receipt_scope_t scope("cadence-owner-c2", 204, "cadence-launch-c2");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(UINT64_MAX, 120, 120)).state,
+              stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    EXPECT_EQ(json.at("cadence").at("last_gap_client_ms").get<std::uint64_t>(), UINT64_MAX - 1);
+    EXPECT_EQ(json.at("cadence").at("gap_resets"), 1);
+  }
+}
+
+TEST(StreamStatsMediaReportCadence, ACounterRegressionKeepsTheCountersAndRecordsNoGap) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-d", 205, "cadence-launch-d");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  stream_stats::age_client_media_counter_baseline_for_tests(1s);
+  const auto counted = stream_stats::ingest_client_media_counters(scope.sample(2'000, 160, 160));
+  ASSERT_EQ(counted.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(counted.receipt.has_value());
+  const auto before = current_media_interval_json();
+  ASSERT_TRUE(before.contains("cadence")) << before.dump();
+  const auto longest = before.at("cadence").at("max_host_interval_ms").get<std::int64_t>();
+  EXPECT_GE(longest, 1'000);
+
+  const auto regressed = stream_stats::ingest_client_media_counters(scope.sample(3'000, 10, 10));
+  ASSERT_EQ(regressed.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+  ASSERT_TRUE(regressed.receipt.has_value());
+  EXPECT_GT(regressed.receipt->epoch, counted.receipt->epoch);
+  const auto json = current_media_interval_json();
+  ASSERT_TRUE(json.contains("cadence")) << json.dump();
+  const auto &cadence = json.at("cadence");
+  EXPECT_EQ(cadence.at("accepted_reports"), 3) << "a counter regression is admitted and keeps the scope's count";
+  EXPECT_EQ(cadence.at("gap_resets"), 0) << "a regression is not a coverage gap";
+  EXPECT_FALSE(cadence.contains("last_gap_host_ms"));
+  EXPECT_FALSE(cadence.contains("last_gap_client_ms"));
+  EXPECT_FALSE(cadence.contains("last_gap_preceding_ingest_state"));
+  EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), longest) << "its short arrival interval does not lower the longest";
+
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(4'000, 70, 69));
+  ASSERT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("accepted_reports"), 4);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("gap_resets"), 0);
+}
+
+TEST(StreamStatsMediaReportCadence, RejectedReportsChangeNoCounter) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-e", 206, "cadence-launch-e");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 190)).state,
+            stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(3'000, 300, 290)).state,
+            stream_stats::client_media_ingest_state_e::observed);
+  const auto before = current_media_interval_json();
+  ASSERT_TRUE(before.contains("cadence")) << before.dump();
+  EXPECT_EQ(before.at("cadence").at("accepted_reports"), 3);
+  EXPECT_EQ(before.at("cadence").at("gap_resets"), 1);
+
+  auto duplicate = scope.sample(3'000, 300, 290);
+  auto earlier = scope.sample(2'500, 310, 300);
+  auto impossible = scope.sample(3'500, 310, 300);
+  impossible.frames_received = 330;  // more received than expected
+  impossible.frames_lost = 0;
+  auto malformed = scope.sample(3'600, 310, 300);
+  malformed.frames_lost = 3;  // does not add up
+  auto other_token = scope.sample(3'700, 310, 300);
+  other_token.app_session_id = "cadence-launch-other";
+  auto other_generation = scope.sample(3'800, 310, 300);
+  other_generation.session_generation = scope.generation + 1;
+  auto other_owner = scope.sample(3'900, 310, 300);
+  other_owner.owner_uuid = "cadence-owner-unknown";
+  auto zero_clock = scope.sample(4'000, 310, 300);
+  zero_clock.client_monotonic_ms = 0;
+  for (const auto &sample : {duplicate, earlier, impossible, malformed, other_token, other_generation, other_owner, zero_clock}) {
+    const auto rejected = stream_stats::ingest_client_media_counters(sample);
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_FALSE(rejected.receipt.has_value());
+  }
+  const auto after = current_media_interval_json();
+  ASSERT_TRUE(after.contains("cadence")) << after.dump();
+  EXPECT_EQ(after.at("cadence"), before.at("cadence")) << "no rejected report counts, gaps or extends an interval";
+  EXPECT_EQ(after, before) << "the receipt is untouched too";
+
+  // The next admitted report counts from where the scope left off.
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(4'100, 320, 310)).state,
+            stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("accepted_reports"), 4);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("gap_resets"), 1);
+}
+
+TEST(StreamStatsMediaReportCadence, ANewScopeStartsOverAndNeverServesTheOldScopesValues) {
+  using namespace std::chrono_literals;
+  nlohmann::json old_snapshot_json;
+  stream_stats::stats_t old_snapshot;
+  {
+    media_receipt_scope_t scope("cadence-owner-f", 207, "cadence-launch-f");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    stream_stats::age_client_media_counter_baseline_for_tests(6s);
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 200)).state,
+              stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    old_snapshot = stream_stats::get_current();
+    old_snapshot_json = stream_stats::client_media_interval_json(old_snapshot);
+    ASSERT_TRUE(old_snapshot_json.contains("cadence")) << old_snapshot_json.dump();
+    EXPECT_EQ(old_snapshot_json.at("cadence").at("gap_resets"), 1);
+    EXPECT_EQ(old_snapshot_json.at("cadence").at("accepted_reports"), 2);
+
+    // The same lifecycle registered again: the receipt starts over, and so does the cadence it carries.
+    stream_stats::start_session_timing(scope.owner, scope.generation, scope.token);
+    EXPECT_FALSE(current_receipt().available);
+    EXPECT_FALSE(current_media_interval_json().contains("cadence"));
+    const auto continued = stream_stats::ingest_client_media_counters(scope.sample(3'000, 260, 260));
+    ASSERT_EQ(continued.state, stream_stats::client_media_ingest_state_e::observed);
+    const auto restarted = current_media_interval_json();
+    ASSERT_TRUE(restarted.contains("cadence")) << restarted.dump();
+    EXPECT_EQ(restarted.at("cadence").at("accepted_reports"), 1);
+    EXPECT_EQ(restarted.at("cadence").at("gap_resets"), 0);
+    EXPECT_FALSE(restarted.at("cadence").contains("last_gap_host_ms"));
+    EXPECT_FALSE(restarted.at("cadence").contains("max_host_interval_ms"));
+  }
+  // A new generation of the same owner inherits nothing.
+  media_receipt_scope_t next("cadence-owner-f", 208, "cadence-launch-f2");
+  EXPECT_FALSE(current_receipt().available);
+  EXPECT_FALSE(current_media_interval_json().contains("cadence"));
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(next.sample(5'000, 10, 10)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const auto fresh = current_media_interval_json();
+  ASSERT_TRUE(fresh.contains("cadence")) << fresh.dump();
+  EXPECT_EQ(fresh.at("cadence").at("accepted_reports"), 1);
+  EXPECT_EQ(fresh.at("cadence").at("gap_resets"), 0);
+  EXPECT_FALSE(fresh.at("cadence").contains("last_gap_host_ms"));
+  EXPECT_FALSE(fresh.at("cadence").contains("last_gap_client_ms"));
+  EXPECT_FALSE(fresh.at("cadence").contains("max_host_interval_ms"));
+
+  // The old scope's snapshot, served as if it were this generation's, shows nothing of either.
+  auto relabelled = old_snapshot;
+  relabelled.session_generation = next.generation;
+  relabelled.app_session_id = next.token;
+  const auto served = stream_stats::client_media_interval_json(relabelled);
+  EXPECT_FALSE(served.at("available").get<bool>());
+  EXPECT_EQ(served.at("reason"), "session_scope_unavailable");
+  EXPECT_FALSE(served.contains("cadence"));
+  EXPECT_FALSE(served.contains("interval"));
+  // And the old snapshot itself still reads as of its own copy.
+  EXPECT_EQ(stream_stats::client_media_interval_json(old_snapshot), old_snapshot_json);
+}
+
+TEST(StreamStatsMediaReportCadence, ItIsOmittedWithoutAReceiptAndAgreesInStatsAndDoctor) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-g", 209, "cadence-launch-g");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'500, 150, 150)).state,
+            stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  const auto snapshot = stream_stats::get_current();
+  const auto as_of = stream_stats::client_media_interval_json(snapshot);
+  ASSERT_TRUE(as_of.at("available").get<bool>());
+  ASSERT_TRUE(as_of.contains("cadence")) << as_of.dump();
+  EXPECT_EQ(as_of.at("cadence").at("gap_resets"), 1);
+
+  // The same object wherever the receipt is served, and only there.
+  const auto stats_json = nlohmann::json::parse(snapshot.to_json());
+  EXPECT_EQ(stats_json.at("client_media_interval").at("cadence"), as_of.at("cadence"));
+  const auto doctor = stream_stats::build_doctor_json(snapshot, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("advanced_evidence").at("client_media_interval").at("cadence"), as_of.at("cadence"));
+  EXPECT_EQ(stats_json.at("doctor").at("advanced_evidence").at("client_media_interval").at("cadence"), as_of.at("cadence"));
+  // Stats already embeds Doctor, so both existing receipt paths carry the same cadence.
+  // Check the exact locations rather than a substring count that mistakes the embed for duplication.
+  std::set<std::string> cadence_locations;
+  const auto flattened = stats_json.flatten();
+  for (const auto &entry : flattened.items()) {
+    if (entry.key().ends_with("/gap_resets")) cadence_locations.insert(entry.key());
+  }
+  const std::set<std::string> expected_cadence_locations {
+    "/client_media_interval/cadence/gap_resets",
+    "/doctor/advanced_evidence/client_media_interval/cadence/gap_resets",
+  };
+  EXPECT_EQ(cadence_locations, expected_cadence_locations) << "cadence appears only beside the existing receipts";
+  const auto text = stats_json.dump();
+  EXPECT_EQ(text.find("cadence-owner-g"), std::string::npos);
+  EXPECT_EQ(text.find("cadence-launch-g"), std::string::npos);
+
+  // Unavailable receipts carry no cadence: not for an idle snapshot, another app session, another
+  // generation, or a scope with no receipt at all.
+  auto idle = snapshot;
+  idle.streaming = false;
+  EXPECT_EQ(stream_stats::client_media_interval_json(idle).at("reason"), "no_stream");
+  EXPECT_FALSE(stream_stats::client_media_interval_json(idle).contains("cadence"));
+  auto other_session = snapshot;
+  other_session.app_session_id = "cadence-launch-replacement";
+  EXPECT_FALSE(stream_stats::client_media_interval_json(other_session).contains("cadence"));
+  auto other_generation = snapshot;
+  other_generation.session_generation = scope.generation + 1;
+  EXPECT_FALSE(stream_stats::client_media_interval_json(other_generation).contains("cadence"));
+  stream_stats::stats_t empty {};
+  empty.streaming = true;
+  empty.session_generation = scope.generation;
+  empty.app_session_id = scope.token;
+  const auto none = stream_stats::client_media_interval_json(empty);
+  EXPECT_FALSE(none.at("available").get<bool>());
+  EXPECT_EQ(none.at("reason"), "no_receipt");
+  EXPECT_FALSE(none.contains("cadence"));
+  EXPECT_EQ(none.at("media_rate_attribution").at("state"), "unknown");
+
+  // The stream ending clears the receipt, and the cadence with it.
+  stream_stats::update_stream_active(false);
+  EXPECT_FALSE(current_receipt().available);
+  const auto ended = current_media_interval_json();
+  EXPECT_FALSE(ended.at("available").get<bool>());
+  EXPECT_FALSE(ended.contains("cadence"));
+}
+
+TEST(StreamStatsMediaReportCadence, ItChangesNoControllerOrVerdictTrajectory) {
+  using namespace std::chrono_literals;
+  struct run_t {
+    adaptive_bitrate::state_t controller;
+    stream_stats::network_verdict_t verdict;
+    nlohmann::json cadence;
+  };
+  // One identical report sequence per scope, with the controller hearing the published reports.
+  const auto run = [](std::uint64_t generation, const std::string &token) {
+    config::video.adaptive_bitrate.enabled = true;
+    config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+    config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+    adaptive_bitrate::load_config();
+    adaptive_bitrate::reset();
+    run_t out;
+    {
+      media_receipt_scope_t scope("cadence-owner-pin", generation, token);
+      adaptive_bitrate::set_enabled(true);
+      adaptive_bitrate::set_runtime_update_supported(true);
+      adaptive_bitrate::set_base_bitrate(20000);
+      adaptive_bitrate::set_session_scope(generation, token, true);
+      EXPECT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+                stream_stats::client_media_ingest_state_e::baseline);
+      const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 196));
+      EXPECT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(observed.observation_published);
+      const auto controller_before_gap = adaptive_bitrate::get_state();
+      const auto verdict_before_gap = stream_stats::current_network_verdict();
+
+      // A coverage reset publishes nothing: the controller and the verdict stand exactly as they were,
+      // whatever the cadence recorded about the gap.
+      stream_stats::age_client_media_counter_baseline_for_tests(6s);
+      const auto gapped = stream_stats::ingest_client_media_counters(scope.sample(2'500, 260, 256));
+      EXPECT_EQ(gapped.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+      EXPECT_FALSE(gapped.observation_published);
+      const auto controller_after_gap = adaptive_bitrate::get_state();
+      EXPECT_DOUBLE_EQ(controller_after_gap.ewma_packet_loss, controller_before_gap.ewma_packet_loss);
+      EXPECT_DOUBLE_EQ(controller_after_gap.ewma_rtt_ms, controller_before_gap.ewma_rtt_ms);
+      EXPECT_EQ(controller_after_gap.target_bitrate_kbps, controller_before_gap.target_bitrate_kbps);
+      EXPECT_EQ(controller_after_gap.state, controller_before_gap.state);
+      EXPECT_EQ(controller_after_gap.reason, controller_before_gap.reason);
+      const auto verdict_after_gap = stream_stats::current_network_verdict();
+      EXPECT_EQ(verdict_after_gap.media_samples, verdict_before_gap.media_samples);
+      EXPECT_DOUBLE_EQ(verdict_after_gap.loss_pct, verdict_before_gap.loss_pct);
+      EXPECT_EQ(verdict_after_gap.loss_available, verdict_before_gap.loss_available);
+      EXPECT_EQ(verdict_after_gap.frames_expected, verdict_before_gap.frames_expected);
+      EXPECT_EQ(verdict_after_gap.frames_lost, verdict_before_gap.frames_lost);
+
+      const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(3'500, 360, 350));
+      EXPECT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(resumed.observation_published);
+      out.controller = adaptive_bitrate::get_state();
+      out.verdict = stream_stats::current_network_verdict();
+      const auto json = current_media_interval_json();
+      EXPECT_TRUE(json.contains("cadence")) << json.dump();
+      out.cadence = json.value("cadence", nlohmann::json::object());
+      adaptive_bitrate::set_session_scope(0, {}, false);
+      adaptive_bitrate::set_enabled(false);
+    }
+    adaptive_bitrate::reset();
+    config::video.adaptive_bitrate.enabled = false;
+    adaptive_bitrate::load_config();
+    return out;
+  };
+
+  const auto first = run(210, "cadence-launch-pin-1");
+  const auto second = run(211, "cadence-launch-pin-2");
+  // Identical inputs, identical controller and verdict figures, whatever the cadence holds.
+  EXPECT_DOUBLE_EQ(second.controller.ewma_packet_loss, first.controller.ewma_packet_loss);
+  EXPECT_DOUBLE_EQ(second.controller.ewma_rtt_ms, first.controller.ewma_rtt_ms);
+  EXPECT_EQ(second.controller.target_bitrate_kbps, first.controller.target_bitrate_kbps);
+  EXPECT_EQ(second.controller.state, first.controller.state);
+  EXPECT_EQ(second.controller.reason, first.controller.reason);
+  EXPECT_EQ(second.verdict.media_samples, first.verdict.media_samples);
+  EXPECT_DOUBLE_EQ(second.verdict.loss_pct, first.verdict.loss_pct);
+  EXPECT_EQ(second.verdict.loss_available, first.verdict.loss_available);
+  EXPECT_EQ(second.verdict.loss_elevated, first.verdict.loss_elevated);
+  EXPECT_EQ(second.verdict.frames_expected, first.verdict.frames_expected);
+  EXPECT_EQ(second.verdict.frames_lost, first.verdict.frames_lost);
+  // The cadence was recorded in both, identically, and reached neither record the decisions use.
+  ASSERT_FALSE(first.cadence.empty());
+  // Host arrival time is measured independently in each run; only the client counter and
+  // scope counters have identical inputs. Compare those facts and bound each actual host gap.
+  for (const auto *cadence : {&first.cadence, &second.cadence}) {
+    EXPECT_EQ(cadence->at("accepted_reports"), 4);
+    EXPECT_EQ(cadence->at("gap_resets"), 1);
+    EXPECT_EQ(cadence->at("last_gap_client_ms"), 500);
+    EXPECT_EQ(cadence->at("last_gap_preceding_ingest_state"), "observed");
+    const auto host_gap_ms = cadence->at("last_gap_host_ms").get<std::int64_t>();
+    EXPECT_GE(host_gap_ms, 6000);
+    EXPECT_LT(host_gap_ms, 7500);
+    EXPECT_EQ(cadence->at("max_host_interval_ms"), host_gap_ms);
+  }
+  EXPECT_EQ(stream_stats::network_verdict_json(first.verdict).dump().find("cadence"), std::string::npos);
+  EXPECT_EQ(stream_stats::network_verdict_json(first.verdict).dump().find("gap_resets"), std::string::npos);
 }

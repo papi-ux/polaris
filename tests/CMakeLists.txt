@@ -7,6 +7,12 @@ include_directories("${CMAKE_SOURCE_DIR}")
 
 enable_testing()
 option(BUILD_FULL_TESTS "Build the full Polaris test suite" OFF)
+# Report-only recorder cost probe (#357, docs/recorder_cost.md): off unless asked for, and only
+# where it can run, so an explicit request elsewhere fails instead of building nothing.
+option(POLARIS_ENABLE_RECORDER_COST_PROBE "Build the report-only recorder cost probe (Linux, full tests)" OFF)
+if(POLARIS_ENABLE_RECORDER_COST_PROBE AND NOT (BUILD_FULL_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+    message(FATAL_ERROR "POLARIS_ENABLE_RECORDER_COST_PROBE requires Linux and BUILD_FULL_TESTS=ON")
+endif()
 
 # Add GoogleTest directory to the project
 set(GTEST_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/googletest")
@@ -102,6 +108,18 @@ if(NOT WIN32)
     )
 endif()
 
+# VrrClockProofTests (fast) parses /proc/<pid>/stat through the Linux probe's parse_starttime.
+# The shared test main also dispatches the labwc supervisor, which hands off the compositor identity
+# through the channel (itself using parse_starttime). Targets built on test_polaris_runtime_objects
+# already get both from the production list; only the standalone targets need them here.
+if(UNIX AND NOT APPLE)
+    set(TEST_LINUX_SUPERVISOR_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/compositor_identity_channel.cpp
+    )
+    list(APPEND TEST_SUPPORT_SOURCES ${TEST_LINUX_SUPERVISOR_SOURCES})
+endif()
+
 set(TEST_AUDIT_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/bounded_log_file.cpp
@@ -109,9 +127,13 @@ set(TEST_AUDIT_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
 )
+if(UNIX AND NOT APPLE)
+    list(APPEND TEST_AUDIT_SUPPORT_SOURCES ${TEST_LINUX_SUPERVISOR_SOURCES})
+endif()
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_workers.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_worker_admission.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_bounded_log_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_benchmark_control_contract.cpp
@@ -159,7 +181,24 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_update_status.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_session_policy.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_clock_proof.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_compositor_identity.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_time.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_pacing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_epoch_authority.cpp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND TEST_SUPPORT_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/capture_producer_sync.cpp)
+    list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_producer_sync.cpp)
+    if(POLARIS_ENABLE_VULKAN)
+        list(APPEND TEST_FAST_SOURCES
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_vulkan_capture_admission.cpp)
+    endif()
+endif()
 
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
@@ -195,6 +234,9 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_ram_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_host.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_repaint.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_feedback.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pipewire_producer_graph.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pipewire_producer_remote.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steam_title_process.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_enable.cpp
@@ -225,6 +267,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_monitor_layout.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_absolute_input_source.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kwin_permission_entries.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_compositor_identity_channel.cpp
     )
 endif()
 
@@ -259,9 +302,14 @@ set(TEST_CONFIG_SOURCES
 
 set(TEST_PAIRING_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_http_pairing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_authorization.cpp
 )
 
 set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_async_http.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_status_http.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_continuous_http.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_apps_stats_contention.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_nvhttp_tls_close.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_http.cpp
@@ -280,6 +328,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_settings_projection_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_setup_reports.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_app_artwork_routes.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_library_artwork_route.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_artwork_sweep.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_sweep_predicate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_sweep_routes.cpp
@@ -287,6 +336,7 @@ set(TEST_HTTP_SOURCES
 
 set(TEST_NETWORK_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_network.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_tailscale_connection.cpp
 )
 
 set(TEST_AUDIO_SOURCES
@@ -294,6 +344,11 @@ set(TEST_AUDIO_SOURCES
 )
 
 set(TEST_STREAM_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_async.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_continuous.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_continuous_async.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_keyframe_recovery.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_provenance.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_session.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning.cpp
@@ -306,7 +361,14 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_doctor_actions.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_save.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_window.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_mode_adaptive_sync.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_pipewire_producer_binding.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_source_pacing.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
@@ -337,6 +399,7 @@ set(TEST_VIDEO_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_lifecycle_hardware.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cbs.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_media_capabilities.cpp
 )
 
 # Copy files needed for config consistency tests to build directory
@@ -664,6 +727,40 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_platform
         ${TEST_PLATFORM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND PIPEWIRE_FOUND AND GIO_FOUND AND GIO_UNIX_FOUND)
+        add_executable(pipewire_remote_producer fixtures/pipewire_remote_producer.cpp)
+        target_include_directories(pipewire_remote_producer SYSTEM PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
+        target_link_libraries(pipewire_remote_producer PRIVATE ${PIPEWIRE_LIBRARIES})
+        target_compile_definitions(test_polaris_platform PRIVATE
+            POLARIS_PIPEWIRE_REMOTE_PRODUCER_PATH="$<TARGET_FILE:pipewire_remote_producer>")
+        add_dependencies(test_polaris_platform pipewire_remote_producer)
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_VULKAN)
+        add_test(NAME polaris_vulkan_device_lifecycle
+            COMMAND test_polaris_platform --gtest_filter=VulkanDeviceLifecycleTests.*)
+        set_tests_properties(polaris_vulkan_device_lifecycle PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            LABELS "requires-gpu")
+        if(POLARIS_ENABLE_PORTAL)
+            # These real MemFd producer cases need neither a compositor nor a
+            # usable GPU. Keep their selection separate from the GPU graph gate
+            # so ordinary CI can exercise reuse and live size renegotiation.
+            add_test(NAME polaris_pipewire_shm_lifecycle
+                COMMAND test_polaris_platform
+                    --gtest_filter=PipeWireProducerPoolTests.ProducerWithoutModifierNegotiatesUsableShmAndReusesPixels:PipeWireProducerPoolTests.RealShmSizeChangeRequestsReinitAndNewCaptureReadsNewPixels)
+            set_tests_properties(polaris_pipewire_shm_lifecycle PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                TIMEOUT 15
+                LABELS "pipewire")
+            add_test(NAME polaris_pipewire_producer_pool
+                COMMAND test_polaris_platform --gtest_filter=PipeWireProducerPoolTests.*)
+            set_tests_properties(polaris_pipewire_producer_pool PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                TIMEOUT 60
+                LABELS "requires-gpu;pipewire")
+        endif()
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         target_sources(test_polaris_platform PRIVATE
             ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_session_serialization.cpp)
@@ -688,7 +785,16 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_steam_shutdown
         ${CMAKE_SOURCE_DIR}/tests/unit/test_steam_shutdown_state_machine.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_desktop_steam.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_prelaunch_transition.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_steamos_session.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_owned_child.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_desktop_steam_lifetime.cpp
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND GIO_FOUND AND GIO_UNIX_FOUND)
+        # #204: the GIO reader, the SteamOS adapter and the coordinator over a fake bus and child.
+        target_sources(test_polaris_steam_shutdown PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steamos_bus.cpp)
+    endif()
 
     configure_polaris_full_test_target(test_polaris_pairing
         ${TEST_PAIRING_SOURCES}
@@ -710,9 +816,140 @@ if (BUILD_FULL_TESTS)
             ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_audio_process_id.cpp)
     endif()
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # In-process libx264/libx265 CPU encoder fixtures (#363): Linux only, where the pinned
+        # archive's registrations were observed. Kept out of test_polaris_video's codec wrappers.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_encoder_fixture.cpp)
+        # Positive CBS stream reads and exact raw replay-save readback of the same real fixture
+        # packets (#365): Linux only, next to the #363 fixture whose encoder support it copies.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream.cpp)
+        # Negative and later-key inputs built from the same real fixture packets (#369 under #329):
+        # Linux only; reuses the #365 support header unchanged.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_negative.cpp)
+        # Real-codec replay cap trim and keyframe realignment (test-only, under #329).
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_window.cpp)
+        # Real-codec replay duration expiry and keyframe realignment (test-only, #375 under #329).
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_expiry.cpp)
+        # Supplied tap times kept beside real packets, live and held, through a byte-identical save
+        # (test-only, #377 under #329); reuses the #365 support header unchanged.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_timing.cpp)
+    endif()
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME polaris_recorder_encoder_fixture
+            COMMAND test_polaris_stream --gtest_filter=RecorderEncoderFixtureTests.*)
+        set_tests_properties(polaris_recorder_encoder_fixture PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        add_test(NAME polaris_recorder_bitstream
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamTests.*)
+        set_tests_properties(polaris_recorder_bitstream PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        # Raw per-case evidence (#369): each case creates its own directory under this one
+        # exclusively, so a run needs a fresh build directory or an emptied evidence directory.
+        set(POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-negative-evidence)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR})
+        add_test(NAME polaris_recorder_bitstream_negative
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamNegativeTests.*)
+        set_tests_properties(polaris_recorder_bitstream_negative PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            ENVIRONMENT "POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR=${POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR}")
+        set(POLARIS_RECORDER_WINDOW_EVIDENCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-window-evidence)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_WINDOW_EVIDENCE_DIR})
+        add_test(NAME polaris_recorder_bitstream_window
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamWindowTests.*)
+        set_tests_properties(polaris_recorder_bitstream_window PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            ENVIRONMENT "POLARIS_RECORDER_WINDOW_EVIDENCE_DIR=${POLARIS_RECORDER_WINDOW_EVIDENCE_DIR}")
+        set(POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-expiry-evidence)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR})
+        add_test(NAME polaris_recorder_bitstream_expiry
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamExpiryTests.*)
+        set_tests_properties(polaris_recorder_bitstream_expiry PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            ENVIRONMENT "POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR=${POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR}")
+        set(POLARIS_RECORDER_TIMING_EVIDENCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-timing-evidence)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_TIMING_EVIDENCE_DIR})
+        add_test(NAME polaris_recorder_bitstream_timing
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamTimingTests.*)
+        set_tests_properties(polaris_recorder_bitstream_timing PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            ENVIRONMENT "POLARIS_RECORDER_TIMING_EVIDENCE_DIR=${POLARIS_RECORDER_TIMING_EVIDENCE_DIR}")
+    endif()
+    # Recorder mode publication uses the real configuration path without opening a recording.
+    add_test(NAME polaris_recorder_mode_publication
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderModeTests.*)
+    set_tests_properties(polaris_recorder_mode_publication PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Replay bounds and session lifetime use fixture-owned memory and synthetic files.
+    add_test(NAME polaris_recorder_replay_lifecycle
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderReplayBufferTests.*:StreamPacketSessionTests.*)
+    set_tests_properties(polaris_recorder_replay_lifecycle PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Replay saves use deterministic storage boundaries and fixture-owned files.
+    add_test(NAME polaris_recorder_replay_save
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderReplaySaveTests.*)
+    set_tests_properties(polaris_recorder_replay_save PROPERTIES
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+    # Replay-window accounting uses controlled arrival times and immutable save snapshots.
+    add_test(NAME polaris_recorder_replay_window
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderReplayWindowTests.*)
+    set_tests_properties(polaris_recorder_replay_window PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Cross-thread admitted-save ownership must remain a portable required gate.
+    add_test(NAME polaris_recorder_replay_async
+        COMMAND test_polaris_stream --gtest_filter=RecorderAsyncSaveTests.*)
+    set_tests_properties(polaris_recorder_replay_async PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Continuous ownership and exclusive output use synthetic packets and owned files.
+    add_test(NAME polaris_recorder_continuous_ownership
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderContinuousOwnershipTests.*)
+    set_tests_properties(polaris_recorder_continuous_ownership PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Real production admission must stay independent of held continuous storage.
+    add_test(NAME polaris_recorder_continuous_async
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderContinuousAsyncTests.*)
+    set_tests_properties(polaris_recorder_continuous_async PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Keyframe recovery requests use real session mail events and fixture-owned files.
+    add_test(NAME polaris_recorder_keyframe_recovery
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderKeyframeRecoveryTests.*)
+    set_tests_properties(polaris_recorder_keyframe_recovery PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Passive replay provenance (#359): evidence beside each payload, fixture-owned files only.
+    add_test(NAME polaris_recorder_provenance
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderProvenanceTests.*)
+    set_tests_properties(polaris_recorder_provenance PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    if(POLARIS_ENABLE_RECORDER_COST_PROBE)
+        # Report-only recorder cost probe (#357, docs/recorder_cost.md), opted in above. Its own
+        # executable over the shared full runtime, so no required suite's binary changes. Each case
+        # creates one new JSON record in the directory below and fails if it already exists.
+        configure_polaris_full_test_target(test_polaris_recorder_cost
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_cost_probe.cpp
+        )
+        if(NOT POLARIS_RECORDER_COST_SOURCE_SHA)
+            execute_process(COMMAND git rev-parse HEAD
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE POLARIS_RECORDER_COST_SOURCE_SHA
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+        endif()
+        set(POLARIS_RECORDER_COST_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-cost)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_COST_OUTPUT_DIR})
+        set_tests_properties(test_polaris_recorder_cost PROPERTIES
+            ENVIRONMENT "POLARIS_RECORDER_COST_OUTPUT_DIR=${POLARIS_RECORDER_COST_OUTPUT_DIR};POLARIS_RECORDER_COST_SOURCE_SHA=${POLARIS_RECORDER_COST_SOURCE_SHA}")
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
+        # These exercise the actual encode loop with an in-memory display and
+        # deterministic session refusals. No GPU, compositor or stream is opened.
+        add_test(NAME polaris_encoder_initialization_termination
+            COMMAND test_polaris_stream --gtest_filter=StreamControlTerminationTests.*)
+        set_tests_properties(polaris_encoder_initialization_termination PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_options(test_polaris_stream PRIVATE
             "-Wl,--wrap=sendmsg" "-Wl,--wrap=sendmmsg" "-Wl,--wrap=poll")
@@ -729,6 +966,19 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_video
         ${TEST_VIDEO_SOURCES}
     )
+    # Linked FFmpeg codec registration inventory (#361): lookups only, nothing opened or decoded.
+    add_test(NAME polaris_recorder_media_capabilities
+        COMMAND test_polaris_video --gtest_filter=RecorderMediaCapabilitiesTests.*)
+    set_tests_properties(polaris_recorder_media_capabilities PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Deterministic capture ownership checks use the production conversion
+        # adapter without opening a GPU, display or PipeWire daemon.
+        add_test(NAME polaris_capture_lease_lifetime
+            COMMAND test_polaris_video --gtest_filter=VideoCaptureLeaseTests.*)
+        set_tests_properties(polaris_capture_lease_lifetime PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_library(encoder_probe_provider_fixture SHARED fixtures/encoder_probe_provider.cpp)
         add_dependencies(test_polaris_video encoder_probe_provider_fixture)

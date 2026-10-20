@@ -1,4 +1,6 @@
 import { NetworkAddressBook, pseudonymizeNetworkAddresses } from './network-address-pseudonyms.js'
+import { doctorIsWaitingForStream } from './doctor-observation.js'
+import { safeTailscalePeerSnapshot, tailscalePeerSummary } from './tailscale-connection-readout.js'
 
 // Words that mean "secret" wherever they appear as a whole segment of a name.
 const SENSITIVE_SEGMENT_WORDS = [
@@ -423,8 +425,7 @@ function gpuNativeCaptureState(stats = {}) {
 
 function streamTargetFps(stats = {}) {
   for (const value of [stats?.encode_target_fps, stats?.session_target_fps, stats?.requested_client_fps]) {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed) && parsed > 0) return parsed
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value
   }
   return null
 }
@@ -503,6 +504,14 @@ function formatDisplayModeDecision(decision = {}) {
   return decision.pinned_by_host ? `${applied} (Display Mode Override)` : applied
 }
 
+// A capture finding the host has not verified for its current settings. The capture evaluation
+// stands until the next launch, so after a capture or stream-mode change in Settings it describes
+// settings the host no longer has, or none at all; the host says so with `stale`. Such a finding
+// is shown as a note with the step that verifies it, never graded, and never given advice written
+// for the settings it was evaluated under.
+const STALE_CAPTURE_FINDING_NOTE = 'This capture finding has not been verified for the current settings. Polaris checks it again when the next stream starts.'
+const STALE_CAPTURE_FINDING_ACTION = 'Start a stream to recheck capture with the current settings.'
+
 // Every finding gets its own card: a host can have more than one thing wrong, and the Doctor
 // used to show only the first, so a second finding stayed out of sight until the first was fixed.
 // A fail comes first, then a warning, then a note; the first card keeps the plain key.
@@ -510,11 +519,17 @@ function hostConfigurationWarningItems(stats = {}) {
   const rank = { fail: 0, warning: 1, info: 2 }
   const items = linuxConfigurationWarnings(stats).map((warning, index) => {
     const severity = lower(warning?.severity)
-    const status = severity === 'fail' || severity === 'error'
-      ? 'fail'
-      : severity === 'info' ? 'info' : 'warning'
-    const detail = warning?.message || warning?.detail || 'Linux host configuration warning.'
-    const action = warning?.action || 'Review Linux streaming configuration before changing capture or encoder settings.'
+    const stale = warning?.stale === true
+    const status = stale
+      ? 'info'
+      : severity === 'fail' || severity === 'error'
+        ? 'fail'
+        : severity === 'info' ? 'info' : 'warning'
+    const message = warning?.message || warning?.detail || 'Linux host configuration warning.'
+    const detail = stale ? `${message} ${STALE_CAPTURE_FINDING_NOTE}` : message
+    const action = stale
+      ? STALE_CAPTURE_FINDING_ACTION
+      : warning?.action || 'Review Linux streaming configuration before changing capture or encoder settings.'
     return { index, status, id: String(warning?.id || index), detail, action }
   })
   items.sort((a, b) => rank[a.status] - rank[b.status] || a.index - b.index)
@@ -628,6 +643,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   // and "no active stream" would only repeat what the person already knows.
   const doctor = stats?.doctor || {}
   const failedStart = statsConnected && !streaming && doctor.primary_issue === 'stream_failed_to_start'
+  const unavailableStatus = statsConnected && doctorIsWaitingForStream(doctor, stats) ? 'info' : 'warning'
   const connection = !statsConnected
     ? checklistItem('connection', 'Connection', 'warning', 'Stream telemetry is disconnected, so Polaris cannot confirm the live session path yet.', 'Refresh the page, verify the host is reachable, then start or resume the stream.')
     : streaming
@@ -640,7 +656,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
           firstNonEmpty(doctor.summary, 'The last stream failed to start: the client left during video setup.'),
           firstNonEmpty(doctor.recommendation?.body, 'The client stopped during video setup; its own error message names the cause.')
         )
-        : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
+        : checklistItem('connection', 'Connection', unavailableStatus, 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
   const hostConfig = hostConfigurationWarningItems(stats)
   const displayMode = displayModeOverrideItem(stats)
 
@@ -652,11 +668,11 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
         : checklistItem('packet-loss', 'Video frame loss', 'pass', `${describeVideoFrameLoss(judgedLoss)}.`, 'Network is not the loudest signal right now.')
     : liveTelemetry
       ? checklistItem('packet-loss', 'Video frame loss', 'info', 'No current confirmed video frame loss measurement is available for this active stream.', 'Control-channel estimates are context only; video frame loss stays unmeasured until this client reports fresh media counters.')
-      : checklistItem('packet-loss', 'Video frame loss', 'warning', 'No current confirmed video frame loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
+      : checklistItem('packet-loss', 'Video frame loss', unavailableStatus, 'No current confirmed video frame loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
 
   const captureFrameAge = Number(stats?.avg_frame_age_ms)
   const capture = !liveTelemetry
-    ? checklistItem('capture-path', 'Capture path', 'warning', 'No active connected stream is available to verify capture.', 'Start a stream and wait for current capture metadata.')
+    ? checklistItem('capture-path', 'Capture path', unavailableStatus, 'No active connected stream is available to verify capture.', 'Start a stream and wait for current capture metadata.')
     : captureCpuCopy
     ? capturePressure
       ? checklistItem(
@@ -708,7 +724,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
         : checklistItem('encoder-pressure', 'Encoder pressure', 'pass', pressure.targetFps ? `${encodeTime.toFixed(1)} ms encode time uses ${targetBudgetUse} and leaves headroom.` : `${encodeTime.toFixed(1)} ms encode time leaves headroom within the ${targetBudgetDetail}.`, 'Encoder pressure is not the loudest signal right now.')
     : liveTelemetry
       ? checklistItem('encoder-pressure', 'Encoder pressure', 'info', 'No current encoder timing is available for this active stream.', 'Encoder pressure remains unmeasured until positive timing is reported.')
-      : checklistItem('encoder-pressure', 'Encoder pressure', 'warning', 'No current encoder timing is available.', 'Start a live stream and wait for encoder telemetry.')
+      : checklistItem('encoder-pressure', 'Encoder pressure', unavailableStatus, 'No current encoder timing is available.', 'Start a live stream and wait for encoder telemetry.')
 
   const authPairing = authPairingIssue
     ? checklistItem('auth-pairing', 'Auth / pairing', 'fail', redactSensitiveText(authPairingIssue), 'Re-pair the client or verify Web UI credentials/trust before tuning stream quality.')
@@ -797,24 +813,28 @@ function reportableSafeAction(action) {
 }
 
 function formatIssueNumber(value, digits = 1, fallback = 'unknown') {
-  const numeric = Number(value)
-  return Number.isFinite(numeric) ? numeric.toFixed(digits) : fallback
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : fallback
 }
 
 function issueDraftLine(label, value, fallback = 'unknown') {
   return `- ${label}: ${formatIssueValue(value, fallback)}`
 }
 
-function summarizeActiveStream(stats = {}) {
+function summarizeActiveStream(stats = {}, connected = false) {
   if (!stats || Object.keys(stats).length === 0) return 'unknown'
-  const streaming = stats.streaming ? 'yes' : 'no'
-  const fps = formatIssueNumber(stats.fps, 1)
-  const target = formatIssueNumber(stats.session_target_fps || stats.requested_client_fps, 1)
-  const bitrate = formatIssueValue(stats.bitrate_kbps ?? stats.bitrate, 'unknown')
-  const judgedLoss = judgedVideoFrameLoss(stats)
+  if (stats.streaming === false) return 'no — live measurements unavailable'
+  if (stats.streaming !== true) return 'unknown — live measurements unavailable'
+  if (connected !== true) return 'unverified — live telemetry unavailable'
+  const sample = captureLiveSessionEvidence({ stats, connected, capturedAt: new Date().toISOString() })
+  const fps = sample?.availability?.video && finiteMeasurement(stats.fps, Number.MIN_VALUE) ? formatIssueNumber(stats.fps, 1) : 'unknown'
+  const targetFps = [stats.session_target_fps, stats.requested_client_fps].find((value) => finiteMeasurement(value, Number.MIN_VALUE))
+  const target = formatIssueNumber(targetFps, 1)
+  const bitrateValue = stats.bitrate_kbps ?? stats.bitrate
+  const bitrate = sample?.availability?.video && finiteMeasurement(bitrateValue, Number.MIN_VALUE) ? formatIssueValue(bitrateValue) : 'unknown'
+  const judgedLoss = sample?.network?.lossAvailable ? judgedVideoFrameLoss({ network_verdict: sample.network.verdict }) : null
   const loss = judgedLoss ? `${judgedLoss.pct.toFixed(2)}%` : 'unknown'
-  const encode = formatIssueNumber(stats.encode_time_ms, 1)
-  return `${streaming}, ${fps} FPS / ${target} target, ${bitrate} kbps, ${loss} video frame loss, ${encode} ms encode`
+  const encode = sample?.availability?.encode ? formatIssueNumber(stats.encode_time_ms, 1) : 'unknown'
+  return `yes, ${fps} FPS / ${target} target, ${bitrate} kbps, ${loss} video frame loss, ${encode} ms encode`
 }
 
 function formatRecentIssues(recentIssues = []) {
@@ -878,16 +898,58 @@ function formatDoctorEvidence(doctor = {}) {
   return doctor.evidence.slice(0, 8).map((entry) => `- ${formatIssueValue(entry.id || entry.label, 'evidence')}: ${formatIssueValue(entry.detail || entry.value || entry.reason, '')}`).join('\n')
 }
 
+function retainedEndedSessionFacts(stats) {
+  const last = stats?.last_session
+  if (!last || last.state !== 'ended' || typeof last.stream_instance_id !== 'string' || !last.stream_instance_id.trim()) return null
+
+  // The host retains these session-owned facts even when the browser did not
+  // capture a quality sample. Never fill their gaps from the current stream,
+  // configuration, or probe results, and never promote them to measurements.
+  const strings = (source, fields) => Object.fromEntries(fields
+    .filter((field) => typeof source?.[field] === 'string' && source[field].trim())
+    .map((field) => [field, source[field]]))
+  const facts = strings(last, ['state', 'stream_instance_id', 'client_name', 'codec', 'encoder_backend', 'started_at', 'ended_at'])
+  if (last.capture && typeof last.capture === 'object' && !Array.isArray(last.capture)) {
+    facts.capture = strings(last.capture, ['preference', 'requested', 'opened', 'route', 'transport', 'residency', 'format', 'mode_override_reason', 'route_fallback_reason'])
+  }
+  return facts
+}
+
+function endedSessionDraftLines(facts) {
+  if (!facts) return []
+  const capture = facts.capture || {}
+  return [
+    '',
+    '## Last ended stream',
+    'Session identity and capture facts do not establish media quality or frame delivery.',
+    issueDraftLine('Stream instance', facts.stream_instance_id),
+    issueDraftLine('Client', facts.client_name),
+    ...(facts.started_at ? [issueDraftLine('Started', facts.started_at)] : []),
+    ...(facts.ended_at ? [issueDraftLine('Ended', facts.ended_at)] : []),
+    issueDraftLine('Codec', facts.codec),
+    issueDraftLine('Encoder backend', facts.encoder_backend),
+    issueDraftLine('Capture preference', capture.preference),
+    issueDraftLine('Capture requested', capture.requested),
+    issueDraftLine('Capture initialized', capture.opened),
+    issueDraftLine('Capture route', capture.route),
+    issueDraftLine('Observed frame transport / residency / format', [capture.transport, capture.residency, capture.format].map((value) => formatIssueValue(value)).join(' / ')),
+    ...(capture.mode_override_reason ? [issueDraftLine('Mode override reason', capture.mode_override_reason)] : []),
+    ...(capture.route_fallback_reason ? [issueDraftLine('Route fallback reason', capture.route_fallback_reason)] : []),
+  ]
+}
+
 export function buildStreamEvidence(input = {}, { addresses = new NetworkAddressBook() } = {}) {
   const stats = input.session_snapshot || input.stream_stats || {}
   const doctor = stats?.doctor || input.doctor || {}
+  const ended = retainedEndedSessionFacts(stats)
   return sanitizeDiagnosticsValue({
     client: input.client || { type: stats.client_type || stats.client_name || 'unknown', name: stats.client_name },
     launch_mode: stats.launch_mode || stats.stream_display_mode || stats.runtime_backend || input.launch_mode,
     encoder: stats.encoder || stats.encode_target_device || input.encoder,
     capture_path: stats.capture_path || stats.capture_transport,
     capture_path_reason: stats.capture_path_reason,
-    active_stream: summarizeActiveStream(stats),
+    active_stream: summarizeActiveStream(stats, input.stream_stats_connected),
+    ...(ended ? { last_ended_stream: ended } : {}),
     doctor,
     fix_my_stream_checklist: input.fix_my_stream_checklist || [],
     recent_issues: input.recent_issues || [],
@@ -957,9 +1019,11 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
     issueDraftLine('Encoder', firstNonEmpty(stats.encoder, stats.encode_target_device, config.encoder)),
     issueDraftLine('Capture', capture),
     issueDraftLine('Network path', stats.client_network_path),
+    ...(safeInput.network_connection ? [issueDraftLine('Tailscale peer', tailscalePeerSummary(safeInput.network_connection))] : []),
     issueDraftLine('Display mode', formatDisplayModeDecision(stats.display_mode_decision)),
     ...gpuDiagnosticLines,
-    issueDraftLine('Active stream', summarizeActiveStream(stats)),
+    issueDraftLine('Active stream', summarizeActiveStream(stats, safeInput.stream_stats_connected)),
+    ...endedSessionDraftLines(retainedEndedSessionFacts(stats)),
     '',
     '## What Polaris thinks happened',
     formatIssueValue(doctorSummary, 'No Doctor summary was included.'),
@@ -1229,7 +1293,8 @@ export function buildGamescopeHelperReport(probe = {}) {
 // until they are older than the window, 20 seconds, and the host's own grading reads no loss after.
 function verdictWindowHoldsReports(stats) {
   const verdict = stats?.network_verdict
-  return Number(verdict?.media_samples) > 0 || Number(verdict?.frames_expected) > 0
+  return (Number.isInteger(verdict?.media_samples) && verdict.media_samples > 0) ||
+    (typeof verdict?.frames_expected === 'number' && Number.isFinite(verdict.frames_expected) && verdict.frames_expected > 0)
 }
 
 // The newest verdict whose loss the host judged while the stream was live, for the post-session report.
@@ -1246,32 +1311,90 @@ export function rememberJudgedNetworkVerdict(remembered, next, previous) {
   return verdictWindowHoldsReports(next) ? (remembered ?? null) : null
 }
 
-export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '', lastJudgedVerdict = null } = {}) {
+const finiteMeasurement = (value, minimum = 0, maximum = Infinity) =>
+  typeof value === 'number' && Number.isFinite(value) && value >= minimum && value <= maximum
+const positiveRevision = (value) => Number.isSafeInteger(value) && value > 0
+const currentSample = (revision, age) => positiveRevision(revision) && finiteMeasurement(age, 0, 5000)
+
+// Global quality fields describe the primary client. Only a sole, identified client can own
+// them unambiguously; a retained capture-only record cannot supply this missing provenance.
+export function captureLiveSessionEvidence({ stats, connected = false, capturedAt, logs = '', previous = null } = {}) {
+  const client = stats?.clients?.length === 1 ? stats.clients[0] : null
+  const streamId = client?.stream_instance_id
+  if (connected !== true || stats?.streaming !== true || typeof streamId !== 'string' || !streamId.trim()) return null
+  if (typeof capturedAt !== 'string' || !Number.isFinite(Date.parse(capturedAt))) return null
+  const verdict = stats.network_verdict
+  const mediaCurrent = currentSample(stats.media_loss_sample_revision, stats.media_loss_last_received_age_ms)
+  const networkCurrent = currentSample(stats.network_sample_revision, stats.network_last_received_age_ms)
+  const lossCurrent = mediaCurrent && verdict?.loss_basis === 'video_frames_lost_after_fec' &&
+    ['clean', 'light', 'elevated'].includes(verdict.loss_state) && Boolean(judgedVideoFrameLoss(stats)) &&
+    Number.isInteger(verdict.media_samples) && verdict.media_samples >= 5 &&
+    finiteMeasurement(verdict.frames_expected, Number.MIN_VALUE) && finiteMeasurement(verdict.frames_lost, 0, verdict.frames_expected)
+  const rttCurrent = networkCurrent && ['clean', 'elevated'].includes(verdict?.rtt_state) &&
+    Number.isInteger(verdict?.rtt_samples) && verdict.rtt_samples >= 5 && finiteMeasurement(verdict.rtt_median_ms)
+  const sameSession = previous?.streamId === streamId ? previous : null
+  const oldNetwork = sameSession?.network
+  const remembered = rememberJudgedNetworkVerdict(
+    oldNetwork?.lossAvailable ? oldNetwork.verdict : null,
+    { ...stats, network_verdict: lossCurrent ? verdict : { ...verdict, loss_pct: null } },
+    sameSession?.stats,
+  )
+  const carried = !lossCurrent && Boolean(remembered)
+  // Revisions survive host resets; a positive revision alone is not a sample in this session.
+  const videoMeasured = positiveRevision(stats.video_sample_revision) &&
+    positiveRevision(stats.video_policy_sample_count) && finiteMeasurement(client.fps, Number.MIN_VALUE)
+  // Detach every nested value from Vue's live objects before it can become history.
+  return JSON.parse(JSON.stringify({
+    origin: 'live-sample', streamId, capturedAt, connectedAtCapture: true, stats, logs,
+    network: {
+      verdict: carried ? remembered : verdict,
+      lossAvailable: lossCurrent || carried,
+      rttAvailable: carried ? oldNetwork.rttAvailable : rttCurrent,
+      carried,
+    },
+    availability: {
+      encode: videoMeasured && finiteMeasurement(stats.encode_time_ms, Number.MIN_VALUE),
+      dropped: videoMeasured && finiteMeasurement(stats.dropped_frame_ratio, 0, 1),
+      latency: networkCurrent && verdict?.rtt_state !== 'stale' && finiteMeasurement(stats.latency_ms, Number.MIN_VALUE),
+      video: videoMeasured,
+    },
+  }))
+}
+
+export function buildPostSessionStreamReport({ snapshot = null, lastSession = null } = {}) {
+  const ended = lastSession?.state === 'ended' && typeof lastSession.stream_instance_id === 'string' && lastSession.stream_instance_id.trim()
+    ? lastSession : null
+  const completed = snapshot?.origin === 'completed' && snapshot.connectedAtCapture === true &&
+    snapshot.stats?.streaming === true && typeof snapshot.streamId === 'string' && snapshot.streamId.trim() &&
+    typeof snapshot.capturedAt === 'string' && Number.isFinite(Date.parse(snapshot.capturedAt)) &&
+    (!ended || ended.stream_instance_id === snapshot.streamId) ? snapshot : null
+  const stats = completed?.stats || {}
+  const logs = completed?.logs || ''
+  const disconnectReason = completed?.disconnectReason || ''
   // The figures Doctor judged over its window, not the last second's report: that one read 32.7% on a
   // session whose frames the host dropped 0.96% of, and named the network on it. A session whose
   // client dropped ends on a stale verdict with no figure, and lost its network cause with it; the
   // verdict the window last judged, rememberJudgedNetworkVerdict()'s, still says what it was.
-  const carried = !judgedVideoFrameLoss(stats) && Boolean(judgedVideoFrameLoss({ network_verdict: lastJudgedVerdict }))
-  const verdict = carried ? lastJudgedVerdict : stats?.network_verdict
-  const judgedLoss = judgedVideoFrameLoss({ network_verdict: verdict })
+  const carried = completed?.network?.carried === true
+  const verdict = completed?.network?.verdict
+  const judgedLoss = completed?.network?.lossAvailable === true ? judgedVideoFrameLoss({ network_verdict: verdict }) : null
   const loss = judgedLoss ? judgedLoss.pct : NaN
   const judgedRtt = verdict?.rtt_median_ms
   // A stale round trip is a frozen reading, not a figure to grade on.
-  const rttStale = stats?.network_verdict?.rtt_state === 'stale'
-  const latency = typeof judgedRtt === 'number' && Number.isFinite(judgedRtt)
+  const latency = completed?.network?.rttAvailable === true && finiteMeasurement(judgedRtt)
     ? judgedRtt
-    : rttStale ? NaN : Number(stats.latency_ms)
-  const encodeTime = Number(stats.encode_time_ms)
-  const dropped = Number(stats.dropped_frame_ratio)
+    : completed?.availability?.latency === true && finiteMeasurement(stats.latency_ms, Number.MIN_VALUE) ? stats.latency_ms : NaN
+  const encodeTime = completed?.availability?.encode === true && finiteMeasurement(stats.encode_time_ms, Number.MIN_VALUE) ? stats.encode_time_ms : NaN
+  const dropped = completed?.availability?.dropped === true && finiteMeasurement(stats.dropped_frame_ratio, 0, 1) ? stats.dropped_frame_ratio : NaN
   const safeLogs = redactSensitiveText(logs)
   const pressure = encoderPressure(stats, encodeTime)
-  const capturePressure = capturePressureActive(stats)
+  const capturePressure = completed?.availability?.video === true && capturePressureActive(stats)
   const gpuNativeState = gpuNativeCaptureState(stats)
   const autoVulkanWarning = linuxConfigurationWarnings(stats)
     .find((warning) => warning?.id === 'amd_private_explicit_vaapi_shm')
-  let issueOwner = 'client'
-  let mainIssue = 'Client disconnected or ended the session before Polaris saw a louder host/network signal.'
-  let suggestedNextLaunchProfile = 'Retry the same launch profile once, then collect a support bundle if it repeats.'
+  let issueOwner = 'unknown'
+  let mainIssue = completed ? 'No confirmed host or network fault was found in the captured session evidence.' : 'No completed session telemetry is available.'
+  let suggestedNextLaunchProfile = completed ? 'Keep the last working profile; collect a support bundle if symptoms repeat.' : 'Observe an affected stream through completion to capture session telemetry.'
 
   const networkFailureLog = latestIssueMatching(safeLogs, ['packet loss', 'network', 'udp', 'socket', 'enet'])
   const lossPressure = judgedLoss?.state === 'elevated'
@@ -1283,9 +1406,9 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
     suggestedNextLaunchProfile = 'Lower bitrate one step, prefer wired/5 GHz, then retry the same game.'
   }
 
-  if (issueOwner === 'client' && autoVulkanWarning?.action) {
+  if (issueOwner === 'unknown' && autoVulkanWarning?.action) {
     suggestedNextLaunchProfile = autoVulkanWarning.action
-  } else if (issueOwner === 'client' && stats.capture_cpu_copy && gpuNativeState.requested && !gpuNativeState.succeeded) {
+  } else if (issueOwner === 'unknown' && stats.capture_cpu_copy && gpuNativeState.requested && !gpuNativeState.succeeded) {
     suggestedNextLaunchProfile = 'GPU-native capture was already attempted and fell back safely; keep the compatibility path unless measured pressure appears, and collect a support bundle if symptoms repeat.'
   }
 
@@ -1308,12 +1431,12 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   // share are independent of media loss. Saturation alone is not starvation.
   const pyrowave = stats.pyrowave_bitrate
   const budgetShare = pyrowave?.ceiling_frame_share
-  const starvedAtBudget = stats.streaming === true && stats.codec === 'pyrowave' &&
+  const starvedAtBudget = completed?.availability?.video === true && stats.streaming === true && stats.codec === 'pyrowave' &&
     pyrowave?.starved === true && typeof budgetShare === 'number' &&
     Number.isFinite(budgetShare) && budgetShare > 0.85 && budgetShare <= 1
   if (starvedAtBudget) {
     const budgetIssue = `PyroWave was bitrate-starved for this resolution and frame rate; ${Math.round(budgetShare * 100)}% of recent encoded frames reached their frame-byte budget.`
-    if (issueOwner === 'client') {
+    if (issueOwner === 'unknown') {
       issueOwner = 'host'
       mainIssue = budgetIssue
     } else {
@@ -1328,22 +1451,37 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   const qualitySummary = `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms latency / ${Number.isFinite(loss) ? `${loss.toFixed(1)}%` : 'unknown'} of video frames lost after FEC / ${Number.isFinite(encodeTime) ? encodeTime.toFixed(1) : 'unknown'} ms encode / ${Number.isFinite(dropped) ? `${(dropped * 100).toFixed(2)}%` : 'unknown'} of frames dropped on the host.`
   const report = {
     kind: 'post-session-stream-report',
-    status: issueOwner === 'client' ? 'warning' : 'fail',
+    status: issueOwner === 'unknown' ? 'info' : 'fail',
+    origin: completed ? 'completed' : ended ? 'capture-only' : 'unavailable',
+    evidenceSummary: completed ? `Historical session telemetry captured at ${completed.capturedAt}.` : 'Historical media quality: unavailable.',
     issueOwner,
     mainIssue,
     qualitySummary,
     suggestedNextLaunchProfile,
     disconnectReason: redactSensitiveText(disconnectReason),
   }
+  const capture = ended?.capture || completed?.stats?.clients?.[0]?.capture
+  const captureLines = capture ? [
+    reportLine('Capture preference', formatIssueValue(capture.preference)),
+    reportLine('Capture requested', formatIssueValue(capture.requested)),
+    reportLine('Capture initialized', formatIssueValue(capture.opened)),
+    reportLine('Capture route', formatIssueValue(capture.route)),
+    reportLine('Observed frame transport / residency / format', [capture.transport, capture.residency, capture.format].map((value) => formatIssueValue(value)).join(' / ')),
+    ...(capture.mode_override_reason ? [reportLine('Mode override reason', capture.mode_override_reason)] : []),
+    ...(capture.route_fallback_reason ? [reportLine('Route fallback reason', capture.route_fallback_reason)] : []),
+  ] : []
   report.copyText = [
     'Post-session Stream Report',
+    report.evidenceSummary,
     reportLine('Issue owner', issueOwner),
     reportLine('Main issue', mainIssue),
     reportLine('Quality', qualitySummary),
     reportLine('Disconnect reason', report.disconnectReason),
     reportLine('Suggested next launch', suggestedNextLaunchProfile),
+    ...captureLines,
     ...(safeLogs.trim() ? [reportLine('Recent evidence', safeLogs.trim().split('\n').slice(-3).join(' | '))] : []),
   ].join('\n')
+  report.copyText = redactSensitiveText(report.copyText)
   return report
 }
 
@@ -1522,6 +1660,7 @@ export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = creat
     // 6: the log fields are lines, like kernel_gpu_messages already was.
     support_bundle_version: 6,
     ...input,
+    ...(input.network_connection ? { network_connection: safeTailscalePeerSnapshot(input.network_connection) } : {}),
     stream_evidence: streamEvidence,
     issue_draft: issueDraft,
   }, new WeakSet(), addresses))

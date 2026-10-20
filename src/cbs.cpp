@@ -279,10 +279,14 @@ namespace cbs {
    * It then checks if the SPS->VUI (Video Usability Information) is present in the active SPS of the packet.
    * This is done for both H264 and H265 codecs.
    */
-  bool validate_sps(const AVPacket *packet, int codec_id) {
+  sps_vui_status_e inspect_sps(const AVPacket *packet, int codec_id) {
+    if (codec_id != AV_CODEC_ID_H264 && codec_id != AV_CODEC_ID_H265) {
+      return sps_vui_status_e::unreadable;
+    }
+
     cbs::ctx_t ctx;
     if (ff_cbs_init(&ctx, (AVCodecID) codec_id, nullptr)) {
-      return false;
+      return sps_vui_status_e::unreadable;
     }
     read_parameter_sets_and_slices(ctx.get(), (AVCodecID) codec_id);
 
@@ -293,16 +297,26 @@ namespace cbs {
       char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
       BOOST_LOG(error) << "Couldn't read packet: "sv << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, err);
 
-      return false;
+      return sps_vui_status_e::unreadable;
     }
 
     if (codec_id == AV_CODEC_ID_H264) {
       const auto *sps = ((CodedBitstreamH264Context *) ctx->priv_data)->active_sps;
-      return sps && sps->vui_parameters_present_flag;
+      if (!sps) {
+        return sps_vui_status_e::unreadable;
+      }
+      return sps->vui_parameters_present_flag ? sps_vui_status_e::present : sps_vui_status_e::absent;
     }
 
     const auto *sps = ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps;
-    return sps && sps->vui_parameters_present_flag;
+    if (!sps) {
+      return sps_vui_status_e::unreadable;
+    }
+    return sps->vui_parameters_present_flag ? sps_vui_status_e::present : sps_vui_status_e::absent;
+  }
+
+  bool validate_sps(const AVPacket *packet, int codec_id) {
+    return inspect_sps(packet, codec_id) == sps_vui_status_e::present;
   }
 
   namespace {

@@ -1,9 +1,12 @@
 import { defineConfig, devices } from '@playwright/test'
+import { mockedFrontendSpecs } from './playwright.mocked-specs.js'
 
-const baseURL = process.env.POLARIS_E2E_BASE_URL || process.env.POLARIS_URL || 'https://127.0.0.1:49001'
+const baseURL = process.env.POLARIS_E2E_BASE_URL || process.env.POLARIS_URL
 
 export default defineConfig({
   testDir: './tests/e2e',
+  testIgnore: mockedFrontendSpecs,
+  globalSetup: './tests/e2e/fixtures/live-setup.js',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

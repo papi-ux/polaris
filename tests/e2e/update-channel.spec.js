@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures/mocked.js'
 
 for (const [width, candidateVersion, installedVersion] of [
   [390, '1.4.13-beta.3', '1.4.12'],

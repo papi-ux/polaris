@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 
-const currentNotes = () => read('docs/release-notes/v1.4.14.md')
+const currentNotes = () => read('docs/release-notes/v1.5.0.md')
 
 const section = (notes, heading, next) => {
   const start = notes.indexOf(heading)
@@ -18,42 +18,55 @@ const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
   'Polaris-fedora44-x86_64.rpm',
   'Polaris-steamos3.8-x86_64.pkg.tar.zst',
+  'Polaris-steamos3.9-x86_64.pkg.tar.zst',
   'Polaris-ubuntu24.04-x86_64.deb',
 ].sort()
 
 const debugAssets = [
   'Polaris-debug-arch-x86_64.pkg.tar.zst',
   'Polaris-debug-steamos3.8-x86_64.pkg.tar.zst',
+  'Polaris-debug-steamos3.9-x86_64.pkg.tar.zst',
 ]
 
-describe('v1.4.14 release contract', () => {
+const assetsOn = (line) => (line.match(/`Polaris-[^`]+`/g) || []).map((name) => name.slice(1, -1))
+
+// The release job refuses a tag whose finalized assets lack one of these binaries.
+const requiredBinaryAssets = () => {
+  const workflow = read('.github/workflows/build.yml')
+  const start = workflow.indexOf('required_binary_assets=(')
+  expect(start).toBeGreaterThanOrEqual(0)
+  const list = workflow.slice(workflow.indexOf('(', start) + 1, workflow.indexOf(')', start))
+  return list.trim().split(/\s+/).sort()
+}
+
+describe('v1.5.0 release contract', () => {
   // These four are what the source says it builds, not what the last release was. Two of them are
   // only read during a package build, so a mismatch surfaces as a failed SteamOS job rather than as
   // a failed test, which is why they are pinned here where a local run sees them. They moved here
-  // from the v1.4.13 contract when 1.4.14 opened.
+  // from the v1.4.13 contract when 1.4.14 opened, and followed the release when it was renumbered 1.5.0 at beta.2.
   it('pins the version every packaging surface agrees on', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.14')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.14"')
+    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.5.0')
+    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.5.0"')
     expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
-      'usr/bin/polaris-1.4.14',
+      'usr/bin/polaris-1.5.0',
     )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain('EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"')
+    expect(read('scripts/ci/build-steamos-package.sh')).toContain('EXPECTED_PKGVER="1.5.0${POLARIS_PRERELEASE_LABEL}-1"')
   })
 
   // The release workflow refuses a tag whose notes file is missing or empty, and a beta reads the
   // notes of the release it precedes, so this file has to exist from the moment the version opens.
   it('has curated notes a beta can publish', () => {
     const notes = currentNotes()
-    expect(notes.split('\n')[0]).toBe('# Polaris v1.4.14')
+    expect(notes.split('\n')[0]).toBe('# Polaris v1.5.0')
     expect(notes.trim().length).toBeGreaterThan(0)
   })
 
-  it('ships exactly the four supported packages and installs them from this tag', () => {
+  it('ships exactly the five supported packages and installs them from this tag', () => {
     const notes = currentNotes()
     for (const asset of expectedAssets) {
       expect(notes).toContain(asset)
       expect(notes).toContain(
-        `https://github.com/papi-ux/polaris/releases/download/v1.4.14/${asset}`,
+        `https://github.com/papi-ux/polaris/releases/download/v1.5.0/${asset}`,
       )
     }
     const assetsLine = notes.split('\n').find((line) => line.startsWith('**Assets:**'))
@@ -77,6 +90,24 @@ describe('v1.4.14 release contract', () => {
     }
   })
 
+  // Containment alone lets a release row go missing unseen, which is how the SteamOS 3.9 package was
+  // built for a while before these notes named it. The three asset lines name exactly the binaries
+  // the release job requires.
+  it('names exactly the thirteen binaries the release job requires, each once', () => {
+    const lines = currentNotes().split('\n')
+    const lineFor = (prefix) => {
+      const line = lines.find((candidate) => candidate.startsWith(prefix))
+      expect(line).toBeDefined()
+      return line
+    }
+    const named = ['**Assets:**', '**DRM/KMS capture', '**Debug symbols'].flatMap((prefix) => assetsOn(lineFor(prefix)))
+    expect(named).toHaveLength(13)
+    expect(new Set(named).size).toBe(named.length)
+    expect([...named].sort()).toEqual(requiredBinaryAssets())
+    expect(assetsOn(lineFor('**Assets:**')).sort()).toEqual(expectedAssets)
+    expect(assetsOn(lineFor('**Debug symbols')).sort()).toEqual([...debugAssets].sort())
+  })
+
   // A beta publishes these notes, and the stable tag publishes them again as they stand then.
   // scripts/check-stable-release-notes.py refuses a stable tag that still holds the beta line, but
   // it reads wording, not meaning, so the line has to be the template's own words: a rewording it
@@ -86,9 +117,9 @@ describe('v1.4.14 release contract', () => {
     const template = read('docs/release-notes/TEMPLATE.md')
     const lines = template.split('\n').filter((line) => line.includes('X.Y.Z is in beta'))
     expect(lines).toHaveLength(1)
-    const betaLine = lines[0].replace('X.Y.Z', '1.4.14').replace(/ \(Beta notes only[^)]*\)$/, '')
+    const betaLine = lines[0].replace('X.Y.Z', '1.5.0').replace(/ \(Beta notes only[^)]*\)$/, '')
     expect(betaLine).toBe(
-      '- While 1.4.14 is in beta, use the packages attached to the prerelease you are reading. ' +
+      '- While 1.5.0 is in beta, use the packages attached to the prerelease you are reading. ' +
         'The install commands below name the final release, which does not exist yet.',
     )
     expect(currentNotes().split('\n')).toContain(betaLine)

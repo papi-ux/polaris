@@ -12,6 +12,7 @@
     "smoke:web": "node scripts/smoke-web-routes.mjs",
     "test": "vitest run --config vitest.config.js",
     "test:e2e": "playwright test",
+    "test:e2e:mocked": "playwright test --config playwright.mocked.config.js",
     "test:e2e:ui": "playwright test --ui",
     "serve": "node scripts/serve-test-fixtures.mjs"
   },
@@ -24,7 +25,7 @@
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.2",
     "uplot": "^1.6.32",
-    "vue": "3.5.22",
+    "vue": "3.5.42",
     "vue-i18n": "11.1.12",
     "vue-router": "^4.5.0"
   },
@@ -38,7 +39,7 @@
     "eslint-plugin-vue": "10.8.0",
     "globals": "17.5.0",
     "jsdom": "29.0.2",
-    "vite": "^6.4.2",
+    "vite": "^6.4.4",
     "vite-plugin-ejs": "1.8.0",
     "vitest": "4.1.11",
     "vue-eslint-parser": "10.4.0"

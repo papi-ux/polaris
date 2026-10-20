@@ -18,6 +18,9 @@
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
+#include <condition_variable>
+#include <exception>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <format>
@@ -61,6 +64,7 @@
 
 // local includes
 #include "config.h"
+#include "tailscale_connection.h"
 #include "configuration_store.h"
 #include "live_tuning.h"
 #include "config_file_update.h"
@@ -2674,11 +2678,16 @@ namespace nvhttp {
 
       // The judged verdict Doctor grades with, so the session status never contradicts it.
       const bool network_risk = stream_stats::judged_network(stats).risk;
-      const bool pacing_risk =
-        stats.dropped_frame_ratio >= 0.04 ||
-        (!static_or_duplicate_content &&
-         (stats.frame_jitter_ms >= 2.2 ||
-          (meaningful_fps_shortfall && source_cadence_confirms_motion)));
+      const bool source_time_policy = stats.video_policy_source_time &&
+        (requester_generation == 0 || stats.video_policy_session_generation == requester_generation);
+      const bool cadence_unavailable = stream_stats::source_pacing_evidence_unavailable(stats, requester_generation);
+      const bool pacing_risk = cadence_unavailable ? false : source_time_policy ?
+        (stats.video_policy_cadence_available &&
+         (stats.dropped_frame_ratio >= 0.04 || stats.frame_jitter_ms >= 2.2)) :
+        (stats.dropped_frame_ratio >= 0.04 ||
+         (!static_or_duplicate_content &&
+          (stats.frame_jitter_ms >= 2.2 ||
+           (meaningful_fps_shortfall && source_cadence_confirms_motion))));
       const bool capture_fallback =
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
@@ -2689,9 +2698,9 @@ namespace nvhttp {
         !build_has_cuda() &&
         capture_fallback;
       const bool encoder_time_fail =
-        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps);
+        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps, source_time_policy);
       const bool encoder_risk =
-        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
+        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps, source_time_policy) ||
         (!capture_fallback && stats.avg_frame_age_ms >= 18.0);
       const bool capture_latency_risk =
         capture_fallback && !encoder_time_fail && stats.avg_frame_age_ms >= 18.0;
@@ -2736,7 +2745,7 @@ namespace nvhttp {
         recommendations.push_back("Lower the game preset, render resolution, or FPS target; bitrate changes alone will not fix host-render-limited stutter.");
       } else if (pacing_risk) {
         issues.push_back("frame_pacing");
-        recommendations.push_back("Match the game frame cap to the stream FPS and avoid VRR-style sync on the streaming display.");
+        recommendations.push_back("Check the game's frame cap and capture timing before changing display sync settings.");
       }
       if (capture_pressure) {
         issues.push_back(capture_reason);
@@ -2813,6 +2822,9 @@ namespace nvhttp {
         grade = "degraded";
       } else if (concern_count == 1) {
         grade = "watch";
+      } else if (cadence_unavailable) {
+        grade = "collecting";
+        primary_issue = "cadence_collecting";
       }
 
       const int current_bitrate_kbps =
@@ -2821,10 +2833,13 @@ namespace nvhttp {
         current_bitrate_kbps > 0 ? current_bitrate_kbps :
           (device_profile ? device_profile->ideal_bitrate_kbps : 15000),
         device_profile,
-        grade != "good",
+        concern_count > 0,
         active_codec_family == "pyrowave"
       );
-      const double safe_target_fps =
+      // Source cadence is not a miss of the negotiated fixed grid. The legacy recommender also
+      // derives shortfall from average FPS internally, even when its pacing_risk argument is false.
+      // Pending/stale cadence cannot authorize a fixed-FPS recommendation either.
+      const double safe_target_fps = source_time_policy || cadence_unavailable ? 0.0 :
         ai_optimizer::derive_safe_target_fps(
           target_fps,
           stats.fps,
@@ -2832,7 +2847,7 @@ namespace nvhttp {
           0.0,
           0.0,
           mobile_client,
-          grade != "good",
+          concern_count > 0,
           pacing_risk || host_render_limited
         );
       if (safe_target_fps > 0.0) {
@@ -2862,6 +2877,7 @@ namespace nvhttp {
       health["grade"] = grade;
       health["primary_issue"] = primary_issue;
       health["summary"] =
+        grade == "collecting" ? "Cadence evidence is pending or stale; keep streaming while Polaris collects it." :
         grade == "good" ? "Session looks steady." :
         network_risk ? "Network jitter is the most likely source of the hitching." :
         hdr_source_missing ? hdr_downgrade_message :
@@ -2873,6 +2889,9 @@ namespace nvhttp {
         host_render_limited ? "Host render is missing the stream FPS target; lower game render settings or stream FPS before tuning bitrate." :
         "The stream needs a safer pacing or encode path.";
       health["issues"] = std::move(issues);
+      if (stats.video_policy_source_time || cadence_unavailable) {
+        health["frame_pacing_measurement_available"] = !cadence_unavailable;
+      }
       health["recommendations"] = std::move(recommendations);
       health["safe_bitrate_kbps"] = safe_bitrate_kbps;
       health["safe_display_mode"] = (virtual_display_risk || host_prefers_headless()) ? "headless" : (current_virtual_display ? "virtual_display" : "headless");
@@ -2917,7 +2936,15 @@ namespace nvhttp {
         adaptive_bitrate::get_state(),
         stats.bitrate_kbps
       );
-      health["doctor"] = stream_stats::build_doctor_json(stats, health, app_uuid);
+      if (stats.video_policy_source_time && !source_time_policy) {
+        // A legacy requester cannot borrow another stream's source-mode pressure threshold.
+        auto requester_stats = stats;
+        requester_stats.video_policy_source_time = false;
+        requester_stats.video_policy_cadence_available = false;
+        health["doctor"] = stream_stats::build_doctor_json(requester_stats, health, app_uuid);
+      } else {
+        health["doctor"] = stream_stats::build_doctor_json(stats, health, app_uuid);
+      }
       return health;
     }
   }  // namespace
@@ -3597,13 +3624,27 @@ namespace nvhttp {
       // The Linux-only app pin resolver does not alter other platforms' legacy display policy.
       const proc::launch_as_availability_t availability {};
 #endif
-      return build_launch_mode_contract(
+      auto contract = build_launch_mode_contract(
         app.launch_as,
         app.name,
         settings_metadata::host_virtual_display_available(),
         host_prefers_headless(),
         availability
       );
+      if (app.leave_game_mode_before_launch) {
+        // #204, only for an app that opted in: the setting, and separately whether this host can act
+        // on it now. Support is probed within a bounded second without starting any service; the
+        // session itself is bound by the launch.
+        const auto readiness = prelaunch::coordinator().readiness(true);
+        contract["leave_game_mode_before_launch"] = {
+          {"enabled", readiness.enabled},
+          {"adapter_implemented", readiness.adapter_implemented},
+          {"ready", readiness.ready},
+          {"code", readiness.code},
+          {"reason", readiness.reason},
+        };
+      }
+      return contract;
     }
 
     nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {
@@ -4077,6 +4118,16 @@ namespace nvhttp {
   namespace {
     bool watch_requested(const args_t &args) {
       return util::from_view(get_arg(args, "watch", "0"));
+    }
+
+    // Every value the query carried, so a repeated flag reads as malformed rather than first-wins.
+    vrr_policy::requested_e vrr_request(const args_t &args) {
+      std::vector<std::string_view> values;
+      const auto [first, last] = args.equal_range(std::string {vrr_policy::k_request_arg});
+      for (auto it = first; it != last; ++it) {
+        values.emplace_back(it->second);
+      }
+      return vrr_policy::parse_request(values);
     }
 
     bool session_token_matches_value(
@@ -4881,6 +4932,7 @@ namespace nvhttp {
         named_cert_node["allow_client_commands"] = named_cert_p->allow_client_commands;
         named_cert_node["always_use_virtual_display"] = named_cert_p->always_use_virtual_display;
         named_cert_node["close_desktop_steam"] = named_cert_p->close_desktop_steam;
+        named_cert_node["recording_authorized"] = named_cert_p->recording_authorized;
 
         // Add "do" commands if available.
         if (!named_cert_p->do_cmds.empty()) {
@@ -5069,6 +5121,8 @@ namespace nvhttp {
           named_cert->allow_client_commands = entry.value("allow_client_commands", true);
           named_cert->always_use_virtual_display = entry.value("always_use_virtual_display", false);
           named_cert->close_desktop_steam = entry.value("close_desktop_steam", crypto::close_desktop_steam_default);
+          // Absent in records written before the setting existed: off.
+          named_cert->recording_authorized = entry.value("recording_authorized", crypto::recording_authorized_default);
           named_cert->do_cmds = extract_command_entries(entry, "do");
           named_cert->undo_cmds = extract_command_entries(entry, "undo");
           register_identity(named_cert);
@@ -5125,6 +5179,7 @@ namespace nvhttp {
     clone->allow_client_commands = source->allow_client_commands;
     clone->always_use_virtual_display = source->always_use_virtual_display;
     clone->close_desktop_steam = source->close_desktop_steam;
+    clone->recording_authorized = source->recording_authorized;
     clone->temporary_authorization = source->temporary_authorization;
     return clone;
   }
@@ -5157,6 +5212,9 @@ namespace nvhttp {
       // their saved permissions through the duplicate branch above.
       named_cert->perm = PERM::_game_control;
     }
+    // Pairing never grants recording, and re-pairing a certificate never carries an earlier
+    // approval over: only a host admin's later update of this permanent record can.
+    named_cert->recording_authorized = crypto::recording_authorized_default;
 
     if (duplicate != previous_clients.end()) {
       if ((*duplicate)->paired_at > 0) {
@@ -5202,13 +5260,18 @@ namespace nvhttp {
   }
 
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker,
-                                                                  const proc::ctx_t *topology_app) {
+                                                                  const proc::ctx_t *topology_app,
+                                                                  vrr_policy::admission_e vrr_admission) {
 #ifndef __linux__
     (void) topology_app;
 #endif
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
+    // Recorded on every path, including a profile-worker launch, and never acted on here: a malformed
+    // value is kept as malformed rather than refusing an otherwise valid launch.
+    launch_session->vrr_requested = vrr_request(args);
+    launch_session->vrr_admission = vrr_admission;
 
     // If launched from client
     if (named_cert_p->uuid != http::unique_id) {
@@ -5894,6 +5957,7 @@ namespace nvhttp {
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
       named_cert_p->close_desktop_steam = crypto::close_desktop_steam_default;
+      named_cert_p->recording_authorized = crypto::recording_authorized_default;
       named_cert_p->temporary_authorization = sess.temporary_authorization;
 
       if (add_authorized_client(named_cert_p, sess.pairing_perm)) {
@@ -6509,6 +6573,52 @@ namespace nvhttp {
     return get_verified_cert(candidate, request->path);
   }
 
+  namespace {
+    /// The paired caller's permission to read its own connection evidence: view, as before.
+    std::optional<SimpleWeb::StatusCode> network_connection_refusal(const crypto::p_named_cert_t &named_cert) {
+      if (!named_cert) return SimpleWeb::StatusCode::client_error_unauthorized;
+      if (!(named_cert->perm & PERM::_allow_view)) return SimpleWeb::StatusCode::client_error_forbidden;
+      return std::nullopt;
+    }
+
+    void write_network_connection(const resp_https_t &response, const nlohmann::json &output) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(output.dump(), headers);
+    }
+  }  // namespace
+
+  /**
+   * The paired route. Authorization is checked before the daemon is asked, and again before the
+   * answer is written, since a device can be unpaired while the read is under way. The daemon read
+   * happens on `collector`'s worker, never on this server's thread.
+   */
+  void networkConnection(tailscale_connection::status_collector_t &collector, resp_https_t response, req_https_t request) {
+    const auto candidate = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    const std::string path = request->path;
+    if (const auto refusal = network_connection_refusal(get_verified_cert(candidate, path))) {
+      response->write(*refusal);
+      return;
+    }
+    // Query/body parameters cannot choose another peer. This describes this
+    // paired TLS connection only; it never claims to have observed video UDP.
+    auto remote = net::addr_to_normalized_string(request->remote_endpoint().address());
+    auto local = net::addr_to_normalized_string(request->local_endpoint().address());
+    const bool accepted = collector.submit(
+      [response, candidate, path, remote, local](const std::optional<std::string> &status, std::int64_t observed_at_ms) {
+        if (const auto refusal = network_connection_refusal(get_verified_cert(candidate, path))) {
+          response->write(*refusal);
+          return;
+        }
+        write_network_connection(response, tailscale_connection::evaluate(status, observed_at_ms, remote, local));
+      });
+    if (!accepted) {
+      // Too many reads already waiting, or the server is stopping: say so now rather than queue.
+      write_network_connection(response, tailscale_connection::evaluate(std::nullopt, 0, remote, local));
+    }
+  }
+
   bool record_client_seen(const crypto::p_named_cert_t &candidate,
                           std::int64_t seen_at,
                           bool persist = true,
@@ -6926,9 +7036,8 @@ namespace nvhttp {
   }
 
   template<class T>
-  void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+  void serverinfo_stable(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
-    reconcile_game_mode_host();
 
     auto local_endpoint = request->local_endpoint();
     crypto::p_named_cert_t named_cert_p;
@@ -6940,6 +7049,7 @@ namespace nvhttp {
     const auto profile_service = named_cert_p ? multiseat::profile_service_for(named_cert_p->uuid) : nullptr;
     profile_client = static_cast<bool>(profile_service);
 #endif
+    if (!profile_client) reconcile_game_mode_host();
     const int pair_status = named_cert_p ? 1 : 0;
     const auto advertised_codec_support = profile_client ? video::codec_capability_state_t {1, 1, {}} :
       advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>);
@@ -7104,6 +7214,66 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  template<class T>
+  void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
+                  std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
+    crypto::p_named_cert_t client;
+    if constexpr (std::is_same_v<PolarisHTTPS, T>) client = get_verified_cert(request);
+#ifdef __linux__
+    if (client && multiseat::profile_service_for(client->uuid)) {
+      serverinfo_stable<T>(std::move(response), std::move(request));
+      return; // independent profile lifecycle, no global process getters/probes
+    }
+#endif
+    const auto observe = [&](const proc::session_snapshot_guard_t &guard) {
+      if (guard.owns_snapshot()) {
+        serverinfo_stable<T>(response, request);
+        return true;
+      }
+      if (!proc::proc.native_end_pending()) return false;
+      // Accepted native End means no resumable game, NOT completed host cleanup.
+      // No process, encoder-cache, display or capability probe is safe on this branch.
+      pt::ptree tree;
+      tree.put("root.<xmlattr>.status_code", 200);
+      tree.put("root.hostname", config::nvhttp.sunshine_name);
+      tree.put("root.appversion", VERSION);
+      tree.put("root.GfeVersion", GFE_VERSION);
+      tree.put("root.uniqueid", http::unique_id);
+      tree.put("root.HttpsPort", net::map_port(PORT_HTTPS));
+      tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
+      tree.put("root.PairStatus", client ? 1 : 0);
+      tree.put("root.Permission", client ? static_cast<std::uint32_t>(client->perm) : 0U);
+      tree.put("root.currentgame", 0);
+      tree.put("root.currentgameuuid", "");
+      tree.put("root.state", "POLARIS_SERVER_FREE");
+      tree.put("root.currentgamesessiontoken", "");
+      tree.put("root.currentgameowner", "");
+      tree.put("root.currentgameownername", "");
+      tree.put("root.currentgameowned", 0);
+      tree.put("root.currentgameviewercount", 0);
+      tree.put("root.currentgamewatchable", 0);
+      tree.put("root.session_cleanup_pending", 1);
+      tree.put("root.session_launch_available", 0);
+      tree.put("root.capabilities_available", 0);
+      std::ostringstream data; pt::write_xml(data, tree);
+      response->write(data.str());
+      response->close_connection_after_response = true;
+      return true;
+    };
+    auto guard = proc::proc.try_session_status_guard();
+    if (observe(guard)) return;
+    // Completion can release stop between the first failed guard and pending read.
+    // One new nonblocking claim observes that settled generation; no polling/wait loop.
+    auto settled = proc::proc.try_session_status_guard();
+    if (observe(settled)) return;
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", 503);
+    tree.put("root.<xmlattr>.status_message", "Session status temporarily unavailable");
+    std::ostringstream data; pt::write_xml(data, tree);
+    response->write(data.str());
+    response->close_connection_after_response = true;
+  }
+
   nlohmann::json get_all_clients() {
     std::lock_guard lock(client_state_mutex);
     nlohmann::json named_cert_nodes = nlohmann::json::array();
@@ -7125,6 +7295,7 @@ namespace nvhttp {
       named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
       named_cert_node["always_use_virtual_display"] = named_cert->always_use_virtual_display;
       named_cert_node["close_desktop_steam"] = named_cert->close_desktop_steam;
+      named_cert_node["recording_authorized"] = named_cert->recording_authorized;
       named_cert_node["temporary_authorization"] = named_cert->temporary_authorization;
 
       // Add "do" commands if available
@@ -7252,12 +7423,29 @@ namespace nvhttp {
 
   nlohmann::json auto_quality_status_json() {
     const auto stats = stream_stats::get_current();
+    return auto_quality_status_json(stats, proc::proc.try_stream_stats_context());
+  }
+
+  nlohmann::json auto_quality_status_json(
+    const stream_stats::stats_t &stats,
+    const std::optional<proc::stream_stats_context_t> &context) {
+    if (!context) {
+      auto policy = settings_metadata::build_auto_quality_policy_json(
+        nlohmann::json::object(), adaptive_bitrate::get_state(), stats.bitrate_kbps);
+      policy["state"] = "insufficient_signal";
+      policy["blocked_reason"] = "session_changing";
+      policy["summary"] = "Session information is temporarily unavailable.";
+      policy["detail"] = "Stream measurements remain available while the session starts or stops.";
+      policy["can_recover_live"] = false;
+      policy["relaunch_required"] = false;
+      return policy;
+    }
     const auto health = build_session_health_json(
       stats,
-      proc::proc.session_uses_virtual_display(),
+      context->virtual_display,
       std::string {},
-      proc::proc.get_last_run_app_name(),
-      proc::proc.get_running_app_uuid()
+      context->game,
+      context->game_uuid
     );
     return settings_metadata::build_auto_quality_policy_json(
       health,
@@ -7304,9 +7492,14 @@ namespace nvhttp {
       return;
     }
 #endif
-    const auto advertised_codec_support = advertised_codec_support_for_http(true);
-
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
+      auto status_guard = proc::proc.try_session_status_guard();
+      if (!status_guard.owns_snapshot()) {
+        apps.put("<xmlattr>.status_code", 503);
+        apps.put("<xmlattr>.status_message", "Session cleanup or transition in progress");
+        return;
+      }
+      const auto advertised_codec_support = advertised_codec_support_for_http(true);
       auto current_appid = proc::proc.running();
       auto should_hide_inactive_apps = config::input.enable_input_only_mode && current_appid > 0 && current_appid != proc::input_only_app_id;
 
@@ -7391,7 +7584,6 @@ namespace nvhttp {
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
-    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7417,7 +7609,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
       return;
     }
-
 #ifdef __linux__
     if (handle_profile_launch(tree, request, named_cert_p, args, false)) return;
 #endif
@@ -7470,6 +7661,10 @@ namespace nvhttp {
 
       return;
     }
+    // #204 O1: the host's mode is brought in line only for a verified client with launch
+    // permission, holding the launch reservation, whose request is well formed. A refused request
+    // changes neither the host's mode nor its kept Game Mode answer.
+    reconcile_game_mode_host();
 
     if (!is_input_only) {
       // Special handling for the "terminate" app
@@ -7751,6 +7946,36 @@ namespace nvhttp {
         }
 
 #ifdef __linux__
+        // #204: an app that leaves Game Mode before its launch does it here: after the certificate,
+        // the permission, the launch reservation and the occupancy checks above, and before Launch
+        // as, the app's display semantics and the launch's own mode decision. Off by default.
+        std::optional<prelaunch::launch_scope_t> prelaunch_scope;
+        if (app_iter->leave_game_mode_before_launch && !watch_only && !launch_session->mirror_desktop) {
+          const auto prelaunch_outcome = proc::prelaunch_for_admitted_launch(
+            prelaunch::entry_e::rtsp,
+            *app_iter,
+            named_cert_p->uuid,
+            *launch_generation,
+            launch_session->resolved_profile_from_client ? launch_session->expected_stream_mode : std::string {},
+            [launch_session]() {
+              return launch_session->is_cancelled();
+            }
+          );
+          if (!prelaunch_outcome.proceed()) {
+            tree.put("root.resume", 0);
+            tree.put("root.gamesession", 0);
+            put_launch_refusal(tree, prelaunch_outcome.status, prelaunch_outcome.message);
+            return;
+          }
+          prelaunch_scope.emplace(prelaunch_outcome);
+          prelaunch_scope->set_others([](std::string &reason) {
+            return proc::prelaunch_other_sessions_now(reason);
+          });
+          // The coordinator's fresh scan is the kept answer now; the mode follows it before the
+          // launch reads it.
+          reconcile_game_mode_host();
+        }
+        prelaunch::note_stage("launch_as");
         if (const auto refusal = proc::refuse_app_launch_as_before_launch(
               *app_iter, proc::launch_selection_request_from_session(*launch_session))) {
           tree.put("root.resume", 0);
@@ -7759,15 +7984,23 @@ namespace nvhttp {
           return;
         }
         proc::apply_app_display_semantics(*app_iter, *launch_session);
+        // Keep the admitted app/request/device consent with this launch, without changing the
+        // stored app or treating launch_session's request-only force flag as device permission.
+        auto admitted_app = *app_iter;
+        admitted_app.close_desktop_steam_for_private =
+          force_private_after_desktop_steam_shutdown_requested(args) ||
+          app_iter->close_desktop_steam_for_private || named_cert_p->close_desktop_steam;
         if (!admit_desktop_launch_policy(
               tree,
               args,
-              *app_iter,
+              admitted_app,
               current_appid > 0 && current_appid != proc::input_only_app_id,
-              named_cert_p->close_desktop_steam
+              false // the effective consent is frozen in the per-launch app above
             )) {
           return;
         }
+#else
+        const auto &admitted_app = *app_iter;
 #endif
 
         // Update last_launched timestamp
@@ -7786,12 +8019,17 @@ namespace nvhttp {
           }
         } catch (...) {}
 
-        auto err = proc::proc.execute_and_raise(*app_iter, launch_session, [&]() {
+        auto err = proc::proc.execute_and_raise(admitted_app, launch_session, [&]() {
           return publish_authorized_launch(named_cert_p, perm, [&]() {
             return proc::proc.raise_session_for_admitted_launch(launch_session);
           });
         });
         launch_session_raised = err == 0;
+#ifdef __linux__
+        if (!err && prelaunch_scope) {
+          proc::proc.bind_prelaunch_transition(prelaunch_scope->commit());
+        }
+#endif
         if (err) {
           put_launch_refusal(
             tree,
@@ -7853,7 +8091,6 @@ namespace nvhttp {
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
-    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7873,7 +8110,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
       return;
     }
-
     if (!(named_cert_p->perm & PERM::_allow_view)) {
       BOOST_LOG(debug) << "Permission ViewApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
 
@@ -7918,6 +8154,9 @@ namespace nvhttp {
 
       return;
     }
+    // #204 O1: a resume binds the running generation and never leaves Game Mode. Its mode is
+    // brought in line only for a verified, permitted, reserved and well-formed request.
+    reconcile_game_mode_host();
 
     // Newer Moonlight clients send localAudioPlayMode on /resume too. Keep the
     // global choice unchanged until this request has passed every admission
@@ -7932,7 +8171,7 @@ namespace nvhttp {
     topology_app = proc::proc.running_app_context();
 #endif
     auto launch_session = make_launch_session(resume_host_audio, false, args, named_cert_p.get(),
-      false, topology_app ? &*topology_app : nullptr);
+      false, topology_app ? &*topology_app : nullptr, vrr_policy::admission_e::resume);
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -8143,10 +8382,116 @@ namespace nvhttp {
 #endif
   }
 
-  void cancel(resp_https_t response, req_https_t request) {
+  // Exactly one server-lifetime-owned End job; never the HTTPS executor or a shared pool.
+  // Lock order: queue -> process admission. The worker drops queue before process/RTSP work.
+  class native_end_worker_t {
+  public:
+    native_end_worker_t(): worker([this]() { run(); }) {}
+    ~native_end_worker_t() { shutdown(); }
+    native_end_worker_t(const native_end_worker_t &) = delete;
+    native_end_worker_t &operator=(const native_end_worker_t &) = delete;
+
+    using dispatch_lease_t = std::shared_ptr<const char>;
+    struct submission_t {
+      proc::session_stop_result_t result;
+      dispatch_lease_t dispatch;
+    };
+    template<class Prepare>
+    submission_t submit(Prepare prepare) {
+      std::lock_guard lock(mutex);
+      if (!accepting || busy) {
+        proc::session_stop_result_t result;
+        result.snapshot.outcome = proc::session_stop_outcome_t::stop_in_progress;
+        return {std::move(result), {}};
+      }
+      // Reserve capacity before authority/admission. Refusal never enters the worker.
+      auto dispatch = std::make_shared<const char>(); // allocation before any stop admission effects
+      auto admitted = prepare();
+      if (!admitted.ticket) return {std::move(admitted.result), {}};
+      pending = std::move(admitted.ticket); // noexcept ownership transfer, no queue allocation
+      if (!pending->publish_native_end()) {
+        pending.reset(); // releases only this unqueued claim, no teardown
+        admitted.result.snapshot.outcome = proc::session_stop_outcome_t::session_changed;
+        return {std::move(admitted.result), {}};
+      }
+      lease = dispatch;
+      ready = false;
+      busy = true;
+      return {std::move(admitted.result), std::move(dispatch)}; // accepted, NOT cleanup-complete
+    }
+
+    void dispatch(const dispatch_lease_t &expected) {
+      std::lock_guard lock(mutex);
+      if (expected && lease == expected) {
+        ready = true;
+        changed.notify_one();
+      }
+    }
+    template<class Write, class Send>
+    void respond(const dispatch_lease_t &expected, Write write, Send send) {
+      try {
+        write();
+        if (expected) send([this, expected](const auto &) { dispatch(expected); });
+      } catch (...) {
+        // An accepted user End remains owned even when serializing/setting up its reply fails.
+        const auto original = std::current_exception();
+        try { BOOST_LOG(error) << "Native End reply failed; accepted cleanup remains owned"sv; } catch (...) {}
+        try { dispatch(expected); } catch (...) {}
+        std::rethrow_exception(original);
+      }
+    }
+    void stop_accepting() {
+      std::lock_guard lock(mutex);
+      accepting = false;
+      ready = true; // drain an accepted unsent lease if IO stopped before its callback
+      changed.notify_one();
+    }
+    void shutdown() {
+      stop_accepting();
+      if (worker.joinable()) worker.join(); // drain accepted ownership; no detached or timeout kill
+    }
+  private:
+    void run() {
+      for (;;) {
+        std::unique_ptr<proc::proc_t::session_shutdown_ticket_t> ticket;
+        {
+          std::unique_lock lock(mutex);
+          changed.wait(lock, [this]() { return (pending && ready) || !accepting; });
+          if (!pending) return;
+          ticket = std::move(pending);
+        }
+        try {
+          const auto result = ticket->complete();
+          if (result.snapshot.outcome != proc::session_stop_outcome_t::allowed || !result.stopped)
+            BOOST_LOG(warning) << "Native End cleanup retained state or changed; refresh before another request"sv;
+        } catch (const std::exception &e) {
+          try { BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete: "sv << e.what(); } catch (...) {}
+        } catch (...) {
+          try { BOOST_LOG(error) << "Native End cleanup failed; outcome incomplete"sv; } catch (...) {}
+        }
+        ticket.reset(); // unwind exact gate/projection before capacity is available again
+        std::lock_guard lock(mutex);
+        busy = false;
+        lease.reset();
+        ready = false;
+      }
+    }
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool accepting = true;
+    bool busy = false;
+    bool ready = false;
+    dispatch_lease_t lease;
+    std::unique_ptr<proc::proc_t::session_shutdown_ticket_t> pending;
+    std::thread worker;
+  };
+
+  void cancel(native_end_worker_t &ends, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
 
     pt::ptree tree;
+    tree.put("root.cancel", 0);
+    tree.put("root.<xmlattr>.status_code", 500);
     bool response_written = false;
     auto g = util::fail_guard([&]() {
       // SB-2: when we already answered Moonlight before nested teardown, skip.
@@ -8198,85 +8543,90 @@ namespace nvhttp {
 #endif
 
     const auto session_token = get_arg(args, "sessiontoken", "");
-    auto pending_capture_cancel = proc::proc.cancel_capture_preparation_for_shutdown(
-      named_cert_p->uuid, session_token, true, false);
-    // Paired cert UUID is the owner identity. Never require sessiontoken for the
-    // owner — Artemis/Moonlight often send a stale token and map any cancel
-    // failure to "started by another device".
-    const bool is_owner = proc::proc.is_session_owner(named_cert_p->uuid);
-
-    // Preflight without teardown so we can answer the client before nested
-    // gamescope undo (which can SEGV polaris mid-cancel and leave Moonlight
-    // thinking quit failed as "another device").
-    auto preflight = proc::proc.get_session_stop_snapshot(named_cert_p->uuid, true);
-    auto outcome = preflight.outcome;
-    if (is_owner &&
-        (outcome == proc::session_stop_outcome_t::other_owner ||
-         outcome == proc::session_stop_outcome_t::token_mismatch ||
-         outcome == proc::session_stop_outcome_t::uncontrolled_stream)) {
-      // Owner cert always wins over stale token / role race after disconnect.
-      if (preflight.had_running_app || preflight.active_sessions > 0) {
-        outcome = proc::session_stop_outcome_t::allowed;
+    // Reserve one owned worker slot, then perform the original final authority/generation
+    // checks and close launch admission, all before promising acceptance on the wire.
+    bool is_owner = false;
+    const auto admission = ends.submit([&]() {
+      is_owner = proc::proc.is_session_owner(named_cert_p->uuid);
+      return proc::proc.prepare_session_shutdown(
+        named_cert_p->uuid, session_token, true, !session_token.empty() && !is_owner
+      );
+    });
+    const auto outcome = admission.result.snapshot.outcome;
+    // The route returns so the one executor can actually send. Transport completion/error
+    // releases only this job's lease. Content timeout closes a stalled write; shutdown drains
+    // an accepted lease even if the pinned server suppresses callbacks while stopping.
+    ends.respond(admission.dispatch, [&]() {
+      response_written = true; // construction attempted: never retry serialization on exception
+      switch (outcome) {
+        case proc::session_stop_outcome_t::allowed:
+        case proc::session_stop_outcome_t::no_active_session:
+          tree.put("root.cancel", 1);
+          tree.put("root.<xmlattr>.status_code", 200);
+          break;
+        case proc::session_stop_outcome_t::permission_denied:
+        case proc::session_stop_outcome_t::viewer_forbidden:
+        case proc::session_stop_outcome_t::uncontrolled_stream:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 403);
+          tree.put("root.<xmlattr>.status_message", "This client cannot stop the active session");
+          break;
+        case proc::session_stop_outcome_t::stop_in_progress:
+        case proc::session_stop_outcome_t::session_changed:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 409);
+          tree.put("root.<xmlattr>.status_message", "The active session changed or is already stopping");
+          break;
+        case proc::session_stop_outcome_t::other_owner:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
+          break;
+        case proc::session_stop_outcome_t::token_mismatch:
+          tree.put("root.cancel", 0);
+          tree.put("root.<xmlattr>.status_code", 470);
+          tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
+          break;
       }
-      else {
-        outcome = proc::session_stop_outcome_t::no_active_session;
-      }
-    }
 
-    switch (outcome) {
-      case proc::session_stop_outcome_t::allowed:
-      case proc::session_stop_outcome_t::no_active_session:
-        tree.put("root.cancel", 1);
-        tree.put("root.<xmlattr>.status_code", 200);
-        break;
-      case proc::session_stop_outcome_t::permission_denied:
-      case proc::session_stop_outcome_t::viewer_forbidden:
-      case proc::session_stop_outcome_t::uncontrolled_stream:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 403);
-        tree.put("root.<xmlattr>.status_message", "This client cannot stop the active session");
-        break;
-      case proc::session_stop_outcome_t::stop_in_progress:
-      case proc::session_stop_outcome_t::session_changed:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 409);
-        tree.put("root.<xmlattr>.status_message", "The active session changed or is already stopping");
-        break;
-      case proc::session_stop_outcome_t::other_owner:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 470);
-        tree.put("root.<xmlattr>.status_message", "The current session belongs to another client");
-        break;
-      case proc::session_stop_outcome_t::token_mismatch:
-        tree.put("root.cancel", 0);
-        tree.put("root.<xmlattr>.status_code", 470);
-        tree.put("root.<xmlattr>.status_message", "The requested session token does not match the active session");
-        break;
-    }
+      BOOST_LOG(info) << "cancel: client=["sv << named_cert_p->name
+                      << "] owner="sv << (is_owner ? "yes" : "no")
+                      << " preflight_outcome="sv << static_cast<int>(outcome)
+                      << " token_sent="sv << !session_token.empty()
+                      << " had_app="sv << admission.result.snapshot.had_running_app;
+      if (outcome == proc::session_stop_outcome_t::allowed) tree.put("root.session_cleanup_pending", 1);
 
-    BOOST_LOG(info) << "cancel: client=["sv << named_cert_p->name
-                    << "] owner="sv << (is_owner ? "yes" : "no")
-                    << " preflight_outcome="sv << static_cast<int>(outcome)
-                    << " token_sent="sv << !session_token.empty()
-                    << " had_app="sv << preflight.had_running_app;
-
-    // Answer Moonlight first — nested WSI undo can SEGV the host process.
-    {
       std::ostringstream data;
       pt::write_xml(data, tree);
       response->write(data.str());
       response->close_connection_after_response = true;
-      response_written = true;
-    }
+    }, [&](auto callback) { response->send(std::move(callback)); });
 
-    if (outcome == proc::session_stop_outcome_t::allowed) {
-      // Require no token for owner; empty token for non-owner still fails if not owned.
-      static_cast<void>(proc::proc.request_session_shutdown(
-        named_cert_p->uuid,
-        session_token,
-        true,
-        !session_token.empty() && !is_owner
-      ));
+    // Returning releases the buffered response on the same executor. The owned worker
+    // continues even if this client disconnects; one accepted End is never auto-retried.
+  }
+
+  void guard_native_end_v1_routes(https_server_t &server) {
+    // Only native /cancel publishes the ticket, on this same single HTTPS executor.
+    // Therefore a nonbusy v1 body finishes before another cancel can claim admission.
+    // While busy, no v1 route body can park this executor behind process/cache teardown.
+    for (auto &[pattern, methods] : server.resource) {
+      for (auto &[method, handler] : methods) {
+        handler = [next = std::move(handler)](resp_https_t response, req_https_t request) {
+          if (request->path.rfind("/polaris/v1/", 0) != 0 || !proc::proc.native_end_pending()) {
+            next(std::move(response), std::move(request));
+            return;
+          }
+          const auto client = get_verified_cert(request); // live/revoked cert check before busy reply
+          SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+          nlohmann::json body {{"status", false}, {"error_code", client ? "session_cleanup_pending" : "unauthorized"}};
+          if (client) body["session_cleanup_pending"] = true;
+          response->write(client ? SimpleWeb::StatusCode::server_error_service_unavailable :
+                                   SimpleWeb::StatusCode::client_error_unauthorized,
+                          body.dump(), headers);
+          response->close_connection_after_response = true;
+        };
+      }
     }
   }
 
@@ -8305,6 +8655,13 @@ namespace nvhttp {
       return;
     }
 
+    auto status_guard = proc::proc.try_session_status_guard();
+    if (!status_guard.owns_snapshot()) {
+      fg.disable();
+      response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+      response->close_connection_after_response = true;
+      return;
+    }
     auto args = request->parse_query_string();
     auto app_image = proc::proc.get_app_image(util::from_view(get_arg(args, "appid")));
 
@@ -8480,8 +8837,12 @@ namespace nvhttp {
     bool host_audio {};
 
     https_server_t https_server {config::nvhttp.cert, config::nvhttp.pkey};
+    // Declared after the server so it is destroyed first; stopped explicitly below as well.
+    tailscale_connection::status_collector_t network_collector;
     http_server_t http_server;
+    native_end_worker_t native_ends; // declared after servers, drained before their destruction
 
+    https_server.config.thread_pool_size = 1;
     https_server.verify = verify_https_client;
 
     https_server.on_verify_failed = [](resp_https_t resp, req_https_t req) {
@@ -8511,7 +8872,9 @@ namespace nvhttp {
     https_server.resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) {
       resume(host_audio, resp, req);
     };
-    https_server.resource["^/cancel$"]["GET"] = cancel;
+    https_server.resource["^/cancel$"]["GET"] = [&native_ends](auto response, auto request) {
+      cancel(native_ends, std::move(response), std::move(request));
+    };
     https_server.resource["^/actions/clipboard$"]["GET"] = getClipboard;
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
 
@@ -8611,6 +8974,8 @@ namespace nvhttp {
       features["artwork_choices_v1"] = nonblank_artwork_api_key(
         config::steamgriddb_api_key());
       features["support_client_report_v1"] = true;
+      // Route availability, not proof of a running/accessible Tailscale daemon.
+      features["network_connection_v1"] = true;
       features["session_lifecycle"] = true;
       features["session_stop_v1"] = true;
       features["device_profiles"] = true;
@@ -8637,8 +9002,10 @@ namespace nvhttp {
       // Speaking the protocol, not permission to use it. Whether this host
       // will actually sleep is host_power below, which a client has to read
       // before offering the control.
+      features["desktop_steam_control_v1"] = false;
       features["host_sleep_v1"] = false;
 #ifdef __linux__
+      features["desktop_steam_control_v1"] = true;
       features["host_sleep_v1"] = true;
 #endif
 
@@ -8991,6 +9358,11 @@ namespace nvhttp {
       if (auto bitrate_units = stream_stats::bitrate_units_json(stats, requester_generation); !bitrate_units.is_null()) {
         output["bitrate_units"] = std::move(bitrate_units);
       }
+      // Authenticated diagnostic facts for the asking stream, independent of Doctor's grading.
+      // The observation remains available when Doctor shadow mode is disabled or collecting.
+      if (auto timing = stream_stats::capture_timing_json(stats, requester_generation); !timing.is_null()) {
+        output["capture_timing"] = std::move(timing);
+      }
       const auto health = build_session_health_json(
         stats,
         status_snapshot.virtual_display,
@@ -9043,6 +9415,11 @@ namespace nvhttp {
           {"target_fps", stats.session_target_fps > 0.0 ? stats.session_target_fps : stats.fps},
           {"refresh_rate_hz", stats.runtime_reported_refresh_hz}
         };
+        // Only the requester's own generation: another owner's or a Watch session's record never
+        // stands in for it, and no record means no vrr evidence rather than a default.
+        if (auto vrr = stream_stats::vrr_json(stats, requester_generation); !vrr.is_null()) {
+          doctor_v2_host_evidence["vrr"] = std::move(vrr);
+        }
       }
       const auto doctor_v2_status = doctor_v2::status(
         named_cert_p->uuid,
@@ -9865,6 +10242,17 @@ namespace nvhttp {
         }
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
+        bool steam_lifetime_game_mode = false;
+#ifdef __linux__
+        steam_lifetime_game_mode = platf::game_mode_host::session_live();
+#endif
+        game["steam_lifecycle"] = {
+          {"desktop_policy", app.desktop_steam_lifetime},
+          {"host_default_keep", config::sunshine.keep_desktop_steam_running},
+          {"keep_in_host_virtual_display", proc::keep_desktop_steam(app.desktop_steam_lifetime, config::sunshine.keep_desktop_steam_running, "host_virtual_display", steam_lifetime_game_mode)},
+          {"keep_in_desktop_display", proc::keep_desktop_steam(app.desktop_steam_lifetime, config::sunshine.keep_desktop_steam_running, "desktop_display", steam_lifetime_game_mode)},
+          {"private_end", "cleanup"}
+        };
         game["display_planner"] = display_planner_contract;
 
         nlohmann::json genre_arr = nlohmann::json::array();
@@ -10974,6 +11362,9 @@ namespace nvhttp {
           {"refresh_rate_hz", stats.runtime_reported_refresh_hz}
         }}
       };
+      if (auto vrr = stream_stats::vrr_json(stats, timing.session_generation); !vrr.is_null()) {
+        host_evidence["vrr"] = std::move(vrr);
+      }
       const auto evidence = doctor_v2::status(named_cert_p->uuid, app_uuid, host_evidence);
       doctor_trial::effective_settings_t settings {
         .topology = settings_metadata::effective_stream_display_mode_selection(stats, proc::proc.session_uses_virtual_display()),
@@ -11594,6 +11985,29 @@ namespace nvhttp {
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
       response->write(output.dump(), headers);
+    };
+
+    auto polarisHostSteam = [](resp_https_t response, req_https_t request) {
+      const auto cert = get_verified_cert(request);
+      if (!cert) { response->write(SimpleWeb::StatusCode::client_error_unauthorized); return; }
+      std::string action, revision;
+      bool confirmed = false;
+      if (request->method == "POST") {
+        try {
+          const auto body = nlohmann::json::parse(std::string(std::istreambuf_iterator<char>(request->content), {}));
+          action = body.at("action").get<std::string>();
+          if (action.empty()) throw std::invalid_argument("action is required");
+          revision = body.at("revision").get<std::string>();
+          confirmed = body.value("confirm_game_quit", false);
+        } catch (const std::exception &) {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request,
+            "{\"status\":false,\"error\":\"Invalid Steam action request\"}"); return;
+        }
+      }
+      const auto [status, body] = proc::proc.desktop_steam_control(cert->uuid,
+        static_cast<bool>(cert->perm & PERM::launch), action, revision, confirmed);
+      SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+      response->write(static_cast<SimpleWeb::StatusCode>(status), body.dump(), headers);
     };
 
     auto polarisHostSleep = [](resp_https_t response, req_https_t request) {
@@ -12400,6 +12814,9 @@ namespace nvhttp {
 
     https_server.resource["^/polaris/v1/session/report$"]["POST"] = polarisSessionReport;
     https_server.resource["^/polaris/v1/support/client-report$"]["POST"] = polarisClientSupportReport;
+    https_server.resource["^/polaris/v1/network/connection$"]["GET"] = [&network_collector](resp_https_t response, req_https_t request) {
+      networkConnection(network_collector, std::move(response), std::move(request));
+    };
     https_server.resource["^/polaris/v1/optimizer/profile/clear$"]["POST"] = polarisClearOptimizerProfile;
     https_server.resource["^/polaris/v1/optimizer/profiles$"]["GET"] = polarisOptimizerProfiles;
     https_server.resource["^/polaris/v1/optimizer/profiles/clear$"]["POST"] = polarisClearOptimizerProfiles;
@@ -12413,6 +12830,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
     https_server.resource["^/polaris/v1/session/telemetry$"]["POST"] = polarisSessionTelemetry;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;
+    https_server.resource["^/polaris/v1/host/steam$"]["GET"] = polarisHostSteam;
+    https_server.resource["^/polaris/v1/host/steam/action$"]["POST"] = polarisHostSteam;
     https_server.resource["^/polaris/v1/host/power$"]["GET"] = polarisHostPower;
     https_server.resource["^/polaris/v1/host/sleep$"]["POST"] = polarisHostSleep;
     https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;
@@ -12441,6 +12860,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/games/.+/steam-launch-mode$"]["POST"] = polarisSetSteamLaunchMode;
     https_server.resource["^/polaris/v1/session/launch$"]["POST"] = polarisLaunchGame;
 
+    guard_native_end_v1_routes(https_server);
     https_server.config.reuse_address = true;
     https_server.config.address = net::af_to_any_address_string(address_family);
     https_server.config.port = port_https;
@@ -12475,11 +12895,15 @@ namespace nvhttp {
     // Wait for any event
     shutdown_event->view();
 
+    native_ends.stop_accepting();
     https_server.stop();
     http_server.stop();
 
     ssl.join();
     tcp.join();
+    native_ends.shutdown();
+    // Any network-evidence request still waiting is answered unknown before the server goes.
+    network_collector.stop();
 
     // Configuration API requests can still access pending sessions here.
     std::lock_guard lock {client_state_mutex};
@@ -12627,6 +13051,9 @@ namespace nvhttp {
         server {cert_file, key_file} {}
 
     https_server_t server;
+    // After the server: destroyed first. The test reader hook replaces the daemon read.
+    tailscale_connection::status_collector_t network_collector;
+    native_end_worker_t native_ends;
     bool host_audio = false;
     std::atomic<unsigned short> port {0};
     std::thread worker;
@@ -12639,10 +13066,40 @@ namespace nvhttp {
     state->server.config.port = 0;
     state->server.config.timeout_request = 5;
     state->server.config.timeout_content = 5;
+    state->server.config.thread_pool_size = 1;
     state->server.verify = verify_https_client;
+    state->server.on_verify_failed = [](resp_https_t response, req_https_t) {
+      pt::ptree tree; tree.put("root.<xmlattr>.status_code", 401);
+      std::ostringstream data; pt::write_xml(data, tree);
+      response->write(data.str()); response->close_connection_after_response = true;
+    };
+    state->server.default_resource["GET"] = not_found<PolarisHTTPS>;
+    state->server.resource["^/applist$"]["GET"] = applist;
+    state->server.resource["^/appasset$"]["GET"] = appasset;
+    // Representative v1 body uses the same production blocking status-view primitive.
+    // The tested production wrapper must prevent this body from running while End is pending.
+    state->server.resource["^/polaris/v1/session/status$"]["GET"] = [](resp_https_t response, req_https_t request) {
+      const auto client = get_verified_cert(request);
+      if (!client) { response->write(SimpleWeb::StatusCode::client_error_unauthorized); return; }
+      auto view = proc::proc.get_session_status_view(client->uuid, !!(client->perm & PERM::launch));
+      response->write(nlohmann::json {{"game_id", view.snapshot.stop.running_app_id}}.dump());
+    };
     state->server.resource["^/launch$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       launch(state->host_audio, std::move(response), std::move(request));
     };
+    // Actual single-executor TLS routes, including their certificate and ownership checks (#424).
+    state->server.resource["^/cancel$"]["GET"] = [state](auto response, auto request) {
+      cancel(state->native_ends, std::move(response), std::move(request));
+    };
+    state->server.resource["^/serverinfo$"]["GET"] = serverinfo<PolarisHTTPS>;
+    // The production /resume handler too (#204: a refused resume changes nothing on the host).
+    state->server.resource["^/resume$"]["GET"] = [state](resp_https_t response, req_https_t request) {
+      resume(state->host_audio, std::move(response), std::move(request));
+    };
+    state->server.resource["^/polaris/v1/network/connection$"]["GET"] = [state](resp_https_t response, req_https_t request) {
+      networkConnection(state->network_collector, std::move(response), std::move(request));
+    };
+    guard_native_end_v1_routes(state->server);
     state->worker = std::thread([state]() {
       try {
         state->server.start([state](unsigned short assigned) {
@@ -12659,10 +13116,13 @@ namespace nvhttp {
   }
 
   launch_route_for_tests_t::~launch_route_for_tests_t() {
+    impl->native_ends.stop_accepting();
     impl->server.stop();
     if (impl->worker.joinable()) {
       impl->worker.join();
     }
+    impl->native_ends.shutdown();
+    impl->network_collector.stop();
   }
 
   unsigned short launch_route_for_tests_t::port() const {
@@ -12728,7 +13188,8 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display,
     const std::optional<bool> temporary_authorization,
-    const std::optional<bool> close_desktop_steam
+    const std::optional<bool> close_desktop_steam,
+    const std::optional<bool> recording_authorized
   ) {
     std::shared_ptr<rtsp_stream::launch_session_t> cancelled_launch;
     {
@@ -12755,6 +13216,12 @@ namespace nvhttp {
       replacement->always_use_virtual_display = always_use_virtual_display;
       replacement->temporary_authorization = temporary_authorization.value_or(previous->temporary_authorization);
       replacement->close_desktop_steam = close_desktop_steam.value_or(previous->close_desktop_steam);
+      replacement->recording_authorized = recording_authorized.value_or(previous->recording_authorized);
+      if (replacement->temporary_authorization) {
+        // A guest never holds a recording approval, even one granted in the same request, and
+        // making the device permanent again later does not bring an earlier approval back.
+        replacement->recording_authorized = false;
+      }
       *it = replacement;
       if (!save_state()) {
         *it = previous;

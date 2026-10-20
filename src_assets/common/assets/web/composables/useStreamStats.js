@@ -5,6 +5,7 @@ let shared = null
 function createChannel(pollMs, options) {
   const stats = ref(null)
   const connected = ref(false)
+  const receivedAt = ref(0)
   let users = 0
   let source = null
   let timer = null
@@ -27,9 +28,11 @@ function createChannel(pollMs, options) {
     clearTimeout(watchdog)
     timer = watchdog = null
     connected.value = false
+    receivedAt.value = 0
   }
   function receive(value) {
     stats.value = value
+    receivedAt.value = Date.now()
     connected.value = true
     failures = 0
     clearTimeout(watchdog)
@@ -84,7 +87,7 @@ function createChannel(pollMs, options) {
   }
   function visibility() { stop(); fallback = false; start() }
   return {
-    stats, connected,
+    stats, connected, receivedAt,
     retain() {
       if (++users === 1) {
         document.addEventListener('visibilitychange', visibility)
@@ -104,5 +107,5 @@ export function useStreamStats(pollFallbackMs = 1000, options = {}) {
   const channel = shared || (shared = createChannel(pollFallbackMs, options))
   onMounted(channel.retain)
   onUnmounted(channel.release)
-  return { stats: channel.stats, connected: channel.connected }
+  return { stats: channel.stats, connected: channel.connected, receivedAt: channel.receivedAt }
 }

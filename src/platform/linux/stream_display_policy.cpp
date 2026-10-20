@@ -758,10 +758,15 @@ namespace stream_display_policy {
     // Measured against polaris.conf as loaded. After a Host Virtual Display load the live setting is
     // already the replacement, and a host set to kms was told that its configured backend was portal.
     if (const auto discarded = override_for(loaded_capture_setting(), decision)) {
-      // An explicit choice set aside, such as kms under a Gamescope session, is what a host on a
-      // capture path nobody picked looks like, so it is a warning and not a note.
-      BOOST_LOG(warning) << describe_capture_override(*discarded, session_selection)
-                         << "; for this session only, and the host setting comes back at teardown";
+      const auto line = describe_capture_override(*discarded, session_selection) +
+                        "; for this session only, and the host setting comes back at teardown";
+      if (discarded->reason == k_capture_override_private_compositor) {
+        // Private labwc sessions always use wlroots, regardless of the host's capture default.
+        BOOST_LOG(info) << line;
+      }
+      else {
+        BOOST_LOG(warning) << line;
+      }
     }
     else {
       BOOST_LOG(info) << "process: session capture backend override [" << describe_capture(config::video.capture)

@@ -18,6 +18,7 @@
 #include "launch_failure.h"
 #include "stream_bitrate.h"
 #include "thread_safe.h"
+#include "vrr_session_policy.h"
 
 #ifdef _WIN32
   #include <windows.h>
@@ -91,6 +92,10 @@ namespace rtsp_stream {
     int controller_type = 0;
     /// Whether this client has reported an HDR10-capable display of its own.
     bool client_reports_hdr10_display = false;
+    /// clientVrrRequested as this authenticated request carried it, and which request carried it. An
+    /// input only: the stream freezes it per generation and reports its effective policy separately.
+    vrr_policy::requested_e vrr_requested = vrr_policy::requested_e::absent;
+    vrr_policy::admission_e vrr_admission = vrr_policy::admission_e::launch;
     // Explicit deterministic launch preset. This is never populated from
     // Doctor history or AI output.
     std::string profile_preference = "auto";
@@ -397,6 +402,11 @@ namespace rtsp_stream {
    * @brief Terminates all running streaming sessions.
    */
   void terminate_sessions();
+
+  /// Caller owns the host stop admission. Retire only ordinary host media and pending launch
+  /// matching its nonempty owner/token and admitted lifecycle generation; leave all others alone.
+  void terminate_owned_host_sessions(std::string_view unique_id, std::string_view token,
+                                    std::uint64_t lifecycle_generation);
 
   /**
    * @brief Runs the RTSP server loop.

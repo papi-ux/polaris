@@ -28,7 +28,9 @@ timing that only Nova for Android measures. PyroWave, Live Tuning from the clien
 launch mode per launch are Nova only, though Artemis can ask for Host Virtual Display on an app whose Launch as
 is Host default; Live Tuning on Mission Control still tunes the stream. Diagnostics carry `client_family` for the stream and for
 each client, and Session Snapshot on **Doctor & Support** shows it as **Client type** ([what each
-client gets](compatibility.md#clients)).
+client gets](compatibility.md#clients)). Its **Network path** tile and the **Tailscale peer** readout say
+how the client reached the host; the Tailscale readout asks the host's own tailscaled and describes the
+control connection, not the route video takes ([Stutter over Tailscale](troubleshooting.md#stutter-over-tailscale)).
 
 Static menus and repeated frames do not by themselves prove a pacing fault. Doctor collects six
 complete video telemetry windows after startup and requires a warning threshold in two consecutive
@@ -144,6 +146,17 @@ each answered about their own whichever started first, and a reconnect is answer
 stream before that stream's first frame. Asked from the host, the reason gives the route every
 stream that reported one shares, and says so when they differ.
 
+A stream's `client_media_interval`, under the Doctor's `advanced_evidence` and in the stream stats, is
+the host's receipt for the newest client media counter report it admitted: the frames that report
+covered and how long it was since the one before it, on the host's arrival clock and on the client's
+own counter clock, kept apart. Beside it, `cadence` counts the reports admitted for that stream owner,
+app session and generation, the baseline and every reset included, keeps the host and client gap of
+the newest coverage reset with the state of the report before it, and the longest host arrival
+interval between two admitted reports. Rejected reports change none of it, it starts over with the
+stream's scope, and it is absent whenever the receipt is. All of it is report timing only: it does not
+say when frames were encoded or sent, so it attributes nothing to congestion, a media rate or
+capacity, and a cadence without gaps is not a measurement of zero video loss.
+
 The session health served beside it, and by the other paired endpoints, takes the same stream's
 codec and encoder for `active_encoder` and `encoder_selection`, for the AV1 part of `decoder_risk`,
 for `safe_codec` and for the CUDA-disabled NVENC finding. What follows from those follows the same
@@ -208,6 +221,34 @@ A reported running session does not verify its video or input.
 
 These checks read diagnostics without changing host setup or the stream's Doctor verdict and Auto
 Fix action. Opening **Spaces** is the next step when a setup finding needs attention.
+
+## Before a stream
+
+While nothing streams, Doctor's headline stays **Waiting for a stream**, and the Fix My Stream
+checklist shows only the host's own configuration findings: the **Host configuration** cards.
+Rows that measure a live session, such as video frame loss, capture path and encoder pressure,
+stay out of view until a stream runs, and the whole checklist, those rows included, still goes
+into the support bundle. When the console loses its connection to the host, the cards go with it,
+because a finding kept from an earlier payload is not current.
+
+Two of those findings read polaris.conf against the configured stream mode, so they need no
+stream:
+
+- `capture_set_aside_by_mode` is a note. The configured mode asks for another capture backend
+  than the one polaris.conf names, for the mode's own reason, in the words the host log uses: a
+  private labwc mode captures through wlroots whatever `capture` says, and a Host Virtual Display
+  is captured the way its backend exposes it. The pairing is valid; `capture = kms` stays saved
+  for the modes that use it. An unset or Autodetect capture, a per-app or per-session launch mode,
+  and a backend the capture evaluation substituted are not reported here.
+- `stream_mode_unavailable` is a warning. The configured mode cannot be entered on this host, for
+  the reason a launch into it is refused with, such as `labwc binary not found on PATH`.
+
+The three findings of the host's capture evaluation, `no_capture_backend`,
+`capture_backend_substituted` and `kms_capture_needs_capability`, carry `stale`. It is `true`
+when no evaluation has run yet, or when the capture or stream-mode setting has changed since the
+last one; the next stream start evaluates again. The console shows such a finding as a note with
+its original text and the step that verifies it, and gives no advice written for the settings it
+was evaluated under.
 
 ## When the stream never started
 

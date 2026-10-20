@@ -98,14 +98,15 @@ only, no controller yet, and only on the local network.
 | Launch mode per launch | Yes | Yes | No: the host's mode applies, or the app's Launch as | Host Virtual Display only, from its virtual display option, on an app set to Host default | No: the host's mode applies, or the app's Launch as when that is a Private Stream mode |
 | Play Setup | Yes | Yes | No | No | No |
 | Spaces | Yes | Yes | Unverified | Unverified | No |
-| PyroWave | A Nova beta, 1.4.13-beta.3 or newer | The PyroWave Flatpak, SDR and 4:2:0 only | No | No | No |
+| PyroWave | A Nova beta, 1.4.13-beta.3 or newer | The standard Flatpak from 1.5.0, SDR and 4:2:0 only | No | No | No |
 | 4:4:4 | With PyroWave | No | Software H.264 only | Unverified | No |
 | HDR | Yes | Not yet | Yes | Yes | No |
 | Watch Stream | Yes | Not yet | No | No | No |
 | Live Tuning | Yes, from Command Center | Yes, from Command Center | Host side only | Host side only | Unverified |
 | Doctor evidence | Network, host, decode and render | Network and host | Network and host | Network and host | Unverified |
 | Host sleep | Yes | Yes | No | No | No |
-| Wake-on-LAN | Yes | Not yet | Yes | Yes | No |
+| Wake-on-LAN | Yes | Yes, from 1.5.0 | Yes | Yes | No |
+| Desktop Steam controls | Yes, from 1.5.0 | Yes, from 1.5.0 | No | No | No |
 | Refusal detail | Reason, fix and code | Text only | Text only | Text only | Unverified |
 
 What the rows mean, and where they come from:
@@ -124,7 +125,7 @@ What the rows mean, and where they come from:
   is a Nova feature, and no Moonlight or Artemis launch of a Space has been tested. A Space streams
   H.264, SDR and stereo only, and PyroWave does not work in one.
 - **PyroWave.** Stable Nova for Android leaves the codec out; a Nova beta, 1.4.13-beta.3 or newer,
-  installs beside it and has it. On Linux it comes in Nova 1.4.13's separate PyroWave Flatpak ([PyroWave](pyrowave.md)).
+  installs beside it and has it. On Linux, the standard Nova Linux bundle has it from 1.5.0, now in beta; before that it came in a separate PyroWave Flatpak ([PyroWave](pyrowave.md)).
 - **4:4:4.** Nova for Android asks for 4:4:4 whenever it asks for PyroWave. A Moonlight client that
   offers 4:4:4 gets it only from the host's software H.264 encoder ([GPU and encoding](#gpu-and-encoding)).
 - **HDR** follows the host's stream mode ([HDR by stream mode](#hdr-by-stream-mode)). Nova for Linux
@@ -141,6 +142,9 @@ What the rows mean, and where they come from:
 - **Host sleep** is a request only Nova sends, and the host accepts it only while **Allow Clients To
   Sleep This Host** is on. **Wake-on-LAN** is the client's own magic packet, sent to the MAC the
   host reports.
+- **Desktop Steam controls.** Open Steam, Open Big Picture and Quit Steam from Nova's PC menu and
+  Command Center, on a Polaris 1.5.0 beta.2 host or newer. Viewers, another client's session,
+  private runtimes and Game Mode are refused ([Desktop Steam and End Session](steam-lifecycle.md)).
 - **Refusal detail.** A refused launch carries a reason, the change that fixes it, and a stable
   code. Moonlight, Artemis and Nova for Linux show the reason and the fix as one line of text,
   without the code; Nova for Android shows all three.

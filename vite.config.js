@@ -7,6 +7,7 @@ import { codecovVitePlugin } from "@codecov/vite-plugin";
 import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
 import process from 'process'
+import { mockedFrontendIdentityPlugin } from './scripts/e2e-frontend-identity.mjs'
 
 /**
  * Before actually building the pages with Vite, we do an intermediate build step using ejs
@@ -59,6 +60,7 @@ export default defineConfig({
         tailwindcss(),
         vue(),
         ViteEjsPlugin({ header }),
+        mockedFrontendIdentityPlugin(fileURLToPath(new URL('.', import.meta.url)), assetsSrcPath, assetsDstPath),
         {
             name: 'inline-main-stylesheet',
             apply: 'build',

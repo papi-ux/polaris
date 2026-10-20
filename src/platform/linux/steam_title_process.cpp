@@ -75,6 +75,7 @@ namespace platf::steam_title {
       std::istringstream fields {std::string {stat.substr(name_end + 1)}};
       std::string field;
       for (int index = 0; fields >> field; ++index) {
+        if (index == 0) process.zombie = field == "Z";
         if (index == 1) {
           if (!numeric(field)) {
             return std::nullopt;
@@ -177,6 +178,10 @@ namespace platf::steam_title {
     return std::string {steam_game_id};
   }
 
+  std::optional<process_t> root(const std::vector<process_t> &table, std::string_view appid, uid_t uid) {
+    return title_root(table, appid, uid);
+  }
+
   bool running(const std::vector<process_t> &table, std::string_view appid, uid_t uid) {
     return std::any_of(table.begin(), table.end(), [&](const process_t &process) {
       return launches(process, appid, uid);
@@ -220,7 +225,8 @@ namespace platf::steam_title {
     return to_ask;
   }
 
-  std::vector<process_t> read_process_table(const std::filesystem::path &proc_root) {
+  std::vector<process_t> read_process_table(const std::filesystem::path &proc_root, bool *complete) {
+    if (complete) *complete = true;
     std::vector<process_t> table;
     std::error_code ec;
     for (std::filesystem::directory_iterator it {proc_root, ec}, last; !ec && it != last; it.increment(ec)) {
@@ -233,20 +239,32 @@ namespace platf::steam_title {
         continue;
       }
       if (auto process = read_process(proc_root, pid)) {
+        if (complete && process->uid == getuid() && (process->comm == "reaper" || process->comm == "steam-launch-wr") && process->cmdline.empty() && !process->zombie) *complete = false;
         table.push_back(std::move(*process));
+      } else if (complete) {
+        struct stat owner {};
+        if (::stat(it->path().c_str(), &owner) == 0) { if (owner.st_uid == getuid()) *complete = false; }
+        else if (errno != ENOENT && errno != ESRCH) *complete = false;
       }
     }
+    if (complete && ec) *complete = false;
     std::sort(table.begin(), table.end(), [](const process_t &left, const process_t &right) {
       return left.pid < right.pid;
     });
     return table;
   }
 
-  close_result_t ask_to_close(std::string_view appid) {
+  close_result_t ask_to_close(std::string_view appid, const process_t *expected_root) {
     close_result_t result;
     const auto uid = getuid();
-    const auto table = read_process_table();
+    bool complete = false;
+    const auto table = read_process_table("/proc", &complete);
+    if (expected_root && !complete) return result;
     result.was_running = running(table, appid, uid);
+    if (expected_root) {
+      const auto current = title_root(table, appid, uid);
+      if (!current || current->pid != expected_root->pid || current->start_ticks != expected_root->start_ticks) return result;
+    }
 
     for (const auto &chosen : processes_to_ask(table, appid, uid)) {
       const auto fd = static_cast<int>(syscall(SYS_pidfd_open, chosen.pid, 0));

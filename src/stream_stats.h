@@ -8,11 +8,13 @@
 
 // standard includes
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -23,12 +25,28 @@
 #include <nlohmann/json_fwd.hpp>
 
 // local includes
+#include "adaptive_bitrate.h"
 #include "platform/common.h"
 #include "pyrowave_advice.h"
 #include "stream_bitrate.h"
 #include "stream_fec.h"
+#include "vrr_session_policy.h"
+#include "vrr_pacing_receipt.h"
 
 namespace stream_stats {
+
+  struct vrr_pacing_stats_t {
+    vrr_pacing::receipt_t last;
+    std::array<std::uint64_t, vrr_pacing::k_event_count> event_counts {};
+    bool authority_lost = false;
+    bool ended = false;
+    std::uint64_t last_source_epoch = 0;
+    std::uint64_t last_source_sequence = 0;
+    std::optional<std::int64_t> last_source_ns;
+  };
+
+  // Encode-loop observations only; never authorizes future source-time use.
+  bool record_vrr_pacing_event(const vrr_pacing::receipt_t &receipt);
 
   inline constexpr std::uint64_t DOCTOR_PACING_WARMUP_SAMPLES = 6;
   inline constexpr std::uint64_t DOCTOR_PACING_CONFIRMATION_SAMPLES = 2;
@@ -57,8 +75,8 @@ namespace stream_stats {
    * assigning different pressure grades to the same encoder timing.
    */
   double encoder_pressure_frame_budget_ms(double target_fps);
-  bool encoder_time_fails_budget(double encode_time_ms, double target_fps);
-  bool encoder_time_nears_budget(double encode_time_ms, double target_fps);
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps, bool source_time = false);
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps, bool source_time = false);
 
   /** Sender-side evidence for encoded frames outside the protocol FEC envelope. */
   struct fec_protection_stats_t {
@@ -111,6 +129,24 @@ namespace stream_stats {
     std::string route_fallback_reason;
 
     bool operator==(const capture_backend_t &) const = default;
+  };
+
+  /**
+   * @brief Images this encoder accepted from one capture epoch, independent of VRR policy.
+   *
+   * The producer's immutable provenance travels with the image. Counts are local to this consumer
+   * and epoch; a display reopen starts them over. They establish neither source-time pacing nor
+   * receiver presentation. A Watch consumer observes its own images without acquiring authority.
+   */
+  struct capture_timing_t {
+    platf::image_provenance_t last_accepted;
+    std::uint64_t accepted_frames = 0;
+    vrr_policy::host_presentation_counts_t presentation_counts;
+    // Protocol syntax and per-frame comparable-clock observations are separate. An epoch proof
+    // alone never makes a valid protocol timestamp comparable for a later image.
+    std::array<std::uint64_t, 9> plausibility_counts {};
+    std::string last_plausibility = "clock_unverified";
+    std::map<std::string_view, std::uint64_t> source_time_counts;
   };
 
   /**
@@ -172,6 +208,13 @@ namespace stream_stats {
     // When add_client() registered this session. A lifecycle time for the record kept once the
     // session ends, and not serialized while it streams.
     std::chrono::system_clock::time_point started_at {};
+    // This session's variable-refresh request and policy inputs, frozen by record_vrr_session() when
+    // the session starts. Empty for a session that never recorded one.
+    std::optional<vrr_policy::record_t> vrr;
+    std::optional<vrr_pacing_stats_t> vrr_pacing;
+
+    /// Accepted-image evidence, never filled by an opened display or host-wide timing counters.
+    std::optional<capture_timing_t> capture_timing;
 
     // Network
     double latency_ms = 0;
@@ -269,6 +312,11 @@ namespace stream_stats {
     std::string start_outcome;
     /// How long the client's control stream stayed before it left, or -1 when it did not leave.
     std::int64_t start_client_left_after_ms = -1;
+    /// The session's frozen variable-refresh request record.
+    std::optional<vrr_policy::record_t> vrr;
+    std::optional<vrr_pacing_stats_t> vrr_pacing;
+    /// A value snapshot of this encoder's accepted-image evidence at teardown.
+    std::optional<capture_timing_t> capture_timing;
   };
 
   struct capture_profile_sample_t {
@@ -361,6 +409,90 @@ namespace stream_stats {
     std::int64_t risk_held_ms = -1;
   };
 
+  /** Declared in full with client media ingest below; the receipt only stores a value of it. */
+  enum class client_media_ingest_state_e;
+
+  /**
+   * Report cadence evidence for one stream scope's client media counter reports, carried with the
+   * receipt.
+   *
+   * Counts and host-arrival timings of the reports the legacy ingest admitted for one stream owner,
+   * app session and generation, the report that established or reset a baseline included. It is
+   * diagnostic only: nothing reads it to decide anything, it changes no admission rule, and a
+   * rejected report (non-monotonic, out of scope, invalid) leaves it exactly as it was. It starts
+   * over with its scope and whenever the receipt is invalidated, and it survives the coverage-gap
+   * and counter-regression epochs that start inside the same scope. Host figures are arrival times
+   * on the host's steady clock; client figures are the client's own counter clock. Neither locates
+   * encode or send time, so nothing here attributes a pause to congestion, to a media rate or to
+   * capacity, and a cadence without gaps is not a measured absence of video loss.
+   */
+  struct client_media_report_cadence_t {
+    /// Reports the legacy ingest admitted in this scope: the baseline and every reset included,
+    /// never a rejected report.
+    std::uint64_t accepted_reports = 0;
+    /// Admitted reports that reset coverage because the host or client gap exceeded the bound.
+    std::uint64_t gap_resets = 0;
+    /// The host arrival and client counter gap the newest coverage-gap reset was computed from.
+    /// Meaningful once gap_resets > 0; the client gap is the unsigned difference the ingest compared.
+    std::int64_t last_gap_host_ms = 0;
+    std::uint64_t last_gap_client_ms = 0;
+    /// The ingest state of the admitted report before that gap, when that report was in this scope.
+    bool last_gap_preceding_state_known = false;
+    client_media_ingest_state_e last_gap_preceding_state {};
+    /// The longest host arrival interval between two consecutive admitted reports of this scope,
+    /// gaps included. Meaningful once host_interval_recorded: a second report has been admitted.
+    bool host_interval_recorded = false;
+    std::int64_t max_host_interval_ms = 0;
+    /// The ingest state of the newest admitted report; it becomes a later gap's preceding state.
+    client_media_ingest_state_e last_accepted_state {};
+  };
+
+  /**
+   * Observational receipt for the newest accepted client media counter report.
+   *
+   * Diagnostic only: nothing reads it to decide anything. It keeps the two monotonic clocks apart.
+   * The host clock bounds are when the reports arrived here; the client clock bounds are the client's
+   * own counter timestamps. Neither says when the frames were encoded or sent, so which bitrate
+   * produced them stays unknown. Only the latest receipt is kept; the cadence it carries counts
+   * every report its scope admitted.
+   */
+  struct client_media_interval_receipt_t {
+    /// A receipt exists for the scope below.
+    bool available = false;
+    /// Epochs start at a counter baseline, a coverage gap, a counter regression or a new scope.
+    std::uint64_t epoch = 0;
+    /// 0 for the report that starts an epoch; each later accepted report adds one.
+    std::uint64_t sequence = 0;
+    /// The legacy ingest state of the report that produced this receipt.
+    client_media_ingest_state_e state {};
+    /// The legacy ingest has finished publishing this report as network evidence (observed reports only).
+    /// Set only after that publication completes, never while it is still in progress.
+    bool network_evidence_published = false;
+    /// An interval between two reports of one epoch, with both clocks representable and within the
+    /// legacy five-second coverage bound. False for an epoch start and for an unrepresentable interval.
+    bool interval_measured = false;
+    /// epoch_start, client_interval_unrepresentable or host_interval_unrepresentable when not measured.
+    std::string interval_unavailable_reason;
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_received = 0;
+    std::uint64_t frames_lost = 0;
+    std::uint64_t client_start_ms = 0;
+    std::uint64_t client_end_ms = 0;
+    std::uint64_t client_duration_ms = 0;
+    std::chrono::steady_clock::time_point host_start {};
+    std::chrono::steady_clock::time_point host_end {};
+    std::int64_t host_duration_ms = 0;
+    /// Host steady-clock milliseconds since host_end, set only when a stats snapshot copies the receipt.
+    std::int64_t host_receipt_age_ms = 0;
+    /// This scope's report cadence, carried from the receipt this one replaced when that receipt was
+    /// the same scope's. Serialized beside the interval, and only with it.
+    client_media_report_cadence_t cadence;
+    /// Scope fence; never serialized.
+    std::string owner_uuid;
+    std::string app_session_id;
+    std::uint64_t session_generation = 0;
+  };
+
   struct stats_t {
     std::uint64_t session_generation = 0;
     std::string app_session_id;
@@ -423,6 +555,10 @@ namespace stream_stats {
     double frame_jitter_ms = 0;
     double capture_source_fps = 0;
     std::string capture_pacing;
+    /// ext-image-copy presentation-time availability, mixed across every route and session the host
+    /// capture producer served. Host capture evidence only: never copied into a session's vrr record,
+    /// last_session or Doctor stream evidence.
+    vrr_policy::host_presentation_counts_t host_capture_presentation;
     std::string codec;
     // The encoder instance producing these samples, not the startup probe.
     std::string encoder_backend;
@@ -469,6 +605,9 @@ namespace stream_stats {
     uint64_t video_policy_sample_count = 0;
     /// Consecutive complete windows whose pacing evidence crosses a warning threshold.
     uint64_t pacing_warning_streak = 0;
+    std::uint64_t video_policy_session_generation = 0;
+    bool video_policy_source_time = false;
+    bool video_policy_cadence_available = true;
     /// Monotonic count of primary media/control network observations.
     uint64_t network_sample_revision = 0;
     /// Host monotonic age of the newest complete network observation, or -1
@@ -506,6 +645,13 @@ namespace stream_stats {
     /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
     int adaptive_min_bitrate_kbps = 0;
     std::string adaptive_floor_source;
+    /// The newest client media interval receipt, copied by get_current() as an as-of diagnostic. Served
+    /// only for the scope it was recorded in; a snapshot built any other way carries none.
+    client_media_interval_receipt_t client_media_interval_receipt;
+    /// Live Tuning's history, copied by get_current() from the same controller snapshot as the
+    /// adaptive fields above. Serialized only for the stream scope it was recorded in; a snapshot built
+    /// any other way carries none.
+    adaptive_bitrate::history_t live_tuning_history;
 
     // System
     double gpu_usage = 0;
@@ -818,6 +964,49 @@ namespace stream_stats {
    * @return False when no client holds that generation or nothing was opened, so the caller retries.
    */
   bool record_capture_backend(std::uint64_t session_generation, const capture_backend_t &backend);
+
+  /**
+   * @brief Atomically attribute one newly accepted source image to its live encoder session.
+   *
+   * Refuses zero/unknown/retired sessions, missing epoch/sequence, regressing epochs, duplicate or
+   * regressing source sequences and contradictory identities/routes/proofs within an epoch. Retry
+   * before registration is allowed: a refused write advances no consumer evidence or cache.
+   */
+  bool record_accepted_capture(std::uint64_t session_generation, const platf::image_provenance_t &provenance);
+
+  /// Authenticated diagnostic evidence for this generation only; no record returns JSON null.
+  nlohmann::json capture_timing_json(const stats_t &stats, std::uint64_t session_generation);
+
+  /**
+   * @brief Freeze a live generation's variable-refresh request, once.
+   *
+   * The request is decided at admission and never changes within a generation: a second write for
+   * the same generation is refused rather than replacing the first, and a write for generation zero
+   * or for a generation with no client entry is refused.
+   * @return Whether this write stored the record.
+   */
+  bool record_vrr_session(const vrr_policy::record_t &record);
+
+  /**
+   * @brief Count one ext-image-copy presentation-time status in the host capture counters.
+   *
+   * Touches only stats_t::host_capture_presentation, never a client's vrr record: a capture frame is
+   * not attributed to any stream generation here. Descriptive only, never cadence evidence.
+   */
+  void note_source_presentation(vrr_policy::presentation_status_e status);
+
+  /**
+   * @brief The diagnostic `vrr` object for one live generation, with session_generation inside it.
+   *
+   * Reads only that generation's own record, so another owner's or a Watch session's record is never
+   * reported for it. Its capture_pacing is unknown: no capture route is proven to belong to a
+   * generation yet, and the process-wide label must not describe it. Null for generation zero or a
+   * generation with no record.
+   */
+  nlohmann::json vrr_json(const stats_t &stats, std::uint64_t session_generation);
+
+  /// Pending/stale source pacing and another generation's sample cannot grade this stream's cadence.
+  bool source_pacing_evidence_unavailable(const stats_t &stats, std::uint64_t session_generation = 0);
 
   /**
    * @brief Record how a live nonzero generation's PyroWave frames reach the codec.
@@ -1176,6 +1365,8 @@ namespace stream_stats {
     /// The frames this report covers since the one before it, and how many of them were lost.
     std::uint64_t frames_expected = 0;
     std::uint64_t frames_lost = 0;
+    /// The diagnostic receipt this report produced, if it was accepted. Never a policy input.
+    std::optional<client_media_interval_receipt_t> receipt;
   };
 
   /**
@@ -1445,6 +1636,24 @@ namespace stream_stats {
   nlohmann::json network_verdict_json(const network_verdict_t &verdict);
 
   /**
+   * @brief The client media interval receipt as stream stats and Doctor's advanced evidence serve it.
+   *
+   * Reads only @p stats, an as-of snapshot. The receipt appears only while that snapshot streams and its
+   * stream generation and app session match the receipt's. It carries no identity, is not action
+   * authority or a stream-health verdict, and its media-rate attribution is always unknown.
+   */
+  nlohmann::json client_media_interval_json(const stats_t &stats);
+
+  /**
+   * @brief Live Tuning's history as the stream stats and Doctor's advanced evidence serve it.
+   *
+   * Reads only @p stats: entries appear only when its history was recorded for the same stream
+   * generation and session the snapshot describes, while it streams. Times are host steady-clock
+   * milliseconds; no entry says which bitrate any client media interval was encoded at.
+   */
+  nlohmann::json live_tuning_history_json(const stats_t &stats);
+
+  /**
    * @brief Update runtime mode metadata exposed to the dashboard.
    * @param state Current runtime state for the active backend.
    */
@@ -1466,7 +1675,10 @@ namespace stream_stats {
                                        double dropped_frame_ratio,
                                        double avg_frame_age_ms,
                                        double frame_jitter_ms,
-                                       double encode_time_ms);
+                                       double encode_time_ms,
+                                       std::uint64_t session_generation = 0,
+                                       bool source_time = false,
+                                       bool cadence_available = true);
 
   /** @brief Publish whether capture is timer-paced or compositor/source-driven. */
   void update_capture_pacing(const std::string &pacing);
@@ -1987,7 +2199,8 @@ namespace stream_stats {
   /**
    * @brief Expire every frozen/aborted run whose frozen_monotonic is older
    * than the 30-minute TTL (measurement-spec-v1.md 6.4). Intended to be
-   * called lazily (e.g. from a future get_benchmark_run()), not on a timer.
+   * called lazily by get_benchmark_run() after its mode and authorization
+   * guards, not on a timer.
    */
   void expire_stale_benchmark_runs();
 

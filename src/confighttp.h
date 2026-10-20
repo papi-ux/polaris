@@ -19,7 +19,9 @@
 
 // local includes
 #include "artwork_sweep.h"
+#include "game_artwork_provider.h"
 #include "process.h"
+#include "stream_recorder.h"
 #include "thread_safe.h"
 
 namespace stream_stats {
@@ -78,6 +80,80 @@ namespace confighttp {
   std::string client_settings_endpoint_url(std::string_view request_host);
 
   void start();
+
+#ifdef POLARIS_TESTS
+  // Serve the production read-only handlers on an owned loopback TLS listener. Before `ready`,
+  // `network_queued` (when given) receives a wait on this server's own network collector: true
+  // once that many accepted readouts are queued for a read not yet started. It is valid only until
+  // this function returns.
+  void run_apps_stats_server_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready,
+    const std::function<void()> &before_apps,
+    const std::function<void(std::function<bool(std::size_t, std::chrono::milliseconds)>)> &network_queued = {}
+  );
+  // Serve the production console app list, save and launch handlers (#204 entry tests) on an owned
+  // loopback TLS listener.
+  void run_console_app_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  );
+  // Serve the production recording routes, registered by the same function start() uses (CSRF
+  // wrapper and handler authentication included), on an owned loopback TLS listener.
+  void run_recording_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  );
+  // Configure only before starting a test listener; reset after its owned drain.
+  void set_recording_post_for_tests(std::function<void(std::function<void()>)> post);
+  void set_recording_commit_observer_for_tests(std::function<void()> observer);
+  void set_recording_before_launch_for_tests(std::function<void()> hook);
+  // Serve the production library artwork route, registered by the same function start() uses, on
+  // an owned loopback TLS listener. Its background fills are drained before this returns.
+  void run_library_artwork_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  );
+  // Configure only before starting a test listener; reset after its owned drain. The transport
+  // replaces Steam's CDN for background fills, and appdata the host artwork cache's root.
+  void set_library_artwork_for_tests(game_artwork::providers::transport_t transport, std::optional<std::filesystem::path> appdata);
+  // True once no background fill is running, false when one still is after the timeout.
+  bool wait_for_library_artwork_fills_for_tests(std::chrono::milliseconds timeout);
+  // Forget every running mark and retry window, so the next view of any entry may fill again.
+  void forget_library_artwork_fills_for_tests();
+#endif
+
+  /**
+   * @brief The Steam downloads a console view of an entry's background or logo may start.
+   *
+   * Only the background and logo the host artwork cache does not hold yet, for an entry with a
+   * Steam app id, from Steam's public CDN. Nothing for a Desktop or utility entry, nor for one whose
+   * artwork somebody removed with Remove artwork. Never SteamGridDB, and never a poster: the console
+   * shows the entry's own image for that.
+   */
+  std::vector<game_artwork::providers::request_t> library_artwork_fill_plan(
+    const std::filesystem::path &appdata,
+    const proc::ctx_t &app
+  );
+
+  /**
+   * @brief Assemble the GET /api/recording/status payload from one recorder snapshot.
+   *
+   * The legacy keys (status, recording, mode, file) keep their meaning; `replay` is additive.
+   * `recording` and `mode` are independent facts. Durations are whole milliseconds by arrival
+   * time, not presentation time; a buffered run is stored raw video starting at a keyframe, not
+   * a save guarantee or a playable clip. No session identity, output directory or error text.
+   */
+  nlohmann::json build_recording_status_json(const stream_recorder::recorder_status_t &status);
+
+  /**
+   * @brief Assemble the POST /api/recording/save-replay payload.
+   *
+   * The legacy keys (status, file) keep their meaning. `outcome` is always present; `captured`
+   * is the admitted snapshot or null; `kind` is present only when a raw video file was saved.
+   * No error text, errno or session identity.
+   */
+  nlohmann::json build_save_replay_json(const stream_recorder::detail::save_result_t &result);
 
   /**
    * @brief Assemble the GET /api/settings/metadata payload.

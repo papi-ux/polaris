@@ -35,7 +35,11 @@ describe('Troubleshooting self-service support flow', () => {
     const source = webSource('views/TroubleshootingView.vue')
 
     expect(source).toContain('doctorDiagnosisIdle ? \'doctor-diagnosis-idle p-3\' : \'p-4\'')
-    expect(source).toContain('v-if="!doctorDiagnosisIdle" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist')
+    // The checklist grid shows only current host configuration findings before a stream (#152),
+    // so it is gated on having something to show rather than on the idle verdict alone.
+    expect(source).toContain('v-if="visibleChecklist.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist')
+    expect(source).toContain('v-for="item in visibleChecklist"')
+    expect(source).not.toContain('v-if="!doctorDiagnosisIdle" class="grid gap-3')
     expect(source).toContain('v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-info/20')
   })
 

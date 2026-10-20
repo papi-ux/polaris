@@ -27,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 
 using namespace std::chrono_literals;
 
@@ -302,6 +303,59 @@ TEST(StreamControlTerminationTests, ASessionThatCouldNotBeBuiltThisTimeIsBuiltAg
     EXPECT_EQ(log.count(hdr_refusal), 0);
     EXPECT_FALSE(session_mail->event<bool>(mail::frame_conversion_failed)->peek())
       << "a failure that may not repeat ended the stream as one that cannot change";
+    stream::session::stop(*session);
+    EXPECT_EQ(stream::session::control_termination_code_for_tests(*session),
+              graceful ? std::optional<std::uint32_t> {0x80030023u} : std::nullopt);
+  }
+}
+TEST(StreamControlTerminationTests, RepeatedEncoderInitializationFailureHasABoundedBudgetAndEndsAsVideoFailure) {
+  auto session = make_session();
+  stream::session::set_state_for_tests(*session, stream::session::state_e::RUNNING);
+  const auto session_mail = stream::session::mail_for_tests(*session);
+  // The old loop needs this independent stop to return; it must not supply the
+  // new failure reason or budget. Both paths exercise the real encode loop.
+  const auto display = std::make_shared<SdrDisplay>([&session](int built) {
+    if (built == 6) stream::session::stop(*session);
+  });
+  auto config = pyrowave_stream(false);
+  config.width = config.height = 0;
+  const auto before = std::chrono::steady_clock::now();
+  video::encode_published_display_for_tests(session_mail, config, display,
+                                           stream::session::packet_destination_for_tests(*session));
+  EXPECT_EQ(display->sessions, 5);
+  EXPECT_GE(std::chrono::steady_clock::now() - before, 1500ms)
+    << "initialization failures still rebuild in a tight loop";
+  EXPECT_TRUE(session_mail->event<bool>(mail::frame_conversion_failed)->peek());
+  EXPECT_TRUE(session_mail->event<bool>(mail::shutdown)->peek());
+  stream::session::stop(*session);
+  EXPECT_EQ(stream::session::control_termination_code_for_tests(*session),
+            std::optional<std::uint32_t> {0x800e9403u});
+}
+
+TEST(StreamControlTerminationTests, CancellationDuringEncoderInitializationBackoffKeepsItsOwnTerminationReason) {
+  for (const bool graceful : {false, true}) {
+    SCOPED_TRACE(graceful ? "graceful stop" : "plain stop");
+    auto session = make_session();
+    stream::session::set_state_for_tests(*session, stream::session::state_e::RUNNING);
+    const auto session_mail = stream::session::mail_for_tests(*session);
+    std::future<void> cancellation;
+    const auto display = std::make_shared<SdrDisplay>([&](int built) {
+      if (built == 1) {
+        cancellation = std::async(std::launch::async, [&] {
+          std::this_thread::sleep_for(20ms);
+          graceful ? stream::session::graceful_stop(*session) : stream::session::stop(*session);
+        });
+      }
+      if (built == 6) stream::session::stop(*session);
+    });
+    auto config = pyrowave_stream(false);
+    config.width = config.height = 0;
+    video::encode_published_display_for_tests(session_mail, config, display,
+                                             stream::session::packet_destination_for_tests(*session));
+    ASSERT_TRUE(cancellation.valid());
+    cancellation.get();
+    EXPECT_EQ(display->sessions, 1) << "shutdown during backoff started another encoder";
+    EXPECT_FALSE(session_mail->event<bool>(mail::frame_conversion_failed)->peek());
     stream::session::stop(*session);
     EXPECT_EQ(stream::session::control_termination_code_for_tests(*session),
               graceful ? std::optional<std::uint32_t> {0x80030023u} : std::nullopt);

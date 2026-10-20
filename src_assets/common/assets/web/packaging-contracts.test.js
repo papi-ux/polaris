@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
@@ -504,6 +504,31 @@ describe('Heroic library launcher entry', () => {
 })
 
 describe('Linux packaging contracts', () => {
+  it('preserves the generated desktop service command for ordinary menu launches', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-service-contract-'))
+    try {
+      writeFileSync(join(fixture, 'CMakeLists.txt'), [
+        'cmake_minimum_required(VERSION 3.22)',
+        'project(PolarisServiceContract LANGUAGES NONE)',
+        'set(POLARIS_EXECUTABLE_PATH "/usr/bin/polaris")',
+        'include("${POLARIS_SOURCE}/cmake/prep/init.cmake")',
+        'configure_file("${POLARIS_SOURCE}/packaging/linux/polaris.service.in"',
+        '               "${CMAKE_CURRENT_BINARY_DIR}/polaris.service" @ONLY)',
+      ].join('\n'))
+      const build = join(fixture, 'build')
+      const configure = spawnSync('cmake', [
+        '-S', fixture, '-B', build, '-DCMAKE_SYSTEM_NAME=Linux',
+        `-DPOLARIS_SOURCE=${process.cwd()}`,
+      ], { encoding: 'utf8' })
+      expect(configure.status, configure.stdout + configure.stderr).toBe(0)
+      const unit = readFileSync(join(build, 'polaris.service'), 'utf8')
+      expect(unit.split('\n').filter((line) => line.startsWith('ExecStart=')))
+        .toEqual(['ExecStart=/usr/bin/polaris'])
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
   it('lets the user service outlive the desktop session', () => {
     // A streaming host must keep serving when the desktop session ends: a
     // headless-boot host never has one, and PartOf= stop propagation would end
@@ -773,18 +798,29 @@ describe('Linux packaging contracts', () => {
     }
   })
 
-  it('defines a distinct SteamOS 3.8 build lane', () => {
+  it('defines one SteamOS build lane per supported SteamOS release', () => {
     const workflow = readSource('.github/workflows/build.yml')
-    const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
+    // Separate jobs with literal names, not a matrix: a skipped matrix job reports one check with its
+    // name unexpanded, and the required "SteamOS 3.8 build" check would never report.
+    for (const [release, steamOs] of [
+      ['3.8', section(workflow, '  steamos-build:', '  steamos-3-9-build:')],
+      ['3.9', section(workflow, '  steamos-3-9-build:', '  ubuntu-build:')],
+    ]) {
+      expect(steamOs).toContain(`    name: SteamOS ${release} build\n`)
+      expect(steamOs).not.toContain('${{ matrix')
+      expect(steamOs).toContain('scripts/ci/run-steamos-build.sh')
+      expect(steamOs).toContain(`POLARIS_STEAMOS_TARGET: '${release}'`)
+      expect(steamOs).toContain('--env "POLARIS_STEAMOS_TARGET=$POLARIS_STEAMOS_TARGET"')
+      expect(steamOs).toContain(`Polaris-steamos${release}-x86_64.pkg.tar.zst`)
+      expect(steamOs).not.toContain('packaging/linux/Arch/PKGBUILD')
+      assertSteamOsUpload(steamOs, release)
+    }
+  })
 
-    expect(steamOs).toContain('SteamOS 3.8 build')
-    expect(steamOs).toContain('scripts/ci/run-steamos-build.sh')
-    expect(steamOs).toContain('Polaris-steamos3.8-x86_64.pkg.tar.zst')
-    expect(steamOs).not.toContain('packaging/linux/Arch/PKGBUILD')
-
-    const upload = yamlStepContaining(steamOs, 'name: Polaris-steamos3.8-package')
+  const assertSteamOsUpload = (steamOs, release) => {
+    const upload = yamlStepContaining(steamOs, `name: Polaris-steamos${release}-package`)
     expect(upload).toContain('uses: actions/upload-artifact@')
-    expect(upload).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
+    expect(upload).toMatch(new RegExp(`^\\s+name: Polaris-steamos${release.replace('.', '\\.')}-package\\s*$`, 'm'))
 
     // All three, because the release job refuses a short list and polaris-kms is published from
     // this artifact. The first tag build after the polaris-kms split failed with an empty log
@@ -802,28 +838,68 @@ describe('Linux packaging contracts', () => {
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && !line.startsWith('#'))
     expect(listedPaths).toHaveLength(3)
-    expect(listedPaths.some((line) => line.endsWith('/Polaris-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
-    expect(listedPaths.some((line) => line.endsWith('/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
-    expect(listedPaths.some((line) => line.endsWith('/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
+    expect(listedPaths.some((line) => line.endsWith(`/Polaris-steamos${release}-x86_64.pkg.tar.zst`))).toBe(true)
+    expect(listedPaths.some((line) => line.endsWith(`/Polaris-kms-steamos${release}-x86_64.pkg.tar.zst`))).toBe(true)
+    expect(listedPaths.some((line) => line.endsWith(`/Polaris-debug-steamos${release}-x86_64.pkg.tar.zst`))).toBe(true)
     for (const line of listedPaths) {
       expect(line, 'every uploaded SteamOS path must be an exact filename').not.toMatch(/[*?\[]/)
     }
-  })
+  }
 
-  it('requires signed SteamOS 3.8.1x package sources with a pinned Valve keyring', () => {
+  it('requires signed SteamOS package sources with a pinned Valve keyring for each release', () => {
     const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
-    const repoNames = [...bootstrap.matchAll(/^\[((?:jupiter|holo|core|extra)(?:-[^\]]+)?)\]$/gm)]
-      .map((match) => match[1])
+    const lines = bootstrap.split('\n')
+    // The target table, run as written, decides the repositories and the keyring for each release.
+    const tableStart = lines.indexOf('case "$POLARIS_STEAMOS_TARGET" in')
+    const tableEnd = lines.indexOf('esac', tableStart + 1)
+    expect(tableStart).toBeGreaterThanOrEqual(0)
+    expect(tableEnd).toBeGreaterThan(tableStart)
+    const table = lines.slice(tableStart, tableEnd + 1).join('\n')
+    // The pacman configuration, written as the script writes it, is what pacstrap reads.
+    const configStart = lines.indexOf("printf '%s\\n' '[options]' 'Architecture = auto' 'CheckSpace' \\")
+    const configEnd = lines.indexOf('done', configStart + 1)
+    expect(configStart).toBeGreaterThanOrEqual(0)
+    expect(configEnd).toBeGreaterThan(configStart)
+    const configBlock = lines.slice(configStart, configEnd + 1).join('\n')
+    const show = 'printf \'%s %s %s\\n\' "$STEAMOS_REPOSITORY_SUFFIX" "$HOLO_KEYRING_PACKAGE" "$HOLO_KEYRING_SHA256"'
 
-    expect(bootstrap).toContain('SigLevel = Required DatabaseOptional')
-    expect(bootstrap).toContain('LocalFileSigLevel = Required')
-    expect(bootstrap).toContain('a5efa4f9c161ce9607fd9dfcccaf2a587baa9acd35eae04d3c01d967dddc9722')
-    expect(repoNames).toEqual([
-      'jupiter-3.8.1x',
-      'holo-3.8.1x',
-      'core-3.8.1x',
-      'extra-3.8.1x',
-    ])
+    for (const [target, suffix, keyring, keyringSha256] of [
+      ['3.8', '3.8.1x', 'holo-keyring-20250801-1-any.pkg.tar.zst', 'a5efa4f9c161ce9607fd9dfcccaf2a587baa9acd35eae04d3c01d967dddc9722'],
+      ['3.9', '3.9', 'holo-keyring-20250801-2-any.pkg.tar.zst', 'cc21dbcbe1b4130438bbb109bb8382a1513c6e116a9e59ad0b139475ccad4252'],
+    ]) {
+      const chosen = spawnSync('bash', ['-c', `${table}\n${show}`], {
+        encoding: 'utf8', env: { ...process.env, POLARIS_STEAMOS_TARGET: target },
+      })
+      expect(chosen.status, chosen.stderr).toBe(0)
+      expect(chosen.stdout).toBe(`${suffix} ${keyring} ${keyringSha256}\n`)
+
+      const rendered = spawnSync('bash', ['-c', `${configBlock}\ncat "$STEAMOS_PACMAN_CONFIG"`], {
+        encoding: 'utf8',
+        env: { ...process.env, STEAMOS_REPOSITORY_SUFFIX: suffix, STEAMOS_PACMAN_CONFIG: join(mkdtempSync(join(tmpdir(), 'polaris-steamos-conf-')), 'pacman.conf') },
+      })
+      expect(rendered.status, rendered.stderr).toBe(0)
+      const config = rendered.stdout
+      expect(config).toContain('SigLevel = Required DatabaseOptional\n')
+      expect(config).toContain('LocalFileSigLevel = Required\n')
+      expect(config).not.toMatch(/SigLevel = (?:Never|Optional)/)
+      const repoNames = [...config.matchAll(/^\[((?:jupiter|holo|core|extra)(?:-[^\]]+)?)\]$/gm)].map((match) => match[1])
+      expect(repoNames).toEqual([`jupiter-${suffix}`, `holo-${suffix}`, `core-${suffix}`, `extra-${suffix}`])
+      for (const repo of repoNames) {
+        expect(config).toContain(`[${repo}]\nServer = https://steamdeck-packages.steamos.cloud/archlinux-mirror/${repo}/os/$arch\n`)
+      }
+    }
+    for (const unsupported of ['', '3.7', '3.10', '3.9.2', 'latest']) {
+      const refused = spawnSync('bash', ['-c', table], {
+        encoding: 'utf8', env: { ...process.env, POLARIS_STEAMOS_TARGET: unsupported },
+      })
+      expect(refused.status, `unexpected status for ${JSON.stringify(unsupported)}`).toBe(1)
+      expect(refused.stderr).toContain('POLARIS_STEAMOS_TARGET must be 3.8 or 3.9')
+    }
+    // The keyring download, its pin and the package install all read the chosen release's names.
+    expect(bootstrap).toContain('"https://steamdeck-packages.steamos.cloud/archlinux-mirror/holo-$STEAMOS_REPOSITORY_SUFFIX/os/x86_64/$HOLO_KEYRING_PACKAGE"')
+    expect(bootstrap).toContain('"$HOLO_KEYRING_SHA256" \\\n  "/tmp/$HOLO_KEYRING_PACKAGE" | sha256sum -c -')
+    // Unset means 3.8, so every existing caller builds exactly the package it built before.
+    expect(bootstrap).toContain('POLARIS_STEAMOS_TARGET="${POLARIS_STEAMOS_TARGET-3.8}"')
   })
 
   it('installs outer-container Git and initializes cleanup state before either is used', () => {
@@ -1051,6 +1127,54 @@ describe('Linux packaging contracts', () => {
     expect(pkgbuild).not.toContain('-D POLARIS_ENABLE_CUDA=OFF')
   })
 
+  for (const target of ['3.8', '3.9']) {
+    it(`configures the GCC runtime dependencies for SteamOS ${target}`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-steamos-runtime-'))
+      try {
+        for (const path of [
+          'packaging/linux/dev.polaris-stream.app.Polaris.desktop',
+          'packaging/linux/dev.polaris-stream.app.Polaris.terminal.desktop',
+          'packaging/linux/dev.polaris-stream.app.Polaris.metainfo.xml',
+          'packaging/linux/polaris.service.in',
+          'packaging/linux/SteamOS/PKGBUILD',
+          'packaging/linux/SteamOS/polaris.install',
+          'packaging/linux/SteamOS/polaris-kms.install',
+        ]) {
+          mkdirSync(dirname(join(fixture, path)), { recursive: true })
+          writeFileSync(join(fixture, path), readSource(path))
+        }
+        const output = join(fixture, 'output')
+        mkdirSync(output)
+        const driver = join(fixture, 'configure.cmake')
+        // The real project sets CMake's policies before including this module. A bare -P
+        // script otherwise treats if(ON) differently on CMake 3.x and 4.x (CMP0012).
+        const minimum = readSource('CMakeLists.txt').match(/^cmake_minimum_required\([^\n]+\)$/m)[0]
+        writeFileSync(driver, `${minimum}
+set(UNIX TRUE)
+set(APPLE FALSE)
+set(PROJECT_FQDN "dev.polaris-stream.app.Polaris")
+set(POLARIS_CONFIGURE_STEAMOS_PKGBUILD ON)
+set(POLARIS_CONFIGURE_ONLY ON)
+set(POLARIS_STEAMOS_TARGET "${target}")
+set(CMAKE_BINARY_DIR "${output}")
+include("${join(process.cwd(), 'cmake/prep/special_package_configuration.cmake')}")
+`)
+        const result = spawnSync('cmake', ['-P', driver], { encoding: 'utf8', cwd: fixture })
+        expect(result.status, result.stderr).toBe(0)
+        const generated = readFileSync(join(output, 'packaging/linux/SteamOS/PKGBUILD'), 'utf8')
+        const depends = generated.match(/^depends=\(\n([\s\S]*?)\n\)/m)[1]
+        const dependencies = [...depends.matchAll(/'([^']+)'/g)].map((match) => match[1])
+        // SteamOS 3.9's gcc-libs is an empty umbrella; namcap needs the actual library owners.
+        // Keep the 3.8 runtime dependency, whose package still owns both libraries.
+        const runtimeNames = dependencies.filter((name) => ['gcc-libs', 'libgcc', 'libstdc++'].includes(name))
+        expect(runtimeNames).toEqual(target === '3.8' ? ['gcc-libs'] : ['libgcc', 'libstdc++'])
+        expect(generated).not.toContain('@POLARIS_STEAMOS_RUNTIME_DEPENDS@')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+
   it('validates exact SteamOS source identity, package metadata, dependencies, and payload', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
@@ -1059,6 +1183,7 @@ describe('Linux packaging contracts', () => {
     const commonTargets = readSource('cmake/targets/common.cmake')
     const pkgbuild = readSource('packaging/linux/SteamOS/PKGBUILD')
     const reviewedNamcap = readSource('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')
+    const reviewedNamcap39 = readSource('packaging/linux/SteamOS/namcap-reviewed-warnings-steamos3.9.txt')
 
     expect(steamOs).toContain('EXPECTED_SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}')
     expect(steamOs).toContain("git rev-parse 'HEAD^{commit}'")
@@ -1077,7 +1202,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     // The release number stays literal. A prerelease joins its label to it with no separator, which
     // pacman sorts below that release, and the helper carries that version and depends on it.
-    expect(buildScript).toContain('EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"')
+    expect(buildScript).toContain('EXPECTED_PKGVER="1.5.0${POLARIS_PRERELEASE_LABEL}-1"')
     expect(buildScript).toContain('if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then')
     expect(buildScript).toContain('if [ "$KMS_IDENTITY" != "polaris-kms|$EXPECTED_PKGVER|x86_64" ]; then')
     expect(buildScript).toContain('if ! grep -Fqx "depend = polaris=$EXPECTED_PKGVER" "$KMS_RECEIPT_ROOT/.PKGINFO"; then')
@@ -1091,15 +1216,18 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('HOST_BINARIES=("$RECEIPT_ROOT"/usr/bin/polaris-[0-9]*)')
     expect(commonTargets).toContain('-buildmode=pie')
     expect(commonTargets).toContain('-ldflags=-linkmode=external -extldflags=-Wl,-z,relro,-z,now')
-    for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libei', 'libpipewire', 'libxkbcommon']) {
+    for (const dependency of ['glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libei', 'libpipewire', 'libxkbcommon']) {
       expect(pkgbuild).toContain(`'${dependency}'`)
     }
-    expect(buildScript).toContain('PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"')
+    expect(buildScript).toContain('PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$RECEIPT_PREFIX-namcap-all.txt"')
+    expect(buildScript).toContain('RECEIPT_PREFIX="$OUTPUT_ROOT/steamos$POLARIS_STEAMOS_TARGET"')
+    expect(buildScript).toContain('NAMCAP_REVIEWED_LIST="$SOURCE_ROOT/packaging/linux/SteamOS/namcap-reviewed-warnings.txt"')
+    expect(buildScript).toContain('LC_ALL=C sort -u "$NAMCAP_REVIEWED_LIST" > "$NAMCAP_ALLOWED"')
     expect(buildScript).toContain('comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED"')
     expect(buildScript).toContain('comm -13 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED"')
-    expect(buildScript).toContain('if [ -s "$OUTPUT_ROOT/steamos3.8-namcap.txt" ]; then')
+    expect(buildScript).toContain('if [ -s "$RECEIPT_PREFIX-namcap.txt" ]; then')
     expect(buildScript).toContain('namcap emitted unreviewed warnings or a reviewed warning disappeared')
-    expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
+    expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$RECEIPT_PREFIX-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
     // Still 18 after LTO and volk namespace isolation removed DT_NEEDED libvulkan.so.1.
     // namcap now calls vulkan-icd-loader potentially unneeded instead of reporting an
@@ -1121,12 +1249,26 @@ describe('Linux packaging contracts', () => {
     )
     expect(new Set(reviewedWarnings).size).toBe(reviewedWarnings.length)
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
+    // SteamOS 3.9 has its own toolchain and its own reviewed list, gated the same way.
+    const reviewedWarnings39 = reviewedNamcap39.trim().split('\n')
+    // namcap 3.6 disables its SHSTK rule; the binaries still lack SHSTK. Retiring these
+    // two warnings records a linter change, not a change in binary hardening.
+    expect(reviewedWarnings39).toEqual(reviewedWarnings.filter((warning) => !warning.includes('GNU_PROPERTY_X86_FEATURE_1_SHSTK')))
+    expect(new Set(reviewedWarnings39).size).toBe(reviewedWarnings39.length)
+    expect(reviewedWarnings39.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
+    // Boost renames its libraries every release. Each soname entry becomes an exact dependency on the
+    // Boost this build linked, and the build refuses a binary whose Boost needs are not all bound.
+    for (const library of ['filesystem', 'locale', 'log', 'program_options', 'thread']) {
+      expect(pkgbuild).toMatch(new RegExp(`depends=\\([\\s\\S]*?\\n  'libboost_${library}\\.so'\\n[\\s\\S]*?\\n\\)`))
+    }
+    expect(buildScript).toContain('if ! grep -Fqx "depend = ${dependency}=${boost_version}-64" "$RECEIPT_ROOT/.PKGINFO"; then')
+    expect(buildScript).toContain('done < "$RECEIPT_PREFIX-boost-sonames.txt"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/polaris"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/lib/systemd/user/polaris.service"')
-    // Named for the release number alone: a prerelease's pkgver, 1.4.14beta.1, is not the binary's
-    // name, and the reviewed namcap warnings name usr/bin/polaris-1.4.14 either way.
+    // Named for the release number alone: a prerelease's pkgver, 1.5.0beta.2, is not the binary's
+    // name, and the reviewed namcap warnings name usr/bin/polaris-1.5.0 either way.
     expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).not.toContain('mv "$pkgdir/usr/bin/polaris"')
@@ -1141,6 +1283,7 @@ describe('Linux packaging contracts', () => {
       'Polaris-arch-x86_64.pkg.tar.zst',
       'Polaris-fedora44-x86_64.rpm',
       'Polaris-steamos3.8-x86_64.pkg.tar.zst',
+      'Polaris-steamos3.9-x86_64.pkg.tar.zst',
       'Polaris-ubuntu24.04-x86_64.deb',
     ]) {
       expect(releaseVerifier).toContain(requiredBinary)
@@ -1247,18 +1390,22 @@ describe('Linux packaging contracts', () => {
     }
   })
 
-  it('downloads and stages the SteamOS package in release assembly', () => {
+  it('downloads and stages each SteamOS release package in release assembly', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const releaseAssetsIndex = workflow.indexOf('  release-assets:')
     expect(releaseAssetsIndex, 'missing release-assets job').toBeGreaterThanOrEqual(0)
     const releaseAssets = workflow.slice(releaseAssetsIndex)
     const needs = section(releaseAssets, '    needs:', '    if:')
+    const releases = ['3.8', '3.9']
 
     expect(needs).toContain('- steamos-build')
-    const download = yamlStepContaining(releaseAssets, 'name: Polaris-steamos3.8-package')
-    expect(download).toContain('uses: actions/download-artifact@v8')
-    expect(download).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
-    expect(download).toMatch(/^\s+path: release-assets\/raw\/steamos3\.8\s*$/m)
+    expect(needs).toContain('- steamos-3-9-build')
+    for (const release of releases) {
+      const download = yamlStepContaining(releaseAssets, `name: Polaris-steamos${release}-package`)
+      expect(download).toContain('uses: actions/download-artifact@v8')
+      expect(download).toMatch(new RegExp(`^\\s+name: Polaris-steamos${release.replace('.', '\\.')}-package\\s*$`, 'm'))
+      expect(download).toMatch(new RegExp(`^\\s+path: release-assets/raw/steamos${release.replace('.', '\\.')}\\s*$`, 'm'))
+    }
 
     const assembly = yamlStepContaining(
       releaseAssets,
@@ -1269,60 +1416,69 @@ describe('Linux packaging contracts', () => {
     expect(hasShellDataBlock(assembly), 'release assembly must not satisfy execution contracts through heredoc data').toBe(false)
     const assemblyCommands = normalizedShellCommands(assembly)
     const nullglobCommand = 'shopt -s nullglob'
-    const packageArrayCommand = 'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)'
-    // All three packages are required; staging still names each archive explicitly.
+    // All three packages of each release are required; staging still names each archive explicitly.
     const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 3 ]; then'
-    const exactCopy = 'cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"'
-    const stagedDestination = 'release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst'
     const stagedDirectory = 'release-assets/staged'
-    const stagedBasename = 'Polaris-steamos3.8-x86_64.pkg.tar.zst'
     const nullglobIndex = assemblyCommands.indexOf(nullglobCommand)
-    const arrayIndex = assemblyCommands.indexOf(packageArrayCommand)
-    const guardIndex = assemblyCommands.indexOf(cardinalityGuard)
-    const guardExitIndex = assemblyCommands.indexOf('exit 1', guardIndex + 1)
-    const guardCloseIndex = assemblyCommands.indexOf('fi', guardIndex + 1)
-    const copyIndex = assemblyCommands.indexOf(exactCopy)
     const expandedAssemblyCommands = canonicalShellCommands(expandStaticShellVariables(assemblyCommands))
     const assemblyBlockDepths = shellBlockDepths(assemblyCommands)
     const assemblyTrapCommands = shellExecutableOccurrences(canonicalShellCommands(assemblyCommands), 'trap')
     expect(hasDynamicShellExecutable(expandedAssemblyCommands), 'release assembly must not use unresolved dynamic executables').toBe(false)
     expect(hasIndirectShellBinding(expandedAssemblyCommands), 'release assembly must not create indirect shell bindings').toBe(false)
     expect(assemblyTrapCommands, 'release assembly must not defer writer commands through traps').toEqual([])
-    const canonicalExactCopy = canonicalShellCommands([exactCopy])[0]
     const allSteamOsWriterCommands = ['cp', 'mv', 'install', 'rsync', 'ln', 'tar', 'bsdtar', 'pax', 'star', 'unzip', '7z', 'dd', 'cpio', 'mount', 'zstd', 'lz4', 'gzip', 'tee', 'touch', 'truncate']
       .flatMap((executable) => shellExecutableOccurrences(expandedAssemblyCommands, executable))
-    const steamOsPackageWriters = allSteamOsWriterCommands
-      .filter(({ command }) => command.includes(stagedDestination)
-        || (command.includes(stagedDirectory) && command.includes(stagedBasename)))
-      .map(({ command }) => command)
     const taintedTopLevelSteamOsWriters = allSteamOsWriterCommands
       .filter(({ command, index }) => assemblyBlockDepths[index] === 0
         && (command.includes(dynamicShellValue) || hasPositionalShellExpansion(command)))
-    const protectedSteamOsArrayBindings = expandedAssemblyCommands
-      .filter((command) => isShellArrayBinding(command)
-        && (command.includes(stagedDestination)
-          || (command.includes(stagedDirectory) && command.includes(stagedBasename))))
-    const steamOsRedirectWriters = expandedAssemblyCommands
-      .filter((command) => command.includes(stagedDestination) && />/.test(command))
     const stagedDirectoryChanges = ['cd', 'pushd']
       .flatMap((executable) => shellExecutableOccurrences(expandedAssemblyCommands, executable))
       .filter(({ command }) => command.includes(stagedDirectory))
-
     expect(nullglobIndex, 'release assembly must enable nullglob').toBeGreaterThanOrEqual(0)
-    expect(arrayIndex, 'SteamOS package array must immediately follow nullglob').toBe(nullglobIndex + 1)
-    expect(guardIndex, 'exact-one cardinality guard must immediately follow package discovery').toBe(arrayIndex + 1)
-    expect(guardExitIndex, 'cardinality mismatch must immediately terminate the assembly').toBe(guardIndex + 1)
-    expect(guardCloseIndex, 'cardinality guard must close immediately after its exit').toBe(guardExitIndex + 1)
-    expect(copyIndex, 'the exact SteamOS copy must run only after cardinality validation').toBe(guardCloseIndex + 1)
-    expect(
-      [nullglobIndex, arrayIndex, guardIndex, guardExitIndex, guardCloseIndex, copyIndex]
-        .map((index) => assemblyBlockDepths[index]),
-      'the SteamOS cardinality and staging sequence must run at top level',
-    ).toEqual([0, 0, 0, 1, 0, 0])
-    expect(steamOsPackageWriters, 'cardinality must dominate every resolved SteamOS artifact writer').toEqual([canonicalExactCopy])
+
+    let previousCopyIndex = -1
+    for (const release of releases) {
+      const packageArrayCommand = `steamos_packages=(release-assets/raw/steamos${release}/*.pkg.tar.zst)`
+      const stagedBasename = `Polaris-steamos${release}-x86_64.pkg.tar.zst`
+      const stagedDestination = `${stagedDirectory}/${stagedBasename}`
+      const exactCopy = `cp "release-assets/raw/steamos${release}/${stagedBasename}" "${stagedDestination}"`
+      const arrayIndex = assemblyCommands.indexOf(packageArrayCommand)
+      const guardIndex = assemblyCommands.indexOf(cardinalityGuard, arrayIndex + 1)
+      const guardExitIndex = assemblyCommands.indexOf('exit 1', guardIndex + 1)
+      const guardCloseIndex = assemblyCommands.indexOf('fi', guardIndex + 1)
+      const copyIndex = assemblyCommands.indexOf(exactCopy)
+      const canonicalExactCopy = canonicalShellCommands([exactCopy])[0]
+      const steamOsPackageWriters = allSteamOsWriterCommands
+        .filter(({ command }) => command.includes(stagedDestination)
+          || (command.includes(stagedDirectory) && command.includes(stagedBasename)))
+        .map(({ command }) => command)
+      const protectedSteamOsArrayBindings = expandedAssemblyCommands
+        .filter((command) => isShellArrayBinding(command)
+          && (command.includes(stagedDestination)
+            || (command.includes(stagedDirectory) && command.includes(stagedBasename))))
+      const steamOsRedirectWriters = expandedAssemblyCommands
+        .filter((command) => command.includes(stagedDestination) && />/.test(command))
+
+      if (release === releases[0]) {
+        expect(arrayIndex, 'the first SteamOS package array must immediately follow nullglob').toBe(nullglobIndex + 1)
+      } else {
+        expect(arrayIndex, `SteamOS ${release} discovery must follow the previous release's staging`).toBeGreaterThan(previousCopyIndex)
+      }
+      expect(guardIndex, `SteamOS ${release} cardinality guard must immediately follow its discovery`).toBe(arrayIndex + 1)
+      expect(guardExitIndex, 'cardinality mismatch must immediately terminate the assembly').toBe(guardIndex + 1)
+      expect(guardCloseIndex, 'cardinality guard must close immediately after its exit').toBe(guardExitIndex + 1)
+      expect(copyIndex, `the exact SteamOS ${release} copy must run only after its cardinality validation`).toBe(guardCloseIndex + 1)
+      expect(
+        [arrayIndex, guardIndex, guardExitIndex, guardCloseIndex, copyIndex].map((index) => assemblyBlockDepths[index]),
+        `the SteamOS ${release} cardinality and staging sequence must run at top level`,
+      ).toEqual([0, 0, 1, 0, 0])
+      expect(steamOsPackageWriters, `cardinality must dominate every resolved SteamOS ${release} artifact writer`).toEqual([canonicalExactCopy])
+      expect(protectedSteamOsArrayBindings, 'release assembly must not hide the SteamOS destination in shell arrays').toEqual([])
+      expect(steamOsRedirectWriters, 'the staged SteamOS artifact must not be written through redirection').toEqual([])
+      previousCopyIndex = copyIndex
+    }
+    expect(assemblyBlockDepths[nullglobIndex], 'nullglob must be enabled at top level').toBe(0)
     expect(taintedTopLevelSteamOsWriters, 'top-level artifact writers must not depend on branch-sensitive shell state').toEqual([])
-    expect(protectedSteamOsArrayBindings, 'release assembly must not hide the SteamOS destination in shell arrays').toEqual([])
-    expect(steamOsRedirectWriters, 'the staged SteamOS artifact must not be written through redirection').toEqual([])
     expect(stagedDirectoryChanges, 'release assembly must not change into the staged-artifact directory').toEqual([])
   })
 

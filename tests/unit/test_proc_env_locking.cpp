@@ -52,3 +52,37 @@ TEST(ProcEnvLocking, GetEnvIsReentrantFromInsideTheLock) {
     EXPECT_NO_THROW((void) proc::proc.get_env());
   });
 }
+
+TEST(ProcStreamStatsContext, CopiesApplicationMetadataUnderTheReentrantLock) {
+  boost::process::v1::environment env;
+  env["MANGOHUD"] = "1";
+  proc::proc_t subject {std::move(env), {}};
+  proc::ctx_t app {};
+  app.id = "42";
+  app.uuid = "telemetry-context-test";
+  subject.set_running_app_for_tests(app);
+  subject.virtual_display = true;
+
+  std::optional<proc::stream_stats_context_t> context;
+  subject.with_session_lifecycle_lock_for_tests([&]() {
+    context = subject.try_stream_stats_context();
+  });
+  ASSERT_TRUE(context);
+  EXPECT_TRUE(context->mangohud_configured);
+  EXPECT_TRUE(context->virtual_display);
+  EXPECT_EQ(context->game, subject.get_last_run_app_name());
+  EXPECT_EQ(context->game_uuid, app.uuid);
+
+  app.env_vars["MANGOHUD"] = "0";
+  subject.set_running_app_for_tests(app);
+  const auto overridden = subject.try_stream_stats_context();
+  ASSERT_TRUE(overridden);
+  EXPECT_FALSE(overridden->mangohud_configured);
+  subject.clear_running_app_for_tests();
+  const auto cleared = subject.try_stream_stats_context();
+  ASSERT_TRUE(cleared);
+  EXPECT_TRUE(cleared->game_uuid.empty());
+  EXPECT_FALSE(cleared->mangohud_configured);
+  EXPECT_EQ(context->game_uuid, "telemetry-context-test");
+  EXPECT_TRUE(context->mangohud_configured);
+}

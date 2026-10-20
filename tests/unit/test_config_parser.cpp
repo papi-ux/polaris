@@ -927,3 +927,14 @@ TEST(ConfigFileRefusalTests, WriteSideSharesTheReadSidesWordsAndWarning) {
   EXPECT_EQ(occurrences(log, "Info: The settings file [" + fixture.file.string() + "] can be read again."), 1u) << log;
 }
 #endif
+
+TEST(ConfigParserTests, PrivateSourcePacingOptInIsStrictAndConsumed) {
+  for (const char *value : {"enabled", "TRUE", "1", "disabled", "0", "maybe1", "", "gpu_native"}) {
+    auto vars = config::parse_config(std::string("vrr_source_pacing = ") + value + "\n");
+    EXPECT_EQ(config::source_pacing_setting(vars), config::parse_bool(value).value_or(false)) << value;
+    EXPECT_EQ(vars.count("vrr_source_pacing"), 0u);
+  }
+  std::unordered_map<std::string, std::string> absent;
+  EXPECT_FALSE(config::source_pacing_setting(absent));
+  EXPECT_FALSE(config::video_t {}.vrr_source_pacing);
+}

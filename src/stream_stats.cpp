@@ -35,6 +35,8 @@
 #include "stream_stats.h"
 #include "utility.h"
 #include "verified_action.h"
+#include "vrr_clock_proof.h"
+#include "vrr_source_time.h"
 
 namespace video {
   std::string active_encoder_name();
@@ -80,14 +82,16 @@ namespace stream_stats {
     }
   }
 
-  bool encoder_time_fails_budget(double encode_time_ms, double target_fps) {
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps, bool source_time) {
+    // Source pacing's negotiated FPS is a ceiling, not a delivery deadline. Use the same measured
+    // encode threshold as the controller's neutral-cadence path; real age/jitter/loss stay separate.
     return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
-           encode_time_ms >= encoder_pressure_fail_threshold_ms(target_fps);
+           encode_time_ms >= (source_time ? 11.0 : encoder_pressure_fail_threshold_ms(target_fps));
   }
 
-  bool encoder_time_nears_budget(double encode_time_ms, double target_fps) {
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps, bool source_time) {
     return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
-           encode_time_ms >= encoder_pressure_watch_threshold_ms(target_fps);
+           encode_time_ms >= (source_time ? 11.0 : encoder_pressure_watch_threshold_ms(target_fps));
   }
 
   static std::mutex stats_mutex;
@@ -162,12 +166,20 @@ namespace stream_stats {
         platf::frame_residency_e::unknown;
       std::uint64_t sample_count = 0;
       std::uint64_t pacing_warning_streak = 0;
+      std::uint64_t session_generation = 0;
+      bool source_time = false;
+      bool cadence_available = true;
+      std::chrono::steady_clock::time_point received_at {};
     };
     doctor_video_policy_state_t doctor_video_policy_state;
     std::mutex doctor_video_policy_mutex;
 
     bool video_policy_has_pacing_warning(
         const doctor_video_policy_state_t &sample) {
+      if (sample.source_time) {
+        return sample.cadence_available &&
+          (sample.dropped_frame_ratio >= 0.04 || sample.frame_jitter_ms >= 2.2);
+      }
       const bool source_cadence_available =
         sample.capture_source_fps > 0.0 && sample.target_fps > 0.0;
       const bool source_cadence_confirms_motion =
@@ -198,12 +210,17 @@ namespace stream_stats {
     bool video_policy_suppresses_quality_restore(
         const doctor_video_policy_state_t &sample) {
       const bool encoder_watch =
-        encoder_time_nears_budget(sample.encode_time_ms, sample.target_fps) ||
+        (sample.source_time ?
+          (std::isfinite(sample.encode_time_ms) && sample.encode_time_ms >= 9.9) :
+          encoder_time_nears_budget(sample.encode_time_ms, sample.target_fps)) ||
         sample.avg_frame_age_ms >= 18.0;
+      // Keep a restore margin below the source controller's 11 ms cut threshold. This holds a
+      // restoration near the threshold; it never turns the margin itself into pressure or a cut.
       // SHM is a supported compatibility path. It is capability context, not
       // pressure by itself; only measured encode/capture latency or confirmed
       // pacing trouble should block a guarded quality restore.
-      return encoder_watch || video_policy_pacing_warning_is_confirmed(sample);
+      return encoder_watch || (sample.source_time && !sample.cadence_available) ||
+        video_policy_pacing_warning_is_confirmed(sample);
     }
 
     void publish_doctor_video_policy_locked() {
@@ -240,6 +257,149 @@ namespace stream_stats {
     std::mutex client_media_ingest_mutex;
     std::mutex client_media_counter_mutex;
     std::optional<client_media_counter_epoch_t> last_client_media_counter_epoch;
+
+    // The newest client media interval receipt. Observational only: nothing reads it to decide
+    // anything, and it never changes the legacy counter epoch above. Guarded by
+    // client_media_counter_mutex, which is never held while taking another lock.
+    struct client_media_receipt_state_t {
+      /// An epoch is open for receipt's scope. Any invalidation clears it, so the next accepted
+      /// report starts a new epoch instead of measuring across the invalidation.
+      bool armed = false;
+      client_media_interval_receipt_t receipt;
+    };
+    client_media_receipt_state_t client_media_receipt_state;
+    std::uint64_t client_media_receipt_epochs = 0;
+
+    bool client_media_receipt_scope_matches_locked(const client_media_counters_t &sample) {
+      const auto &receipt = client_media_receipt_state.receipt;
+      return client_media_receipt_state.armed && receipt.available &&
+        receipt.owner_uuid == sample.owner_uuid && receipt.app_session_id == sample.app_session_id &&
+        receipt.session_generation == sample.session_generation;
+    }
+
+    // Caller holds client_media_counter_mutex. Folds one admitted report into its scope's cadence:
+    // the count, the host arrival interval since the admitted report before it (a gap included) and,
+    // for a coverage-gap reset, the host and client gap the legacy ingest reset on with the state of
+    // the report before it. @p previous is the legacy ingest's previous report, or null for a report
+    // with none; an interval only counts between two reports this cadence admitted. Diagnostic only:
+    // it reads what the ingest already computed and decides nothing.
+    void note_client_media_cadence_locked(
+        client_media_report_cadence_t &cadence, const client_media_counters_t &sample,
+        client_media_ingest_state_e state, std::chrono::steady_clock::time_point received_at,
+        const client_media_counter_epoch_t *previous) {
+      const bool previous_counted = previous != nullptr && cadence.accepted_reports > 0;
+      if (previous != nullptr) {
+        const auto host_elapsed = received_at - previous->received_at;
+        const auto host_ms = static_cast<std::int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(host_elapsed).count());
+        // An arrival before the report before it is no interval; it folds into nothing.
+        if (previous_counted && host_elapsed >= std::chrono::steady_clock::duration::zero()) {
+          cadence.max_host_interval_ms = cadence.host_interval_recorded ?
+            std::max(cadence.max_host_interval_ms, host_ms) : host_ms;
+          cadence.host_interval_recorded = true;
+        }
+        if (state == client_media_ingest_state_e::coverage_gap_reset) {
+          cadence.gap_resets += 1;
+          cadence.last_gap_host_ms = host_ms;
+          // The same unsigned client difference the legacy ingest held against the bound.
+          cadence.last_gap_client_ms = sample.client_monotonic_ms - previous->sample.client_monotonic_ms;
+          cadence.last_gap_preceding_state_known = previous_counted;
+          cadence.last_gap_preceding_state =
+            previous_counted ? cadence.last_accepted_state : client_media_ingest_state_e {};
+        }
+      }
+      cadence.accepted_reports += 1;
+      cadence.last_accepted_state = state;
+    }
+
+    // Caller holds client_media_counter_mutex. A baseline, coverage gap, counter regression or new
+    // scope starts an epoch; its first report measures nothing. The cadence carries over from the
+    // receipt this one replaces when that receipt is the same scope's, and @p previous, the legacy
+    // ingest's previous report when it had one, lets it keep the interval or the gap between them.
+    client_media_interval_receipt_t start_client_media_receipt_epoch_locked(
+        const client_media_counters_t &sample, client_media_ingest_state_e state,
+        std::chrono::steady_clock::time_point received_at,
+        const client_media_counter_epoch_t *previous = nullptr) {
+      client_media_report_cadence_t cadence;
+      if (client_media_receipt_scope_matches_locked(sample)) {
+        cadence = client_media_receipt_state.receipt.cadence;
+      }
+      note_client_media_cadence_locked(cadence, sample, state, received_at, previous);
+      client_media_interval_receipt_t receipt;
+      receipt.available = true;
+      receipt.epoch = ++client_media_receipt_epochs;
+      receipt.sequence = 0;
+      receipt.state = state;
+      receipt.interval_unavailable_reason = "epoch_start";
+      receipt.client_end_ms = sample.client_monotonic_ms;
+      receipt.host_end = received_at;
+      receipt.owner_uuid = sample.owner_uuid;
+      receipt.app_session_id = sample.app_session_id;
+      receipt.session_generation = sample.session_generation;
+      receipt.cadence = cadence;
+      client_media_receipt_state = client_media_receipt_state_t {true, receipt};
+      return receipt;
+    }
+
+    // Caller holds client_media_counter_mutex. Records one accepted legacy interval (observed or
+    // waiting_for_frames) between two reports of the same scope. The receipt starts unpublished; only
+    // mark_client_media_receipt_published_locked() says otherwise, once publication has completed.
+    client_media_interval_receipt_t record_client_media_receipt_interval_locked(
+        const client_media_counters_t &sample, const client_media_counter_epoch_t &previous,
+        client_media_ingest_state_e state, std::chrono::steady_clock::time_point received_at) {
+      if (!client_media_receipt_scope_matches_locked(sample)) {
+        return start_client_media_receipt_epoch_locked(sample, state, received_at, &previous);
+      }
+      constexpr std::uint64_t max_interval_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        CLIENT_MEDIA_COUNTER_MAX_GAP).count();
+      auto receipt = client_media_receipt_state.receipt;
+      receipt.sequence += 1;
+      receipt.state = state;
+      receipt.network_evidence_published = false;
+      receipt.frames_expected = sample.frames_expected - previous.sample.frames_expected;
+      receipt.frames_received = sample.frames_received - previous.sample.frames_received;
+      receipt.frames_lost = sample.frames_lost - previous.sample.frames_lost;
+      receipt.client_start_ms = previous.sample.client_monotonic_ms;
+      receipt.client_end_ms = sample.client_monotonic_ms;
+      receipt.client_duration_ms = sample.client_monotonic_ms - previous.sample.client_monotonic_ms;
+      receipt.host_start = previous.received_at;
+      receipt.host_end = received_at;
+      const auto host_elapsed = received_at - previous.received_at;
+      receipt.host_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_elapsed).count();
+      note_client_media_cadence_locked(receipt.cadence, sample, state, received_at, &previous);
+      // Ingest resets coverage for any client difference over the gap, so this only guards the bound. A
+      // receipt never claims coverage the bounds cannot represent.
+      if (receipt.client_duration_ms > max_interval_ms) {
+        receipt.interval_measured = false;
+        receipt.interval_unavailable_reason = "client_interval_unrepresentable";
+      } else if (host_elapsed < std::chrono::steady_clock::duration::zero() ||
+                 host_elapsed > CLIENT_MEDIA_COUNTER_MAX_GAP) {
+        receipt.interval_measured = false;
+        receipt.interval_unavailable_reason = "host_interval_unrepresentable";
+      } else {
+        receipt.interval_measured = true;
+        receipt.interval_unavailable_reason.clear();
+      }
+      client_media_receipt_state.receipt = receipt;
+      return receipt;
+    }
+
+    // Caller holds client_media_counter_mutex. The legacy path has finished publishing the report
+    // @p recorded describes. Marks the latest receipt only while it is still that same record (scope,
+    // epoch and sequence); a newer or invalidated receipt is left alone.
+    void mark_client_media_receipt_published_locked(const client_media_interval_receipt_t &recorded) {
+      auto &latest = client_media_receipt_state.receipt;
+      if (latest.available && latest.epoch == recorded.epoch && latest.sequence == recorded.sequence &&
+          latest.owner_uuid == recorded.owner_uuid && latest.app_session_id == recorded.app_session_id &&
+          latest.session_generation == recorded.session_generation) {
+        latest.network_evidence_published = true;
+      }
+    }
+
+    // Caller holds client_media_counter_mutex.
+    void invalidate_client_media_receipt_locked() {
+      client_media_receipt_state = client_media_receipt_state_t {};
+    }
 
     struct primary_network_observation_t {
       std::uint64_t revision = 0;
@@ -360,6 +520,7 @@ namespace stream_stats {
       {
         std::lock_guard<std::mutex> media_lock(client_media_counter_mutex);
         last_client_media_counter_epoch.reset();
+        invalidate_client_media_receipt_locked();
       }
       hot_network_risk.store(false, std::memory_order_relaxed);
       hot_bytes_sent.store(0, std::memory_order_relaxed);
@@ -582,6 +743,282 @@ namespace stream_stats {
       return buffer;
     }
 
+    /// Runtime receipts are value-only observations. Freshness cannot grant capture authority.
+    nlohmann::json vrr_record_json(const vrr_policy::record_t &record, nlohmann::json identity,
+                                  const std::optional<vrr_pacing_stats_t> &runtime = std::nullopt) {
+      const auto decision = vrr_policy::decide(record, {});
+      nlohmann::json j {
+        {"schema", 1}, {"requested", vrr_policy::name(record.requested)},
+        {"requested_from", vrr_policy::name(record.admission)},
+        {"host_permission", record.host_source_pacing},
+        {"effective", decision.effective}, {"pacing_mode", decision.pacing_mode},
+        {"fallback_reason", decision.fallback_reason}, {"capture_pacing", "unknown"},
+      };
+      j.update(identity);
+      if (!record.host_source_pacing) return j;
+      if (!runtime) {
+        if (record.requested == vrr_policy::requested_e::on && !record.watch_or_input_only) {
+          j["pacing_mode"] = "source_time_pending";
+          j["fallback_reason"] = "source_time_unproven";
+        }
+        return j;
+      }
+      const auto &sample = runtime->last;
+      const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+      const bool fresh = sample.observed_steady_ns >= 0 && now_ns >= sample.observed_steady_ns &&
+        now_ns - sample.observed_steady_ns <= 2'000'000'000;
+      const bool observed_source = sample.mode == vrr_pacing::mode_e::source_time &&
+        !runtime->authority_lost;
+      j["effective"] = observed_source && fresh && !runtime->ended;
+      j["pacing_mode"] = j["effective"] == true ? "source_time" :
+        (!runtime->ended && !runtime->authority_lost && sample.mode != vrr_pacing::mode_e::unsupported ?
+          (fresh ? "source_time_pending" : "unverified") : "fixed_grid");
+      if (sample.capture_epoch != 0) j["capture_pacing"] = "source_driven";
+      if (j["effective"] == true) j["fallback_reason"] = nullptr;
+      else if (runtime->ended) j["fallback_reason"] = "stream_ended";
+      else if (runtime->authority_lost) j["fallback_reason"] = "authority_lost";
+      else if (sample.mode == vrr_pacing::mode_e::unsupported) j["fallback_reason"] = vrr_pacing::name(sample.event);
+      else if (!fresh) j["fallback_reason"] = "pacing_evidence_stale";
+      else j["fallback_reason"] = "source_time_unproven";
+      nlohmann::json counts = nlohmann::json::object();
+      for (std::size_t i = 0; i < runtime->event_counts.size(); ++i) {
+        counts[std::string(vrr_pacing::name(static_cast<vrr_pacing::event_e>(i)))] = runtime->event_counts[i];
+      }
+      j["host_pacing"] = {{"state", vrr_pacing::name(sample.mode)}, {"last_event", vrr_pacing::name(sample.event)},
+        {"fresh", fresh && !runtime->ended}, {"event_counts", std::move(counts)},
+        {"receiver_presentation_verified", false}, {"physical_acceptance", false},
+        {"receiver_source_cadence_available", false}};
+      return j;
+    }
+
+    constexpr std::array<std::string_view, 9> k_capture_plausibility {
+      "valid", "missing", "invalid", "nonmonotonic", "future", "stale", "before_epoch",
+      "prefetched_init", "clock_unverified",
+    };
+
+    constexpr std::array<std::string_view, 23> k_source_time_results {
+      "not_observed", "mapped", "no_presentation_clock", "prefetched_init", "missing",
+      "invalid_nsec", "invalid_overflow", "nonmonotonic", "invalid_status", "proof_unavailable",
+      "namespace_unverified", "identity_unverified", "mapping_invalid", "lease_not_current",
+      "live_clock_unavailable", "mapping_drifted", "ready_unavailable", "before_epoch", "future",
+      "stale", "regressed_in_epoch", "conversion_overflow", "clock_domain_unverified",
+    };
+
+    // Only fixed identity policy names may cross the public diagnostics boundary. A future or
+    // malformed proof reason must not expose a process identity, path or runtime-supplied text.
+    std::string_view public_compositor_identity_reason(std::string_view reason) {
+      constexpr std::array<std::string_view, 10> allowed {
+        "not_probed", "no_authoritative_compositor_identity", "compositor_generation_unavailable",
+        "compositor_generation_changed", "compositor_identity_invalid", "compositor_peer_pid_mismatch",
+        "compositor_peer_uid_mismatch", "compositor_peer_starttime_unavailable",
+        "compositor_peer_starttime_mismatch", "authoritative_compositor_peer_matched",
+      };
+      return std::find(allowed.begin(), allowed.end(), reason) != allowed.end() ? reason :
+             "identity_reason_unavailable";
+    }
+
+    bool capture_clock_verified(const platf::image_provenance_t &image) {
+      const auto &proof = image.clock_proof;
+      return image.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic &&
+             proof && proof->capture_epoch_id == image.capture_epoch_id &&
+             vrr_clock::authorises_clock_comparison(*proof);
+    }
+
+    std::string_view capture_plausibility(const platf::image_provenance_t &image) {
+      // These outcomes need no comparison between clocks. Valid protocol syntax does.
+      if (image.prefetched_init || image.presentation.status != vrr_policy::presentation_status_e::valid) {
+        return vrr_clock::name(vrr_clock::classify(image.presentation.status, image.presentation.ns,
+                                                image.prefetched_init, image.ready_at, nullptr, {}));
+      }
+      const auto result = vrr_clock::name(image.source_time.result);
+      if (result == "mapped") return "valid";
+      if (result == "regressed_in_epoch" || result == "nonmonotonic") return "nonmonotonic";
+      if (result == "missing" || result == "ready_unavailable") return "missing";
+      if (result == "future" || result == "stale" || result == "before_epoch" || result == "prefetched_init") return result;
+      if (result == "invalid_nsec" || result == "invalid_overflow" || result == "invalid_status" ||
+          result == "conversion_overflow") return "invalid";
+      return "clock_unverified";
+    }
+
+    // Internal provenance is trusted producer evidence, but malformed or contradictory values
+    // must never be published as a mapped time or consume a consumer's next source sequence.
+    bool source_time_consistent(const platf::image_provenance_t &image) {
+      const auto &receipt = image.source_time;
+      const auto result = vrr_clock::name(receipt.result);
+      if (std::find(k_source_time_results.begin(), k_source_time_results.end(), result) == k_source_time_results.end()) return false;
+      if (result != "not_observed" && receipt.presentation_baseline != image.presentation.baseline) return false;
+      if (result != "mapped" && (receipt.source_steady_ns || receipt.uncertainty_ns != 0)) return false;
+      if (receipt.observed_steady_ns < vrr_clock::k_failed_read) return false;
+      if (result == "not_observed") return receipt.observed_steady_ns == vrr_clock::k_failed_read;
+      // These gates precede any clock observation. Match their structural facts in producer order;
+      // statistics never consult a live lease or repeat the producer's clock measurement.
+      const auto early = [&](std::string_view expected) {
+        return result == expected && receipt.observed_steady_ns == vrr_clock::k_failed_read;
+      };
+      if (image.route.presentation == platf::presentation_clock_e::none) return early("no_presentation_clock");
+      if (result == "no_presentation_clock") return false;
+      if (image.prefetched_init) return early("prefetched_init");
+      if (image.presentation.status != vrr_policy::presentation_status_e::valid) {
+        return early(vrr_policy::name(image.presentation.status));
+      }
+      if (!image.clock_proof) return early("proof_unavailable");
+      const auto &proof = *image.clock_proof;
+      if (proof.time_namespace != vrr_clock::namespace_e::same) return early("namespace_unverified");
+      if (!proof.producer_identity_verified) return early("identity_unverified");
+      if (!proof.mapping.valid || proof.epoch_start_mono_ns < 0) return early("mapping_invalid");
+      if (!proof.clock_domain_verified) return early("clock_domain_unverified");
+      if (!vrr_clock::authorises_clock_comparison(proof)) return early("proof_unavailable");
+      if (result == "lease_not_current") return early(result);
+      if (result == "live_clock_unavailable") return true;  // failed reads can precede the steady read
+      if (result == "mapping_drifted") return receipt.observed_steady_ns >= 0;
+      if (result == "ready_unavailable") return !image.ready_at && receipt.observed_steady_ns >= 0;
+      if (result != "mapped") {
+        return (result == "before_epoch" || result == "future" || result == "stale" ||
+                result == "regressed_in_epoch" || result == "conversion_overflow") &&
+               image.ready_at && receipt.observed_steady_ns >= 0;
+      }
+      if (!capture_clock_verified(image) || !image.presentation.ns || !image.ready_at || image.prefetched_init ||
+          image.presentation.status != vrr_policy::presentation_status_e::valid || !receipt.source_steady_ns ||
+          *receipt.source_steady_ns < 0 || receipt.observed_steady_ns < 0 ||
+          receipt.uncertainty_ns < image.clock_proof->mapping.uncertainty_ns ||
+          receipt.uncertainty_ns > vrr_clock::source_time_limits_t {}.max_total_uncertainty_ns) return false;
+      std::int64_t mapped = 0;
+      std::int64_t latest = 0;
+      return vrr_clock::checked_add(*image.presentation.ns, image.clock_proof->mapping.steady_to_mono_offset_ns, mapped) &&
+             mapped == *receipt.source_steady_ns &&
+             vrr_clock::checked_add(receipt.observed_steady_ns, static_cast<std::int64_t>(receipt.uncertainty_ns), latest) &&
+             mapped <= latest;
+    }
+
+    // This readout is accepted-image evidence, not a pacing decision. Public records carry opaque
+    // capture/stream identities; absolute timestamps and process/namespace identifiers stay absent.
+    nlohmann::json host_adaptive_sync_record_json(const game_mode_adaptive_sync::record_t &record) {
+      const auto now = game_mode_adaptive_sync::steady_clock_t::now();
+      const auto evaluated = game_mode_adaptive_sync::evaluate(record, now);
+      // Every reason is a fixed diagnostic code. Never export arbitrary producer/credential text.
+      static constexpr std::array reasons {
+        "producer_unbound", "producer_tracking_disabled", "producer_tracking_unavailable", "capture_stopping", "capture_not_running",
+        "binding_on_pipewire_thread", "read_cancelled", "read_timeout", "pipewire_core_error",
+        "server_version_unsupported", "graph_identity_invalid", "capture_client_unknown",
+        "capture_credentials_absent", "capture_node_unknown", "capture_node_not_owned",
+        "source_not_linked", "source_ambiguous", "source_unattributed", "producer_credentials_absent",
+        "producer_uid_mismatch", "producer_restarted", "producer_exe_unreadable", "producer_generation_unreadable", "pid_namespace_mismatch",
+        "producer_client_not_visible", "pipewire_graph_changed", "pipewire_read_timeout",
+        "pipewire_version_unverified", "root_display_not_found", "root_display_ambiguous",
+        "x_connect_failed_or_denied", "x_read_timeout", "x_snapshot_torn", "x_reader_unavailable",
+        "property_absent", "property_malformed", "property_out_of_domain", "contradictory_properties",
+        "connector_unbound", "property_read_bracketed", "observer_read_failed"
+      };
+      const auto found = std::find(reasons.begin(), reasons.end(), record.attempt.reason);
+      const char *reason = found == reasons.end() ? "producer_unbound" : *found;
+      nlohmann::json last = nullptr;
+      if (evaluated.last_state) {
+        last = {{"state", game_mode_adaptive_sync::name(*evaluated.last_state)},
+          {"age_ms", *evaluated.age_ms}, {"generation_unchanged", evaluated.same_generation},
+          {"provenance", "property_read_bracketed"}, {"current_state_confirmed", false},
+          {"capable", record.last_known->properties.capable.value},
+          {"feedback", record.last_known->properties.feedback.value}};
+      }
+      return {{"schema", 1}, {"scope", "host_adaptive_sync_observation"},
+        {"current_state", evaluated.current_state}, {"current_reason", evaluated.current_reason},
+        {"observation_reason", reason}, {"ended", record.ended}, {"last_known", std::move(last)},
+        {"range_status", evaluated.range_status}, {"advice", evaluated.advice},
+        {"connector", "unbound"}, {"property_writer", "unattested"},
+        {"root_selection", "root_selected_by_property"}, {"pid_reuse", "unexcluded"}};
+    }
+
+    nlohmann::json host_adaptive_sync_json(const platf::image_provenance_t &image) {
+      return image.host_adaptive_sync ? host_adaptive_sync_record_json(image.host_adaptive_sync->read()) : nlohmann::json(nullptr);
+    }
+
+    nlohmann::json accepted_capture_json(const capture_timing_t &timing, nlohmann::json identity) {
+      const auto &image = timing.last_accepted;
+      const auto pacing = image.route.pacing == platf::capture_pacing_e::source_driven ? "source_driven" :
+                          image.route.pacing == platf::capture_pacing_e::fixed_interval ? "fixed_interval" : "unknown";
+      const bool protocol_time = image.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic;
+      nlohmann::json counts = nlohmann::json::object();
+      for (const auto status : vrr_policy::k_presentation_statuses) {
+        counts[std::string(vrr_policy::name(status))] = timing.presentation_counts[status];
+      }
+      nlohmann::json plausibility = nlohmann::json::object();
+      for (std::size_t index = 0; index < k_capture_plausibility.size(); ++index) {
+        plausibility[std::string(k_capture_plausibility[index])] = timing.plausibility_counts[index];
+      }
+      nlohmann::json clock {
+        {"scope", "capture_epoch_observation"},
+        {"time_namespace", "unverifiable"},
+        {"producer_identity_verified", false},
+        {"producer_identity_reason", "not_probed"},
+        {"local_mapping_verified", false},
+        {"clock_domain_verified", false},
+        {"reason", "not_probed"},
+      };
+      if (const auto &proof = image.clock_proof; protocol_time && proof && proof->capture_epoch_id == image.capture_epoch_id) {
+        const auto ns = proof->time_namespace;
+        const bool verified = capture_clock_verified(image);
+        clock["time_namespace"] = ns == vrr_clock::namespace_e::same ? "same" :
+                                  ns == vrr_clock::namespace_e::different ? "different" : "unverifiable";
+        clock["producer_identity_verified"] = proof->producer_identity_verified;
+        clock["producer_identity_reason"] = public_compositor_identity_reason(proof->producer_identity_reason);
+        clock["local_mapping_verified"] = proof->mapping.valid;
+        clock["clock_domain_verified"] = verified;
+        // Reasons come from fixed policy gates, never arbitrary runtime strings or process facts.
+        clock["reason"] = ns != vrr_clock::namespace_e::same ? "time_namespace_unverified" :
+                          !proof->producer_identity_verified ? "producer_identity_unverified" :
+                          !proof->mapping.valid ? "clock_mapping_unverified" :
+                          !verified ? "clock_domain_unverified" : "verified";
+        clock["probe_samples"] = proof->mapping.samples;
+        clock["uncertainty_ns"] = proof->mapping.uncertainty_ns;
+      }
+      nlohmann::json source_time_counts = nlohmann::json::object();
+      for (const auto result : k_source_time_results) {
+        const auto count = timing.source_time_counts.find(result);
+        source_time_counts[std::string(result)] = count == timing.source_time_counts.end() ? 0 : count->second;
+      }
+      nlohmann::json source_time {
+        {"scope", "per_frame_observation"},
+        {"result", vrr_clock::name(image.source_time.result)},
+        {"mapped_available", image.source_time.source_steady_ns.has_value()},
+        {"result_counts", std::move(source_time_counts)},
+      };
+      if (image.source_time.source_steady_ns) source_time["uncertainty_ns"] = image.source_time.uncertainty_ns;
+      nlohmann::json j {
+        {"schema", 1},
+        {"scope", "accepted_source_images"},
+        {"capture_instance_id", process_instance_nonce() + ".capture." + std::to_string(image.capture_epoch_id)},
+        {"capture_pacing", pacing},
+        {"presentation_clock", protocol_time ? "ext_image_copy_monotonic" : "none"},
+        {"accepted_frames", timing.accepted_frames},
+        {"presentation_counts", std::move(counts)},
+        {"plausibility_counts", std::move(plausibility)},
+        {"last_plausibility", timing.last_plausibility},
+        {"last_presentation_status", vrr_policy::name(image.presentation.status)},
+        {"raw_presentation_available", image.presentation.ns.has_value()},
+        {"ready_time_available", image.ready_at.has_value()},
+        {"prefetched_init", image.prefetched_init},
+        {"clock", std::move(clock)},
+        {"source_time", std::move(source_time)},
+        {"source_time_eligible", false},
+        {"pacing_authority", false},
+        {"effective_vrr", false},
+        {"receiver_presentation_verified", false},
+      };
+      j.update(identity);
+      return j;
+    }
+
+    nlohmann::json host_capture_presentation_json(const vrr_policy::host_presentation_counts_t &host) {
+      nlohmann::json j {
+        {"scope", "host_capture"},
+        {"source", "ext_image_copy_ready"},
+      };
+      for (const auto status : vrr_policy::k_presentation_statuses) {
+        j[std::string {vrr_policy::name(status)}] = host[status];
+      }
+      return j;
+    }
+
     /// The last session as the stats report it. Every value was frozen from the session's own
     /// generation, and one it never reported is absent rather than given a default.
     nlohmann::json ended_session_json(const ended_session_t &ended) {
@@ -609,6 +1046,16 @@ namespace stream_stats {
       }
       if (!ended.pyrowave_route.empty()) {
         session["pyrowave_route"] = ended.pyrowave_route;
+      }
+      if (ended.vrr) {
+        // The public record names a stream by stream_instance_id, as the rest of last_session does.
+        session["vrr"] = vrr_record_json(*ended.vrr,
+          {{"stream_instance_id", stream_instance_id(ended.session_generation)}}, ended.vrr_pacing);
+      }
+      if (ended.capture_timing) {
+        session["capture_timing"] = accepted_capture_json(*ended.capture_timing,
+          {{"stream_instance_id", stream_instance_id(ended.session_generation)}});
+        session["host_adaptive_sync"] = host_adaptive_sync_json(ended.capture_timing->last_accepted);
       }
       if (const auto &stop = ended.app_stop; !stop.path.empty()) {
         nlohmann::json app_stop {
@@ -719,6 +1166,8 @@ namespace stream_stats {
     nlohmann::json j;
 
     j["streaming"] = streaming;
+    // Match separately collected network evidence to this process and stream.
+    j["stream_instance_id"] = streaming ? stream_instance_id(session_generation) : std::string {};
     j["client_name"] = client_name;
     j["client_ip"] = client_ip;
     // "nova" or "moonlight" for the stream client_name names; empty when nothing says which.
@@ -797,6 +1246,7 @@ namespace stream_stats {
     j["frame_jitter_ms"] = frame_jitter_ms;
     j["capture_source_fps"] = capture_source_fps;
     j["capture_pacing"] = capture_pacing;
+    j["host_capture_presentation"] = host_capture_presentation_json(host_capture_presentation);
     j["codec"] = codec;
     j["pacing_policy"] = pacing_policy;
     j["optimization_source"] = optimization_source;
@@ -823,6 +1273,10 @@ namespace stream_stats {
     j["video_sample_revision"] = video_sample_revision;
     j["video_policy_sample_count"] = video_policy_sample_count;
     j["pacing_warning_streak"] = pacing_warning_streak;
+    if (video_policy_source_time) {
+      j["frame_pacing_measurement"] = {{"basis", "source_relative_encode_handoff"},
+        {"available", video_policy_cadence_available}, {"receiver_presentation_verified", false}};
+    }
     j["network_sample_revision"] = network_sample_revision;
     j["network_last_received_age_ms"] = network_last_received_age_ms;
     j["media_loss_sample_revision"] = media_loss_sample_revision;
@@ -836,6 +1290,8 @@ namespace stream_stats {
     j["adaptive_bitrate_active"] = adaptive_bitrate_active;
     j["adaptive_bitrate_state"] = adaptive_bitrate_state;
     j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
+    j["client_media_interval"] = client_media_interval_json(*this);
+    j["live_tuning_history"] = live_tuning_history_json(*this);
     j["doctor_live_action_scope_available"] = doctor_live_action_scope_available;
     j["idr_requests_total"] = idr_requests_total;
     j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
@@ -890,6 +1346,15 @@ namespace stream_stats {
       cj["capture_source"] = capture_source_json(c.capture_source);
       if (c.session_generation != 0) {
         cj["stream_instance_id"] = stream_instance_id(c.session_generation);
+        // This client's own frozen request, named by the same opaque identity as the row.
+        if (c.vrr) {
+          cj["vrr"] = vrr_record_json(*c.vrr, {{"stream_instance_id", stream_instance_id(c.session_generation)}}, c.vrr_pacing);
+        }
+        if (c.capture_timing) {
+          cj["capture_timing"] = accepted_capture_json(*c.capture_timing,
+            {{"stream_instance_id", stream_instance_id(c.session_generation)}});
+          cj["host_adaptive_sync"] = host_adaptive_sync_json(c.capture_timing->last_accepted);
+        }
       }
       if (!c.capture_backend.opened.empty()) {
         cj["capture"] = capture_backend_json(c.capture_backend, frames_of_published_display(c));
@@ -1339,6 +1804,13 @@ namespace stream_stats {
     nlohmann::json configuration_warnings = nlohmann::json::array();
     nlohmann::json capture_forecast = nullptr;
 #ifdef __linux__
+    // The three findings the capture evaluation produces stand until the next evaluation, which a
+    // launch runs when the capture or stream-mode setting has moved since. Until then, or before
+    // any evaluation has run, they describe settings the host no longer has, or nothing at all, so
+    // each says whether it has been verified for the settings the host holds now. The console
+    // shows an unverified one as a note with the step that verifies it (#152).
+    const bool capture_evaluation_stale = platf::capture_sources_stale();
+
     // No capture at all. Polaris logs this fatally at startup and then carries on serving, so a
     // host in this state pairs normally, accepts launches and advertises H.264 as the only codec
     // it has, while Doctor reports nothing. The log line is the only trace and it scrolls past
@@ -1347,6 +1819,7 @@ namespace stream_stats {
       configuration_warnings.push_back({
         {"id", "no_capture_backend"},
         {"severity", "fail"},
+        {"stale", capture_evaluation_stale},
         {"message", "This host has no working capture backend, so no encoder could be probed and "
                     "it is advertising H.264 as the only codec it has. Streams will connect and "
                     "look far worse than this hardware can manage, or fail outright."},
@@ -1394,6 +1867,7 @@ namespace stream_stats {
       configuration_warnings.push_back({
         {"id", "capture_backend_substituted"},
         {"severity", "warning"},
+        {"stale", capture_evaluation_stale},
         {"message", kms_for_capability ?
            "This host is configured for KMS capture, but the Polaris binary does not hold "
            "CAP_SYS_ADMIN, so it could not read a framebuffer and Polaris substituted another "
@@ -1434,6 +1908,7 @@ namespace stream_stats {
       configuration_warnings.push_back({
         {"id", "kms_capture_needs_capability"},
         {"severity", nothing_else ? "fail" : "warning"},
+        {"stale", capture_evaluation_stale},
         {"message", "KMS capture found the display but could not read a DRM framebuffer handle, "
                     "because the Polaris binary does not hold CAP_SYS_ADMIN. That capability is "
                     "opt-in: the polaris-kms package carries it on a helper of its own, which updates "
@@ -1441,6 +1916,68 @@ namespace stream_stats {
         {"action", std::string {"Run "} + enable_kms_command + " once and do what it prints, since it may ask for a new "
                    "login first, then restart Polaris."}
       });
+    }
+
+    // #152: what the configured stream mode does to an explicit capture backend, said before any
+    // stream. polaris.conf's capture is measured against the mode's own rule, so a host set to kms
+    // in a private labwc mode learns up front that the mode captures through wlroots and keeps
+    // kms saved for the modes that use it. This is information: the pairing is valid, and nothing
+    // here refuses it. A substitution is the capture evaluation's finding, reported above, and an
+    // unset or auto capture asked the host to choose, so neither is a backend set aside. A per-app
+    // or per-session mode is that launch's own choice and is never measured here.
+    {
+      const auto configured_mode = stream_display_policy::configured_selection();
+      auto set_aside = stream_display_policy::capture_mode_override_for_current_mode();
+      if (!set_aside &&
+          (configured_mode == stream_display_policy::k_host_virtual_display ||
+           configured_mode == stream_display_policy::k_desktop_takeover)) {
+        // A Host Virtual Display load already rewrote the live setting to what its backend
+        // exposes, so the mode rule sees no difference; the load's own rule, asked again for the
+        // loaded setting, says what it set aside.
+        set_aside = stream_display_policy::capture_host_virtual_display_override(
+          virtual_display::detect_backend(),
+          stream_display_policy::loaded_capture_setting()
+        );
+      }
+      if (set_aside && set_aside->reason != stream_display_policy::k_capture_override_substituted) {
+        const auto effective = set_aside->effective.empty() ? std::string {"auto"} : set_aside->effective;
+        configuration_warnings.push_back({
+          {"id", "capture_set_aside_by_mode"},
+          {"severity", "info"},
+          {"stream_mode", configured_mode},
+          {"configured_capture", set_aside->configured},
+          {"effective_capture", effective},
+          {"reason", set_aside->reason},
+          {"message", stream_display_policy::describe_capture_override(*set_aside, configured_mode) +
+                      ". Nothing is wrong with this pairing: capture = " + set_aside->configured +
+                      " stays saved for the modes that use it, and a stream in this mode captures through " +
+                      effective + "."},
+          {"action", "No change is needed. Keep capture = " + set_aside->configured +
+                     " if a later mode switch should use it, or leave capture unset to let each mode choose."}
+        });
+      }
+
+      // The configured mode cannot be entered on this host, for a reason the host already names
+      // to launches and to the mode selector: a private runtime binary missing from PATH, no
+      // virtual display backend, or no takeover support. The mode is read as a launch reads it,
+      // from linux_stream_mode or, when that is unset, from the legacy booleans: a launch into
+      // either is refused the same way, and that refusal is what this finding says beforehand.
+      if (!configured_mode.empty() &&
+          !stream_display_policy::selection_available(configured_mode)) {
+        auto reason = stream_display_policy::selection_unavailable_reason(configured_mode);
+        if (reason.empty()) {
+          reason = "the host reports it unavailable without naming a reason";
+        }
+        configuration_warnings.push_back({
+          {"id", "stream_mode_unavailable"},
+          {"severity", "warning"},
+          {"stream_mode", configured_mode},
+          {"reason", reason},
+          {"message", "The configured stream mode [" + configured_mode + "] cannot be entered on this host: " +
+                      reason + ". A launch into it is refused with the same reason until the host has what it needs."},
+          {"action", "Install what the reason names, or choose a stream mode this host can enter in Settings."}
+        });
+      }
     }
 
     // Without CUDA the GPU-native advice below is a dead end; the capture forecast names the
@@ -2122,6 +2659,11 @@ namespace stream_stats {
         body = "Streaming telemetry looks ready. Keep this page open if you are trying to catch an intermittent problem.";
         next_step = "Keep monitoring";
         expected = "No recovery action should be needed right now.";
+      } else if (primary_issue == "cadence_collecting") {
+        title = "Keep streaming";
+        body = "Polaris needs fresh cadence evidence before it can grade pacing. No quality change is needed for missing evidence.";
+        next_step = "Keep monitoring";
+        expected = "A fresh measurement can distinguish source cadence from delivery pressure.";
       } else if (primary_issue == "network_jitter") {
         if (pyrowave.at_floor) {
           body = "Confirmed network pressure is affecting this stream. " + pyrowave_floor_guidance(pyrowave);
@@ -2622,12 +3164,12 @@ namespace stream_stats {
     // capture path, not the encoder — the old verdict here sent an SHM-bound
     // user to lower bitrate, which cannot recover capture throughput (issue
     // #367: encode at 5.8 ms of budget while frames arrived 26.5 ms old).
-    const bool encoder_time_fail = encoder_time_fails_budget(stats.encode_time_ms, target_fps);
+    const bool encoder_time_fail = encoder_time_fails_budget(stats.encode_time_ms, target_fps, stats.video_policy_source_time);
     const bool frame_age_counts_against_encoder = !capture_cpu_copy;
     const bool encoder_fail = encoder_time_fail ||
                               (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 22.0);
     const bool encoder_watch = !encoder_fail &&
-                               (encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
+                               (encoder_time_nears_budget(stats.encode_time_ms, target_fps, stats.video_policy_source_time) ||
                                 (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 18.0));
     const bool capture_latency_fail = capture_cpu_copy && !encoder_time_fail && stats.avg_frame_age_ms >= 22.0;
     const bool capture_latency_watch = capture_cpu_copy && !encoder_time_fail &&
@@ -2640,12 +3182,17 @@ namespace stream_stats {
       stats.duplicate_frame_ratio >= 0.50 ||
       (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
        stats.duplicate_frame_ratio >= 0.10);
-    const bool raw_pacing_watch =
-      stats.dropped_frame_ratio >= 0.04 ||
-      (!static_or_duplicate_content &&
-       (stats.frame_jitter_ms >= 2.2 || observed_target_shortfall));
+    const bool cadence_unavailable = source_pacing_evidence_unavailable(stats) ||
+      !health.value("frame_pacing_measurement_available", true);
+    const bool raw_pacing_watch = cadence_unavailable ? false : stats.video_policy_source_time ?
+      (stats.video_policy_cadence_available &&
+       (stats.dropped_frame_ratio >= 0.04 || stats.frame_jitter_ms >= 2.2)) :
+      (stats.dropped_frame_ratio >= 0.04 ||
+       (!static_or_duplicate_content &&
+        (stats.frame_jitter_ms >= 2.2 || observed_target_shortfall)));
     const bool pacing_window_ready =
-      stats.video_policy_sample_count >= DOCTOR_PACING_WARMUP_SAMPLES;
+      stats.video_policy_sample_count >= DOCTOR_PACING_WARMUP_SAMPLES &&
+      !cadence_unavailable;
     const bool pacing_streak_confirmed =
       stats.pacing_warning_streak >= DOCTOR_PACING_CONFIRMATION_SAMPLES;
     const bool pacing_watch =
@@ -2666,7 +3213,7 @@ namespace stream_stats {
     const ended_session_t *const failed_start = recent_failed_start(stats, doctor_now);
 
     std::string primary_issue = health.value("primary_issue", std::string {});
-    if (primary_issue == "steady" || primary_issue == "none") primary_issue.clear();
+    if (primary_issue == "steady" || primary_issue == "none" || primary_issue == "cadence_collecting") primary_issue.clear();
     const bool health_claims_network_jitter = primary_issue == "network_jitter";
     const bool health_claims_unconfirmed_frame_pacing =
       primary_issue == "frame_pacing" && !pacing_watch;
@@ -2713,6 +3260,7 @@ namespace stream_stats {
       else if (capture_latency_watch || capture_pacing_watch) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
+      else if (cadence_unavailable) primary_issue = "cadence_collecting";
       else if (pyrowave_starved) primary_issue = "pyrowave_starved";
       else if (quality_reduced_live && !auto_safe_managing) primary_issue = "quality_reduced_live";
       else if (pyrowave_needs_more) primary_issue = "pyrowave_needs_more_than_allowed";
@@ -2734,6 +3282,15 @@ namespace stream_stats {
       status = "needs_action";
       severity = "warning";
       simple_state = "Needs attention";
+    } else if (primary_issue == "no_active_stream" &&
+               !(stats.last_session && stats.last_session->start_outcome == stream_start::k_no_ping &&
+                 ended_within(*stats.last_session, doctor_now, DOCTOR_FAILED_START_WINDOW))) {
+      // Idle telemetry is unavailable, not a fault or a successful stream test.
+      // Keep the traffic-light contract; clients render unknown/info neutrally.
+      traffic = "amber";
+      status = "unknown";
+      severity = "info";
+      simple_state = "Waiting for a stream";
     } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
       traffic = "amber";
       status = "unknown";
@@ -2744,6 +3301,11 @@ namespace stream_stats {
       status = "needs_action";
       severity = "critical";
       simple_state = "Needs attention";
+    } else if (primary_issue == "cadence_collecting") {
+      traffic = "amber";
+      status = "unknown";
+      severity = "info";
+      simple_state = "Collecting cadence";
     } else if ((primary_issue != "none" && primary_issue != "control_channel_observation") ||
                (honor_health_grade && health_grade == "watch") || capture_pressure || pacing_watch) {
       traffic = "amber";
@@ -2785,6 +3347,7 @@ namespace stream_stats {
       primary_issue == "stream_failed_to_start" ? failed_start_summary(*failed_start) :
       primary_issue == "no_active_stream" ? "No active stream is running, so Doctor cannot verify the live path yet." :
       primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
+      primary_issue == "cadence_collecting" ? "Cadence evidence is pending or stale; keep streaming while Polaris collects it." :
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
       primary_issue == "control_channel_observation" ?
@@ -2951,8 +3514,9 @@ namespace stream_stats {
     if (!stats.client_network_path.empty()) {
       const auto &path = stats.client_network_path;
       constexpr auto relay_hint =
-        " That is fine when the connection is direct. When Tailscale relays it instead, expect stutter "
-        "and extra latency; running tailscale ping with this host's name on the client says which.";
+        " This address label does not verify a direct or relay connection. Check the Tailscale peer "
+        "status or run tailscale ping with this host's name on the client. Measured latency and video "
+        "frame loss determine stream quality.";
       std::string detail;
       if (path == "lan") {
         detail = "The client is on the same local network as this host.";
@@ -3106,7 +3670,7 @@ namespace stream_stats {
     append_doctor_evidence(
       evidence,
       "frame_pacing",
-      "Mean target interval error",
+      stats.video_policy_source_time ? "Source-relative encode handoff error" : "Mean target interval error",
       stats.frame_jitter_ms,
       "ms",
       pacing_watch ? "watch" :
@@ -3118,6 +3682,8 @@ namespace stream_stats {
         "Doctor is collecting six complete video telemetry windows before grading startup pacing." :
       pacing_collecting ?
         "The threshold was crossed once; Doctor requires a second consecutive complete window before warning." :
+      stats.video_policy_source_time ?
+        "Mean absolute difference between source intervals and encode handoff intervals; receiver presentation has not been verified." :
         "Mean absolute distance between actual source-frame intervals and the requested interval; this is not statistical network jitter."
     );
     append_doctor_evidence(
@@ -3169,6 +3735,8 @@ namespace stream_stats {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");
     }
     advanced["network_verdict"] = network_verdict_json(verdict);
+    advanced["client_media_interval"] = client_media_interval_json(stats);
+    advanced["live_tuning_history"] = live_tuning_history_json(stats);
     advanced["pacing_coverage"] = {
       {"sample_count", stats.video_policy_sample_count},
       {"required_sample_count", DOCTOR_PACING_WARMUP_SAMPLES},
@@ -3177,6 +3745,11 @@ namespace stream_stats {
       {"ready", pacing_window_ready},
       {"confirmed", pacing_watch}
     };
+    if (stats.video_policy_source_time) {
+      advanced["pacing_coverage"]["available"] = stats.video_policy_cadence_available;
+      advanced["pacing_coverage"]["basis"] = "source_relative_encode_handoff";
+      advanced["pacing_coverage"]["receiver_presentation_verified"] = false;
+    }
     advanced["raw_fields_redacted"] = true;
 
     double confidence_score = 0.35;
@@ -3476,7 +4049,15 @@ namespace stream_stats {
           .pyrowave_route = ending->pyrowave_route,
           .start_outcome = ending->start_outcome,
           .start_client_left_after_ms = ending->start_client_left_after_ms,
+          .vrr = ending->vrr,
+          .vrr_pacing = ending->vrr_pacing,
+          .capture_timing = ending->capture_timing,
         };
+        if (last_ended_session->vrr_pacing) last_ended_session->vrr_pacing->ended = true;
+        if (last_ended_session->capture_timing && last_ended_session->capture_timing->last_accepted.host_adaptive_sync) {
+          auto &observer = last_ended_session->capture_timing->last_accepted.host_adaptive_sync;
+          observer = observer->retired_snapshot();
+        }
       }
     }
 
@@ -3664,6 +4245,9 @@ namespace stream_stats {
       });
     if (client == current_stats.clients.end()) return false;
     client->capture_backend = backend;
+    // An observer belongs to the accepted source, never to the replacement display that has not
+    // delivered an image yet. Other consumers of the old capture keep their own readers.
+    if (client->capture_timing) client->capture_timing->last_accepted.host_adaptive_sync.reset();
     // A publication names the display a session now encodes from. Frames an earlier display
     // delivered say nothing about this one, and neither does the PyroWave route an earlier
     // display's encoder took: the encoder for this one has encoded nothing yet. Its route reads
@@ -3672,6 +4256,184 @@ namespace stream_stats {
     client->capture_frame_since_publication = false;
     client->pyrowave_route.clear();
     return true;
+  }
+
+  bool record_accepted_capture(std::uint64_t session_generation, const platf::image_provenance_t &image) {
+    if (session_generation == 0 || image.capture_epoch_id == 0 || image.source_sequence == 0) return false;
+    if (std::find(vrr_policy::k_presentation_statuses.begin(), vrr_policy::k_presentation_statuses.end(),
+                  image.presentation.status) == vrr_policy::k_presentation_statuses.end()) return false;
+    if (image.route.pacing != platf::capture_pacing_e::unknown &&
+        image.route.pacing != platf::capture_pacing_e::fixed_interval &&
+        image.route.pacing != platf::capture_pacing_e::source_driven) return false;
+    if (image.route.presentation != platf::presentation_clock_e::none &&
+        image.route.presentation != platf::presentation_clock_e::ext_image_copy_monotonic) return false;
+    if (image.presentation.ns && *image.presentation.ns < 0) return false;
+    if (image.presentation.status == vrr_policy::presentation_status_e::valid && !image.presentation.ns) return false;
+    if (image.route.presentation == platf::presentation_clock_e::none &&
+        (image.presentation.status != vrr_policy::presentation_status_e::missing || image.presentation.ns || image.clock_proof)) return false;
+    if (image.clock_proof && image.clock_proof->capture_epoch_id != image.capture_epoch_id) return false;
+    if (!source_time_consistent(image)) return false;
+
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    if (client->capture_timing) {
+      const auto &previous = client->capture_timing->last_accepted;
+      if (image.capture_epoch_id < previous.capture_epoch_id) return false;
+      if (image.capture_epoch_id == previous.capture_epoch_id &&
+          (image.source_sequence <= previous.source_sequence ||
+           image.capture_generation_id != previous.capture_generation_id ||
+           image.route.pacing != previous.route.pacing ||
+           image.route.presentation != previous.route.presentation ||
+           image.clock_proof != previous.clock_proof)) return false;
+    }
+    if (!client->capture_timing || client->capture_timing->last_accepted.capture_epoch_id != image.capture_epoch_id) {
+      client->capture_timing = capture_timing_t {};
+    }
+    auto &timing = *client->capture_timing;
+    timing.last_accepted = image;
+    if (timing.accepted_frames < UINT64_MAX) ++timing.accepted_frames;
+    timing.presentation_counts.count(image.presentation.status);
+    auto &source_time_count = timing.source_time_counts[vrr_clock::name(image.source_time.result)];
+    if (source_time_count < UINT64_MAX) ++source_time_count;
+    const auto plausibility = capture_plausibility(image);
+    timing.last_plausibility = plausibility;
+    const auto index = static_cast<std::size_t>(std::find(k_capture_plausibility.begin(), k_capture_plausibility.end(), plausibility) -
+                                               k_capture_plausibility.begin());
+    if (index < timing.plausibility_counts.size() && timing.plausibility_counts[index] < UINT64_MAX) {
+      ++timing.plausibility_counts[index];
+    }
+    return true;
+  }
+
+  nlohmann::json capture_timing_json(const stats_t &stats, std::uint64_t session_generation) {
+    if (session_generation == 0) return nullptr;
+    const auto client = std::find_if(stats.clients.begin(), stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == stats.clients.end() || !client->capture_timing) return nullptr;
+    const auto &timing = *client->capture_timing;
+    auto j = accepted_capture_json(timing, {{"session_generation", session_generation}});
+    // Private Doctor evidence retains source facts for debugging. They remain diagnostic: none is
+    // a cadence window, a pacing instruction or proof of physical acceptance.
+    j["capture_generation_id"] = timing.last_accepted.capture_generation_id;
+    j["capture_epoch_id"] = timing.last_accepted.capture_epoch_id;
+    j["last_source_sequence"] = timing.last_accepted.source_sequence;
+    j["last_presentation_ns"] = timing.last_accepted.presentation.ns ?
+      nlohmann::json(*timing.last_accepted.presentation.ns) : nlohmann::json(nullptr);
+    j["host_adaptive_sync"] = host_adaptive_sync_json(timing.last_accepted);
+
+    return j;
+  }
+
+  bool record_vrr_session(const vrr_policy::record_t &record) {
+    if (record.session_generation == 0) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [&record](const client_stats_t &candidate) {
+        return candidate.session_generation == record.session_generation;
+      });
+    if (client == current_stats.clients.end() || client->vrr) return false;
+    client->vrr = record;
+    return true;
+  }
+
+  bool record_vrr_pacing_event(const vrr_pacing::receipt_t &receipt) {
+    using mode = vrr_pacing::mode_e;
+    using event = vrr_pacing::event_e;
+    if (receipt.session_generation == 0 || vrr_pacing::name(receipt.mode) == "invalid_mode" ||
+        vrr_pacing::name(receipt.event) == "invalid_event" ||
+        static_cast<std::size_t>(receipt.event) >= vrr_pacing::k_event_count || receipt.observed_steady_ns < 0) return false;
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (receipt.observed_steady_ns > now_ns || now_ns - receipt.observed_steady_ns > 2'000'000'000) return false;
+    if ((receipt.event == event::accepted_source) != receipt.emitted_source_ns.has_value()) return false;
+    if (receipt.event == event::authority_lost && receipt.mode != mode::latched_fallback) return false;
+    const bool unsupported = receipt.event == event::unsupported_route || receipt.event == event::unsupported_codec ||
+      receipt.event == event::unsupported_loop;
+    if ((receipt.mode == mode::unsupported) != unsupported) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [&receipt](const client_stats_t &candidate) { return candidate.session_generation == receipt.session_generation; });
+    if (client == current_stats.clients.end() || !client->vrr || !client->vrr->host_source_pacing ||
+        client->vrr->requested != vrr_policy::requested_e::on || client->vrr->watch_or_input_only) return false;
+    if (client->vrr_pacing && client->vrr_pacing->authority_lost && receipt.mode != mode::latched_fallback) return false;
+    if (receipt.event == event::accepted_source) {
+      if (receipt.mode != mode::source_time || !client->capture_timing || receipt.capture_generation == 0 ||
+          receipt.capture_epoch == 0 || receipt.source_sequence == 0 || *receipt.emitted_source_ns < 0) return false;
+      const auto &image = client->capture_timing->last_accepted;
+      if (*receipt.emitted_source_ns > receipt.observed_steady_ns &&
+          std::uint64_t(*receipt.emitted_source_ns - receipt.observed_steady_ns) > image.source_time.uncertainty_ns) return false;
+      if (image.capture_generation_id != receipt.capture_generation || image.capture_epoch_id != receipt.capture_epoch ||
+          image.source_sequence != receipt.source_sequence || image.source_time.result != vrr_clock::source_time_e::mapped ||
+          image.source_time.source_steady_ns != receipt.emitted_source_ns) return false;
+      if (client->vrr_pacing) {
+        const auto &previous = *client->vrr_pacing;
+        if ((previous.last_source_epoch == receipt.capture_epoch && receipt.source_sequence <= previous.last_source_sequence) ||
+            (previous.last_source_ns && *receipt.emitted_source_ns <= *previous.last_source_ns)) return false;
+      }
+    } else if (receipt.mode == mode::source_time &&
+               (!client->vrr_pacing || client->vrr_pacing->event_counts[static_cast<std::size_t>(event::accepted_source)] == 0)) {
+      return false;
+    }
+    if (!client->vrr_pacing) client->vrr_pacing.emplace();
+    auto &runtime = *client->vrr_pacing;
+    if (receipt.event == event::accepted_source) {
+      runtime.last_source_epoch = receipt.capture_epoch;
+      runtime.last_source_sequence = receipt.source_sequence;
+      runtime.last_source_ns = receipt.emitted_source_ns;
+    }
+    // Untimed recovery/suppression events retain the established value binding for diagnostics.
+    // This is history, not authority; the producer still performs its own at-use lease check.
+    auto observation = receipt;
+    if (observation.mode != mode::unsupported && observation.capture_epoch == 0 && runtime.last_source_epoch != 0) {
+      observation.capture_generation = runtime.last.capture_generation;
+      observation.capture_epoch = runtime.last_source_epoch;
+      observation.source_sequence = runtime.last_source_sequence;
+    }
+    runtime.last = observation;
+    runtime.authority_lost = runtime.authority_lost || receipt.event == event::authority_lost;
+    auto &count = runtime.event_counts[static_cast<std::size_t>(receipt.event)];
+    if (count < UINT64_MAX) ++count;
+    return true;
+  }
+
+  void note_source_presentation(vrr_policy::presentation_status_e status) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.host_capture_presentation.count(status);
+  }
+
+  nlohmann::json vrr_json(const stats_t &stats, std::uint64_t session_generation) {
+    if (session_generation == 0) return nullptr;
+    const auto client = std::find_if(stats.clients.begin(), stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == stats.clients.end() || !client->vrr) return nullptr;
+    auto result = vrr_record_json(*client->vrr, {{"session_generation", session_generation}}, client->vrr_pacing);
+    result["host_adaptive_sync"] = client->capture_timing ? host_adaptive_sync_json(client->capture_timing->last_accepted) : nlohmann::json(nullptr);
+    return result;
+  }
+
+  bool source_pacing_evidence_unavailable(const stats_t &stats, std::uint64_t session_generation) {
+    if (stats.video_policy_source_time &&
+        (!stats.video_policy_cadence_available ||
+         (session_generation != 0 && stats.video_policy_session_generation != session_generation))) return true;
+    for (const auto &client : stats.clients) {
+      if ((session_generation != 0 && client.session_generation != session_generation) || !client.vrr ||
+          !client.vrr->host_source_pacing || client.vrr->requested != vrr_policy::requested_e::on ||
+          client.vrr->watch_or_input_only) continue;
+      if (client.vrr_pacing && (client.vrr_pacing->authority_lost ||
+          client.vrr_pacing->last.mode == vrr_pacing::mode_e::unsupported)) continue;
+      const auto observed = vrr_json(stats, client.session_generation);
+      if (!observed.value("effective", false) || !stats.video_policy_source_time ||
+          stats.video_policy_session_generation != client.session_generation) return true;
+    }
+    return false;
   }
 
   bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route) {
@@ -4328,6 +5090,129 @@ namespace stream_stats {
     return verdict.rtt_elevated ? "elevated" : "clean";
   }
 
+  nlohmann::json live_tuning_history_json(const stats_t &stats) {
+    const auto &history = stats.live_tuning_history;
+    const bool same_scope = history.scoped && history.session_generation != 0 &&
+      history.session_generation == stats.session_generation &&
+      !history.app_session_id.empty() && history.app_session_id == stats.app_session_id;
+    const bool available = stats.streaming && same_scope;
+    nlohmann::json out = {
+      {"version", 1},
+      {"clock", "host_steady_ms"},
+      {"capacity", history.capacity},
+      {"available", available},
+      {"reason", !stats.streaming ? "no_stream" : !same_scope ? "session_scope_unavailable" : "recorded"},
+      // These are controller and encoder transitions. Which bitrate a client media interval was
+      // encoded at is not known from them.
+      {"actual_media_rate_attribution", "unknown"},
+      {"session_generation", available ? stats.session_generation : 0},
+      {"dropped", available ? history.dropped : 0},
+      {"truncated", available && history.dropped > 0},
+      {"host_elapsed_ms_at_snapshot", available ? history.host_elapsed_ms_at_copy : 0},
+      {"entries", nlohmann::json::array()},
+    };
+    if (!available) return out;
+    for (const auto &entry : history.entries) {
+      nlohmann::json e = {
+        {"sequence", entry.sequence},
+        {"host_elapsed_ms", entry.host_elapsed_ms},
+        {"kind", entry.kind},
+        {"cause", entry.cause},
+        {"state", entry.state},
+        {"reason", entry.reason},
+        {"requested_bitrate_kbps", entry.requested_bitrate_kbps},
+        {"applied_proof", entry.applied_known ? "encoder_confirmed" : "unknown"},
+        {"applied_bitrate_kbps", entry.applied_known ? nlohmann::json(entry.applied_bitrate_kbps) : nlohmann::json(nullptr)},
+        {"operator_revision", entry.operator_revision},
+        {"applied_revision", entry.applied_revision},
+        {"repeat_count", entry.repeat_count},
+        {"feedback_initialized", entry.feedback_initialized},
+        {"ewma_packet_loss_percent", entry.ewma_packet_loss},
+        {"ewma_rtt_ms", entry.ewma_rtt_ms},
+      };
+      if (entry.repeat_count > 1) e["last_host_elapsed_ms"] = entry.last_host_elapsed_ms;
+      if (entry.callback_revision != 0 || entry.callback_bitrate_kbps != 0) {
+        e["callback"] = {{"bitrate_kbps", entry.callback_bitrate_kbps}, {"revision", entry.callback_revision}};
+      }
+      e["input"] = entry.input_available ? nlohmann::json {
+        {"packet_loss_percent", entry.input_packet_loss_percent},
+        {"rtt_ms", entry.input_rtt_ms},
+      } : nlohmann::json(nullptr);
+      out["entries"].push_back(std::move(e));
+    }
+    return out;
+  }
+
+  nlohmann::json client_media_interval_json(const stats_t &stats) {
+    const auto &receipt = stats.client_media_interval_receipt;
+    const bool same_scope = receipt.available && receipt.session_generation != 0 &&
+      receipt.session_generation == stats.session_generation &&
+      !receipt.app_session_id.empty() && receipt.app_session_id == stats.app_session_id;
+    const bool available = stats.streaming && same_scope;
+    nlohmann::json out = {
+      {"version", 1},
+      {"available", available},
+      {"reason", !stats.streaming ? "no_stream" : !receipt.available ? "no_receipt" :
+                 !same_scope ? "session_scope_unavailable" : "recorded"},
+      // An as-of copy of a diagnostic receipt. It decides nothing and is no verdict on the stream.
+      {"snapshot", "as_of_diagnostic"},
+      {"action_authority", false},
+      // Host arrival and client counter clocks do not locate encode or send time.
+      {"media_rate_attribution", {{"state", "unknown"}, {"reason", "unmeasured_report_timing"}}},
+    };
+    if (!available) return out;
+    out["epoch"] = receipt.epoch;
+    out["sequence"] = receipt.sequence;
+    out["ingest_state"] = std::string {from_client_media_ingest_state(receipt.state)};
+    out["network_evidence_published"] = receipt.network_evidence_published;
+    out["host_receipt_age_ms"] = receipt.host_receipt_age_ms;
+    nlohmann::json interval = {{"measured", receipt.interval_measured}};
+    if (!receipt.interval_measured) {
+      interval["unavailable_reason"] = receipt.interval_unavailable_reason;
+    } else {
+      interval["frames"] = {
+        {"expected", receipt.frames_expected},
+        {"received", receipt.frames_received},
+        {"lost", receipt.frames_lost},
+      };
+      // No frames in the interval means no loss figure, not zero loss.
+      interval["loss_available"] = receipt.frames_expected > 0;
+      interval["host_arrival"] = {{"clock", "host_steady_arrival"}, {"duration_ms", receipt.host_duration_ms}};
+      interval["client_counter"] = {
+        {"clock", "client_monotonic_counter"},
+        {"start_ms", receipt.client_start_ms},
+        {"end_ms", receipt.client_end_ms},
+        {"duration_ms", receipt.client_duration_ms},
+      };
+    }
+    out["interval"] = std::move(interval);
+    // This scope's report cadence: how many reports the legacy ingest admitted, the host arrival and
+    // client counter gap of the newest coverage reset, and the longest host arrival interval between
+    // two admitted reports. Report timing on the two clocks only: no congestion, media-rate or
+    // capacity claim and no loss figure, so a cadence without gaps is not zero video loss.
+    const auto &cadence = receipt.cadence;
+    nlohmann::json cadence_json = {
+      {"host_clock", "host_steady_arrival"},
+      {"client_clock", "client_monotonic_counter"},
+      {"loss_evidence", false},
+      {"accepted_reports", cadence.accepted_reports},
+      {"gap_resets", cadence.gap_resets},
+    };
+    if (cadence.gap_resets > 0) {
+      cadence_json["last_gap_host_ms"] = cadence.last_gap_host_ms;
+      cadence_json["last_gap_client_ms"] = cadence.last_gap_client_ms;
+      if (cadence.last_gap_preceding_state_known) {
+        cadence_json["last_gap_preceding_ingest_state"] =
+          std::string {from_client_media_ingest_state(cadence.last_gap_preceding_state)};
+      }
+    }
+    if (cadence.host_interval_recorded) {
+      cadence_json["max_host_interval_ms"] = cadence.max_host_interval_ms;
+    }
+    out["cadence"] = std::move(cadence_json);
+    return out;
+  }
+
   nlohmann::json network_verdict_json(const network_verdict_t &verdict) {
     return {
       {"loss_basis", "video_frames_lost_after_fec"},
@@ -4547,6 +5432,7 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::baseline;
         result.accepted = true;
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at);
         return result;
       }
 
@@ -4557,14 +5443,17 @@ namespace stream_stats {
         return result;
       }
 
-      const auto client_gap = std::chrono::milliseconds(
-        sample.client_monotonic_ms - previous.client_monotonic_ms
-      );
+      // The client difference is untrusted and unsigned. Compare it as unsigned milliseconds: a signed
+      // duration would turn a difference of 2^63 ms or more negative, and so let it count.
+      constexpr std::uint64_t max_client_gap_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        CLIENT_MEDIA_COUNTER_MAX_GAP).count();
+      const std::uint64_t client_gap_ms = sample.client_monotonic_ms - previous.client_monotonic_ms;
       if (received_at - previous_epoch.received_at > CLIENT_MEDIA_COUNTER_MAX_GAP ||
-          client_gap > CLIENT_MEDIA_COUNTER_MAX_GAP) {
+          client_gap_ms > max_client_gap_ms) {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::coverage_gap_reset;
         result.accepted = true;
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at, &previous_epoch);
         // Accepted and never counted: reports spaced this far apart carry no loss Doctor can use,
         // and nothing else would say so.
         if (logged_media_gap_generation.exchange(sample.session_generation) != sample.session_generation) {
@@ -4582,6 +5471,7 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::counter_epoch_reset;
         result.accepted = true;
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at, &previous_epoch);
         return result;
       }
 
@@ -4596,12 +5486,17 @@ namespace stream_stats {
       result.accepted = true;
       if (expected_delta == 0) {
         result.state = client_media_ingest_state_e::waiting_for_frames;
+        result.receipt = record_client_media_receipt_interval_locked(
+          sample, previous_epoch, result.state, received_at);
         return result;
       }
       result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
       result.frames_expected = expected_delta;
       result.frames_lost = lost_delta;
       result.state = client_media_ingest_state_e::observed;
+      // Recorded unpublished: publication happens below, and the receipt says so only after it has.
+      result.receipt = record_client_media_receipt_interval_locked(
+        sample, previous_epoch, result.state, received_at);
     }
 
     // Serialize counter advancement with evidence publication so concurrent
@@ -4636,6 +5531,13 @@ namespace stream_stats {
       adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
     }
     result.observation_published = true;
+    if (result.receipt) {
+      // Publication above has completed. Only now do this report's receipt, and the latest receipt if it
+      // is still this one, say so. Taken alone; nothing else is called under it.
+      std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+      result.receipt->network_evidence_published = true;
+      mark_client_media_receipt_published_locked(*result.receipt);
+    }
     if (logged_media_report_generation.exchange(sample.session_generation) != sample.session_generation) {
       BOOST_LOG(info) << "Doctor: client media reports reach this host for stream generation "sv
                       << sample.session_generation << "; the first counted one covered "sv
@@ -4923,8 +5825,32 @@ namespace stream_stats {
                                        double dropped_frame_ratio,
                                        double avg_frame_age_ms,
                                        double frame_jitter_ms,
-                                       double encode_time_ms) {
+                                       double encode_time_ms,
+                                       std::uint64_t session_generation,
+                                       bool source_time,
+                                       bool cadence_available) {
+    // Only the registered opted-in generation can label a policy sample source-relative.
+    bool observed_source = false;
+    std::unique_lock<std::mutex> stats_lock(stats_mutex, std::defer_lock);
+    if (source_time && session_generation != 0) {
+      stats_lock.lock();
+      const auto owner = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+        [session_generation](const client_stats_t &c) { return c.session_generation == session_generation; });
+      observed_source = owner != current_stats.clients.end() && owner->vrr && owner->vrr->host_source_pacing &&
+        owner->vrr->requested == vrr_policy::requested_e::on && !owner->vrr->watch_or_input_only &&
+        owner->vrr_pacing && !owner->vrr_pacing->authority_lost &&
+        owner->vrr_pacing->last.mode == vrr_pacing::mode_e::source_time;
+    }
     std::lock_guard<std::mutex> policy_lock(doctor_video_policy_mutex);
+    if (doctor_video_policy_state.session_generation != session_generation ||
+        doctor_video_policy_state.source_time != observed_source) {
+      doctor_video_policy_state.sample_count = 0;
+      doctor_video_policy_state.pacing_warning_streak = 0;
+    }
+    doctor_video_policy_state.session_generation = session_generation;
+    doctor_video_policy_state.source_time = observed_source;
+    doctor_video_policy_state.cadence_available = !observed_source || cadence_available;
+    doctor_video_policy_state.received_at = std::chrono::steady_clock::now();
     doctor_video_policy_state.target_fps = target_fps;
     doctor_video_policy_state.delivered_fps = delivered_fps;
     doctor_video_policy_state.duplicate_frame_ratio = duplicate_frame_ratio;
@@ -5180,7 +6106,7 @@ namespace stream_stats {
                             std::uint64_t session_generation,
                             std::string session_token) {
     std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
-    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    std::unique_lock<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
         [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; }),
@@ -5191,17 +6117,33 @@ namespace stream_stats {
     state.session_generation = session_generation;
     state.session_token = std::move(session_token);
     session_timings.push_back(std::move(state));
+    // Taken alone, after frame_timing_mutex is released.
+    lock.unlock();
+    std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+    // A new lifecycle for this owner: no earlier receipt of it is proof for this one. The legacy
+    // counter baseline is left exactly as it was.
+    if (client_media_receipt_state.receipt.owner_uuid == device_uuid) {
+      invalidate_client_media_receipt_locked();
+    }
   }
 
   void stop_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {
     std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
-    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    std::unique_lock<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
         [&device_uuid, session_generation](const session_timing_state_t &s) {
           return s.device_uuid == device_uuid && s.session_generation == session_generation;
         }),
       session_timings.end());
+    // Taken alone, after frame_timing_mutex is released. Only the ending lifecycle's receipt goes;
+    // the legacy counter baseline is left exactly as it was.
+    lock.unlock();
+    std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+    const auto &receipt = client_media_receipt_state.receipt;
+    if (receipt.owner_uuid == device_uuid && receipt.session_generation == session_generation) {
+      invalidate_client_media_receipt_locked();
+    }
   }
 
   void record_frame_timing(const std::string &device_uuid,
@@ -5257,6 +6199,16 @@ namespace stream_stats {
       session_timings.front().session_token
     };
   }
+
+  namespace {
+    // Whether this exact owner and generation is the registered timing scope right now. Cheap and
+    // allocation-free: no ring copies, percentiles or sorting, and the lock is held for this lookup only.
+    bool session_timing_is_current(const std::string &device_uuid, std::uint64_t session_generation) {
+      std::lock_guard<std::mutex> lock(frame_timing_mutex);
+      const auto *state = find_session_timing_locked(device_uuid);
+      return state && state->session_generation == session_generation;
+    }
+  }  // namespace
 
   void bind_doctor_action_scope(nlohmann::json &doctor,
                                 std::string_view app_session_id,
@@ -5541,13 +6493,26 @@ namespace stream_stats {
 
     std::lock_guard<std::mutex> lock(benchmark_run_mutex);
 
+    // With the caller's exact generation registered, an accepted create may supersede that owner's
+    // strictly older open runs. Decide every rejection before changing any row, and abort older runs only
+    // after insertion so allocation failure leaves existing rows intact. This probe is a snapshot; the
+    // route identity and population prechecks are not atomic with insertion.
+    // Lock order: benchmark_run_mutex, then frame_timing_mutex inside the probe only.
+    const bool caller_is_current = session_timing_is_current(device_uuid, session_generation);
+    const auto is_open = [](const benchmark_run_t &r) {
+      return r.state == benchmark_run_state_e::armed ||
+             r.state == benchmark_run_state_e::active ||
+             r.state == benchmark_run_state_e::draining;
+    };
+    const auto is_superseded = [&](const benchmark_run_t &r) {
+      return caller_is_current && is_open(r) && r.owning_device_uuid == device_uuid &&
+             r.owning_session_generation < session_generation;
+    };
+
     const bool session_already_has_active_run = std::any_of(
       benchmark_runs.begin(), benchmark_runs.end(),
-      [&device_uuid](const benchmark_run_t &r) {
-        return r.owning_device_uuid == device_uuid &&
-               (r.state == benchmark_run_state_e::armed ||
-                r.state == benchmark_run_state_e::active ||
-                r.state == benchmark_run_state_e::draining);
+      [&](const benchmark_run_t &r) {
+        return r.owning_device_uuid == device_uuid && is_open(r) && !is_superseded(r);
       });
     if (session_already_has_active_run) {
       return benchmark_run_create_result_e::rejected_session_already_has_an_active_run;
@@ -5575,7 +6540,18 @@ namespace stream_stats {
     run.armed_monotonic = std::chrono::steady_clock::now();
     run.client_population_revision_at_arm = client_population_revision();
 
+    // If allocation fails above or here, no existing row has been touched yet.
     benchmark_runs.push_back(std::move(run));
+
+    // The new run has the caller's generation, so it is never superseded.
+    const auto superseded_at = std::chrono::steady_clock::now();
+    for (auto &r : benchmark_runs) {
+      if (is_superseded(r)) {
+        r.state = benchmark_run_state_e::aborted;
+        r.abort_reason = benchmark_abort_reason_e::session_generation_changed;
+        r.frozen_monotonic = superseded_at;
+      }
+    }
     enforce_terminal_retention_locked(benchmark_runs);
 
     return benchmark_run_create_result_e::created;
@@ -5667,7 +6643,9 @@ namespace stream_stats {
         result = benchmark_run_start_result_e::rejected_population_changed_since_arm;
         return;
       }
-      if (!get_session_timing(device_uuid).session_active) {
+      // The run's own generation must still be the registered timing scope, not merely some
+      // session for this device: a reconnect replaces the generation, and the old one never returns.
+      if (!session_timing_is_current(device_uuid, session_generation)) {
         result = benchmark_run_start_result_e::rejected_session_no_longer_active;
         return;
       }
@@ -5742,6 +6720,10 @@ namespace stream_stats {
     if (!caller_is_authorized_harness) {
       return benchmark_run_get_result_e::rejected_caller_not_authorized_as_harness;
     }
+
+    // The authorized cold read enforces retention before exposing any payload. The helper takes
+    // benchmark_run_mutex itself, so call it before entering the locked visitor below.
+    expire_stale_benchmark_runs();
 
     const bool found = with_benchmark_run(run_id, [&](benchmark_run_t &run) {
       apply_lazy_transitions_locked(run);
@@ -5827,7 +6809,7 @@ namespace stream_stats {
 
   stats_t get_current() {
     stats_t result;
-    const auto adaptive_state = adaptive_bitrate::get_state();
+    const auto adaptive_state = adaptive_bitrate::get_state_with_history();
     {
       std::lock_guard<std::mutex> lock(stats_mutex);
       const auto target_bitrate = adaptive_state.target_bitrate_kbps;
@@ -5846,10 +6828,22 @@ namespace stream_stats {
 
       result = current_stats;
       result.last_session = last_ended_session;
+      // Only this snapshot carries the history; current_stats never holds a copy that could go stale.
+      result.live_tuning_history = adaptive_state.history;
     }
     if (const auto identity = get_single_active_session_identity()) {
       result.session_generation = identity->session_generation;
       result.app_session_id = identity->session_token;
+    }
+    {
+      // A coherent copy of the newest receipt, taken alone after the other locks are released. The
+      // serializer reads only this copy; it is an as-of diagnostic, never authority.
+      std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+      result.client_media_interval_receipt = client_media_receipt_state.receipt;
+    }
+    if (result.client_media_interval_receipt.available) {
+      result.client_media_interval_receipt.host_receipt_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - result.client_media_interval_receipt.host_end).count();
     }
 
     // Doctor-policy video fields are read under the same narrow lock used to
@@ -5871,6 +6865,11 @@ namespace stream_stats {
       result.video_sample_revision = hot_video_sample_revision.load(std::memory_order_acquire);
       result.video_policy_sample_count = doctor_video_policy_state.sample_count;
       result.pacing_warning_streak = doctor_video_policy_state.pacing_warning_streak;
+      result.video_policy_session_generation = doctor_video_policy_state.session_generation;
+      result.video_policy_source_time = doctor_video_policy_state.source_time;
+      result.video_policy_cadence_available = doctor_video_policy_state.cadence_available &&
+        (!result.video_policy_source_time ||
+         std::chrono::steady_clock::now() - doctor_video_policy_state.received_at <= std::chrono::seconds {2});
     }
     {
       // Keep the complete network group on one host-received observation.

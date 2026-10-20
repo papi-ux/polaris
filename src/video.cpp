@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -52,11 +53,17 @@ extern "C" {
 #include "verified_action.h"
 #include "video_frame_pacing.h"
 #include "encoder_probe_reuse.h"
+#include "vrr_clock_proof.h"
+#include "vrr_epoch_authority.h"
+#include "vrr_pacing_receipt.h"
+#include "vrr_source_pacing.h"
+#include "vrr_source_time.h"
 #include <iomanip>
 
 #ifdef __linux__
   #include "platform/linux/encoder_auto_policy.h"
   #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/vrr_clock_probe.h"
   #include "platform/linux/session_media.h"
   #include "platform/linux/cuda.h"
   #include "platform/linux/graphics.h"
@@ -101,6 +108,9 @@ namespace video {
     };
     thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
     thread_local const std::function<capture_preparation_e(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
+    /// Runs right after a frame's successful conversion in the parallel encode loop, standing in
+    /// for a conversion that blocks while the world changes.
+    thread_local const std::function<void()> *after_convert_test_hook = nullptr;
 #endif
 
 #ifdef __linux__
@@ -422,6 +432,9 @@ namespace video {
       clone->native_fd = src->native_fd;
       clone->frame_timestamp = src->frame_timestamp;
       clone->frame_metadata = src->frame_metadata;
+      // The immutable snapshot the consumer accepted, whole: never re-read from the source image,
+      // whose provenance belongs to the producer's pool and is reset when it is reused.
+      clone->provenance = frame.provenance;
       clone->x = src->x;
       clone->y = src->y;
       clone->src_w = src->src_w;
@@ -431,14 +444,19 @@ namespace video {
       clone->sd = src->sd;
       clone->sequence = src->sequence;
       clone->dmabuf_buffer_key = src->dmabuf_buffer_key;
+      clone->requires_producer_lease = src->requires_producer_lease;
+      clone->capture_owner = frame.image;
 
-      for (auto &fd : clone->sd.fds) {
-        if (fd < 0) {
+      // Until duplicated, every plane belongs to capture. On a partial
+      // failure the clone's destructor may close only its own duplicates.
+      std::fill_n(clone->sd.fds, 4, -1);
+      for (std::size_t plane = 0; plane < 4; ++plane) {
+        if (src->sd.fds[plane] < 0) {
           continue;
         }
 
-        fd = dup_compat_fd(fd);
-        if (fd < 0) {
+        clone->sd.fds[plane] = dup_compat_fd(src->sd.fds[plane]);
+        if (clone->sd.fds[plane] < 0) {
           BOOST_LOG(error) << "Failed to duplicate DMA-BUF compatibility image fd for frame conversion"sv;
           return {};
         }
@@ -1813,6 +1831,8 @@ namespace video {
     std::shared_ptr<std::vector<packet_raw_t::replace_t>> replacements = std::make_shared<std::vector<packet_raw_t::replace_t>>();
     bool frame_submitted = false;
     bool filler_stripped = false;
+    /// Source-time pacing only: each submission's emitted time by PTS, so delayed output keeps ITS time.
+    std::optional<vrr_pacing::submission_times_t> source_submissions;
 
     cbs::nal_t sps;
     cbs::nal_t vps;
@@ -2178,6 +2198,9 @@ namespace video {
       return true;
     }
 
+    /// Source-time pacing only: each submission's emitted time by frame index.
+    std::optional<vrr_pacing::submission_times_t> source_submissions;
+
   private:
     std::unique_ptr<encode_device_frame_converter_t<platf::nvenc_encode_device_t>> converter;
     conversion_request_t conversion_request;
@@ -2253,11 +2276,73 @@ namespace video {
     }
   }
 
+  /**
+   * One consumer's record of the source images it actually accepted: called only after the pacer
+   * admitted the image and it converted, never for a repeat of the last image this consumer recorded,
+   * an input-only loop or a probe. A Watch consumer records its own images, while its frozen
+   * watch_or_input_only policy keeps every pacing authority false. Stats fences epoch and sequence again.
+   *
+   * The stream registers its stats entry after its video thread starts, so the first accepted image
+   * can be refused. That one accepted observation is kept, unchanged, and retried from the loop's
+   * later iterations, so a static source whose next frames are only repeats still lands it once.
+   * A newer accepted image replaces it; nothing here touches pacing, conversion, encoding or packets.
+   */
+  struct accepted_capture_t {
+    std::uint64_t epoch_id = 0;
+    std::uint64_t sequence = 0;
+    std::optional<platf::image_provenance_t> pending;
+
+    /**
+     * The one guard for both entry paths. Only an eligible consumer, and only a stamped image of this
+     * consumer's own logical capture generation, where 0 is the ordinary desktop's valid generation:
+     * a stale image of another generation never enters, by record or by retry.
+     */
+    static bool admissible(const config_t &config, const platf::image_provenance_t &provenance) {
+      return !config.input_only && !encoder_probe_active() && config.session_generation != 0 &&
+             provenance.capture_epoch_id != 0 && provenance.source_sequence != 0 &&
+             provenance.capture_generation_id == config.capture_generation.generation_id;
+    }
+
+    /** Publish an accepted observation; on refusal keep it as the one pending observation. */
+    bool publish(const config_t &config, const platf::image_provenance_t &provenance) {
+      if (stream_stats::record_accepted_capture(config.session_generation, provenance)) {
+        epoch_id = provenance.capture_epoch_id;
+        sequence = provenance.source_sequence;
+        pending.reset();
+        return true;
+      }
+      pending = provenance;
+      return false;
+    }
+
+    /** A newly accepted, converted source image. @return Whether it was published now. */
+    bool record(const config_t &config, const platf::image_provenance_t &provenance) {
+      if (!admissible(config, provenance)) return false;
+      if (provenance.capture_epoch_id == epoch_id && provenance.source_sequence == sequence) return false;
+      return publish(config, provenance);
+    }
+
+    /**
+     * Retry the pending observation from an iteration that accepted no new image. A pending
+     * observation that is no longer admissible for this consumer is dropped, never transferred.
+     */
+    bool retry(const config_t &config) {
+      if (!pending) return false;
+      if (!admissible(config, *pending)) {
+        pending.reset();
+        return false;
+      }
+      const auto observation = *pending;
+      return publish(config, observation);
+    }
+  };
+
   struct sync_session_t {
     sync_session_ctx_t *ctx;
     std::unique_ptr<encode_session_t> session;
     std::optional<stream_stats::capture_source_t> reported_source;
     capture_backend_publication_t capture_backend;
+    accepted_capture_t accepted_capture;
   };
 
   void record_capture_source(const config_t &config, const frame_t &frame,
@@ -3356,6 +3441,169 @@ namespace video {
     return bound.platform_formats->dev_type;
   }
 
+  /**
+   * The allocator state after issuing current. The largest value is issued once and then the state
+   * becomes 0, which never issues again: identities are never reused, even after exhaustion.
+   */
+  static constexpr std::uint64_t capture_identity_after(std::uint64_t current) {
+    return current == std::numeric_limits<std::uint64_t>::max() ? 0 : current + 1;
+  }
+
+  /** Take one nonzero identity from a shared allocator, or 0 permanently once it is exhausted. */
+  static std::uint64_t allocate_capture_identity(std::atomic<std::uint64_t> &next) {
+    auto current = next.load(std::memory_order_relaxed);
+    while (current != 0) {
+      if (next.compare_exchange_weak(current, capture_identity_after(current), std::memory_order_relaxed)) {
+        return current;
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * One producer's capture epoch: minted after each successful display open or reopen, so frames of
+   * successive displays never share an identity. A probe's display mints none and its images stay
+   * unstamped. Diagnostic only: nothing here changes how frames are stamped, paced or encoded.
+   */
+  struct capture_epoch_t {
+    std::uint64_t capture_generation_id = 0;
+    std::uint64_t epoch_id = 0;
+    /// Next source sequence to issue; 0 once exhausted, after which no image is stamped again.
+    std::uint64_t next_sequence = 1;
+    platf::capture_timing_route_t route;
+    /// Historical evidence from the open; stable for the epoch's whole life.
+    std::shared_ptr<const vrr_clock::proof_t> proof;
+    /**
+     * The display's lease, snapshotted once at open and the very object the proof was collected
+     * against. Only the epoch retains it: no proof, image, receipt or statistic does.
+     */
+    std::shared_ptr<const vrr_clock::compositor_lease_t> lease;
+    /// Clocks for the per-frame bracket; set only where a presentation clock can be mapped.
+    vrr_clock::system_t *clocks = nullptr;
+    vrr_clock::epoch_source_state_t source_state;
+    /**
+     * This epoch's live authority (its exact lease and proof), published for encode threads to check
+     * at use. Withdrawn, and closed, when this epoch is replaced by a reopen or destroyed; frames and
+     * their provenance never hold it.
+     */
+    vrr_clock::authority_publication_t authority;
+
+    /**
+     * Stamp a new source frame's producer identity before any consumer can see the image. An
+     * exhausted epoch or sequence leaves the image unstamped, so it can never be recorded.
+     */
+    void stamp(platf::img_t &img) {
+      if (epoch_id == 0 || next_sequence == 0) return;
+      const auto sequence = next_sequence;
+      next_sequence = capture_identity_after(sequence);
+      img.provenance.capture_generation_id = capture_generation_id;
+      img.provenance.capture_epoch_id = epoch_id;
+      img.provenance.source_sequence = sequence;
+      img.provenance.route = route;
+      img.provenance.clock_proof = proof;
+      img.provenance.source_time = map_source_time(img.provenance);
+    }
+
+    /**
+     * The per-frame receipt, observed now: the epoch's lease must be current at this moment and a
+     * fresh clock read must agree with the epoch's mapping. Diagnostic only; frame_timestamp, pacing
+     * and encoding never read it.
+     */
+    vrr_clock::source_time_receipt_t map_source_time(const platf::image_provenance_t &provenance) {
+      const bool clock = route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic;
+      if (!clock || !clocks) {
+        vrr_clock::source_time_receipt_t receipt;
+        receipt.result = vrr_clock::source_time_e::no_presentation_clock;
+        receipt.presentation_baseline = provenance.presentation.baseline;
+        return receipt;
+      }
+      const vrr_clock::source_time_input_t input {
+        .route_has_presentation_clock = true,
+        .capture_epoch_id = epoch_id,
+        .status = provenance.presentation.status,
+        .presentation_ns = provenance.presentation.ns,
+        .presentation_baseline = provenance.presentation.baseline,
+        .prefetched_init = provenance.prefetched_init,
+        .ready_at = provenance.ready_at,
+      };
+      return vrr_clock::map_source_time(input, proof.get(), lease.get(), *clocks, source_state, {});
+    }
+  };
+
+  static std::atomic<std::uint64_t> next_capture_epoch_id {1};
+
+  /** What both capture threads do to a pooled image they hand to a backend again. */
+  static void reset_pooled_image(platf::img_t &img) {
+    img.frame_timestamp.reset();
+    // Only the pool holds a pulled image, so no consumer can observe this reset.
+    img.provenance = {};
+  }
+
+  /**
+   * Stamp a newly captured image once, before its first raise. An image already stamped since its
+   * pool reset is never written again, so a consumer holding it can never see its provenance change.
+   */
+  static void stamp_new_source_image(capture_epoch_t &epoch, platf::img_t *img, bool frame_captured) {
+    if (frame_captured && img && img->provenance.capture_epoch_id == 0) {
+      epoch.stamp(*img);
+    }
+  }
+
+  /// The clocks every production epoch reads: the kernel's, on Linux; none elsewhere.
+  static vrr_clock::system_t *production_epoch_clocks() {
+#ifdef __linux__
+    return &vrr_clock::linux_probe::real_system();
+#else
+    return nullptr;
+#endif
+  }
+
+  /**
+   * Open one epoch whose proof and per-frame mapping read clocks. Production passes the kernel's
+   * (production_epoch_clocks()); only the test stepper passes another. A null clocks pointer leaves the
+   * epoch without a proof, so its frames can never map.
+   */
+  static capture_epoch_t open_capture_epoch(const platf::display_t &disp, std::uint64_t capture_generation_id,
+                                            [[maybe_unused]] vrr_clock::system_t *clocks) {
+    capture_epoch_t epoch;
+    if (encoder_probe_active()) return epoch;
+    epoch.capture_generation_id = capture_generation_id;
+    epoch.epoch_id = allocate_capture_identity(next_capture_epoch_id);
+    if (epoch.epoch_id == 0) return epoch;  // exhausted: unstamped, unrecordable, never a reused identity
+    epoch.route = disp.capture_timing;
+#ifdef __linux__
+    if (epoch.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic && clocks) {
+      // The expectation is the lease this display retained when it connected to its frozen private
+      // generation (none for desktop, KMS, Gamescope, unowned or probe displays). collect() verifies
+      // the socket peer it actually reads against it, so the clock domain is verified only for that
+      // still-current compositor. Diagnostic only: pacing and timestamps are unchanged.
+      // Snapshot the lease once: the proof is collected against this object, and every frame of
+      // the epoch is later checked against the same one, never against a newer foreign lease.
+      epoch.lease = disp.compositor_lease();
+      epoch.clocks = clocks;
+      epoch.proof = vrr_clock::collect(
+        disp.presentation_peer_fd(),
+        epoch.epoch_id,
+        *epoch.clocks,
+        vrr_clock::mapping_limits_t {},
+        epoch.lease
+      );
+      // Only an epoch whose own proof authorises clock comparison under its own lease has authority
+      // to publish. It names the same lease and proof objects, never a later one.
+      if (epoch.lease && epoch.proof && vrr_clock::authorises_clock_comparison(*epoch.proof)) {
+        epoch.authority = vrr_clock::authority_publication_t {std::make_shared<vrr_clock::epoch_authority_t>(
+          epoch.epoch_id, epoch.capture_generation_id, epoch.proof, epoch.lease
+        )};
+      }
+    }
+#endif
+    return epoch;
+  }
+
+  static capture_epoch_t open_capture_epoch(const platf::display_t &disp, std::uint64_t capture_generation_id) {
+    return open_capture_epoch(disp, capture_generation_id, production_epoch_clocks());
+  }
+
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -3444,6 +3692,7 @@ namespace video {
 
     display_wp = disp;
     initial_capture_failure.disable();
+    auto capture_epoch = open_capture_epoch(*disp, active_generation.generation_id);
 
     constexpr auto capture_buffer_size = 12;
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
@@ -3532,7 +3781,7 @@ namespace video {
         if (img_out) {
           // trim allocated but unused portion of the pool based on timeouts
           trim_imgs();
-          img_out->frame_timestamp.reset();
+          reset_pooled_image(*img_out);
           return true;
         } else {
           // sleep and retry if image pool is full
@@ -3549,6 +3798,7 @@ namespace video {
       bool artificial_reinit = false;
 
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+        stamp_new_source_image(capture_epoch, img.get(), frame_captured);
         KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
           if (!capture_ctx->images->running()) {
             capture_ctx = capture_ctxs.erase(capture_ctx);
@@ -3736,6 +3986,7 @@ namespace video {
             }
 
             display_wp = disp;
+            capture_epoch = open_capture_epoch(*disp, active_generation.generation_id);
 
             reinit_request_event.reset();
             reinit_event.reset();
@@ -3755,6 +4006,28 @@ namespace video {
     }
   }
 
+  /// A steady time as exact nanoseconds; nullopt when the clock's ticks cannot say it exactly.
+  static std::optional<std::int64_t> steady_ns_of(std::chrono::steady_clock::time_point at) {
+    return vrr_clock::exact_ns(at.time_since_epoch());
+  }
+
+  /// The steady time of a pacing timestamp, which was checked representable when it was made.
+  static std::chrono::steady_clock::time_point steady_at_ns(std::int64_t ns) {
+    return std::chrono::steady_clock::time_point {
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds {ns})
+    };
+  }
+
+  /// Record a source-paced submission's emitted time under its index. False when it has none.
+  static bool record_source_submission(std::optional<vrr_pacing::submission_times_t> &submissions,
+                                       std::int64_t index,
+                                       const std::optional<std::chrono::steady_clock::time_point> &frame_timestamp) {
+    const auto ns = frame_timestamp ? steady_ns_of(*frame_timestamp) : std::nullopt;
+    if (!ns) return false;
+    submissions->put(index, *ns);
+    return true;
+  }
+
   int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto *encode_device = session.device();
     if (!encode_device || !encode_device->frame) {
@@ -3763,6 +4036,11 @@ namespace video {
 
     auto &frame = encode_device->frame;
     frame->pts = frame_nr;
+    // A source-paced session gives every submission an explicit time. Fail closed without one.
+    if (session.source_submissions && !record_source_submission(session.source_submissions, frame_nr, frame_timestamp)) {
+      BOOST_LOG(error) << "Source-paced frame "sv << frame_nr << " has no emitted time; refusing to encode it"sv;
+      return -1;
+    }
 
     auto &ctx = session.avcodec_ctx;
 
@@ -3828,7 +4106,19 @@ namespace video {
         }
       }
 
-      if (av_packet && av_packet->pts == frame_nr) {
+      if (session.source_submissions) {
+        // Delayed output keeps the time of the frame it encodes, never the one just submitted.
+        const auto emitted = session.source_submissions->take(av_packet->pts);
+        if (!emitted) {
+          BOOST_LOG(error) << "Encoder returned frame "sv << av_packet->pts
+                           << " with no recorded source-paced submission; refusing to send it"sv;
+          return -1;
+        }
+        packet->frame_timestamp = steady_at_ns(emitted->emit_ns);
+        packet->source_time_paced = emitted->source_time_paced;
+        packet->source_clock_timestamp = true;
+        packet->encode_done_timestamp = std::chrono::steady_clock::now();
+      } else if (av_packet && av_packet->pts == frame_nr) {
         packet->frame_timestamp = frame_timestamp;
         packet->encode_done_timestamp = std::chrono::steady_clock::now();
       }
@@ -3896,6 +4186,10 @@ namespace video {
 #endif
 
   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+    if (session.source_submissions && !record_source_submission(session.source_submissions, frame_nr, frame_timestamp)) {
+      BOOST_LOG(error) << "Source-paced frame "sv << frame_nr << " has no emitted time; refusing to encode it"sv;
+      return -1;
+    }
     auto encoded_frame = session.encode_frame(frame_nr);
     auto encode_done_timestamp = std::chrono::steady_clock::now();
     if (encoded_frame.data.empty()) {
@@ -3910,6 +4204,18 @@ namespace video {
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
+    if (session.source_submissions) {
+      // The packet keeps the time recorded for ITS index; a mismatch never borrows the current one.
+      const auto emitted = session.source_submissions->take(static_cast<std::int64_t>(encoded_frame.frame_index));
+      if (!emitted) {
+        BOOST_LOG(error) << "NvENC returned frame "sv << encoded_frame.frame_index
+                         << " with no recorded source-paced submission; refusing to send it"sv;
+        return -1;
+      }
+      frame_timestamp = steady_at_ns(emitted->emit_ns);
+      packet->source_time_paced = emitted->source_time_paced;
+      packet->source_clock_timestamp = true;
+    }
     packet->frame_timestamp = frame_timestamp;
     packet->encode_done_timestamp = encode_done_timestamp;
     packets->raise(std::move(packet));
@@ -4539,6 +4845,118 @@ namespace video {
     mail->event<bool>(mail::shutdown)->raise(true);
   }
 
+  /**
+   * One session generation's source-time pacing (Polaris #216). encode_published_displays() holds
+   * it across every display reopen and encoder recreation, so neither can reset what was emitted or
+   * clear a latched fallback. Absent for every session that is not eligible.
+   */
+  struct source_pacing_session_t {
+    explicit source_pacing_session_t(const config_t &config):
+        generation {rate_of(config)} {
+    }
+
+    static vrr_pacing::rate_t rate_of(const config_t &config) {
+      const auto rate = encoding_framerate_to_rational(config);
+      return {rate.num, rate.den};
+    }
+
+    vrr_pacing::generation_t generation;
+    /// An IDR request no successfully submitted frame has carried yet.
+    bool idr_pending = false;
+    /// Source-relative cadence: the previous committed source frame's time and its encode handoff.
+    std::optional<std::int64_t> last_source_ns;
+    std::optional<std::int64_t> last_handoff_ns;
+  };
+
+  /// What prevents source pacing on this display and encoder, or nullopt when it can be paced.
+  static std::optional<vrr_pacing::event_e> source_pacing_unsupported(
+    const config_t &config,
+    const platf::display_t &display,
+    encode_session_t &session,
+    const vrr_pacing::generation_t &generation
+  ) {
+    // H.264 or HEVC SDR through an encoder that encodes in encode(), after the authority gate.
+    if ((config.videoFormat != 0 && config.videoFormat != 1) || config.dynamicRange != 0 || !generation.rate_valid() ||
+        (!dynamic_cast<avcodec_encode_session_t *>(&session) && !dynamic_cast<nvenc_encode_session_t *>(&session))) {
+      return vrr_pacing::event_e::unsupported_codec;
+    }
+    // Only the owned private compositor's source-driven ext-image-copy route can be proven. A desktop
+    // or unowned compositor (no retained lease) keeps the fixed-rate loop exactly.
+    if (display.capture_timing.pacing != platf::capture_pacing_e::source_driven ||
+        display.capture_timing.presentation != platf::presentation_clock_e::ext_image_copy_monotonic ||
+        !display.compositor_lease()) {
+      return vrr_pacing::event_e::unsupported_route;
+    }
+    return std::nullopt;
+  }
+
+  /// Turn on per-submission time keeping for a paced encoder session.
+  static void enable_source_submissions(encode_session_t &session) {
+    if (auto *av = dynamic_cast<avcodec_encode_session_t *>(&session)) {
+      av->source_submissions.emplace();
+    } else if (auto *nv = dynamic_cast<nvenc_encode_session_t *>(&session)) {
+      nv->source_submissions.emplace();
+    }
+  }
+
+  /// Back to the encoder's own timestamp handling, for a session that is not source paced after all.
+  static void disable_source_submissions(encode_session_t &session) {
+    if (auto *av = dynamic_cast<avcodec_encode_session_t *>(&session)) {
+      av->source_submissions.reset();
+    } else if (auto *nv = dynamic_cast<nvenc_encode_session_t *>(&session)) {
+      nv->source_submissions.reset();
+    }
+  }
+
+  /// Mark whether the next submission is the effective source-time path's (sets the packet flag).
+  static void mark_next_source_submission(encode_session_t &session, bool source_time_paced) {
+    if (auto *av = dynamic_cast<avcodec_encode_session_t *>(&session); av && av->source_submissions) {
+      av->source_submissions->next_source_time_paced = source_time_paced;
+    } else if (auto *nv = dynamic_cast<nvenc_encode_session_t *>(&session); nv && nv->source_submissions) {
+      nv->source_submissions->next_source_time_paced = source_time_paced;
+    }
+  }
+
+  /// One value-only observation for the diagnostics. Never carries live authority.
+  static void record_source_pacing_event(
+    const config_t &config,
+    vrr_pacing::mode_e mode,
+    vrr_pacing::event_e event,
+    const platf::image_provenance_t *frame = nullptr,
+    std::optional<std::int64_t> emitted_source_ns = std::nullopt
+  ) {
+    vrr_pacing::receipt_t receipt;
+    receipt.session_generation = config.session_generation;
+    if (frame) {
+      receipt.capture_generation = frame->capture_generation_id;
+      receipt.capture_epoch = frame->capture_epoch_id;
+      receipt.source_sequence = frame->source_sequence;
+    }
+    receipt.mode = mode;
+    receipt.event = event;
+    if (event == vrr_pacing::event_e::accepted_source) receipt.emitted_source_ns = emitted_source_ns;
+    receipt.observed_steady_ns = steady_ns_of(std::chrono::steady_clock::now()).value_or(-1);
+    (void) stream_stats::record_vrr_pacing_event(receipt);
+  }
+
+  static vrr_pacing::source_frame_t source_frame_of(const platf::image_provenance_t &provenance) {
+    return {
+      provenance.capture_epoch_id,
+      provenance.source_sequence,
+      provenance.source_time.result,
+      provenance.source_time.source_steady_ns,
+      provenance.source_time.uncertainty_ns,
+    };
+  }
+
+  /// A receipt meaning this epoch can never map (its route is not proven), as opposed to one frame.
+  static bool receipt_route_unproven(vrr_clock::source_time_e result) {
+    using r = vrr_clock::source_time_e;
+    return result == r::not_observed || result == r::no_presentation_clock || result == r::proof_unavailable ||
+           result == r::namespace_unverified || result == r::identity_unverified || result == r::mapping_invalid ||
+           result == r::clock_domain_unverified;
+  }
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -4550,7 +4968,9 @@ namespace video {
     safe::signal_t &reinit_request_event,
     const encoder_t &encoder,
     stream_packets::destination_t channel_data,
-    packet_queue_t packets
+    packet_queue_t packets,
+    bool &session_initialized,
+    source_pacing_session_t *pacing_state = nullptr
   ) {
     // A disable/rollback may have superseded the target while a former
     // FFmpeg encoder was being retired. Use the latest pending request.
@@ -4560,6 +4980,7 @@ namespace video {
     bool refused_for_good = false;
     auto session = make_encode_session(disp, encoder, config, disp->width, disp->height,
                                        std::move(encode_device), &refused_for_good);
+    session_initialized = static_cast<bool>(session);
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
         false,
@@ -4571,6 +4992,23 @@ namespace video {
         end_stream_encoder_cannot_serve(mail);
       }
       return;
+    }
+
+    // Source-time pacing applies to this encoder session only when the generation is eligible and the
+    // display, codec and encoder can carry it. Otherwise this session paces exactly as before.
+    source_pacing_session_t *pacing = nullptr;
+    if (pacing_state) {
+      if (const auto unsupported = source_pacing_unsupported(config, *disp, *session, pacing_state->generation)) {
+        record_source_pacing_event(config, vrr_pacing::mode_e::unsupported, *unsupported);
+        // A route that stops being pace-able after emissions keeps their order, as a latched fallback.
+        if (pacing_state->generation.last_emitted_ns()) {
+          pacing_state->generation.latch();
+          pacing = pacing_state;
+        }
+      } else {
+        pacing = pacing_state;
+      }
+      if (pacing) enable_source_submissions(*session);
     }
 
     bool bitrate_session_recreation_pending = false;
@@ -4668,6 +5106,7 @@ namespace video {
 
     bool missing_frame_timestamp_warning_logged = false;
     std::optional<stream_stats::capture_source_t> reported_source;
+    accepted_capture_t accepted_capture;
     // Only a PyroWave session records a route into it. Each display's publication starts it over.
     std::string reported_pyrowave_route;
     // Published from the loop until it lands, so a session registered after the display opened,
@@ -4689,6 +5128,10 @@ namespace video {
     int applied_adaptive_bitrate = config.bitrate;
     // Codec time spent in convert() for the frame about to be encoded. Only PyroWave encodes there.
     double codec_time_in_convert_ms = 0.0;
+    // Source-time pacing: the VALUE provenance of the image this encoder session's surface now holds
+    // (its last conversion), so a recovery or liveness re-encode of it is judged by ITS epoch's live
+    // authority. Empty for the dummy surface. Holds no lease and grants nothing by itself.
+    std::optional<platf::image_provenance_t> surface_provenance;
 
     while (true) {
       // Break out of the encoding loop if any of the following are true:
@@ -4719,13 +5162,20 @@ namespace video {
 
       if (requested_idr_frame) {
         session->request_idr_frame();
+        // Latched until a successfully submitted frame carries it.
+        if (pacing) pacing->idr_pending = true;
       }
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
       bool reused_previous_frame = true;
+      // Source-time pacing: what this iteration would emit, committed only after a successful encode.
+      bool source_mode = pacing && !pacing->generation.latched();
+      std::optional<vrr_pacing::candidate_t> pacing_candidate;
+      std::optional<platf::image_provenance_t> source_provenance;
+      const bool want_recovery = requested_idr_frame || (pacing && pacing->idr_pending);
 
       // Encode at a minimum FPS to avoid image quality issues with static content
-      if (!requested_idr_frame || images->peek()) {
+      if (!want_recovery || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
           auto frame = make_frame(std::move(img));
 
@@ -4739,7 +5189,42 @@ namespace video {
           }
 
           auto current_timestamp = *frame_timestamp;
-          const auto pacing_decision = frame_timestamp_pacer.evaluate(current_timestamp);
+          if (source_mode) {
+            // Never the fixed grid: the frame's own mapped source time, or a named refusal.
+            const auto result = frame.provenance.source_time.result;
+            if (result == vrr_clock::source_time_e::lease_not_current) {
+              pacing->generation.latch();
+              record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::authority_lost, &frame.provenance);
+              continue;
+            }
+            if (receipt_route_unproven(result) && pacing->generation.mode() == vrr_pacing::mode_e::waiting) {
+              // No source frame was paced and this epoch can never map: this encoder session paces
+              // exactly as before, starting with this frame. A later display open is judged afresh.
+              record_source_pacing_event(config, vrr_pacing::mode_e::unsupported, vrr_pacing::event_e::unsupported_route, &frame.provenance);
+              disable_source_submissions(*session);
+              pacing = nullptr;
+              source_mode = false;
+            } else if (receipt_route_unproven(result)) {
+              // Source frames were already paced and this epoch can never map: keep their order,
+              // as a latched fallback, rather than dropping every frame to the liveness floor.
+              pacing->generation.latch();
+              record_source_pacing_event(config, vrr_pacing::mode_e::unsupported, vrr_pacing::event_e::unsupported_route, &frame.provenance);
+              continue;
+            }
+          }
+          if (source_mode) {
+            const auto now_ns = steady_ns_of(std::chrono::steady_clock::now());
+            const auto precheck = now_ns ? pacing->generation.precheck_source(source_frame_of(frame.provenance), *now_ns) :
+                                           vrr_pacing::decision_t {std::nullopt, vrr_pacing::event_e::source_stale};
+            if (!precheck.candidate) {
+              record_source_pacing_event(config, pacing->generation.mode(), precheck.event, &frame.provenance);
+              continue;
+            }
+            pacing_candidate = precheck.candidate;
+            source_provenance = frame.provenance;
+          }
+          const auto pacing_decision = source_mode ? frame_timestamp_decision_t {true, current_timestamp} :
+                                                     frame_timestamp_pacer.evaluate(current_timestamp);
           if (!pacing_decision.should_encode) {
             dropped_frames++;
             continue;
@@ -4747,7 +5232,7 @@ namespace video {
 
           reused_previous_frame = false;
 
-          if (last_source_frame_timestamp && target_frame_interval_ms > 0.0) {
+          if (!source_mode && last_source_frame_timestamp && target_frame_interval_ms > 0.0) {
             const auto actual_interval_ms = std::chrono::duration<double, std::milli>(
               current_timestamp - *last_source_frame_timestamp
             ).count();
@@ -4799,7 +5284,12 @@ namespace video {
             ).count();
           }
 #endif
+#ifdef POLARIS_TESTS
+          if (after_convert_test_hook) (*after_convert_test_hook)();
+#endif
+          if (pacing) surface_provenance = source_mode ? std::optional {frame.provenance} : std::nullopt;
           record_capture_source(config, frame, reported_source);
+          accepted_capture.record(config, frame.provenance);
 #ifdef POLARIS_BUILD_PYROWAVE
           record_pyrowave_route(config, *session, reported_pyrowave_route);
 #endif
@@ -4814,6 +5304,78 @@ namespace video {
       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
         break;
       }
+      // No new image was accepted this iteration: retry an accepted observation the stats refused
+      // before this session registered. The repeat itself is never recorded.
+      if (reused_previous_frame) accepted_capture.retry(config);
+
+      bool submission_proven = false;
+      if (pacing) {
+        const auto now_ns = steady_ns_of(std::chrono::steady_clock::now());
+        if (!now_ns) {
+          record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::source_stale);
+          continue;
+        }
+        if (pacing_candidate) {
+          // The post-conversion authority gate: this frame's own epoch must still be open, of this
+          // generation, with the very proof the frame carries, under its exact snapshot lease, NOW.
+          const auto authority = vrr_clock::check_epoch_authority(
+            source_provenance->capture_epoch_id,
+            config.capture_generation.generation_id,
+            source_provenance->clock_proof.get()
+          );
+          if (authority != vrr_clock::authority_e::current ||
+              source_provenance->capture_generation_id != config.capture_generation.generation_id) {
+            pacing->generation.latch();
+            record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::authority_lost, &*source_provenance);
+            continue;
+          }
+          // Conversion can block: judge freshness, order and the ceiling again, now.
+          const auto recheck = pacing->generation.precheck_source(source_frame_of(*source_provenance), *now_ns);
+          if (!recheck.candidate) {
+            record_source_pacing_event(config, pacing->generation.mode(), recheck.event, &*source_provenance);
+            continue;
+          }
+          pacing_candidate = recheck.candidate;
+        } else if (source_mode) {
+          // No new source frame: routine repeats are suppressed; IDR recovery, initial readiness and
+          // the bounded liveness floor are labelled emissions at the current time.
+          const auto wait = pacing->generation.on_wait(*now_ns, pacing->idr_pending);
+          if (!wait.candidate) {
+            record_source_pacing_event(config, pacing->generation.mode(), wait.event);
+            // A held IDR skips the blocking pop: back off briefly while the rate budget refills.
+            if (pacing->idr_pending) std::this_thread::sleep_for(1ms);
+            continue;
+          }
+          if (wait.candidate->kind != vrr_pacing::kind_e::readiness && surface_provenance) {
+            // A re-encode of a source frame's surface is judged by that frame's own epoch, now. Lost
+            // while idle: latch, even with no new capture; nothing here can re-promote it.
+            const auto authority = vrr_clock::check_epoch_authority(
+              surface_provenance->capture_epoch_id,
+              config.capture_generation.generation_id,
+              surface_provenance->clock_proof.get()
+            );
+            if (authority != vrr_clock::authority_e::current ||
+                surface_provenance->capture_generation_id != config.capture_generation.generation_id) {
+              pacing->generation.latch();
+              record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::authority_lost);
+              continue;
+            }
+            submission_proven = true;
+          }
+          pacing_candidate = wait.candidate;
+        } else {
+          // Latched fallback: the legacy frame or repeat, kept in emission order and bounded.
+          const auto legacy_ns = frame_timestamp ? steady_ns_of(*frame_timestamp) : std::nullopt;
+          const auto ordered = pacing->generation.fallback_emission(legacy_ns, *now_ns);
+          if (!ordered.candidate) continue;
+          pacing_candidate = ordered.candidate;
+        }
+        frame_timestamp = steady_at_ns(pacing_candidate->emit_ns);
+        // Only a source frame, or a re-encode of a source frame's surface under its current authority,
+        // is an effective source-time submission. Readiness and dummy surfaces never claim it.
+        if (pacing_candidate->kind == vrr_pacing::kind_e::source) submission_proven = source_mode;
+        mark_next_source_submission(*session, submission_proven);
+      }
 
       {
         auto encode_start = std::chrono::steady_clock::now();
@@ -4826,6 +5388,27 @@ namespace video {
         if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
           BOOST_LOG(error) << "Could not encode video packet"sv;
           break;
+        }
+        if (pacing && pacing_candidate) {
+          // Spent only now that the encoder took the frame.
+          const auto handoff_ns = steady_ns_of(encode_start).value_or(pacing_candidate->emit_ns);
+          pacing->generation.commit(*pacing_candidate, handoff_ns);
+          pacing->idr_pending = false;
+          if (source_mode && pacing_candidate->kind == vrr_pacing::kind_e::source) {
+            // Source-relative cadence: how far the encode handoff interval strayed from the source's.
+            if (pacing->last_source_ns && pacing->last_handoff_ns) {
+              const auto source_interval = pacing_candidate->emit_ns - *pacing->last_source_ns;
+              const auto handoff_interval = handoff_ns - *pacing->last_handoff_ns;
+              accumulated_jitter_ms += std::abs(static_cast<double>(handoff_interval - source_interval)) / 1'000'000.0;
+              jitter_samples++;
+            }
+            pacing->last_source_ns = pacing_candidate->emit_ns;
+            pacing->last_handoff_ns = handoff_ns;
+            record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::accepted_source,
+                                       &*source_provenance, pacing_candidate->emit_ns);
+          } else if (source_mode) {
+            record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_of(pacing_candidate->kind));
+          }
         }
         auto encode_end = std::chrono::steady_clock::now();
         const double codec_time_in_convert = std::exchange(codec_time_in_convert_ms, 0.0);
@@ -4876,17 +5459,57 @@ namespace video {
           // Linearize only a transition in deterministic video policy before
           // adaptive feedback or hot-stat publication. Repeated samples in the
           // same class must not expire a human-clickable Auto Fix every frame.
-          stream_stats::note_doctor_video_policy_sample(
-            target_fps,
-            current_fps,
-            duplicate_frame_ratio,
-            dropped_frame_ratio,
-            avg_frame_age_ms,
-            frame_jitter_ms,
-            encode_duration
-          );
+          // A source-paced session's jitter is the encode handoff's deviation from the source's own
+          // intervals, never from the negotiated ceiling. Until two committed source frames exist it
+          // is unavailable, which is said explicitly rather than reported as a healthy zero.
+          const bool source_cadence_available = source_mode && pacing->generation.mode() == vrr_pacing::mode_e::source_time &&
+                                                jitter_samples >= 2;
+          if (pacing) {
+            // A latched fallback of an opted-in generation clears its own source label.
+            stream_stats::note_doctor_video_policy_sample(
+              target_fps,
+              current_fps,
+              duplicate_frame_ratio,
+              dropped_frame_ratio,
+              avg_frame_age_ms,
+              frame_jitter_ms,
+              encode_duration,
+              config.session_generation,
+              source_mode,
+              source_mode ? source_cadence_available : true
+            );
+          } else {
+            stream_stats::note_doctor_video_policy_sample(
+              target_fps,
+              current_fps,
+              duplicate_frame_ratio,
+              dropped_frame_ratio,
+              avg_frame_age_ms,
+              frame_jitter_ms,
+              encode_duration
+            );
+          }
 
-          if (adaptive_bitrate::is_enabled()) {
+          // Variable game FPS, intentional ceiling refusals and suppressed repeats are not pressure: a
+          // source-paced session hands the controller neutral cadence inputs, but its measured encode
+          // time and frame age as observed, so real encoder pressure still lowers bitrate.
+          if (adaptive_bitrate::is_enabled() && source_mode) {
+            const auto inputs = vrr_pacing::source_health_inputs(
+              dropped_frame_ratio,
+              source_cadence_available ? std::optional {frame_jitter_ms} : std::nullopt,
+              bitrate_relievable_encode_ms,
+              avg_frame_age_ms
+            );
+            adaptive_bitrate::update_stream_health(
+              inputs.fps_ratio,
+              inputs.dropped_frame_ratio,
+              inputs.duplicate_frame_ratio,
+              inputs.frame_jitter_ms,
+              inputs.encode_time_ms,
+              inputs.avg_frame_age_ms,
+              target_fps
+            );
+          } else if (adaptive_bitrate::is_enabled()) {
             adaptive_bitrate::update_stream_health(
               fps_ratio,
               dropped_frame_ratio,
@@ -4944,12 +5567,14 @@ namespace video {
 #ifdef POLARIS_BUILD_PYROWAVE
           record_pyrowave_ceiling_frames(config, *session);
 #endif
-          stream_stats::update_frame_delivery(
-            duplicate_frame_ratio,
-            dropped_frame_ratio,
-            avg_frame_age_ms,
-            frame_jitter_ms
-          );
+          if (!source_mode || source_cadence_available) {
+            stream_stats::update_frame_delivery(
+              duplicate_frame_ratio,
+              dropped_frame_ratio,
+              avg_frame_age_ms,
+              frame_jitter_ms
+            );
+          }
 
           stream_stats::update_video_stats(
             current_fps,
@@ -5332,6 +5957,8 @@ namespace video {
       invalidate_live_probe_reuse();
       return encode_e::error;
     }
+    // Every return to this function reopened the display, so each call is one epoch.
+    auto capture_epoch = open_capture_epoch(*disp, active_generation.generation_id);
 
     auto img = disp->alloc_img();
     if (!img || disp->dummy_img(img.get())) {
@@ -5343,6 +5970,10 @@ namespace video {
 
     std::vector<sync_session_t> synced_sessions;
     for (auto &ctx : synced_session_ctxs) {
+      // Source-time pacing is implemented for the parallel encode loop only; say so, then pace as before.
+      if (ctx->config.vrr_pacing.eligible()) {
+        record_source_pacing_event(ctx->config, vrr_pacing::mode_e::unsupported, vrr_pacing::event_e::unsupported_loop);
+      }
       bool retired_gpu_native_route = false;
       auto synced_session = make_synced_session(disp, encoder, initial_frame, *ctx, retired_gpu_native_route);
       if (!synced_session) {
@@ -5357,6 +5988,7 @@ namespace video {
     auto ec = platf::capture_e::ok;
     while (encode_session_ctx_queue.running()) {
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+        stamp_new_source_image(capture_epoch, img.get(), frame_captured);
         auto frame = make_frame(std::move(img));
 
         while (encode_session_ctx_queue.peek()) {
@@ -5379,6 +6011,10 @@ namespace video {
           }
 
           synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(*incoming_sync_ctx)));
+          if (synced_session_ctxs.back()->config.vrr_pacing.eligible()) {
+            record_source_pacing_event(synced_session_ctxs.back()->config, vrr_pacing::mode_e::unsupported,
+                                       vrr_pacing::event_e::unsupported_loop);
+          }
 
           bool retired_gpu_native_route = false;
           auto encode_session = make_synced_session(disp, encoder, frame, *synced_session_ctxs.back(), retired_gpu_native_route);
@@ -5441,7 +6077,13 @@ namespace video {
           }
           // Published first, so the frame this session accepts next is recorded for its display.
           publish_capture_backend(pos->capture_backend, pos->reported_source);
-          if (frame_captured) record_capture_source(ctx->config, frame, pos->reported_source);
+          if (frame_captured) {
+            record_capture_source(ctx->config, frame, pos->reported_source);
+            if (frame.valid()) pos->accepted_capture.record(ctx->config, frame.provenance);
+          } else {
+            // A repeat: retry only an accepted observation refused before registration.
+            pos->accepted_capture.retry(ctx->config);
+          }
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             ctx->shutdown_event->raise(true);
@@ -5471,7 +6113,9 @@ namespace video {
 
       auto pull_free_image_callback = [&img](std::shared_ptr<platf::img_t> &img_out) -> bool {
         img_out = img;
-        img_out->frame_timestamp.reset();
+        // The previous frame was converted and encoded synchronously before this pull; clones and
+        // frame views keep their own copies of its provenance.
+        reset_pooled_image(*img_out);
         return true;
       };
 
@@ -5544,6 +6188,12 @@ namespace video {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
+    unsigned int consecutive_init_failures = 0;
+
+    // This session generation's source-time pacing outlives every encode_run() below, so a display
+    // reopen or encoder recreation never resets an emission order or clears a latched fallback.
+    std::optional<source_pacing_session_t> pacing_state;
+    if (config.vrr_pacing.eligible()) pacing_state.emplace(config);
 
     while (!shutdown_event->peek() && images->running()) {
       // Wait for the main capture event when the display is being reinitialized
@@ -5583,6 +6233,7 @@ namespace video {
       // Update client with our current HDR display state
       hdr_event->raise(make_hdr_info(*encode_device));
 
+      bool session_initialized = false;
       encode_run(
         frame_nr,
         mail,
@@ -5594,8 +6245,34 @@ namespace video {
         capture_ctx.reinit_request_event,
         encoder,
         channel_data,
-        packets
+        packets,
+        session_initialized,
+        pacing_state ? &*pacing_state : nullptr
       );
+
+      if (session_initialized) {
+        // Ordinary display/bitrate rebuilds get a fresh initialization budget,
+        // even if no packet was sent before the successful session ended.
+        consecutive_init_failures = 0;
+        continue;
+      }
+      if (shutdown_event->peek() || !images->running()) break;
+      if (++consecutive_init_failures >= 5) {
+        BOOST_LOG(error) << "Encoder initialization failed on five consecutive attempts; ending the stream. "sv
+                         << "Check the encoder errors and available resources before reconnecting."sv;
+        end_stream_encoder_cannot_serve(mail);
+        break;
+      }
+
+      // Resource pressure may clear, but rebuilding once per captured frame
+      // only repeats allocations until the client reports a no-video timeout.
+      // Four retries wait 100/200/400/800 ms; cancellation remains responsive.
+      const auto retry_at = std::chrono::steady_clock::now() +
+                            100ms * (1u << (consecutive_init_failures - 1));
+      while (!shutdown_event->peek() && images->running() &&
+             std::chrono::steady_clock::now() < retry_at) {
+        std::this_thread::sleep_for(20ms);
+      }
     }
   }
 
@@ -5746,6 +6423,16 @@ namespace video {
     VUI_PARAMS = 0x01,  ///< VUI parameters
   };
 
+  int validate_avcodec_probe_packet(const AVPacket *packet, AVCodecID codec, std::string_view encoder_name) {
+    const auto sps_status = cbs::inspect_sps(packet, codec);
+    if (sps_status == cbs::sps_vui_status_e::unreadable &&
+        codec == AV_CODEC_ID_H265 && encoder_name == "hevc_vulkan"sv) {
+      BOOST_LOG(warning) << "Vulkan HEVC probe produced an unreadable packet; this codec is unavailable"sv;
+      return -1;
+    }
+    return sps_status == cbs::sps_vui_status_e::present ? VUI_PARAMS : 0;
+  }
+
   int validate_config(std::shared_ptr<platf::display_t> disp, const encoder_t &encoder, const config_t &config) {
     auto encode_device = make_encode_device(*disp, encoder, config);
     if (!encode_device) {
@@ -5801,8 +6488,10 @@ namespace video {
     // This check only applies for H.264 and HEVC
     if (config.videoFormat <= 1) {
       if (auto packet_avcodec = dynamic_cast<packet_raw_avcodec *>(packet.get())) {
-        if (cbs::validate_sps(packet_avcodec->av_packet, config.videoFormat ? AV_CODEC_ID_H265 : AV_CODEC_ID_H264)) {
-          flag |= VUI_PARAMS;
+        const auto codec = config.videoFormat ? AV_CODEC_ID_H265 : AV_CODEC_ID_H264;
+        flag = validate_avcodec_probe_packet(packet_avcodec->av_packet, codec, config.videoFormat ? encoder.hevc.name : encoder.h264.name);
+        if (flag < 0) {
+          return flag;
         }
       } else {
         // Don't check it for non-avcodec encoders.
@@ -6394,7 +7083,8 @@ namespace video {
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
-      if (active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) {
+      if (active_hevc_mode == 3 &&
+          (!encoder->hevc[encoder_t::PASSED] || !encoder->hevc[encoder_t::DYNAMIC_RANGE])) {
         // The dummy source is NV12, so an 8-bit failure is authoritative: an
         // encoder that could not pass at all has nothing to say about 10-bit.
         // Overriding there would advertise Main10 on a host with no HEVC and
@@ -7658,11 +8348,41 @@ namespace video {
   void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
                                           const std::shared_ptr<platf::display_t> &display,
                                           const stream_packets::destination_t &channel_data) {
+    encode_published_display_for_tests(mail, std::move(config), display, channel_data,
+                                       std::make_shared<img_event_t::element_type>());
+  }
+
+  void with_after_convert_observer_for_tests(const std::function<void()> &observer,
+                                             const std::function<void()> &body) {
+    const auto previous = after_convert_test_hook;
+    after_convert_test_hook = &observer;
+    auto restore = util::fail_guard([previous] { after_convert_test_hook = previous; });
+    body();
+  }
+
+  bool with_software_h264_for_tests(const std::function<void()> &body) {
+    // The real software encoder (libx264), selected as a probe would select it, for this body only.
+    const auto previous_encoder = chosen_encoder;
+    const bool previous_passed = software.h264[encoder_t::PASSED];
+    software.h264[encoder_t::PASSED] = true;
+    chosen_encoder = &software;
+    auto restore = util::fail_guard([previous_encoder, previous_passed] {
+      chosen_encoder = previous_encoder;
+      software.h264[encoder_t::PASSED] = previous_passed;
+    });
+    if (software.h264.name.empty()) return false;
+    body();
+    return true;
+  }
+
+  void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
+                                          const std::shared_ptr<platf::display_t> &display,
+                                          const stream_packets::destination_t &channel_data,
+                                          const img_event_t &images) {
     // What the capture thread publishes, without a capture thread: its display and signals that
-    // are never raised.
+    // are never raised. The images are whatever the test raises, as the capture thread would.
     capture_thread_async_ctx_t capture_ctx {};
     capture_ctx.display_wp = display;
-    const auto images = std::make_shared<img_event_t::element_type>();
     int frame_nr = 1;
     encode_published_displays(frame_nr, mail, images, config, capture_ctx, channel_data,
                               mail->queue<packet_t>(mail::video_packets));
@@ -7721,6 +8441,10 @@ namespace video {
     std::string_view selected_encoder
   ) {
     finalize_encoder_selection_info(info, selected_encoder);
+  }
+
+  int validate_avcodec_probe_packet_for_tests(const AVPacket *packet, AVCodecID codec, std::string_view encoder_name) {
+    return validate_avcodec_probe_packet(packet, codec, encoder_name);
   }
 
   int probe_encoders_with_hooks_for_tests(
@@ -7869,6 +8593,129 @@ namespace video {
   ) {
     record_capture_source(config, frame, reported_source);
   }
+
+  capture_epoch_for_tests_t open_capture_epoch_for_tests(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  ) {
+    auto epoch = open_capture_epoch(disp, capture_generation_id);
+    for (const auto &[img, frame_captured] : pushes) {
+      stamp_new_source_image(epoch, img.get(), frame_captured);
+    }
+    return {epoch.epoch_id, epoch.route, epoch.proof};
+  }
+
+  struct capture_epoch_stepper_for_tests_t::epoch_t {
+    epoch_t(const platf::display_t &disp, std::uint64_t capture_generation_id, std::shared_ptr<vrr_clock::system_t> retained):
+        clocks {std::move(retained)},
+        value {open_capture_epoch(disp, capture_generation_id, clocks ? clocks.get() : production_epoch_clocks())} {
+    }
+
+    /// Declared first: initialised before the epoch reads it, destroyed after the epoch (and the
+    /// authority it published) is closed. Null means the production kernel clocks.
+    std::shared_ptr<vrr_clock::system_t> clocks;
+    capture_epoch_t value;
+  };
+
+  capture_epoch_stepper_for_tests_t::capture_epoch_stepper_for_tests_t(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id
+  ):
+      epoch_ {std::make_unique<epoch_t>(disp, capture_generation_id, nullptr)} {
+  }
+
+  namespace {
+    std::shared_ptr<vrr_clock::system_t> require_test_clocks(std::shared_ptr<vrr_clock::system_t> clocks) {
+      if (!clocks) throw std::invalid_argument {"capture_epoch_stepper_for_tests_t needs non-null clocks"};
+      return clocks;
+    }
+  }  // namespace
+
+  capture_epoch_stepper_for_tests_t::capture_epoch_stepper_for_tests_t(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id,
+    std::shared_ptr<vrr_clock::system_t> clocks
+  ):
+      epoch_ {std::make_unique<epoch_t>(disp, capture_generation_id, require_test_clocks(std::move(clocks)))} {
+  }
+
+  capture_epoch_stepper_for_tests_t::~capture_epoch_stepper_for_tests_t() = default;
+
+  capture_epoch_for_tests_t capture_epoch_stepper_for_tests_t::opened() const {
+    return {epoch_->value.epoch_id, epoch_->value.route, epoch_->value.proof};
+  }
+
+  void capture_epoch_stepper_for_tests_t::push(platf::img_t &img, bool frame_captured) {
+    stamp_new_source_image(epoch_->value, &img, frame_captured);
+  }
+
+  std::uint64_t capture_epoch_stepper_for_tests_t::baseline_changes() const {
+    return epoch_->value.source_state.baseline_changes;
+  }
+
+  void reset_pooled_image_for_tests(platf::img_t &img) {
+    reset_pooled_image(img);
+  }
+
+  std::uint64_t allocate_capture_identity_for_tests(std::atomic<std::uint64_t> &allocator) {
+    return allocate_capture_identity(allocator);
+  }
+
+  void stamp_seeded_epoch_for_tests(
+    std::uint64_t epoch_id,
+    std::uint64_t capture_generation_id,
+    std::uint64_t next_sequence,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  ) {
+    capture_epoch_t epoch;
+    epoch.epoch_id = epoch_id;
+    epoch.capture_generation_id = capture_generation_id;
+    epoch.next_sequence = next_sequence;
+    for (const auto &[img, frame_captured] : pushes) {
+      stamp_new_source_image(epoch, img.get(), frame_captured);
+    }
+  }
+
+  std::size_t record_accepted_captures_for_tests(
+    const config_t &config,
+    const std::vector<platf::image_provenance_t> &accepted
+  ) {
+    accepted_capture_t consumer;
+    std::size_t recorded = 0;
+    for (const auto &provenance : accepted) {
+      if (consumer.record(config, provenance)) ++recorded;
+    }
+    return recorded;
+  }
+
+  struct accepted_capture_consumer_for_tests_t::state_t {
+    accepted_capture_t consumer;
+  };
+
+  accepted_capture_consumer_for_tests_t::accepted_capture_consumer_for_tests_t():
+      state {std::make_unique<state_t>()} {
+  }
+
+  accepted_capture_consumer_for_tests_t::~accepted_capture_consumer_for_tests_t() = default;
+
+  bool accepted_capture_consumer_for_tests_t::record(const config_t &config, const platf::image_provenance_t &provenance) {
+    return state->consumer.record(config, provenance);
+  }
+
+  bool accepted_capture_consumer_for_tests_t::retry(const config_t &config) {
+    return state->consumer.retry(config);
+  }
+
+  bool accepted_capture_consumer_for_tests_t::has_pending() const {
+    return state->consumer.pending.has_value();
+  }
+
+#ifdef __linux__
+  std::shared_ptr<platf::img_t> clone_compat_image_for_conversion_for_tests(const frame_t &frame) {
+    return clone_compat_image_for_conversion(frame);
+  }
+#endif
 
   #ifdef __linux__
   capture_generation::request_context_t capture_request_for_session_for_tests(const capture_generation::identity_t &generation) {

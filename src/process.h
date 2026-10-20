@@ -45,8 +45,13 @@
 
 // local includes
 #include "capture_generation.h"
+#include "prelaunch_transition.h"
 #include "app_launch_as.h"
 #include "config.h"
+#include "steam_lifetime.h"
+#ifdef __linux__
+#include "platform/linux/steam_title_process.h"
+#endif
 #include "emulator_library.h"
 #include "game_library_scanner.h"
 #include "audio.h"
@@ -134,6 +139,10 @@ namespace proc {
   /// nothing has to be upgraded each time apps.json is read.
   std::string canonical_steam_shutdown_undo();
 
+  /// Desktop Steam outlives a transient streaming generation. Keep its display,
+  /// audio and gamepad routing, but remove private and generation ownership.
+  boost::process::v1::environment desktop_steam_environment(boost::process::v1::environment env);
+
   struct launch_as_availability_t {
     bool available = true;
     std::string reason;
@@ -161,6 +170,30 @@ namespace proc {
   int prepare_host_virtual_capture_for_launch(const ctx_t &app, const launch_selection_t &selection, bool watch_only);
   int refuse_app_launch_as_before_launch(const struct ctx_t &app, const launch_selection_request_t &request);
   int refuse_app_launch_as_unavailable(const struct ctx_t &app, std::string reason);
+
+  /**
+   * @brief #204: an app's leave-Game-Mode step for one authorised, reserved launch.
+   *
+   * Every admitted entry calls this after it has authorised the request and holds the launch
+   * reservation, and before Launch as, app display semantics and the launch's own mode decision.
+   * An app with the setting off returns at once, so default launches are unchanged. A refusal is
+   * recorded with launch_failure before it returns. The caller reconciles the host's Game Mode
+   * state again after any outcome other than not_needed for an app that is off.
+   *
+   * @param expected_selection The exact topology the client resolved, when it sent one.
+   */
+  prelaunch::outcome_t prelaunch_for_admitted_launch(
+    prelaunch::entry_e entry,
+    const struct ctx_t &app,
+    const std::string &client_uuid,
+    std::uint64_t lifecycle_generation,
+    std::string_view expected_selection,
+    std::function<bool()> cancelled
+  );
+  /// #204: a fresh look, right before a restore, at what else is on the host; reason on true.
+  bool prelaunch_other_sessions_now(std::string &reason);
+  /// Tests answer the post-switch capture readiness of a selection; empty returns to the host check.
+  void set_prelaunch_capture_ready_for_tests(std::function<bool(std::string_view, std::string &)> ready);
 
   launch_as_availability_t launch_as_availability(const struct ctx_t &app);
 
@@ -538,6 +571,7 @@ namespace proc {
     std::string_view session_instance_id
   );
   std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat);
+  bool proc_group_session_from_stat_matches_for_tests(std::string_view stat, pid_t process_group, pid_t session);
   bool steam_pidfd_capture_identity_matches_for_tests(
     std::optional<std::uint64_t> before,
     std::optional<std::uint64_t> after
@@ -830,6 +864,11 @@ namespace proc {
     // desktop Steam blocks a private launch of this app, shut it down and
     // proceed instead of refusing.
     bool close_desktop_steam_for_private = false;
+    // #204, private and off by default: leave Steam Game Mode before this app's own private launch.
+    // Only JSON true turns it on. This build has no session-switch adapter, so an enabled app on a
+    // host in Game Mode is refused before anything changes.
+    bool leave_game_mode_before_launch = false;
+    std::string desktop_steam_lifetime = "inherit";
     bool use_app_identity = false;
     bool per_client_app_identity = false;
     bool allow_client_commands = false;
@@ -981,6 +1020,13 @@ namespace proc {
     bool encoder_backend_explicit = false;
   };
 
+  struct stream_stats_context_t {
+    bool mangohud_configured = false;
+    bool virtual_display = false;
+    std::string game;
+    std::string game_uuid;
+  };
+
   session_stop_outcome_t evaluate_session_stop_request(
     bool can_launch,
     bool has_running_app,
@@ -1013,10 +1059,19 @@ namespace proc {
     bool transition_launch_to_stop();
     void begin_snapshot();
     bool try_begin_snapshot();
+    bool try_begin_snapshot_now(); // no condition-variable wait, including during launch/status
     void finish_snapshot();
     void finish_launch(const std::function<void()> &before_release = {});
-    void finish_stop(bool committed = true);
+    void finish_stop(bool committed = true,
+                     std::atomic<const void *> *projection = nullptr,
+                     const void *ticket_identity = nullptr);
     bool stop_in_progress() const;
+    /// #204: closes admission for a restore to Game Mode that runs after this gate's lock is gone.
+    /// Fails, changing nothing, while a launch or an RTSP setup is admitted; until released every
+    /// launch and setup is refused (or, for begin_launch(), waits).
+    bool try_fence_restore();
+    void release_restore_fence();
+    bool restore_fenced() const;
 
   private:
     enum class state_e {
@@ -1032,6 +1087,7 @@ namespace proc {
     bool _stop_waiting = false;
     bool _launch_to_stop_handoff = false;
     bool _last_stop_committed = false;
+    bool _restore_fenced = false;
     std::uint32_t _rtsp_setups_in_flight = 0;
     std::uint64_t _generation = 1;
   };
@@ -1040,6 +1096,7 @@ namespace proc {
   public:
     explicit session_snapshot_guard_t(session_lifecycle_gate_t &gate);
     static session_snapshot_guard_t try_acquire(session_lifecycle_gate_t &gate);
+    static session_snapshot_guard_t try_acquire_now(session_lifecycle_gate_t &gate);
     ~session_snapshot_guard_t();
     bool owns_snapshot() const;
     session_snapshot_guard_t(const session_snapshot_guard_t &) = delete;
@@ -1059,6 +1116,8 @@ namespace proc {
 
   class proc_t {
   public:
+    std::pair<int, nlohmann::json> desktop_steam_control(const std::string &unique_id, bool can_launch,
+      const std::string &action = {}, const std::string &revision = {}, bool confirm_game_quit = false);
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
 
     std::string display_name;
@@ -1098,6 +1157,11 @@ namespace proc {
     bool launch_input_only_and_raise(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
 
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    /// execute() under a reservation the caller already holds from try_begin_session_launch() (#204);
+    /// the caller finishes it.
+    int execute_admitted(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    /// #204: the transition generation the launched session committed, which its end must name.
+    void bind_prelaunch_transition(std::uint64_t transition_generation);
     int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
                           const std::function<int()> &publish);
     int validate_resolved_profile_for_running_app(
@@ -1129,6 +1193,8 @@ namespace proc {
     std::string get_running_app_uuid();
     /// The running generation's frozen app entry, unaffected by catalogue reloads.
     std::optional<ctx_t> running_app_context() const;
+    /// Telemetry must not wait for launch/teardown to release application state.
+    std::optional<stream_stats_context_t> try_stream_stats_context() const;
     std::string get_session_token();
     std::string get_session_owner_unique_id();
     std::shared_ptr<input::retained_gamepad_t> retained_gamepad_for_owner(const std::string &unique_id);
@@ -1146,6 +1212,30 @@ namespace proc {
     bool session_shutdown_requested() const;
     session_status_view_t get_session_status_view(const std::string &unique_id, bool can_launch);
     session_stop_snapshot_t get_session_stop_snapshot(const std::string &unique_id, bool can_launch);
+    /// A claimed stop. The owning caller must drain it before moving or destroying this proc_t.
+    /// Dropping an unqueued ticket releases admission without tearing down the session.
+    class session_shutdown_ticket_t {
+    public:
+      ~session_shutdown_ticket_t();
+      session_shutdown_ticket_t(const session_shutdown_ticket_t &) = delete;
+      session_shutdown_ticket_t &operator=(const session_shutdown_ticket_t &) = delete;
+      session_stop_result_t complete(); // exactly once; retains the original cleanup budgets
+      bool publish_native_end() noexcept;
+    private:
+      friend class proc_t;
+      struct state_t;
+      explicit session_shutdown_ticket_t(std::unique_ptr<state_t> state);
+      std::unique_ptr<state_t> _state;
+    };
+    struct session_shutdown_admission_t {
+      session_stop_result_t result;
+      std::unique_ptr<session_shutdown_ticket_t> ticket;
+    };
+    session_shutdown_admission_t prepare_session_shutdown(
+      const std::string &unique_id, std::string_view expected_token,
+      bool can_launch, bool require_exact_token);
+    bool native_end_pending() const;
+    session_snapshot_guard_t try_session_status_guard();
     session_stop_result_t request_session_shutdown(
       const std::string &unique_id,
       std::string_view expected_token,
@@ -1164,6 +1254,8 @@ namespace proc {
      * which no other stop does.
      */
     void end_session(bool immediate = false, bool needs_refresh = true);
+    /// Console Close App: retire this launch's exact host media only after owning stop admission.
+    void end_session_and_retire_owned_media();
     bool terminate_if(const std::function<bool()> &condition,
                       const std::function<void()> &before_terminate);
     bool terminate_abandoned_desktop_takeover(std::string_view session_token);
@@ -1217,7 +1309,13 @@ namespace proc {
      *        starting anything. clear_running_app_for_tests() leaves the host with no app again.
      */
     void set_running_app_for_tests(const ctx_t &app);
+    /// Adopt a real, already-exited child for running() cleanup tests; never spawns a process.
+    void set_exited_app_child_for_tests(boost::process::v1::child child);
     void clear_running_app_for_tests();
+    /// Stop admission is held; the observer runs without the metadata mutex, before media claim.
+    void set_stop_before_media_observer_for_tests(std::function<void()> observer);
+    /// Observe real shutdown before/after terminate_impl; the before callback may hold a test barrier.
+    void set_session_shutdown_observer_for_tests(std::function<void(bool)> observer);
 #endif
 
   private:
@@ -1227,8 +1325,14 @@ namespace proc {
       // Protected by mutex; binds the launch metadata to its admission identity.
       std::shared_ptr<const char> metadata_capture_owner {capture_owner.load()};
       std::weak_ptr<rtsp_stream::launch_session_t> capture_launch;
+#ifdef __linux__
+      // Mutex-protected scoped Console stop owner; only that stop may clean up during its drain.
+      const void *console_cleanup_owner = nullptr;
+#endif
       /// Set while a stop runs because someone ended the session on purpose.
       std::atomic<bool> stop_ends_session {false};
+      // Exact accepted native-End ticket identity; not a cleanup-completion flag.
+      std::atomic<const void *> native_end_ticket {nullptr};
     };
 
     void launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
@@ -1237,9 +1341,10 @@ namespace proc {
       std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
       bool no_active_sessions_at_launch
     );
-    void terminate_impl(bool immediate, bool needs_refresh);
+    void terminate_impl(bool immediate, bool needs_refresh,
+                        const std::function<bool(const rtsp_stream::launch_session_t &)> &prepared_matches = {});
     /// terminate() and end_session(): take the lifecycle gate, then tear down.
-    void stop(bool immediate, bool needs_refresh, bool ends_session);
+    void stop(bool immediate, bool needs_refresh, bool ends_session, bool retire_owned_media = false);
 #ifdef __linux__
     bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
     /// Ask the private session app rooted at app_root_pid to close its windows; returns how many were asked.
@@ -1265,6 +1370,7 @@ namespace proc {
     void stop_steam_big_picture_input_guard();
 #endif
     session_lifecycle_sync_t &session_lifecycle_sync() const;
+    session_stop_result_t complete_session_shutdown(session_shutdown_ticket_t &ticket);
     session_stop_snapshot_t get_session_stop_snapshot_locked(
       const std::string &unique_id,
       bool can_launch,
@@ -1275,6 +1381,10 @@ namespace proc {
       bool refresh_running = true
     );
 
+#ifdef POLARIS_TESTS
+    std::function<void(bool)> _session_shutdown_observer_for_tests;
+    std::function<void()> _stop_before_media_observer_for_tests;
+#endif
     int _app_id = 0;
     std::string _app_name;
 
@@ -1316,6 +1426,15 @@ namespace proc {
     std::string _game_mode_launched_appid;
     /// Whether this session started with the host in Game Mode, so its Steam cleanup is not its own.
     bool _session_started_in_game_mode = false;
+    /// #204: the committed transition this session's end may restore; 0 for none.
+    std::uint64_t _prelaunch_transition_generation = 0;
+    bool _keep_desktop_steam = false;
+    bool _desktop_steam_preexisting = false;
+    std::string _desktop_launched_appid;
+    std::optional<platf::steam_title::process_t> _desktop_title_root;
+    std::chrono::steady_clock::time_point _desktop_title_claim_deadline {};
+    void capture_desktop_title();
+    bool close_desktop_title();
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;

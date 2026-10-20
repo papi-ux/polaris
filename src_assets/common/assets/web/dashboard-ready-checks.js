@@ -1,16 +1,23 @@
 export function buildReadyCheckDisplay(checks = []) {
-  const normalized = checks.filter(Boolean)
-  const passing = normalized.filter((check) => check.ok).length
-  const total = normalized.length
+  const normalized = checks.filter(Boolean).map(check => ({
+    ...check,
+    status: check.status || (check.ok === true ? 'ready' : check.ok === false ? 'attention' : 'not_checked'),
+  }))
+  const applicable = normalized.filter(check => check.status !== 'not_applicable')
+  const passing = applicable.filter(check => check.status === 'ready').length
+  const total = applicable.length
   const allPassing = total > 0 && passing === total
-  const visibleChecks = allPassing ? [] : normalized.filter((check) => !check.ok)
+  const visibleChecks = allPassing ? [] : applicable.filter(check => check.status !== 'ready')
+  const attention = visibleChecks.filter(check => check.status === 'attention')
 
   return {
     passing,
     total,
     allPassing,
-    attention: visibleChecks.length,
-    primaryIssue: visibleChecks[0] || null,
+    attention: attention.length,
+    unknown: visibleChecks.filter(check => check.status === 'not_checked').length,
+    notApplicable: normalized.length - total,
+    primaryIssue: attention[0] || null,
     visibleChecks,
   }
 }

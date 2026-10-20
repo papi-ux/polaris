@@ -7,32 +7,38 @@
       </div>
       <div v-if="config" class="page-meta" role="status" aria-live="polite" aria-atomic="true">
         <span class="meta-pill">{{ activePanelTitle }}</span>
-        <span class="meta-pill" :class="hasUnsavedChanges ? 'border-warning/40 bg-warning/10 text-warning' : 'border-success/30 bg-success/10 text-success'">
-          {{ hasUnsavedChanges ? $t('config.unsaved_changes') : $t('config.all_changes_saved') }}
-        </span>
+        <span class="meta-pill" :class="saveState.tone" :data-save-state="saveState.id">{{ saveState.page }}</span>
         <span v-if="searchQuery" class="meta-pill">{{ searchSummary }}</span>
       </div>
     </section>
 
     <section class="section-card settings-command-bar sticky top-4 z-20" role="region" :aria-label="$t('config.action_center')">
       <div class="settings-command-copy">
-        <div class="section-kicker">{{ $t('config.action_center') }}</div>
+        <!-- The region is already named Action Center, so phones drop the visible eyebrow. -->
+        <div class="section-kicker hidden sm:block">{{ $t('config.action_center') }}</div>
         <div class="settings-command-title">{{ commandCenterTitle }}</div>
-        <div class="settings-command-note">{{ commandCenterNote }}</div>
+        <div v-if="commandCenterNote" class="settings-command-note" data-command-note>{{ commandCenterNote }}</div>
       </div>
 
       <div class="settings-command-tools">
         <div class="settings-command-meta">
-          <span v-if="hasUnsavedChanges" class="meta-pill border-warning/40 bg-warning/10 text-warning">{{ $t('config.pending_badge') }}</span>
-          <span v-else class="meta-pill border-success/30 bg-success/10 text-success">{{ $t('config.synced_badge') }}</span>
+          <span class="meta-pill" :class="saveState.tone" data-save-badge>{{ saveState.badge }}</span>
         </div>
 
+        <!-- Escape clears; Enter moves focus to the top match's control instead of leaving it highlighted out of reach. -->
         <input
           v-model="searchQuery"
-          type="text"
+          type="search"
+          :aria-label="$t('config.search_label')"
           :placeholder="$t('config.search_placeholder')"
+          enterkeyhint="search"
+          autocomplete="off"
+          spellcheck="false"
           class="focus-ring settings-search-input"
+          data-settings-search
           @input="onSearch"
+          @keydown.escape="onSearchEscape"
+          @keydown.enter="focusTopSearchMatch"
         >
 
         <div class="settings-command-actions">
@@ -42,10 +48,12 @@
           <button class="focus-ring settings-action-button settings-action-button-primary" @click="save" :disabled="!config || !hasUnsavedChanges || saving || restarting" tabindex="0">
             {{ saving ? $t('config.saving') : $t('_common.save') }}
           </button>
-          <button class="focus-ring settings-action-button settings-action-button-accent" @click="apply" :disabled="!config || saving || restarting || (!saved && !hasUnsavedChanges)" tabindex="0">
-            {{ restarting ? $t('config.restarting') : $t('_common.apply') }}
+          <button class="focus-ring settings-action-button settings-action-button-accent" @click="apply" :disabled="!config || saving || restarting || (!saved && !restartPending && !hasUnsavedChanges)" aria-describedby="settings-restart-disclosure" data-save-and-restart tabindex="0">
+            {{ restarting ? $t('config.restarting') : $t('config.save_and_restart') }}
           </button>
         </div>
+        <!-- Said before the action, not in a confirmation after it: restarting ends every stream. -->
+        <p id="settings-restart-disclosure" class="settings-command-note col-span-full" data-restart-disclosure>{{ $t('config.save_and_restart_disclosure') }}</p>
       </div>
     </section>
 
@@ -206,6 +214,9 @@
         </div>
       </section>
 
+      <!-- A client picks PyroWave per stream, whichever encoder profile is open, so it has one card. -->
+      <pyro-wave-card v-if="currentTabIsEncoder" :config="config" :platform="platform" />
+
       <section v-if="currentTabIsEncoder" class="section-card settings-subnav-card">
         <div class="section-kicker">Encoder Switcher</div>
         <div class="settings-subnav-row">
@@ -265,6 +276,12 @@
           :platform="platform">
         </files>
 
+        <recording
+          v-if="shouldShowTab('recording')"
+          :config="config"
+          :platform="platform">
+        </recording>
+
         <advanced
           v-if="shouldShowTab('advanced')"
           :config="config"
@@ -295,10 +312,12 @@ import General from '../configs/tabs/General.vue'
 import Inputs from '../configs/tabs/Inputs.vue'
 import Network from '../configs/tabs/Network.vue'
 import Files from '../configs/tabs/Files.vue'
+import Recording from '../configs/tabs/Recording.vue'
 import Advanced from '../configs/tabs/Advanced.vue'
 import AudioVideo from '../configs/tabs/AudioVideo.vue'
 import AiOptimizer from '../configs/tabs/AiOptimizer.vue'
 import ContainerEncoders from '../configs/tabs/ContainerEncoders.vue'
+import PyroWaveCard from '../configs/tabs/encoders/PyroWaveCard.vue'
 import Skeleton from '../components/Skeleton.vue'
 import { useToast } from '../composables/useToast'
 import {
@@ -309,7 +328,7 @@ import { requestHostRestart } from '../restart-host.js'
 import { readConfigResponse, readSettingsRefusal, readSettingsSaveRefusal, SettingsUnreadableError } from '../config-cache.js'
 import { reportSettingsReadable, reportSettingsUnreadable, settingsRefusalSentence } from '../settings-unreadable.js'
 import { saveNeedsRestart } from '../config-save-outcome.js'
-import { rankSettingsSearchTabs } from '../settings-search.js'
+import { normalizeSettingsSearchQuery, rankSettingsSearchTabs } from '../settings-search.js'
 
 const { toast } = useToast()
 const i18n = inject('i18n')
@@ -319,6 +338,9 @@ let fallbackDisplayModeCache = ""
 const platform = ref("")
 const saved = ref(false)
 const savedNeedsRestart = ref(true)
+// A save this page made that still waits for a restart. It outlasts later saves the host applies
+// live and a local reset, and clears only when the restart this page asked for reports ready.
+const restartPending = ref(false)
 const restarted = ref(false)
 const saving = ref(false)
 const restarting = ref(false)
@@ -362,6 +384,7 @@ const tabs = ref([
       "steamgriddb_api_key": "",
       "beat_times_lookup": "enabled",
       "host_sleep_enabled": "disabled",
+  "keep_desktop_steam_running": "disabled",
     },
   },
   {
@@ -441,6 +464,7 @@ const tabs = ref([
       "disconnect_resume_timeout_seconds": 300,
       "adaptive_bitrate_enabled": "disabled",
       "adaptive_bitrate_min": 2000,
+      "vrr_source_pacing": "disabled",
     },
   },
   {
@@ -474,6 +498,20 @@ const tabs = ref([
       "pkey": "",
       "cert": "",
       "file_state": "",
+    },
+  },
+  {
+    id: "recording",
+    name: "Recording",
+    group: "host",
+    groupLabel: "Host & Runtime",
+    summary: "Experimental host-only raw video: the recording policy, replay length, and where files are written.",
+    searchAliases: ["replay buffer", "raw video", "record stream", "recording policy"],
+    options: {
+      "recording_enabled": "disabled",
+      "recording_replay_buffer": "disabled",
+      "recording_replay_buffer_minutes": 5,
+      "recording_output_dir": "",
     },
   },
   {
@@ -652,6 +690,8 @@ function optionSearchMetadata(optionKey) {
     ai_enabled: ["auto quality", "profile optimizer", "per game tuning"],
     adaptive_bitrate_enabled: ["auto quality", "adaptive bitrate", "headless quality"],
     ai_codex_home: ["codex home", "runtime home", "subscription auth"],
+    // Client stream pacing only. Host adaptive sync is a separate Doctor diagnostic, not this option.
+    vrr_source_pacing: ["vrr", "source pacing", "source paced", "variable refresh rate", "stream pacing"],
   }
 
   return {
@@ -664,8 +704,22 @@ function optionSearchMetadata(optionKey) {
 const searchResults = computed(() => rankSettingsSearchTabs(tabs.value, searchQuery.value, optionSearchMetadata))
 
 const matchingTabs = computed(() => searchResults.value.map((entry) => entry.tab))
+// The PyroWave card is not an option, so a search for it lands on the encoder tab that carries its
+// aliases and focuses the card instead of that tab's first option.
+const pyrowaveSearchQuery = computed(() => {
+  const query = normalizeSettingsSearchQuery(searchQuery.value)
+  return query.length >= 3 && PYROWAVE_SEARCH_ALIASES.some((alias) => {
+    const normalized = normalizeSettingsSearchQuery(alias)
+    return normalized.startsWith(query) || query.includes(normalized)
+  })
+})
 const matchedOptionByTab = computed(() => Object.fromEntries(
-  searchResults.value.map((entry) => [entry.tab.id, entry.firstOptionKey])
+  searchResults.value.map((entry) => [
+    entry.tab.id,
+    pyrowaveSearchQuery.value && entry.tab.id === pyrowaveSearchTabId.value && !entry.matchedOptionKeys.length
+      ? PYROWAVE_SEARCH_TARGET
+      : entry.firstOptionKey,
+  ])
 ))
 const tabGroups = computed(() => {
   const order = [
@@ -694,6 +748,11 @@ const tabGroups = computed(() => {
 const mobileNavItems = computed(() => tabGroups.value.flatMap(group => group.items))
 const searchSummary = computed(() => i18n.t('config.search_results', { query: searchQuery.value, count: matchingTabs.value.length }))
 const searchHasResults = computed(() => matchingTabs.value.length > 0)
+const PYROWAVE_SEARCH_TARGET = 'pyrowave'
+// No bare client or codec words: a search for Nova or a codec is not a search for this card.
+const PYROWAVE_SEARCH_ALIASES = ['pyrowave', 'pyro wave', 'wavelet codec']
+// The encoder tab that carries the PyroWave aliases: the first one this platform keeps, set on load.
+const pyrowaveSearchTabId = ref('')
 const sectionHashTabs = {
   encryption_and_trust: 'network',
   artwork_integration: 'general',
@@ -703,6 +762,23 @@ const sensitiveValuePattern = /(api[_-]?key|token|password|credential|secret|cer
 const hasUnsavedChanges = computed(() => {
   if (!config.value || !initialSerialized.value) return false
   return JSON.stringify(serialize()) !== initialSerialized.value
+})
+// What the page can say about its settings. Saved-but-waiting-for-restart is its own state: only the
+// host's save answer may say settings are already in use, and nothing here claims more than that.
+const saveState = computed(() => {
+  if (restarting.value) {
+    return { id: 'restarting', badge: i18n.t('config.restarting'), page: i18n.t('config.restarting'), tone: 'border-info/30 bg-info/10 text-info-bright' }
+  }
+  if (hasUnsavedChanges.value) {
+    return { id: 'unsaved', badge: i18n.t('config.pending_badge'), page: i18n.t('config.unsaved_changes'), tone: 'border-warning/40 bg-warning/10 text-warning' }
+  }
+  if (restartPending.value || (saved.value && savedNeedsRestart.value)) {
+    return { id: 'saved_restart_needed', badge: i18n.t('config.saved_restart_needed_badge'), page: i18n.t('config.saved_restart_needed_badge'), tone: 'border-warning/40 bg-warning/10 text-warning' }
+  }
+  if (saved.value) {
+    return { id: 'saved_live', badge: i18n.t('config.saved_live_badge'), page: i18n.t('config.all_changes_saved'), tone: 'border-success/30 bg-success/10 text-success' }
+  }
+  return { id: 'saved', badge: i18n.t('config.saved_badge'), page: i18n.t('config.all_changes_saved'), tone: 'border-storm/30 bg-storm/10 text-silver' }
 })
 const optionMetadataByKey = computed(() => {
   const entries = []
@@ -765,13 +841,17 @@ const commandCenterNote = computed(() => {
   if (searchQuery.value) {
     return i18n.t('config.search_focus_desc', { query: searchQuery.value, count: matchingTabs.value.length })
   }
-  if (hasUnsavedChanges.value) {
-    return i18n.t('config.command_unsaved_note')
-  }
+  // Pending edits: the title says so and the restart consequence is the one
+  // disclosure under Save and restart Polaris, so no second copy of it here.
+  if (hasUnsavedChanges.value) return ''
+  // Restart needed: the disconnect consequence is the one disclosure under Save and
+  // restart Polaris, so this note says only that the restart is still to come. The
+  // save toast keeps the full note, because it carries its own Restart action.
+  if (restartPending.value) return i18n.t('config.saved_restart_needed_command_note')
   if (saved.value) {
-    return savedNeedsRestart.value ? i18n.t('config.apply_note') : i18n.t('config.saved_live_note')
+    return savedNeedsRestart.value ? i18n.t('config.saved_restart_needed_command_note') : i18n.t('config.saved_live_note')
   }
-  return i18n.t('config.command_saved_note')
+  return i18n.t('config.command_saved_restart_note')
 })
 const activePanelHeroCopy = computed(() => {
   if (searchQuery.value) {
@@ -816,9 +896,9 @@ function pendingChangeImpact(key) {
     return i18n.t('config.pending_changes_live_apply')
   }
   if (Array.isArray(restartFields) && restartFields.includes(key)) {
-    return i18n.t('config.pending_changes_apply_required')
+    return i18n.t('config.pending_changes_restart_required')
   }
-  return i18n.t('config.pending_changes_apply_required')
+  return i18n.t('config.pending_changes_restart_required')
 }
 
 function onSearch() {
@@ -830,6 +910,47 @@ function onSearch() {
 function clearSearch() {
   searchQuery.value = ''
   clearSearchHighlight()
+}
+
+function onSearchEscape(event) {
+  if (!searchQuery.value || event?.isComposing) return
+  // Only a non-empty search is consumed, so Escape still reaches anything else listening.
+  event.preventDefault()
+  clearSearch()
+}
+
+const SEARCH_FOCUSABLE = 'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+async function focusTopSearchMatch(event) {
+  // Enter that confirms an input-method composition (for example CJK text) is not a request to jump.
+  if (event?.isComposing || !normalizeSettingsSearchQuery(searchQuery.value)) return
+  const top = searchResults.value[0]
+  if (!top) return
+  event?.preventDefault?.()
+  currentTab.value = top.tab.id
+  const optionKey = matchedOptionByTab.value[top.tab.id]
+  await focusSearchTarget(optionKey)
+  const target = resolveSearchTarget(optionKey)
+  if (!target) return
+  // Prefer the setting's own field; otherwise the first control in its block.
+  const field = settingsContentRef.value?.querySelector?.(`#${escapeSelector(optionKey)}`)
+  const control = field?.matches?.(SEARCH_FOCUSABLE) ? field
+    : target.matches?.(SEARCH_FOCUSABLE) ? target : target.querySelector?.(SEARCH_FOCUSABLE)
+  control?.focus?.({ preventScroll: true })
+}
+
+/**
+ * Open every collapsed disclosure that encloses `target`, outermost first, so a matched setting
+ * can be seen and focused. Disclosures that do not contain it stay as they are.
+ */
+function openEnclosingDisclosures(target) {
+  const enclosing = []
+  for (let node = target?.closest?.('details'); node; node = node.parentElement?.closest('details')) {
+    enclosing.push(node)
+  }
+  for (const details of enclosing.reverse()) {
+    if (!details.open) details.open = true
+  }
 }
 
 function escapeSelector(value) {
@@ -860,6 +981,8 @@ function captureResponseOnlyConfig(source) {
 }
 
 function resolveSearchTarget(optionKey) {
+  // The PyroWave card sits above the encoder switcher, outside the tab content.
+  if (optionKey === PYROWAVE_SEARCH_TARGET) return document.querySelector('[data-pyrowave-card]')
   if (!settingsContentRef.value || !optionKey) return null
   const escaped = escapeSelector(optionKey)
   const root = settingsContentRef.value
@@ -896,6 +1019,7 @@ async function focusSearchTarget(optionKey) {
   if (!target) return
 
   clearSearchHighlight()
+  openEnclosingDisclosures(target)
   highlightedSearchTarget = target
   target.classList.add('settings-search-hit')
   target.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'nearest' })
@@ -977,6 +1101,8 @@ function save() {
   restarted.value = false
 
   let configCopy = serialize()
+  // The response confirms this submission, not edits typed while it was in flight.
+  const submittedSerialized = JSON.stringify(configCopy)
   const clearSteamGridDbApiKey = configCopy.clear_steamgriddb_api_key === true
 
   tabs.value.forEach(tab => {
@@ -1005,15 +1131,17 @@ function save() {
       settingsRefusal.value = null
       reportSettingsReadable()
       saved.value = true
-      savedNeedsRestart.value = saveNeedsRestart(result)
-      initialSerialized.value = JSON.stringify(serialize())
+      // A live save does not make an earlier restart-needed save live.
+      savedNeedsRestart.value = saveNeedsRestart(result) || restartPending.value
+      restartPending.value = savedNeedsRestart.value
+      initialSerialized.value = submittedSerialized
       if (savedNeedsRestart.value) {
         toast(
-          i18n.t('config.apply_note') || 'Configuration saved. Restart Polaris for changes to take effect.',
+          i18n.t('config.saved_restart_needed_note') || 'Saved. Polaris uses these settings after it restarts.',
           'success',
           8000,
           {
-            label: 'Restart Now',
+            label: i18n.t('config.restart_now'),
             handler: () => apply()
           }
         )
@@ -1108,6 +1236,7 @@ function apply() {
           saved.value = false
           restarted.value = false
           restarting.value = false
+          restartPending.value = false
           if (readiness?.settingsUnreadable) {
             settingsRefusal.value = readiness.settingsUnreadable
             toast(i18n.t('config.restart_ready_unreadable') || 'Polaris is back online, but it cannot read its settings file.', 'error', 8000)
@@ -1195,6 +1324,12 @@ function loadConfig() {
       tabs.value = tabs.value.filter((el) => el.id !== "amd" && el.id !== "qsv" && el.id !== "vt")
       let nvTab = tabs.value.find(t => t.id === "nv")
       if (nvTab) nvTab.name = "NVIDIA NVENC \u2605"
+      // PyroWave is Linux only; its card is found from the first encoder profile the switcher opens.
+      const firstEncoderTab = tabs.value.find(t => t.group === "encoders")
+      if (firstEncoderTab) {
+        firstEncoderTab.searchAliases = [...(firstEncoderTab.searchAliases || []), ...PYROWAVE_SEARCH_ALIASES]
+        pyrowaveSearchTabId.value = firstEncoderTab.id
+      }
     }
     if (platform.value === "macos") {
       tabs.value = tabs.value.filter((el) => el.id !== "amd" && el.id !== "nv" && el.id !== "qsv" && el.id !== "vaapi")
@@ -1297,6 +1432,14 @@ function handleHash() {
     if (configHash) {
       let stripped_hash = configHash
 
+      if (stripped_hash === PYROWAVE_SEARCH_TARGET) {
+        selectNavTab('encoders')
+        setTimeout(() => {
+          focusSearchTarget(PYROWAVE_SEARCH_TARGET)
+        }, 400)
+        return
+      }
+
       if (sectionHashTabs[stripped_hash]) {
         currentTab.value = sectionHashTabs[stripped_hash]
         setTimeout(() => {
@@ -1342,7 +1485,7 @@ onMounted(() => {
 watch(searchQuery, async (value) => {
   if (value && searchResults.value.length > 0) {
     currentTab.value = searchResults.value[0].tab.id
-    await focusSearchTarget(searchResults.value[0].firstOptionKey)
+    await focusSearchTarget(matchedOptionByTab.value[searchResults.value[0].tab.id])
     return
   }
 

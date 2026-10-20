@@ -325,6 +325,13 @@ if(GIO_FOUND AND GIO_UNIX_FOUND)
     add_compile_definitions(POLARIS_BUILD_GIO)
     include_directories(SYSTEM ${GIO_INCLUDE_DIRS} ${GIO_UNIX_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${GIO_LIBRARIES} ${GIO_UNIX_LIBRARIES})
+    # #204: the SteamOS session switch reads logind, the user manager and SteamOS Manager over GIO.
+    # Without GIO the coordinator keeps its unavailable adapter.
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_bus.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_bus.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_adapter.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_adapter.cpp")
 endif()
 if(GIO_FOUND AND GIO_UNIX_FOUND AND PIPEWIRE_FOUND)
     add_compile_definitions(POLARIS_BUILD_PORTAL)
@@ -371,7 +378,8 @@ if(${POLARIS_ENABLE_VULKAN})
     include_directories(SYSTEM ${CMAKE_BINARY_DIR}/generated-src)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/capture_producer_sync.cpp")
 
     set(VULKAN_SHADER_DIR "${CMAKE_BINARY_DIR}/generated-src/shaders")
     set(VULKAN_SHADER_SOURCE "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/shaders/vulkan/rgb2yuv.comp")
@@ -651,6 +659,7 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_host.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_repaint.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_repaint.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_feedback.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/steam_title_process.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/steam_title_process.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/user_unit_override.h"
@@ -666,6 +675,10 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/gamescope_process.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_labwc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_gamescope.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/compositor_identity_channel.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/compositor_identity_channel.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_backend.h"

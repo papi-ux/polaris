@@ -1,6 +1,6 @@
 <template>
   <div class="page-shell pb-2">
-    <section class="page-header">
+    <section class="page-header troubleshooting-page-header">
       <div class="page-heading">
         <h1 class="page-title">{{ $t('navbar.troubleshoot') }}</h1>
         <p class="page-subtitle">{{ $t('troubleshooting.overview') }}</p>
@@ -22,7 +22,7 @@
       data-previous-run-banner
       :data-previous-run-outcome="previousRunBanner.crashed ? 'crashed' : 'unclean'"
     >
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.previous_run') }}</div>
           <h2 class="section-title">{{ previousRunBanner.title }}</h2>
@@ -48,7 +48,7 @@
     </section>
 
     <section class="section-card space-y-4" data-fix-my-stream>
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.fix_my_stream_mode') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.fix_my_stream') }}</h2>
@@ -77,7 +77,7 @@
           </div>
         </details>
         <div v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation :data-ai-readiness="aiReadiness.state">
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="text-[11px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
               <p class="mt-1 text-xs leading-relaxed text-info-bright">{{ aiReadinessText }}</p>
@@ -108,15 +108,15 @@
           </div>
         </div>
       </div>
-      <div v-if="!doctorDiagnosisIdle" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist>
+      <div v-if="visibleChecklist.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist>
         <div
-          v-for="item in fixMyStreamChecklist"
+          v-for="item in visibleChecklist"
           :key="item.key"
           class="surface-subtle border p-4"
           :class="statusTone(item.status).card"
           data-readonly
         >
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ item.label }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(item.status).badge">
               {{ fixMyStreamStatusLabel(item.status) }}
@@ -128,10 +128,13 @@
       </div>
     </section>
 
+    <StreamPacingReadout v-if="streamStats?.streaming" :stats="streamStats" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
+    <TailscaleConnectionReadout :stats="streamStats" />
+
     <SpacesDiagnostics v-if="platform === 'linux'" />
 
     <section class="section-card space-y-4" data-support-self-tests>
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.self_tests_kicker') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.self_tests_title') }}</h2>
@@ -145,9 +148,9 @@
         </button>
       </div>
 
-      <div class="grid gap-3 xl:grid-cols-3">
+      <div class="troubleshooting-card-grid grid gap-3">
         <div class="surface-subtle border p-4" :class="statusTone(networkPathReport.status).card" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.network_path_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(networkPathReport.status).badge">{{ statusTone(networkPathReport.status).label }}</span>
           </div>
@@ -167,7 +170,7 @@
         </div>
 
         <div class="surface-subtle border p-4" :class="statusTone(controllerInputReport.status).card">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.controller_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(controllerInputReport.status).badge">{{ statusTone(controllerInputReport.status).label }}</span>
           </div>
@@ -175,8 +178,10 @@
           <div class="mt-3 flex flex-wrap gap-2">
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="refreshControllerSnapshot">{{ $t('troubleshooting.controller_detect') }}</button>
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="recordControllerEvent('A / primary button', 1)">{{ $t('troubleshooting.controller_log_a') }}</button>
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="controllerRumbleSupported !== true" @click="pulseControllerHaptics">{{ $t('troubleshooting.controller_test_rumble') }}</button>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="controllerRumbleSupported !== true" :aria-describedby="controllerRumbleHint ? 'controller-rumble-hint' : undefined" data-controller-rumble @click="pulseControllerHaptics">{{ $t('troubleshooting.controller_test_rumble') }}</button>
           </div>
+          <!-- A disabled rumble test says why, where keyboard and screen-reader users reach it too. -->
+          <p v-if="controllerRumbleHint" id="controller-rumble-hint" class="mt-2 text-xs text-storm" data-controller-rumble-hint>{{ controllerRumbleHint }}</p>
           <details class="mt-3 text-xs text-storm">
             <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
             <div class="mt-2 space-y-2">
@@ -190,7 +195,7 @@
         </div>
 
         <div v-if="gamescopeHelperReport" class="surface-subtle border p-4" :class="statusTone(gamescopeHelperReport.status).card" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.gamescope_helper_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(gamescopeHelperReport.status).badge">{{ statusTone(gamescopeHelperReport.status).label }}</span>
           </div>
@@ -208,11 +213,12 @@
         </div>
 
         <div class="surface-subtle border p-4" :class="statusTone(postSessionReport.status).card" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.post_session_report') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(postSessionReport.status).badge">{{ postSessionReport.issueOwner }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ postSessionReport.mainIssue }}</p>
+          <p class="mt-2 text-xs leading-relaxed text-storm">{{ postSessionReport.evidenceSummary }}</p>
           <p class="mt-3 text-xs leading-relaxed text-ice">{{ $t('troubleshooting.post_session_next_launch', { profile: postSessionReport.suggestedNextLaunchProfile }) }}</p>
           <details class="mt-3 text-xs text-storm">
             <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
@@ -223,7 +229,7 @@
     </section>
 
     <section class="section-card space-y-4">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.recovery_ladder') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.quick_recovery') }}</h2>
@@ -238,7 +244,7 @@
       </div>
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <div class="surface-subtle flex h-full flex-col border-success/15 p-4">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-success">{{ $t('troubleshooting.recovery_rank_1') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_1_label') }}</span>
           </div>
@@ -258,7 +264,7 @@
         </div>
 
         <div class="surface-subtle flex h-full flex-col border-warning/15 p-4">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-warning-bright">{{ $t('troubleshooting.recovery_rank_2') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_2_label') }}</span>
           </div>
@@ -275,7 +281,7 @@
         </div>
 
         <div class="surface-subtle flex h-full flex-col border-danger/15 p-4">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-danger/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-danger">{{ $t('troubleshooting.recovery_rank_3') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_3_label') }}</span>
           </div>
@@ -295,7 +301,7 @@
         </div>
 
         <div class="surface-subtle flex h-full flex-col border-info/15 p-4" v-if="platform === 'windows'">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-info/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.recovery_optional') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_display_reset') }}</span>
           </div>
@@ -349,7 +355,7 @@
         <h2 id="diagnostics" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.diagnostics') }}</h2>
         <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.diagnostics_desc') }}</p>
         <div v-if="groupedRecentIssues.length" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.recent_incidents') }}</div>
             <div class="text-xs text-storm">{{ groupedRecentIssues.length }} {{ $t('troubleshooting.visible_now') }}</div>
           </div>
@@ -429,7 +435,7 @@
     </section>
 
     <section class="section-card">
-      <div class="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+      <div class="troubleshooting-log-header flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <h2 id="logs" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.logs') }}</h2>
           <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.logs_desc') }}</p>
@@ -508,9 +514,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onBeforeUnmount, inject, watch } from 'vue'
+import { ref, computed, onBeforeUnmount, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
+import { usePostSessionReport } from '../composables/usePostSessionReport'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import StatTile from '../components/StatTile.vue'
@@ -524,8 +531,6 @@ import {
   buildGithubIssueDraft,
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
-  buildPostSessionStreamReport,
-  rememberJudgedNetworkVerdict,
   buildSupportSelfTestCopy,
   createExportAddressBook,
   redactSensitiveText,
@@ -540,10 +545,14 @@ import { streamClientFamilyLabel } from '../client-family.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
+import { doctorIsWaitingForStream, idleHostFindings } from '../doctor-observation.js'
+import StreamPacingReadout from '../components/StreamPacingReadout.vue'
+import TailscaleConnectionReadout from '../components/TailscaleConnectionReadout.vue'
+import { normalizeTailscalePeer } from '../tailscale-connection-readout.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
-const { stats: streamStats, connected: streamStatsConnected } = useStreamStats()
+const { stats: streamStats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats()
 // Host truth for this page: the settings projection feeds the stream display
 // and provenance rows, and the AI status says whether an explanation can run.
 const projection = useConfigProjection()
@@ -588,12 +597,6 @@ const controllerEvents = ref([])
 const controllerRumbleSupported = ref(null)
 const nativeNetworkPathProbe = ref(null)
 const gamescopeHelperProbe = ref(null)
-const lastCompletedStreamStats = ref(null)
-const lastDisconnectReason = ref('')
-// The verdict the host last judged the live stream's loss on, and the one the completed session ended
-// with. The last live payloads of a session whose client dropped call the loss stale.
-const lastJudgedNetworkVerdict = ref(null)
-const lastCompletedJudgedVerdict = ref(null)
 
 const confirmedActions = computed(() => ({
   forceClose: {
@@ -675,9 +678,20 @@ const fixMyStreamChecklist = computed(() => buildFixMyStreamChecklist({
 }))
 
 const doctorPayload = computed(() => streamStats.value?.doctor || null)
-const doctorDiagnosisIdle = computed(() => !streamStats.value?.streaming && !doctorPayload.value)
+const doctorDiagnosisIdle = computed(() => doctorIsWaitingForStream(doctorPayload.value, streamStats.value) || (!streamStats.value?.streaming && !doctorPayload.value))
+// Before a stream only the host's current configuration findings are shown (#152); the live rows
+// have nothing to measure, and a payload kept from a dropped connection is not current. The
+// support bundle still carries the whole checklist.
+const visibleChecklist = computed(() => doctorDiagnosisIdle.value
+  ? (streamStatsConnected.value ? idleHostFindings(fixMyStreamChecklist.value) : [])
+  : fixMyStreamChecklist.value)
 const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doctor_categories_prefix')} ${AI_DOCTOR_EXPLANATION_CATEGORIES.join(', ')}`)
 const doctorPlainDiagnosis = computed(() => {
+  if (doctorIsWaitingForStream(doctorPayload.value, streamStats.value)) return {
+    title: i18n.t('troubleshooting.doctor_waiting_title'),
+    detail: i18n.t('troubleshooting.doctor_waiting_detail'),
+    action: i18n.t('troubleshooting.doctor_waiting_action'),
+  }
   const doctor = doctorPayload.value
   if (doctor?.simple_state || doctor?.summary || doctor?.diagnosis) {
     const title = doctor.simple_state || doctor.summary || doctor.diagnosis
@@ -753,7 +767,9 @@ const networkPathReport = computed(() => buildNetworkPathTestReport({
   mdnsAvailable: window.location.hostname.endsWith('.local'),
 }))
 
-const browserGamepads = computed(() => {
+// navigator.getGamepads() is not reactive: a computed over it would keep the list it saw when the
+// page opened, before any controller was connected. Read it again on Detect and on connect events.
+function readBrowserGamepads() {
   if (!navigator.getGamepads) return []
   return Array.from(navigator.getGamepads()).filter(Boolean).map((pad) => ({
     index: pad.index,
@@ -761,6 +777,20 @@ const browserGamepads = computed(() => {
     buttons: pad.buttons?.length || 0,
     axes: pad.axes?.length || 0,
   }))
+}
+const browserGamepads = ref(readBrowserGamepads())
+function refreshBrowserGamepads() {
+  browserGamepads.value = readBrowserGamepads()
+  // Device changes retire the detected capability, even when another controller remains.
+  controllerRumbleSupported.value = null
+}
+window.addEventListener('gamepadconnected', refreshBrowserGamepads)
+window.addEventListener('gamepaddisconnected', refreshBrowserGamepads)
+
+const controllerRumbleHint = computed(() => {
+  if (controllerRumbleSupported.value === true) return ''
+  if (controllerRumbleSupported.value === false) return i18n.t('troubleshooting.controller_rumble_unsupported')
+  return i18n.t('troubleshooting.controller_rumble_detect_first')
 })
 
 const controllerNativeEvidence = computed(() => streamStats.value?.controller_input || {})
@@ -774,12 +804,7 @@ const controllerInputReport = computed(() => buildControllerInputTestReport({
 
 const gamescopeHelperReport = computed(() => buildGamescopeHelperReport(gamescopeHelperProbe.value))
 
-const postSessionReport = computed(() => buildPostSessionStreamReport({
-  stats: lastCompletedStreamStats.value || streamStats.value || {},
-  logs: logs.value,
-  disconnectReason: lastDisconnectReason.value,
-  lastJudgedVerdict: lastCompletedStreamStats.value ? lastCompletedJudgedVerdict.value : lastJudgedNetworkVerdict.value,
-}))
+const postSessionReport = usePostSessionReport(streamStats, streamStatsConnected, logs)
 
 const supportSelfTestCopy = computed(() => buildSupportSelfTestCopy({
   network: networkPathReport.value,
@@ -795,24 +820,35 @@ function recordControllerEvent(label, pad = 1) {
 }
 
 function refreshControllerSnapshot() {
+  refreshBrowserGamepads()
   const pads = browserGamepads.value
   if (pads.length) {
-    controllerRumbleSupported.value = Boolean(navigator.getGamepads?.()[pads[0].index]?.vibrationActuator)
+    controllerRumbleSupported.value = Array.from(navigator.getGamepads?.() || []).some(canVibrate)
     recordControllerEvent('Browser gamepad visible', pads[0].index + 1)
   } else {
     recordControllerEvent('Manual button sample', 1)
   }
 }
 
+function canVibrate(pad) {
+  return typeof pad?.vibrationActuator?.playEffect === 'function'
+}
+
 async function pulseControllerHaptics() {
-  const pad = navigator.getGamepads?.().find((candidate) => candidate?.vibrationActuator)
-  if (!pad?.vibrationActuator?.playEffect) return
-  await pad.vibrationActuator.playEffect('dual-rumble', {
-    duration: 180,
-    strongMagnitude: 0.35,
-    weakMagnitude: 0.25,
-  })
-  controllerRumbleSupported.value = true
+  // The same test Detect uses, so the button never enables for a controller this cannot pulse.
+  const pad = Array.from(navigator.getGamepads?.() || []).find(canVibrate)
+  if (!pad) return
+  try {
+    await pad.vibrationActuator.playEffect('dual-rumble', {
+      duration: 180,
+      strongMagnitude: 0.35,
+      weakMagnitude: 0.25,
+    })
+  } catch {
+    // The browser may refuse or interrupt the effect; say so instead of failing silently.
+    showToast(i18n.t('troubleshooting.controller_rumble_failed'), 'error')
+    return
+  }
   recordControllerEvent('Optional rumble pulse', pad.index + 1)
 }
 
@@ -820,15 +856,6 @@ function copySupportSelfTests() {
   navigator.clipboard.writeText(supportSelfTestCopy.value)
   showToast(i18n.t('troubleshooting.self_tests_copied'), 'success')
 }
-
-watch(streamStats, (next, previous) => {
-  lastJudgedNetworkVerdict.value = rememberJudgedNetworkVerdict(lastJudgedNetworkVerdict.value, next, previous)
-  if (previous?.streaming && next && !next.streaming) {
-    lastCompletedStreamStats.value = previous
-    lastCompletedJudgedVerdict.value = lastJudgedNetworkVerdict.value
-    lastDisconnectReason.value = 'Stream telemetry changed from active to idle.'
-  }
-}, { deep: true })
 
 function fixMyStreamStatusLabel(status) {
   if (status === 'pass') return i18n.t('troubleshooting.fix_my_stream_status_pass')
@@ -1143,7 +1170,7 @@ function cleanupStaleVirtualDisplay() {
 }
 
 async function collectSupportContext() {
-  const [systemStats, aiStatus, aiCache, aiHistory, config, previousRunLogs, olderRunLogs, kernelGpuMessages] = await Promise.all([
+  const [systemStats, aiStatus, aiCache, aiHistory, config, previousRunLogs, olderRunLogs, kernelGpuMessages, networkConnection] = await Promise.all([
     safeFetchJson('./api/stats/system'),
     safeFetchJson('./api/ai/status'),
     safeFetchJson('./api/ai/cache'),
@@ -1155,7 +1182,8 @@ async function collectSupportContext() {
     // restart used to overwrite the run that had been streaming.
     safeFetchText('./polaris/v1/diagnostics/logs/previous?generation=1'),
     // The kernel's own GPU lines for this boot and the previous one, when readable.
-    safeFetchJson('./polaris/v1/diagnostics/kernel-gpu')
+    safeFetchJson('./polaris/v1/diagnostics/kernel-gpu'),
+    safeFetchJson('./api/network/connection')
   ])
 
   return {
@@ -1176,6 +1204,9 @@ async function collectSupportContext() {
     } : null,
     fix_my_stream_checklist: fixMyStreamChecklist.value,
     session_snapshot: streamStats.value,
+    network_connection: normalizeTailscalePeer(networkConnection, {
+      generation: streamStats.value?.stream_instance_id, streaming: streamStats.value?.streaming === true,
+    }),
     client: {
       type: streamStats.value?.client_type || streamClientFamilyLabel(streamStats.value?.client_family) ||
         streamStats.value?.client_name || 'unknown',
@@ -1355,5 +1386,7 @@ projection.load()
 
 onBeforeUnmount(() => {
   clearInterval(logInterval)
+  window.removeEventListener('gamepadconnected', refreshBrowserGamepads)
+  window.removeEventListener('gamepaddisconnected', refreshBrowserGamepads)
 })
 </script>

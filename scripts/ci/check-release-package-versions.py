@@ -23,7 +23,7 @@ REQUIRED = (
     "Polaris-kms-ubuntu24.04-x86_64.deb",
     *(
         f"Polaris{component}-{platform}-x86_64.pkg.tar"
-        for platform in ("arch", "steamos3.8")
+        for platform in ("arch", "steamos3.8", "steamos3.9")
         for component in ("", "-kms", "-debug")
     ),
 )

@@ -1,6 +1,6 @@
 <template>
-  <div class="page-shell operator-console library-view">
-    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+  <div class="page-shell operator-console library-view" @pointerdown="dismissLibraryMore" @keydown.esc="closeLibraryMore($event, true)">
+    <p v-if="!inNova" class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
       <a href="https://papi-ux.com/docs/apps/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">Library and app editor guide</a>
     </p>
     <section v-if="!showEditForm" class="page-header">
@@ -71,124 +71,6 @@
       </div>
     </section>
 
-    <section v-if="!showEditForm" class="section-card">
-    <section class="library-cover-sweep-summary">
-      <div class="min-w-0" role="status" aria-live="polite" aria-atomic="true">
-        <div class="section-kicker">Covers</div>
-        <div class="library-import-staged-title">{{ sweepTitle }}</div>
-        <div class="library-import-staged-copy">{{ sweepCopy }}</div>
-        <div v-if="coverSweep.error.value" class="mt-1 text-xs text-rose" data-sweep-error>
-          {{ coverSweep.error.value }}
-        </div>
-      </div>
-      <div class="library-import-staged-actions">
-        <Button
-          v-if="sweepSearching || coverSweep.automatic.value"
-          variant="outline"
-          data-sweep-stop
-          @click="coverSweep.stop()"
-        >
-          Stop
-        </Button>
-        <Button
-          v-else
-          variant="outline"
-          :loading="coverSweep.starting.value"
-          :disabled="coverSweep.starting.value || coverSweep.applying.value || coverSweep.automatic.value"
-          data-sweep-start
-          @click="coverSweep.start()"
-        >
-          Find covers
-        </Button>
-        <Button
-          variant="outline"
-          :disabled="sweepRows.length === 0"
-          data-sweep-review-open
-          @click="showSweepReview = !showSweepReview"
-        >
-          {{ showSweepReview ? 'Hide review' : 'Review proposals' }}
-        </Button>
-        <Button
-          variant="primary"
-          :loading="coverSweep.applying.value"
-          :disabled="coverSweep.applying.value || coverSweep.automatic.value || sweepKeptCount === 0"
-          data-sweep-apply
-          @click="applySweep"
-        >
-          {{ sweepApplyLabel }}
-        </Button>
-      </div>
-    </section>
-
-    <section v-if="showSweepReview && sweepRows.length" class="library-cover-sweep-drawer">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div class="section-kicker">Proposed covers</div>
-          <h3 class="text-base font-semibold text-silver">Keep the matches that are right</h3>
-          <p class="mt-1 text-sm text-storm">
-            A title search is right most of the time rather than always, so nothing is stored until you
-            apply. Open a row to see its poster.
-          </p>
-        </div>
-        <span class="meta-pill">{{ sweepKeptCount }} of {{ sweepRows.length }} kept</span>
-      </div>
-      <div class="library-cover-sweep-list">
-        <article
-          v-for="row in sweepRows"
-          :key="row.uuid"
-          class="library-cover-sweep-row"
-          :data-sweep-row="row.uuid"
-        >
-          <div class="min-w-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="truncate text-sm font-semibold text-silver">{{ row.name }}</span>
-              <span class="control-chip">{{ sweepOutcomeLabel(row) }}</span>
-              <span v-if="row.confidence !== null" class="control-chip">{{ row.confidence }}% match</span>
-            </div>
-            <div class="mt-1 text-xs text-storm">{{ sweepRowCopy(row) }}</div>
-            <div v-if="row.postersError" class="mt-1 text-xs text-rose">{{ row.postersError }}</div>
-            <div v-if="row.applyError" class="mt-1 text-xs text-rose">{{ row.applyError }}</div>
-            <div v-if="row.posters.length" class="mt-2 flex flex-wrap gap-2">
-              <button
-                v-for="(poster, at) in row.posters"
-                :key="poster.token"
-                type="button"
-                class="rounded border p-0.5"
-                :class="row.chosenIndex === at ? 'border-aurora' : 'border-transparent'"
-                :data-sweep-poster="at"
-                @click="row.chosenIndex = at"
-              >
-                <img :src="poster.preview" :alt="row.title" class="h-24 w-16 rounded object-cover" />
-              </button>
-            </div>
-          </div>
-          <div class="flex shrink-0 items-center gap-2">
-            <Button
-              v-if="row.outcome === 'proposed' && !row.posters.length"
-              variant="ghost"
-              size="sm"
-              :loading="row.postersLoading"
-              :data-sweep-row-open="row.uuid"
-              @click="coverSweep.loadPosters(row)"
-            >
-              Show posters
-            </Button>
-            <label v-if="row.outcome === 'proposed'" class="flex items-center gap-1 text-xs text-storm">
-              <input
-                type="checkbox"
-                v-model="row.keep"
-                :disabled="row.applied"
-                :data-sweep-keep="row.uuid"
-              />
-              Keep
-            </label>
-            <span v-if="row.applied" class="control-chip" :data-sweep-applied="row.uuid">Applied</span>
-          </div>
-        </article>
-      </div>
-    </section>
-    </section>
-
     <section v-if="!showEditForm && showImport" class="section-card library-import-console">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
@@ -214,7 +96,7 @@
           <div class="min-w-0">
             <div class="section-kicker">ROM folders</div>
             <div class="text-sm font-semibold text-silver">Emulator games</div>
-            <p class="mt-1 text-sm text-storm">Point Polaris at a folder of games and pick the emulator that loads them. Every file it can load becomes an entry named from its filename; covers come from SteamGridDB when a key is set in Settings.</p>
+            <p class="mt-1 text-sm text-support">Point Polaris at a folder of games and pick the emulator that loads them. Every file it can load becomes an entry named from its filename; covers come from SteamGridDB when a key is set in Settings.</p>
           </div>
           <Button variant="outline" size="sm" data-rom-folder-add @click="showRomSourceForm ? closeRomSourceForm() : openRomSourceForm()">
             {{ showRomSourceForm ? 'Cancel' : 'Add folder' }}
@@ -269,7 +151,7 @@
           <article v-for="source in romSourceCards" :key="source.id" class="library-import-review-row" data-rom-folder>
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-sm font-semibold text-silver">{{ romSourceInstallLabel(source) }}</span>
+                <span class="min-w-0 max-w-full break-words text-sm font-semibold text-silver">{{ romSourceInstallLabel(source) }}</span>
                 <span class="control-chip">{{ romSourceCountLabel(source) }}</span>
               </div>
               <div class="mt-1 break-all font-mono text-xs text-storm">{{ source.path }}</div>
@@ -348,7 +230,7 @@
           <div>
             <div class="section-kicker">Review queue</div>
             <h3 class="text-base font-semibold text-silver">Confirm staged and already imported games</h3>
-            <p class="mt-1 text-sm text-storm">Remove individual staged entries before importing, or use already-imported rows as a sanity check.</p>
+            <p class="mt-1 text-sm text-support">Remove individual staged entries before importing, or use already-imported rows as a sanity check.</p>
           </div>
           <span class="meta-pill">{{ reviewImportGames.length }} discovered</span>
         </div>
@@ -390,7 +272,7 @@
         <div class="mt-4 flex items-center justify-center gap-2">
           <h3 class="text-lg font-semibold text-silver">Ready to scan installed libraries</h3>
         </div>
-        <p class="mt-2 text-sm text-storm">Steam, Lutris and Heroic are found on their own. Add a ROM folder above to bring emulator games in too.</p>
+        <p class="mt-2 text-sm text-support">Steam, Lutris and Heroic are found on their own. Add a ROM folder above to bring emulator games in too.</p>
         <div class="mt-5">
           <Button variant="primary" :disabled="gameScanning" @click="scanGames">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
@@ -402,7 +284,7 @@
       <div v-else-if="gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center" role="status" aria-live="polite">
         <svg class="mx-auto h-7 w-7 animate-spin text-ice" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.373 0 0 5.373 0 12h4Zm2 5.291A7.962 7.962 0 0 1 4 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647Z" /></svg>
         <h3 class="mt-4 text-lg font-semibold text-silver">Scanning installed libraries</h3>
-        <p class="mt-2 text-sm text-storm">Checking Steam, Lutris, Heroic and your ROM folders for new, staged, and already-imported entries.</p>
+        <p class="mt-2 text-sm text-support">Checking Steam, Lutris, Heroic and your ROM folders for new, staged, and already-imported entries.</p>
       </div>
 
       <div v-else class="library-import-workspace">
@@ -483,7 +365,7 @@
             >
               <input type="checkbox" v-model="game.selected" :disabled="game.already_imported" class="mt-1 h-4 w-4 rounded accent-ice" />
               <div class="min-w-0 flex-1">
-                <div class="flex min-w-0 items-start justify-between gap-2">
+                <div class="flex min-w-0 flex-wrap items-start justify-between gap-2">
                   <div class="truncate text-sm font-medium text-silver">{{ game.name }}</div>
                   <span class="control-chip">{{ game.already_imported ? 'Imported' : game.selected ? 'Staged' : 'New' }}</span>
                 </div>
@@ -512,7 +394,7 @@
           <div class="section-title-row">
             <h2 class="section-title">Jump back in</h2>
           </div>
-          <p class="mt-2 text-sm text-storm">Favorites and recently played games, ready to launch.</p>
+          <p class="mt-2 text-sm text-support">Favorites and recently played games, ready to launch.</p>
         </div>
         <span class="meta-pill">{{ quickLaunchReadyCount }} ready / {{ quickLaunchRailApps.length }} shown</span>
       </div>
@@ -521,26 +403,15 @@
         <article
           v-for="app in quickLaunchRailApps"
           :key="`quick-${app.uuid}`"
-          class="surface-subtle overflow-hidden p-0"
+          class="library-quick-card surface-subtle p-0"
           :data-quick-launch-app="app.uuid"
         >
-          <div class="flex min-h-full gap-4 p-3">
-            <div class="relative h-28 w-20 shrink-0 overflow-hidden rounded-lg border border-storm/20 bg-void/60">
-              <img
-                v-if="app['image-path']"
-                :src="'./api/covers/image?name=' + encodeURIComponent(app.name)"
-                class="h-full w-full object-cover"
-                loading="lazy"
-                @error="$event.target.style.display='none'; $event.target.nextElementSibling.style.display='flex'"
-              />
-              <div class="flex h-full w-full items-center justify-center">
-                <svg class="h-6 w-6 text-storm/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-              </div>
-            </div>
+          <div class="library-quick-content flex min-h-full flex-col gap-4 p-3">
+            <PosterImage class="w-20" :name="app.name" :src="app['image-path'] ? './api/covers/image?name=' + encodeURIComponent(app.name) : ''" />
             <div class="flex min-w-0 flex-1 flex-col">
-              <div class="flex min-w-0 items-start justify-between gap-2">
+              <div class="flex min-w-0 flex-wrap items-start justify-between gap-2">
                 <div class="min-w-0">
-                  <h3 class="truncate text-sm font-semibold text-silver">{{ app.name || 'Untitled app' }}</h3>
+                  <h3 class="truncate text-sm font-semibold text-silver" :title="app.name">{{ app.name || 'Untitled app' }}</h3>
                   <div class="mt-1 text-xs text-storm">{{ quickLaunchStateCopy(app) }}</div>
                 </div>
                 <span class="control-chip shrink-0">{{ quickLaunchStateLabel(app) }}</span>
@@ -555,7 +426,7 @@
                   v-if="quickLaunchDetails(app).running"
                   class="focus-ring dashboard-action-button dashboard-action-button-secondary library-quick-launch-action"
                   type="button"
-                  :disabled="actionDisabled"
+                  :disabled="actionDisabled || !currentAppAvailable"
                   @click="requestCloseApp(app)"
                 >
                   {{ pendingStopAppUuid === app.uuid ? "Confirm stop" : "Stop stream" }}
@@ -563,7 +434,9 @@
                 <a
                   v-else-if="quickLaunchDetails(app).launchReady"
                   class="focus-ring dashboard-action-button dashboard-action-button-primary library-quick-launch-action no-underline"
-                  :href="launchHref(app)"
+                  :href="currentAppAvailable && !actionDisabled ? launchHref(app) : undefined"
+                  :aria-disabled="!currentAppAvailable || actionDisabled"
+                  :tabindex="currentAppAvailable && !actionDisabled ? 0 : -1"
                   @click.prevent="launchApp($event, app)"
                 >
                   Launch
@@ -583,8 +456,8 @@
       </div>
     </section>
 
-    <div v-if="!showEditForm" class="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)]">
-      <section class="section-card">
+    <div v-if="!showEditForm" class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(300px,0.8fr)]" data-library-body>
+      <section class="section-card min-w-0">
         <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div class="section-kicker">Library Surface</div>
@@ -644,8 +517,8 @@
           </div>
         </div>
 
-        <div class="console-inline-note mt-3">
-          <span class="font-medium text-silver">Ordering and export</span>
+        <div id="library-reorder-state" class="console-inline-note mt-3">
+          <span class="font-medium text-silver">Order changes stay local until Save order.</span>
           <span v-if="libraryViewFiltered" class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">
             Reorder disabled while filtered
           </span>
@@ -654,10 +527,12 @@
           </span>
         </div>
 
+        <p class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-reorder-status>{{ reorderStatus }}</p>
         <div v-if="visibleApps.length" class="mt-5 space-y-3">
           <article
             v-for="app in visibleApps"
             :key="app.uuid"
+            :data-library-app="app.uuid"
             class="library-row rounded-lg border border-storm/20 bg-deep/35 p-3 transition-[border-color,background-color,box-shadow] duration-200"
             :class="app.dragover ? 'border-ice/40 bg-twilight/35 shadow-[0_12px_30px_rgba(0,0,0,0.18)]' : 'hover:border-storm/35 hover:bg-deep/45'"
             :draggable="!libraryViewFiltered"
@@ -668,34 +543,21 @@
             @dragend="onDragEnd()"
             @drop="onLibraryDrop($event, app)"
           >
-            <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div class="flex min-w-0 items-start gap-4">
+            <div class="library-row-content flex min-w-0 flex-col gap-4">
+              <div class="library-row-identity flex min-w-0 flex-1 flex-wrap items-start gap-3">
                 <div
                   class="mt-1 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-storm/20 bg-void/45 text-storm"
                   aria-hidden="true"
                 >
                   <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9h8M8 15h8M5 9h.01M5 15h.01M19 9h.01M19 15h.01"/></svg>
                 </div>
-                <div class="relative h-20 w-14 shrink-0 overflow-hidden rounded-lg border border-storm/20 bg-void/60">
-                  <img
-                    v-if="app['image-path']"
-                    :src="'./api/covers/image?name=' + encodeURIComponent(app.name)"
-                    class="h-full w-full object-cover"
-                    loading="lazy"
-                    @error="$event.target.style.display='none'; $event.target.nextElementSibling.style.display='flex'"
-                  />
-                  <div class="flex h-full w-full items-center justify-center">
-                    <svg class="h-5 w-5 text-storm/40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-                  </div>
-                  <div v-if="currentApp === app.uuid" class="absolute inset-0 flex items-center justify-center bg-success/20">
-                    <span class="rounded-full border border-success/25 bg-success/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-eyebrow text-success-bright">
-                      Live
-                    </span>
-                  </div>
+                <div class="relative shrink-0">
+                  <PosterImage class="w-14" :name="app.name" :src="app['image-path'] ? './api/covers/image?name=' + encodeURIComponent(app.name) : ''" />
+                  <span v-if="currentApp === app.uuid" class="absolute bottom-1 left-1 rounded bg-success/20 px-1.5 py-0.5 text-xs font-semibold text-success-bright">Live</span>
                 </div>
-                <div class="min-w-0">
+                <div class="library-row-title min-w-0 flex-1 basis-full">
                   <div class="flex flex-wrap items-center gap-2">
-                    <h3 class="truncate text-base font-semibold text-silver">{{ app.name || 'Untitled app' }}</h3>
+                    <h3 class="min-w-0 max-w-full truncate text-base font-semibold text-silver">{{ app.name || 'Untitled app' }}</h3>
                     <span v-if="app.source && app.source !== 'manual'" class="rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow" :class="sourceBadgeClass(app.source)">
                       {{ app.source }}
                     </span>
@@ -705,7 +567,7 @@
                     </span>
                   </div>
                   <div class="mt-2 text-xs text-storm">
-                    {{ currentApp === app.uuid ? 'Live for connected clients.' : 'Ready.' }}
+                    {{ !currentAppAvailable ? 'Waiting for current app status.' : currentApp === app.uuid ? 'Live for connected clients.' : 'Ready.' }}
                   </div>
                   <div class="mt-3 flex flex-wrap gap-2 text-[11px] text-storm">
                     <span class="meta-pill">Position {{ appPositionLabel(app) }}</span>
@@ -715,16 +577,22 @@
               </div>
 
               <div v-if="app.uuid" class="library-row-actions flex shrink-0 flex-wrap items-center justify-end gap-2">
-                <button class="focus-ring icon-action-button library-row-secondary-action" :disabled="actionDisabled" :aria-label="`Edit ${app.name}`" :title="`Edit ${app.name}`" @click="editApp(app)">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-                </button>
-                <button class="focus-ring icon-action-button icon-action-button-danger library-row-secondary-action" :disabled="actionDisabled" :aria-label="`Delete ${app.name}`" :title="`Delete ${app.name}`" @click="showDeleteForm(app)">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg>
-                </button>
+                <div class="flex gap-1" role="group" :aria-label="'Reorder ' + app.name">
+                  <button type="button" class="focus-ring inline-flex h-11 w-11 items-center justify-center rounded-lg border border-storm/20 text-silver disabled:opacity-40"
+                    :aria-label="'Move ' + app.name + ' up'" :title="'Move ' + app.name + ' up'" aria-describedby="library-reorder-state"
+                    :disabled="!canMoveLibraryApp(app, -1)" data-move-direction="-1" :data-move-up="app.uuid" @click="moveLibraryApp(app, -1, $event)">
+                    <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m6 14 6-6 6 6"/></svg>
+                  </button>
+                  <button type="button" class="focus-ring inline-flex h-11 w-11 items-center justify-center rounded-lg border border-storm/20 text-silver disabled:opacity-40"
+                    :aria-label="'Move ' + app.name + ' down'" :title="'Move ' + app.name + ' down'" aria-describedby="library-reorder-state"
+                    :disabled="!canMoveLibraryApp(app, 1)" data-move-direction="1" :data-move-down="app.uuid" @click="moveLibraryApp(app, 1, $event)">
+                    <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m6 10 6 6 6-6"/></svg>
+                  </button>
+                </div>
                 <button
                   v-if="currentApp === app.uuid"
                   class="focus-ring icon-action-button icon-action-button-warning"
-                  :disabled="actionDisabled"
+                  :disabled="actionDisabled || !currentAppAvailable"
                   :aria-label="`Terminate ${app.name}`"
                   :title="`Terminate ${app.name}`"
                   @click="closeApp()"
@@ -733,14 +601,28 @@
                 </button>
                 <a
                   v-else
-                  class="focus-ring icon-action-button icon-action-button-success library-row-launch inline-flex items-center justify-center no-underline"
+                  class="focus-ring library-row-launch inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border px-4 text-sm font-semibold no-underline"
                   :aria-label="`Launch ${app.name}`"
                   :title="`Launch ${app.name}`"
+                  :aria-disabled="!currentAppAvailable || actionDisabled"
+                  :tabindex="currentAppAvailable && !actionDisabled ? 0 : -1"
                   @click.prevent="launchApp($event, app)"
-                  :href="launchHref(app)"
+                  :href="currentAppAvailable && !actionDisabled ? launchHref(app) : undefined"
                 >
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/></svg>
+                  <span>{{ $t('dashboard.launch') }}</span>
                 </a>
+                <details class="relative" :data-library-more="app.uuid" @toggle="onLibraryMoreToggle">
+                  <summary class="focus-ring flex min-h-11 cursor-pointer items-center rounded-lg border border-storm/20 px-3 text-sm text-silver" :aria-label="'More actions for ' + app.name">More</summary>
+                  <div class="absolute right-0 z-10 mt-2 flex min-w-36 flex-col rounded-lg border border-storm/25 bg-void p-1 shadow-card">
+                <button class="focus-ring inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm text-silver hover:bg-twilight/30" :disabled="actionDisabled" :aria-label="`Edit ${app.name}`" :title="`Edit ${app.name}`" @click="closeLibraryMore($event); editApp(app)">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg><span>Edit</span>
+                </button>
+                <button class="focus-ring inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-sm text-danger-bright hover:bg-danger/10" :disabled="actionDisabled" :aria-label="`Delete ${app.name}`" :title="`Delete ${app.name}`" @click="closeLibraryMore($event, true); showDeleteForm(app)">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg><span>Delete</span>
+                </button>
+                  </div>
+                </details>
               </div>
             </div>
           </article>
@@ -803,7 +685,7 @@
                 <span class="text-sm text-silver">{{ source.label }}</span>
                 <span class="meta-pill">{{ source.available }}</span>
               </div>
-              <div v-if="!importSources.length" class="rounded-xl border border-storm/15 bg-void/40 px-3 py-3 text-sm text-storm">
+              <div v-if="!importSources.length" class="rounded-xl border border-storm/15 bg-void/40 px-3 py-3 text-sm text-support">
                 Scan libraries to see import candidates here.
               </div>
             </div>
@@ -813,10 +695,13 @@
             <div class="section-title-row">
               <div class="text-sm font-semibold text-silver">Emulator readiness</div>
             </div>
-            <div class="mt-3 grid gap-2">
-              <div v-for="source in romSourceCards" :key="source.id" class="flex items-start justify-between gap-3 rounded-xl border border-storm/15 bg-void/40 px-3 py-2">
-                <span class="text-sm text-silver">{{ romSourceInstallLabel(source) }}</span>
-                <span class="text-right text-xs" :class="romSourceReady(source) ? 'text-success' : 'text-warning-bright'">{{ romSourceStatus(source) }}</span>
+            <!-- A launcher path or a warning can be one long token: the single bounded column, the
+                 shrinkable row and spans keep it inside the card, and a status that cannot fit
+                 beside its label moves to its own line, still at the right. -->
+            <div class="mt-3 grid grid-cols-1 gap-2">
+              <div v-for="source in romSourceCards" :key="source.id" class="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1 rounded-xl border border-storm/15 bg-void/40 px-3 py-2">
+                <span class="min-w-0 max-w-full grow basis-40 break-words text-sm text-silver">{{ romSourceInstallLabel(source) }}</span>
+                <span class="ml-auto min-w-0 max-w-full break-words text-right text-xs" :class="romSourceReady(source) ? 'text-success' : 'text-warning-bright'">{{ romSourceStatus(source) }}</span>
               </div>
             </div>
           </article>
@@ -825,12 +710,12 @@
             <div class="section-title-row">
               <div class="text-sm font-semibold text-silver">Library hygiene</div>
             </div>
-            <div class="mt-3 text-sm text-storm">Keep the client-facing surface intentional.</div>
+            <div class="mt-3 text-sm text-support">Keep the client-facing surface intentional.</div>
           </article>
 
           <details class="library-health-details">
             <summary class="focus-ring">Host context</summary>
-            <div class="mt-3 space-y-2 text-sm text-storm">
+            <div class="mt-3 space-y-2 text-sm text-support">
               <div class="flex items-center justify-between gap-3">
                 <span>Host name</span>
                 <span class="font-medium text-silver">{{ hostName || 'Unknown host' }}</span>
@@ -848,6 +733,124 @@
         </div>
       </section>
     </div>
+
+    <section v-if="!showEditForm" class="section-card">
+    <section class="library-cover-sweep-summary">
+      <div class="min-w-0" role="status" aria-live="polite" aria-atomic="true">
+        <div class="section-kicker">Covers</div>
+        <div class="library-import-staged-title">{{ sweepTitle }}</div>
+        <div class="library-import-staged-copy">{{ sweepCopy }}</div>
+        <div v-if="coverSweep.error.value" class="mt-1 text-xs text-rose" data-sweep-error>
+          {{ coverSweep.error.value }}
+        </div>
+      </div>
+      <div class="library-import-staged-actions">
+        <Button
+          v-if="sweepSearching || coverSweep.automatic.value"
+          variant="outline"
+          data-sweep-stop
+          @click="coverSweep.stop()"
+        >
+          Stop
+        </Button>
+        <Button
+          v-else
+          variant="outline"
+          :loading="coverSweep.starting.value"
+          :disabled="coverSweep.starting.value || coverSweep.applying.value || coverSweep.automatic.value"
+          data-sweep-start
+          @click="coverSweep.start()"
+        >
+          Find covers
+        </Button>
+        <Button
+          variant="outline"
+          :disabled="sweepRows.length === 0"
+          data-sweep-review-open
+          @click="showSweepReview = !showSweepReview"
+        >
+          {{ showSweepReview ? 'Hide review' : 'Review proposals' }}
+        </Button>
+        <Button
+          variant="primary"
+          :loading="coverSweep.applying.value"
+          :disabled="coverSweep.applying.value || coverSweep.automatic.value || sweepKeptCount === 0"
+          data-sweep-apply
+          @click="applySweep"
+        >
+          {{ sweepApplyLabel }}
+        </Button>
+      </div>
+    </section>
+
+    <section v-if="showSweepReview && sweepRows.length" class="library-cover-sweep-drawer">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div class="section-kicker">Proposed covers</div>
+          <h3 class="text-base font-semibold text-silver">Keep the matches that are right</h3>
+          <p class="mt-1 text-sm text-support">
+            A title search is right most of the time rather than always, so nothing is stored until you
+            apply. Open a row to see its poster.
+          </p>
+        </div>
+        <span class="meta-pill">{{ sweepKeptCount }} of {{ sweepRows.length }} kept</span>
+      </div>
+      <div class="library-cover-sweep-list">
+        <article
+          v-for="row in sweepRows"
+          :key="row.uuid"
+          class="library-cover-sweep-row"
+          :data-sweep-row="row.uuid"
+        >
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="truncate text-sm font-semibold text-silver">{{ row.name }}</span>
+              <span class="control-chip">{{ sweepOutcomeLabel(row) }}</span>
+              <span v-if="row.confidence !== null" class="control-chip">{{ row.confidence }}% match</span>
+            </div>
+            <div class="mt-1 text-xs text-storm">{{ sweepRowCopy(row) }}</div>
+            <div v-if="row.postersError" class="mt-1 text-xs text-rose">{{ row.postersError }}</div>
+            <div v-if="row.applyError" class="mt-1 text-xs text-rose">{{ row.applyError }}</div>
+            <div v-if="row.posters.length" class="mt-2 flex flex-wrap gap-2">
+              <button
+                v-for="(poster, at) in row.posters"
+                :key="poster.token"
+                type="button"
+                class="rounded border p-0.5"
+                :class="row.chosenIndex === at ? 'border-aurora' : 'border-transparent'"
+                :data-sweep-poster="at"
+                @click="row.chosenIndex = at"
+              >
+                <img :src="poster.preview" :alt="row.title" class="h-24 w-16 rounded object-cover" />
+              </button>
+            </div>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <Button
+              v-if="row.outcome === 'proposed' && !row.posters.length"
+              variant="ghost"
+              size="sm"
+              :loading="row.postersLoading"
+              :data-sweep-row-open="row.uuid"
+              @click="coverSweep.loadPosters(row)"
+            >
+              Show posters
+            </Button>
+            <label v-if="row.outcome === 'proposed'" class="flex items-center gap-1 text-xs text-storm">
+              <input
+                type="checkbox"
+                v-model="row.keep"
+                :disabled="row.applied"
+                :data-sweep-keep="row.uuid"
+              />
+              Keep
+            </label>
+            <span v-if="row.applied" class="control-chip" :data-sweep-applied="row.uuid">Applied</span>
+          </div>
+        </article>
+      </div>
+    </section>
+    </section>
 
     <!-- Edit form -->
     <section v-if="showEditForm" class="app-editor-layout">
@@ -885,7 +888,7 @@
                       <button type="submit" class="app-editor-secondary-button" :disabled="coverSearching || !coverQuery.trim()">{{ $t('apps.find_cover_search') }}</button>
                     </form>
                     <div class="p-3 max-h-96 overflow-y-auto" :class="{ 'opacity-50 pointer-events-none': coverFinderBusy }" aria-live="polite">
-                      <div v-if="coverSearching && !coverGame" class="flex items-center gap-2 text-sm text-storm" data-cover-state="searching">
+                      <div v-if="coverSearching && !coverGame" class="flex items-center gap-2 text-sm text-support" data-cover-state="searching">
                         <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
                         <span>{{ $t('apps.find_cover_searching', { query: coverSearchedQuery }) }}</span>
                       </div>
@@ -893,10 +896,10 @@
                         <p>{{ coverError }}</p>
                         <a v-if="coverNeedsKey" href="#/config#steamgriddb_api_key" target="_blank" rel="noopener" class="mt-1 inline-block text-ice hover:underline" data-cover-key-link>{{ $t('apps.find_cover_key_link') }}</a>
                       </div>
-                      <p v-if="!coverGame && !coverSearching && !coverError && coverSearchedQuery && !coverCandidates.length" class="text-sm text-storm" data-cover-state="empty">
+                      <p v-if="!coverGame && !coverSearching && !coverError && coverSearchedQuery && !coverCandidates.length" class="text-sm text-support" data-cover-state="empty">
                         {{ $t('apps.find_cover_empty', { query: coverSearchedQuery }) }}
                       </p>
-                      <p v-if="!coverGame && !coverSearching && !coverError && !coverSearchedQuery" class="text-sm text-storm" data-cover-state="prompt">
+                      <p v-if="!coverGame && !coverSearching && !coverError && !coverSearchedQuery" class="text-sm text-support" data-cover-state="prompt">
                         {{ $t('apps.find_cover_prompt') }}
                       </p>
                       <div v-if="!coverGame && !coverSearching && coverCandidates.length" class="grid grid-cols-3 gap-3">
@@ -913,7 +916,7 @@
                           <button type="button" class="app-editor-secondary-button shrink-0" data-cover-back @click="closeCoverGame">{{ $t('apps.find_cover_all_matches') }}</button>
                           <p class="min-w-0 truncate text-sm text-silver" :title="coverLabel(coverGame)">{{ coverLabel(coverGame) }}</p>
                         </div>
-                        <div v-if="coverChoicesLoading" class="flex items-center gap-2 text-sm text-storm" data-cover-state="loading-posters">
+                        <div v-if="coverChoicesLoading" class="flex items-center gap-2 text-sm text-support" data-cover-state="loading-posters">
                           <div class="animate-spin rounded-full h-5 w-5 shrink-0 border-b-2 border-ice"></div>
                           <span>{{ $t('apps.find_cover_loading_posters', { title: coverGame.title }) }}</span>
                         </div>
@@ -1221,6 +1224,15 @@
               <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" v-model="editForm['auto-detach']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" v-model="editForm['wait-all']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
+              <div v-if="platform === 'linux'" class="app-editor-field">
+                <label for="desktopSteamLifetime" class="settings-field-label">Steam after End Session</label>
+                <select id="desktopSteamLifetime" class="app-editor-input" v-model="editForm['desktop-steam-lifetime']">
+                  <option value="inherit">Use host default</option>
+                  <option value="keep">Keep desktop Steam running</option>
+                  <option value="close">Close Steam started for this stream</option>
+                </select>
+                <p class="text-xs text-storm">Host Virtual Display and Mirror Host Desktop only. Private streams still clean up; custom undo scripts still run.</p>
+              </div>
               <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" v-model="editForm['use-app-identity']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
@@ -1279,17 +1291,17 @@
             </div>
 
             <template v-if="platform === 'windows'">
-              <div class="text-sm text-storm"><b>{{ $t('apps.env_rtss_cli_example') }}</b>
+              <div class="text-sm text-support"><b>{{ $t('apps.env_rtss_cli_example') }}</b>
                 <pre class="mt-1 text-silver bg-void p-2 rounded">cmd /C \path\to\rtss-cli.exe limit:set %POLARIS_CLIENT_FPS%</pre>
               </div>
             </template>
             <template v-if="platform === 'linux'">
-              <div class="text-sm text-storm"><b>{{ $t('apps.env_xrandr_example') }}</b>
+              <div class="text-sm text-support"><b>{{ $t('apps.env_xrandr_example') }}</b>
                 <pre class="mt-1 text-silver bg-void p-2 rounded">sh -c "xrandr --output HDMI-1 --mode \"${POLARIS_CLIENT_WIDTH}x${POLARIS_CLIENT_HEIGHT}\" --rate ${POLARIS_CLIENT_FPS}"</pre>
               </div>
             </template>
             <template v-if="platform === 'macos'">
-              <div class="text-sm text-storm"><b>{{ $t('apps.env_displayplacer_example') }}</b>
+              <div class="text-sm text-support"><b>{{ $t('apps.env_displayplacer_example') }}</b>
                 <pre class="mt-1 text-silver bg-void p-2 rounded">sh -c "displayplacer "id:&lt;screenId&gt; res:${POLARIS_CLIENT_WIDTH}x${POLARIS_CLIENT_HEIGHT} hz:${POLARIS_CLIENT_FPS} scaling:on origin:(0,0) degree:0""</pre>
               </div>
             </template>
@@ -1341,11 +1353,13 @@
 </template>
 
 <script setup>
-import { computed, ref, inject, onMounted, watch } from 'vue'
+import { computed, ref, inject, onMounted, watch, nextTick } from 'vue'
 import Checkbox from '../Checkbox.vue'
 import Button from '../components/Button.vue'
+import PosterImage from '../components/PosterImage.vue'
 import AppArtworkControls from '../components/AppArtworkControls.vue'
 import { artworkLookupOffSet } from '../app-artwork.js'
+import { artLaunchHref, embeddedClient } from '../client-embed.js'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
@@ -1489,6 +1503,7 @@ const newAppTemplate = {
   // bundled Desktop, and one already had to run twice.
   "launch-as": "host_default",
   "close-desktop-steam-for-private": false,
+  "desktop-steam-lifetime": "inherit",
   "terminate-on-pause": false,
   "gamepad": "",
   "game-category": ""
@@ -1552,10 +1567,14 @@ function launchAsPill(entry) {
   return i18n.t('apps.launch_as_pill', { mode: launchAsChoice(entry)?.label || entry?.['launch-as'] })
 }
 const currentApp = ref("")
+const currentAppAvailable = ref(false)
 const draggingApp = ref(-1)
 const hostName = ref("")
+// Inside Nova's Host Console the guide link is hidden: Nova opens outside pages in the browser.
+const inNova = embeddedClient() === 'nova'
 const hostUUID = ref("")
 const listReordered = ref(false)
+const reorderStatus = ref('')
 const librarySearch = ref("")
 const libraryFilter = ref("all")
 
@@ -1670,6 +1689,7 @@ function quickLaunchDetails(app) {
 }
 
 function quickLaunchStateLabel(app) {
+  if (!currentAppAvailable.value) return 'Checking status'
   const details = quickLaunchDetails(app)
   if (details.running) return 'Live'
   if (details.launchReady) return 'Ready'
@@ -1677,6 +1697,7 @@ function quickLaunchStateLabel(app) {
 }
 
 function quickLaunchStateCopy(app) {
+  if (!currentAppAvailable.value) return 'Waiting for current app status.'
   const details = quickLaunchDetails(app)
   if (details.running) return 'Currently streaming for connected clients.'
   if (!details.launchReady) return 'Missing a launch command; open the entry before sending it to clients.'
@@ -1758,7 +1779,7 @@ function unstageImportGame(game) {
 }
 
 function launchHref(app) {
-  return `art://launch?host_uuid=${hostUUID.value}&host_name=${hostName.value}&app_uuid=${app.uuid}&app_name=${app.name}`
+  return artLaunchHref({ hostUuid: hostUUID.value, hostName: hostName.value, app })
 }
 
 function scrollEditorToTop() {
@@ -1768,6 +1789,54 @@ function scrollEditorToTop() {
 }
 
 // Methods
+// Work with canonical published order, never the filtered display or an active drag sentinel.
+function canMoveLibraryApp(app, direction) {
+  if (!app?.uuid || ![-1, 1].includes(direction) || actionDisabled.value || showEditForm.value ||
+      libraryViewFiltered.value || draggingApp.value >= 0) return false
+  const index = appOrderIndex(app)
+  return index >= 0 && index + direction >= 0 && index + direction < apps.value.length
+}
+
+async function moveLibraryApp(app, direction, event) {
+  if (!canMoveLibraryApp(app, direction)) return
+  const control = event?.currentTarget
+  const index = appOrderIndex(app)
+  const updated = [...apps.value]
+  ;[updated[index], updated[index + direction]] = [updated[index + direction], updated[index]]
+  apps.value = updated
+  listReordered.value = true
+  reorderStatus.value = app.name + ' moved to position ' + (index + direction + 1) + ' of ' + appCount.value + '. Save order to apply.'
+  await nextTick()
+  // Moving a keyed DOM node can drop focus even away from an end boundary.
+  // Keep it on this app; if the clicked control became disabled, use its neighbor.
+  const nextControl = control?.disabled ? control.closest('[data-library-app]')?.querySelector('button[data-move-direction]:not(:disabled)') : control
+  nextControl?.focus({ preventScroll: true })
+  nextControl?.scrollIntoView?.({ block: 'nearest' })
+}
+
+function closeLibraryMore(event, returnFocus = false) {
+  const root = event.currentTarget?.closest('.library-view')
+  if (!root) return
+  const menus = root.querySelectorAll('details[data-library-more][open]')
+  for (const menu of menus) {
+    menu.open = false
+    if (returnFocus && menu.contains(event.target)) menu.querySelector('summary')?.focus()
+  }
+  if (returnFocus && menus.length) event.preventDefault()
+}
+
+function dismissLibraryMore(event) {
+  if (!event.target.closest('[data-library-more]')) closeLibraryMore(event)
+}
+
+function onLibraryMoreToggle(event) {
+  const menu = event.target
+  if (!menu.open) return
+  for (const other of menu.closest('.library-view')?.querySelectorAll('details[data-library-more][open]') || []) {
+    if (other !== menu) other.open = false
+  }
+}
+
 function onLibraryDragStart(e, app) {
   if (libraryViewFiltered.value) {
     e.preventDefault()
@@ -1864,17 +1933,30 @@ function saveOrder() {
   .finally(() => { actionDisabled.value = false })
 }
 
+let appsRequestRevision = 0
 function loadApps() {
+  const revision = ++appsRequestRevision
   return fetch("./api/apps", { credentials: 'include' })
-  .then(r => r.json())
   .then(r => {
+    if (r.ok === false) throw new Error(`HTTP ${r.status}`)
+    return r.json()
+  })
+  .then(r => {
+    if (revision !== appsRequestRevision) return
     apps.value = r.apps.filter(i => i.uuid).map(i => ({ ...i, launching: false, dragover: false }))
     artworkLookupOff.value = artworkLookupOffSet(r)
     pendingStopAppUuid.value = ""
-    currentApp.value = r.current_app
+    currentAppAvailable.value = r.current_app_available !== false && typeof r.current_app === 'string'
+    currentApp.value = currentAppAvailable.value ? r.current_app : ''
     hostName.value = r.host_name
     hostUUID.value = r.host_uuid
     listReordered.value = false
+  })
+  .catch(() => {
+    if (revision !== appsRequestRevision) return
+    currentAppAvailable.value = false
+    currentApp.value = ''
+    pendingStopAppUuid.value = ''
   })
 }
 
@@ -1896,6 +1978,7 @@ function newApp() {
 }
 
 function launchApp(event, app) {
+  if (!currentAppAvailable.value || actionDisabled.value) return
   const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
   if (!isLocalHost && confirm(i18n.t('apps.launch_local_client'))) {
     const link = document.createElement('a')
@@ -1923,6 +2006,7 @@ function launchApp(event, app) {
 }
 
 function requestCloseApp(app) {
+  if (!currentAppAvailable.value || actionDisabled.value) return
   if (pendingStopAppUuid.value !== app.uuid) {
     pendingStopAppUuid.value = app.uuid
     return
@@ -1931,6 +2015,7 @@ function requestCloseApp(app) {
 }
 
 function closeApp(options = {}) {
+  if (!currentAppAvailable.value || actionDisabled.value) return
   const confirmFirst = options.confirmFirst !== false
   if (confirmFirst && !confirm(i18n.t("apps.close_warning"))) {
     return
@@ -2324,6 +2409,37 @@ fetch("./api/config", { credentials: 'include' })
 </script>
 
 <style scoped>
+.library-row, .library-quick-card {
+  container-type: inline-size;
+}
+
+/* Row containment creates stacking contexts: lift the actual open menu row. */
+.library-row:has(details[open]) { z-index: 20; }
+
+@container (min-width: 24rem) {
+  .library-quick-content { flex-direction: row; }
+}
+
+.library-row-title .meta-pill {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+@container (min-width: 26rem) {
+  .library-row-title {
+    flex-basis: 0;
+  }
+}
+
+@container (min-width: 38rem) {
+  .library-row-content {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+}
+
 .cover-container {
   padding-top: 133.33%;
   position: relative;

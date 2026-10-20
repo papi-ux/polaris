@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <stdexcept>
 #include <vector>
 
 // lib includes
@@ -91,6 +92,7 @@
   #include "platform/linux/display_topology.h"
   #include "platform/linux/gamescope_process.h"
   #include "platform/linux/game_mode_host.h"
+  #include "platform/linux/multiseat_launch_service.h"
   #include "platform/linux/steam_title_process.h"
   #include "platform/linux/gamescope_session_helper.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
@@ -215,7 +217,7 @@ namespace proc {
     std::unique_lock lock(_mutex);
     _changed.wait(lock, [this]() {
       return _state == state_e::idle && !_stop_waiting && !_launch_to_stop_handoff &&
-             _rtsp_setups_in_flight == 0;
+             _rtsp_setups_in_flight == 0 && !_restore_fenced;
     });
     _state = state_e::launching;
     if (on_admitted) {
@@ -229,7 +231,7 @@ namespace proc {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
              _rtsp_setups_in_flight == 0;
     });
-    if (_state != state_e::idle || _stop_waiting) {
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced) {
       return std::nullopt;
     }
     return _generation;
@@ -241,7 +243,7 @@ namespace proc {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
              _rtsp_setups_in_flight == 0;
     });
-    if (_state != state_e::idle || _stop_waiting) {
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced) {
       return false;
     }
     _state = state_e::launching;
@@ -255,7 +257,7 @@ namespace proc {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
              _rtsp_setups_in_flight == 0;
     });
-    if (_state != state_e::idle || _stop_waiting || _generation != expected_generation) {
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced || _generation != expected_generation) {
       return false;
     }
     _state = state_e::launching;
@@ -271,7 +273,7 @@ namespace proc {
     _changed.wait(lock, [this]() {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff;
     });
-    if (_state != state_e::idle || _stop_waiting ||
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced ||
         _generation != expected_generation) {
       return false;
     }
@@ -303,7 +305,16 @@ namespace proc {
     _changed.notify_all();
     if (cancel_launch) {
       lock.unlock();
-      cancel_launch();
+      try {
+        cancel_launch();
+      } catch (...) {
+        lock.lock();
+        // This attempt owns stop_waiting. No queued cleanup exists; preserve the original
+        // exception and spent generation, releasing only this admission claim.
+        _stop_waiting = false;
+        _changed.notify_all();
+        throw;
+      }
       lock.lock();
     }
     _changed.wait(lock, [this]() {
@@ -384,6 +395,14 @@ namespace proc {
     return true;
   }
 
+  bool session_lifecycle_gate_t::try_begin_snapshot_now() {
+    std::unique_lock lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || _state != state_e::idle || _stop_waiting ||
+        _launch_to_stop_handoff || _restore_fenced) return false;
+    _state = state_e::snapshotting;
+    return true;
+  }
+
   void session_lifecycle_gate_t::finish_snapshot() {
     std::lock_guard lock(_mutex);
     if (_state == state_e::snapshotting) {
@@ -402,6 +421,12 @@ namespace proc {
     if (gate.try_begin_snapshot()) {
       guard._gate = &gate;
     }
+    return guard;
+  }
+
+  session_snapshot_guard_t session_snapshot_guard_t::try_acquire_now(session_lifecycle_gate_t &gate) {
+    session_snapshot_guard_t guard;
+    if (gate.try_begin_snapshot_now()) guard._gate = &gate;
     return guard;
   }
 
@@ -429,9 +454,14 @@ namespace proc {
     }
   }
 
-  void session_lifecycle_gate_t::finish_stop(bool committed) {
+  void session_lifecycle_gate_t::finish_stop(bool committed,
+                                            std::atomic<const void *> *projection,
+                                            const void *ticket_identity) {
     std::lock_guard lock(_mutex);
     if (_state == state_e::stopping) {
+      // Clear only this ticket, under the admission lock, before any new launch can enter.
+      // A projection must never survive into a replacement generation's launching state.
+      if (projection) projection->compare_exchange_strong(ticket_identity, nullptr);
       _last_stop_committed = committed;
       _state = state_e::idle;
       _changed.notify_all();
@@ -441,6 +471,28 @@ namespace proc {
   bool session_lifecycle_gate_t::stop_in_progress() const {
     std::lock_guard lock(_mutex);
     return _state == state_e::stopping || _stop_waiting || _launch_to_stop_handoff;
+  }
+
+  bool session_lifecycle_gate_t::try_fence_restore() {
+    std::lock_guard lock(_mutex);
+    // Claimed under the same lock every admission takes, so there is no moment in which a launch
+    // was admitted but the restore does not know, or the restore was claimed but a launch gets in.
+    if (_state == state_e::launching || _launch_to_stop_handoff || _rtsp_setups_in_flight > 0 || _restore_fenced) {
+      return false;
+    }
+    _restore_fenced = true;
+    return true;
+  }
+
+  void session_lifecycle_gate_t::release_restore_fence() {
+    std::lock_guard lock(_mutex);
+    _restore_fenced = false;
+    _changed.notify_all();
+  }
+
+  bool session_lifecycle_gate_t::restore_fenced() const {
+    std::lock_guard lock(_mutex);
+    return _restore_fenced;
   }
 
   launcher_identity_t launcher_identity_from_lutris_runner(const std::string &runner) {
@@ -1151,6 +1203,7 @@ namespace proc {
       auto shutdown_cmd = canonical_steam_shutdown_command(steam_launch_reference_command(ctx));
       BOOST_LOG(info) << "process: added " << label << " cleanup undo command [" << shutdown_cmd << ']';
       ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
+      ctx.prep_cmds.back().managed_steam_cleanup = true;
     }
 
     bool is_steam_library_app(const proc::ctx_t &ctx) {
@@ -1657,9 +1710,10 @@ namespace proc {
 
     bool is_transient_steam_client_cmdline(std::string_view cmdline) {
       const auto lower_cmdline = boost::to_lower_copy(std::string {cmdline});
+      // SteamRT3 keeps -srt-logger-opened on the persistent client, including
+      // SteamOS Desktop autostart. It does not identify a transient launcher.
       return lower_cmdline.find("-shutdown") != std::string::npos ||
-             lower_cmdline.find("-child-update-ui") != std::string::npos ||
-             lower_cmdline.find("-srt-logger-opened") != std::string::npos;
+             lower_cmdline.find("-child-update-ui") != std::string::npos;
     }
 
     bool proc_status_is_zombie(std::string_view status) {
@@ -1806,8 +1860,11 @@ namespace proc {
       std::string state;
       pid_t parent_pid = -1;
       proc_group_session_t result {};
+      // Init's group/session can be 1 inside a PID namespace. This is readable
+      // membership, not cleanup authority; callers still require an exact
+      // credentialed leader and membership in its authorized freeze set.
       if (!(fields >> state >> parent_pid >> result.process_group >> result.session) ||
-          result.process_group <= 1 || result.session <= 1) {
+          result.process_group <= 0 || result.session <= 0) {
         return std::nullopt;
       }
       return result;
@@ -4102,14 +4159,15 @@ namespace proc {
       const std::function<steam_shutdown_clock_t::time_point()> &now,
       const std::function<void(steam_shutdown_clock_t::duration)> &sleep_for,
       steam_shutdown_clock_t::duration timeout,
-      steam_shutdown_clock_t::duration poll_interval
+      steam_shutdown_clock_t::duration poll_interval,
+      std::optional<steam_shutdown_clock_t::time_point> absolute_deadline = std::nullopt
     ) {
       if (timeout < steam_shutdown_clock_t::duration::zero() ||
           poll_interval <= steam_shutdown_clock_t::duration::zero()) {
         return false;
       }
 
-      const auto deadline = now() + timeout;
+      const auto deadline = absolute_deadline ? *absolute_deadline : now() + timeout;
       for (;;) {
         // Recheck the process state after observing the FIFO as released. This
         // prevents a Steam instance that starts during the FIFO probe from
@@ -4514,8 +4572,11 @@ namespace proc {
 
       for (auto &cmd : ctx.prep_cmds) {
         if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
+          cmd.managed_steam_cleanup = cmd.undo_cmd == canonical_steam_shutdown_command(cmd.undo_cmd) ||
+                                      cmd.undo_cmd == "steam -shutdown" || cmd.undo_cmd == "setsid steam -shutdown" ||
+                                      cmd.undo_cmd == "steam steam://close/bigpicture" || cmd.undo_cmd == "setsid steam steam://close/bigpicture";
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
-          if (shutdown_cmd != cmd.undo_cmd) {
+          if (cmd.managed_steam_cleanup && shutdown_cmd != cmd.undo_cmd) {
             // In memory only, on every read of an apps.json an older Polaris wrote, so not news.
             BOOST_LOG(debug) << "process: upgraded Steam Big Picture cleanup command from ["
                              << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
@@ -4623,8 +4684,11 @@ namespace proc {
 
       for (auto &cmd : ctx.prep_cmds) {
         if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
+          cmd.managed_steam_cleanup = cmd.undo_cmd == canonical_steam_shutdown_command(cmd.undo_cmd) ||
+                                      cmd.undo_cmd == "steam -shutdown" || cmd.undo_cmd == "setsid steam -shutdown" ||
+                                      cmd.undo_cmd == "steam steam://close/bigpicture" || cmd.undo_cmd == "setsid steam steam://close/bigpicture";
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
-          if (shutdown_cmd != cmd.undo_cmd) {
+          if (cmd.managed_steam_cleanup && shutdown_cmd != cmd.undo_cmd) {
             // In memory only, on every read of an apps.json an older Polaris wrote, so not news.
             BOOST_LOG(debug) << "process: upgraded Steam cleanup command from ["
                              << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
@@ -4897,6 +4961,12 @@ namespace proc {
     ctx.launch_as = std::move(value);
     ctx.desktop_mirror = ctx.launch_as == "desktop_display";
     ctx.virtual_display = ctx.launch_as == "host_virtual_display";
+  }
+
+  boost::process::v1::environment desktop_steam_environment(boost::process::v1::environment env) {
+    env.erase("POLARIS_SESSION_INSTANCE_ID");
+    env.erase("POLARIS_PRIVATE_SESSION");
+    return env;
   }
 
   std::string canonical_steam_shutdown_undo() {
@@ -6120,6 +6190,109 @@ namespace proc {
       stream_display_policy::selection_unavailable_reason(pin.selection)};
   }
 
+  namespace {
+    std::mutex prelaunch_capture_ready_mutex;
+    std::function<bool(std::string_view, std::string &)> prelaunch_capture_ready_for_tests;
+  }  // namespace
+
+  void set_prelaunch_capture_ready_for_tests(std::function<bool(std::string_view, std::string &)> ready) {
+    std::lock_guard lock {prelaunch_capture_ready_mutex};
+    prelaunch_capture_ready_for_tests = std::move(ready);
+  }
+
+  bool prelaunch_other_sessions_now(std::string &reason) {
+    const auto sessions = rtsp_stream::session_snapshot({});
+    if (proc.running() > 0) {
+      reason = "an app is running on the host";
+    } else if (sessions.active_sessions > 0 || sessions.pending_sessions > 0) {
+      reason = "a stream is active or pending on the host";
+    } else if (browser_stream::capture_active()) {
+      reason = "a Browser Stream session is active";
+    } else if (multiseat::installed_profile_service() != nullptr) {
+      reason = "profile sessions are configured on the host";
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  prelaunch::outcome_t prelaunch_for_admitted_launch(
+    prelaunch::entry_e entry,
+    const ctx_t &app,
+    const std::string &client_uuid,
+    std::uint64_t lifecycle_generation,
+    std::string_view expected_selection,
+    std::function<bool()> cancelled
+  ) {
+    prelaunch::request_t request;
+    request.entry = entry;
+    request.client_uuid = client_uuid;
+    request.lifecycle_generation = lifecycle_generation;
+    request.policy_enabled = app.leave_game_mode_before_launch;
+    if (!request.policy_enabled) {
+      // Off: no scan, no probe, nothing recorded. The launch is the one it always was.
+      prelaunch::outcome_t outcome;
+      outcome.state = prelaunch::state_e::not_needed;
+      return outcome;
+    }
+
+    // The route this launch would use once the host is out of Game Mode: the app's pin, the exact
+    // topology the client resolved, or the host's own mode that Game Mode is holding.
+    using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+    const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+    std::string selection;
+    if (pin.verdict == verdict::pinned) {
+      selection = pin.selection;
+    } else if (!expected_selection.empty()) {
+      selection = std::string {expected_selection};
+    } else {
+      const auto held = stream_display_policy::game_mode_held_selection();
+      selection = held.empty() ? stream_display_policy::configured_selection() : held;
+    }
+    request.private_route = !selection.empty() && selection != stream_display_policy::k_desktop_display;
+
+    const auto sessions = rtsp_stream::session_snapshot({});
+    request.occupancy.app_running = proc.running() > 0;
+    request.occupancy.streams_active = sessions.active_sessions > 0;
+    request.occupancy.launch_pending = sessions.pending_sessions > 0;
+    request.occupancy.browser_capture = browser_stream::capture_active();
+    request.occupancy.profile_service = multiseat::installed_profile_service() != nullptr;
+    request.cancelled = std::move(cancelled);
+    request.others_now = [](std::string &reason) {
+      return prelaunch_other_sessions_now(reason);
+    };
+    request.capture_ready = [selection](std::string &reason) {
+      // Typed session records may already describe the new desktop while an old process answer
+      // (or a genuinely retiring Game Mode process) still says Game Mode. Converge here, inside
+      // the owned transition's existing deadline and its fresh before/after desktop observations.
+      // The caller-thread scan also fences out older background refreshes before hand-off.
+      try {
+        if (platf::game_mode_host::session_live_fresh()) {
+          reason = "Steam Game Mode processes have not finished leaving the host.";
+          return false;
+        }
+      } catch (const std::exception &) {
+        reason = "Whether Steam Game Mode processes have ended could not be read.";
+        return false;
+      }
+      {
+        std::lock_guard lock {prelaunch_capture_ready_mutex};
+        if (prelaunch_capture_ready_for_tests) return prelaunch_capture_ready_for_tests(selection, reason);
+      }
+      return stream_display_policy::selection_valid_fresh(selection, reason);
+    };
+
+    auto outcome = prelaunch::coordinator().run(request);
+    if (!outcome.proceed()) {
+      launch_failure::refuse(outcome.status, outcome.code, outcome.message, outcome.action);
+    }
+    BOOST_LOG(info) << "prelaunch: ["sv << app.name << "] entry="sv << prelaunch::name(entry)
+                    << " state="sv << prelaunch::name(outcome.state)
+                    << (outcome.code.empty() ? std::string {} : " code=" + outcome.code)
+                    << " cancellation_transport="sv << (request.cancelled ? "launch"sv : "unsupported"sv);
+    return outcome;
+  }
+
   int refuse_app_launch_as_before_launch(const ctx_t &app, const launch_selection_request_t &request) {
     using verdict = stream_display_policy::app_launch_as_t::verdict_e;
     const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, request.client_named_selection);
@@ -6191,6 +6364,7 @@ namespace proc {
     const proc::ctx_t &app,
     rtsp_stream::launch_session_t &launch_session
   ) {
+    prelaunch::note_stage("semantics");
     // A host in Steam Game Mode has one screen, and it is the Game Mode screen. There is no
     // desktop to build a private display beside, and the Steam that is running IS the session:
     // a Private Stream would first have to close it, which ends Game Mode for whoever is
@@ -6349,24 +6523,69 @@ namespace proc {
       return !steam_double->running;
     }
 #endif
-    const auto pipe_path = steam_instance_pipe_path();
+    std::optional<std::string> home_env;
+    if (const char *home = getenv("HOME"); home != nullptr && *home != '\0') {
+      home_env = home;
+    }
+    const auto account_home = account_home_directory();
+    const auto account_home_value = account_home.empty() ?
+      std::nullopt : std::optional<std::string> {account_home};
+    const auto pipe_path = steam_instance_pipe_path(home_env, account_home_value);
     if (!pipe_path) {
       BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing Steam shutdown handoff";
       return false;
     }
 
-    const auto command = canonical_steam_shutdown_command("steam");
-    BOOST_LOG(info) << "process: explicit request closing active Steam client before protected configuration change using [" << command << "]";
+    const auto remote_path = steam_remote_command_path(home_env, account_home_value);
+    if (!remote_path || access(remote_path->c_str(), X_OK) != 0) {
+      BOOST_LOG(warning) << "process: Steam forwarding client is unavailable; refusing Steam shutdown handoff";
+      return false;
+    }
+    // Leaving Game Mode can expose Desktop Steam before its command receiver
+    // exists. One early nonblocking forward is lost; waiting afterwards cannot
+    // deliver it. Wait before the single request, sharing the original budget
+    // with final process/FIFO quiescence rather than adding another timeout.
+    const auto shutdown_deadline = steam_shutdown_clock_t::now() + 10s;
+    const steam_shutdown_clock_t::duration poll_interval = 100ms;
+    bool readiness_wait_logged = false;
+    while (desktop_steam_client_active_impl() && !steam_instance_pipe_listener_active(*pipe_path)) {
+      if (platf::game_mode_host::session_live_fresh()) {
+        BOOST_LOG(warning) << "process: Game Mode returned while waiting for Steam's command receiver; refusing shutdown";
+        return false;
+      }
+      const auto current = steam_shutdown_clock_t::now();
+      if (current >= shutdown_deadline) {
+        BOOST_LOG(warning) << "process: Steam command receiver was not ready before the shutdown deadline; no request sent";
+        return false;
+      }
+      if (!readiness_wait_logged) {
+        BOOST_LOG(info) << "process: waiting for the starting Desktop Steam command receiver before the single shutdown request";
+        readiness_wait_logged = true;
+      }
+      std::this_thread::sleep_for(std::min(poll_interval, shutdown_deadline - current));
+    }
+    // The cached mode answer can predate the wait. A returning Game Mode Steam
+    // must never receive the delayed desktop shutdown request.
+    if (platf::game_mode_host::session_live_fresh()) {
+      BOOST_LOG(warning) << "process: refusing delayed Steam shutdown because Game Mode is running";
+      return false;
+    }
+    if (steam_shutdown_clock_t::now() >= shutdown_deadline) {
+      BOOST_LOG(warning) << "process: Steam shutdown readiness exhausted the original deadline; no request sent";
+      return false;
+    }
+    // The singleton can disappear after admission. The forwarding client can
+    // only deliver -shutdown; unlike the Steam launcher it cannot bootstrap a
+    // replacement when that happens. The same process/FIFO wait decides success.
+    BOOST_LOG(info) << "process: explicit request closing active Steam client before protected configuration change using no-launch forwarding client [" << *remote_path << "]";
     auto env = boost::this_process::environment();
-    boost::system::error_code ec;
-    boost::filesystem::path working_dir {};
-    auto child = platf::run_command(false, true, command, working_dir, env, nullptr, ec, nullptr);
+    std::error_code ec;
+    boost::filesystem::path working_dir {home_env.value_or(account_home)};
+    auto child = run_steam_remote_shutdown_without_launch(*remote_path, working_dir, env, nullptr, ec);
     if (ec) {
       BOOST_LOG(warning) << "process: Steam shutdown command failed: " << ec.message();
       return false;
     }
-    child.detach();
-
     const bool quiescent = wait_for_desktop_steam_quiescence(
       []() {
         return desktop_steam_client_active_impl();
@@ -6381,8 +6600,21 @@ namespace proc {
         std::this_thread::sleep_for(duration);
       },
       10s,
-      100ms
+      100ms,
+      shutdown_deadline
     );
+    // Observe an available exit result without adding a wait or treating it as
+    // delivery proof. The process/FIFO/process predicate still decides success.
+    std::error_code status_error;
+    const bool forwarding_running = child.running(status_error);
+    if (status_error) {
+      BOOST_LOG(info) << "process: Steam forwarding client exit status unavailable: " << status_error.message();
+    } else if (forwarding_running) {
+      BOOST_LOG(info) << "process: Steam forwarding client is still running after the shutdown observation";
+    } else {
+      BOOST_LOG(info) << "process: Steam forwarding client exit status=" << child.exit_code();
+    }
+    child.detach();
     if (!quiescent) {
       BOOST_LOG(warning) << "process: Steam client did not reach process/FIFO quiescence before shutdown deadline";
     }
@@ -6934,6 +7166,11 @@ namespace proc {
 
   std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat) {
     return proc_start_time_from_stat(stat);
+  }
+
+  bool proc_group_session_from_stat_matches_for_tests(std::string_view stat, pid_t process_group, pid_t session) {
+    const auto parsed = proc_group_session_from_stat(stat);
+    return parsed && parsed->process_group == process_group && parsed->session == session;
   }
 
   bool steam_pidfd_capture_identity_matches_for_tests(
@@ -8114,6 +8351,17 @@ namespace proc {
     }
   }
 
+  void proc_t::bind_prelaunch_transition(std::uint64_t transition_generation) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _prelaunch_transition_generation = transition_generation;
+  }
+
+  int proc_t::execute_admitted(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    const bool no_active_sessions_at_launch = rtsp_stream::session_count() == 0;
+    return execute_impl(app, std::move(launch_session), no_active_sessions_at_launch);
+  }
+
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     auto capture_owner = std::make_shared<const char>();
     _session_lifecycle_gate->begin_launch([&]() {
@@ -8379,6 +8627,11 @@ namespace proc {
     // Preparation holds lifecycle admission, but not this metadata mutex.
     // Check owner/admission before cancelling, including the gap before the portal
     // registers its first D-Bus request. Rejected stop requests have no effect.
+    // #204: a launch still leaving Game Mode has installed nothing yet. Only its own client's
+    // cancel reaches it; the coordinator holds no lifecycle lock while it waits.
+    if (can_launch && prelaunch::coordinator().cancel_for_client(unique_id)) {
+      return std::make_shared<int>(0);
+    }
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     // Preserve the existing owner-certificate exemption from stale tokens.
@@ -8428,6 +8681,8 @@ namespace proc {
       finish_session_launch();
       return false;
     }
+    // #204: a session-end restore that runs outside the lifecycle lock holds the gate's restore
+    // fence, so try_begin_rtsp_launch() above already refused this launch while it is owned.
     // A late cancellation fence from an earlier request cannot poison this
     // launch, even when both requests refer to the same running app.
     return true;
@@ -8842,6 +9097,14 @@ namespace proc {
     _detached_child_authority_complete = true;
 #endif
     _app = app;
+#ifdef __linux__
+    _keep_desktop_steam = keep_desktop_steam(app.desktop_steam_lifetime,
+      config::sunshine.keep_desktop_steam_running, session_mode, platf::game_mode_host::session_live());
+    _desktop_steam_preexisting = (session_mode == "host_virtual_display" || session_mode == "desktop_display") &&
+      !platf::game_mode_host::session_live() && desktop_steam_client_active_impl();
+    _desktop_launched_appid.clear();
+    _desktop_title_root.reset();
+#endif
     if (resolved_emulator_command) {
       _app.cmd = *resolved_emulator_command;
     }
@@ -9969,6 +10232,7 @@ namespace proc {
     std::error_code ec;
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
+    prelaunch::note_stage("prep");
 
     for (; _app_prep_it != std::end(_app.prep_cmds); ++_app_prep_it) {
       auto &cmd = *_app_prep_it;
@@ -9996,6 +10260,27 @@ namespace proc {
       // no output file configured.
       if (critical_nested_session_prep) {
         prep_output = stderr;
+        // Desktop Steam can appear after route admission (for example, on leaving Game Mode).
+        // Reuse that policy immediately before the nested session can start Steam or a title.
+        // The route froze effective app/request/device consent in this per-launch app. The
+        // lifecycle lock excludes another Polaris launch; our own _app is not a desktop game.
+        auto launch_policy = resolve_desktop_launch_safety_policy(
+          true, false, _app.close_desktop_steam_for_private,
+          _app, desktop_steam_client_active_impl(), false
+        );
+        if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
+          if (!request_desktop_steam_shutdown_for_private_stream()) {
+            return launch_failure::refuse(409, "desktop_steam_shutdown_failed",
+              "Desktop Steam did not finish shutting down on the host.",
+              "Quit Steam on the host, then launch again.");
+          }
+          launch_policy = resolve_desktop_launch_safety_policy_after_shutdown(_app, false);
+        }
+        if (launch_policy.recommendedAction == "refuse_private_stream") {
+          return launch_failure::refuse(409, "desktop_active_private_stream_refused",
+            "Unsafe private stream launch refused because desktop Steam is active.",
+            "Quit Steam on the host, or turn on \"Close Steam on the host to start games\" for this device in Devices so Polaris closes Steam for you, or retry with explicit desktop mirroring.");
+        }
       }
 #endif
       auto child = platf::run_command(
@@ -10798,14 +11083,27 @@ namespace proc {
         // for a Steam game, the upper half of the id for a shortcut to a non-Steam game.
         const auto reaper_appid = platf::steam_title::launch_appid(appid);
         const bool game_mode_live = platf::game_mode_host::session_live();
-        const bool title_already_open = game_mode_live && !appid.empty() &&
-                                        platf::steam_title::running(platf::steam_title::read_process_table(), reaper_appid, getuid());
+        bool table_complete = true;
+        const auto title_table = platf::steam_title::read_process_table("/proc", &table_complete);
+        if ((_keep_desktop_steam || _desktop_steam_preexisting) && !appid.empty() && !table_complete)
+          return launch_failure::refuse(503, "steam_ownership_unavailable", "Steam game ownership could not be checked. Refresh before launching.", "Check host process visibility and try again.");
+        const bool title_already_open = (game_mode_live || _keep_desktop_steam || _desktop_steam_preexisting) && !appid.empty() &&
+                                        platf::steam_title::running(title_table, reaper_appid, getuid());
         if (game_mode_live && !appid.empty()) {
           detached_to_spawn = game_mode_detached_commands(_app.detached, appid, title_already_open);
         }
         _game_mode_launched_appid = game_mode_title_to_remember(reaper_appid, game_mode_live, title_already_open);
+        if ((_keep_desktop_steam || _desktop_steam_preexisting) && !title_already_open && !appid.empty()) {
+          _desktop_launched_appid = reaper_appid;
+          _desktop_title_claim_deadline = std::chrono::steady_clock::now() + 30s;
+        }
+        if ((_keep_desktop_steam || _desktop_steam_preexisting) && title_already_open) {
+          detached_to_spawn.erase(std::remove_if(detached_to_spawn.begin(), detached_to_spawn.end(), [](const auto &command) {
+            return command_contains_steam_game_launch_uri(command) || command_contains_steam_applaunch(command);
+          }), detached_to_spawn.end());
+        }
         if (title_already_open) {
-          BOOST_LOG(info) << "game_mode: ["sv << _app.name << "] is already open in Game Mode, so this stream joins it: it is not launched again, and ending the stream will leave it open"sv;
+          BOOST_LOG(info) << "Steam title ["sv << _app.name << "] is already open; this stream joins it and leaves it open when ending"sv;
         }
       }
 #endif
@@ -10814,11 +11112,21 @@ namespace proc {
                                                 find_working_directory(cmd, _env) :
                                                 boost::filesystem::path(_app.working_dir);
         BOOST_LOG(info) << "Spawning ["sv << cmd << "] in ["sv << working_dir << ']';
-        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+        auto detached_env = _env;
+        bool desktop_steam_command = false;
+#ifdef __linux__
+        desktop_steam_command = _keep_desktop_steam && standalone_desktop_steam_launch(cmd);
+        if (desktop_steam_command) {
+          // Desktop Steam outlives the stream. Its bootstrap and children must not
+          // carry the exact-generation credential that owns transient app cleanup.
+          detached_env = desktop_steam_environment(std::move(detached_env));
+        }
+#endif
+        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, detached_env, _pipe.get(), ec, nullptr);
         if (ec) {
           BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
         } else {
-          if (detached_only) {
+          if (detached_only && !desktop_steam_command) {
             const auto child_pid = static_cast<pid_t>(child.id());
             int pidfd_open_error = 0;
             auto child_pidfd = open_process_pidfd(child_pid, pidfd_open_error);
@@ -10928,6 +11236,9 @@ namespace proc {
 #endif
 
     _app_launch_time = std::chrono::steady_clock::now();
+#ifdef __linux__
+    capture_desktop_title();
+#endif
 
 #ifdef __linux__
     // A launch that lands on the host session instead of the private one still
@@ -11095,6 +11406,198 @@ namespace proc {
     return 0;
   }
 
+#ifdef __linux__
+  void proc_t::capture_desktop_title() {
+    if ((!_keep_desktop_steam && !_desktop_steam_preexisting) || _desktop_launched_appid.empty() || _desktop_title_root ||
+        std::chrono::steady_clock::now() > _desktop_title_claim_deadline) return;
+    bool complete = false;
+    const auto table = platf::steam_title::read_process_table("/proc", &complete);
+    if (complete) _desktop_title_root = platf::steam_title::root(table, _desktop_launched_appid, getuid());
+  }
+
+  bool proc_t::close_desktop_title() {
+    if (_desktop_launched_appid.empty()) return true;
+    capture_desktop_title();
+    bool complete = false;
+    const auto table = platf::steam_title::read_process_table("/proc", &complete);
+    if (!complete) return false;
+    if (!platf::steam_title::running(table, _desktop_launched_appid, getuid())) {
+      // A delayed launch could still arrive. Keep the output until the claim
+      // window ends, then an absent title needs no shutdown.
+      if (!_desktop_title_root && std::chrono::steady_clock::now() < _desktop_title_claim_deadline) return false;
+      _desktop_launched_appid.clear();
+      return true;
+    }
+    const auto root = platf::steam_title::root(table, _desktop_launched_appid, getuid());
+    if (_desktop_title_root && std::none_of(table.begin(), table.end(), [&](const auto &row) {
+          return row.pid == _desktop_title_root->pid && row.start_ticks == _desktop_title_root->start_ticks;
+        })) {
+      _desktop_launched_appid.clear();
+      return true;
+    }
+    if (!root || !_desktop_title_root) return false;
+    if (root->pid != _desktop_title_root->pid || root->start_ticks != _desktop_title_root->start_ticks) {
+      // The launch we owned ended. A later launch of this appid belongs to the desktop.
+      _desktop_launched_appid.clear();
+      return true;
+    }
+    (void) platf::steam_title::ask_to_close(_desktop_launched_appid, &*_desktop_title_root);
+    const auto deadline = std::chrono::steady_clock::now() + _app.exit_timeout;
+    do {
+      const auto fresh = platf::steam_title::read_process_table("/proc", &complete);
+      if (!complete) return false;
+      if (std::none_of(fresh.begin(), fresh.end(), [&](const auto &row) {
+            return row.pid == root->pid && row.start_ticks == root->start_ticks;
+          })) {
+        _desktop_launched_appid.clear();
+        return true;
+      }
+      std::this_thread::sleep_for(50ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false; // No force kill: keep the output and owner for an End retry.
+  }
+#endif
+
+  std::pair<int, nlohmann::json> proc_t::desktop_steam_control(const std::string &unique_id, bool can_launch,
+    const std::string &action, const std::string &revision, bool confirm_game_quit) {
+    auto blocked = [&](int status, std::string code, std::string message) -> std::pair<int, nlohmann::json> {
+      return {status, {{"version", 1}, {"status", false}, {"state", "unavailable"},
+        {"code", std::move(code)}, {"error", std::move(message)}}};
+    };
+    if (!can_launch) return blocked(403, "permission_denied", "This device may watch but not control Steam.");
+#ifndef __linux__
+    return blocked(501, "unsupported_platform", "Desktop Steam controls require a Linux host.");
+#else
+    auto guard = session_snapshot_guard_t::try_acquire(*_session_lifecycle_gate);
+    if (!guard.owns_snapshot()) return blocked(409, "session_busy", "A stream is starting or ending. Refresh Steam status.");
+    const auto sessions = rtsp_stream::session_snapshot(unique_id);
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    if (platf::game_mode_host::session_live() || _session_started_in_game_mode)
+      return blocked(409, "game_mode", "Steam belongs to Game Mode. Use its own Steam controls.");
+    const bool has_session = _app_id > 0 || sessions.active_sessions != 0 || sessions.pending_sessions != 0;
+    if (has_session && (!_launch_session || !boost::iequals(_launch_session->unique_id, unique_id) ||
+        sessions.requester_role == rtsp_stream::session_role_e::viewer))
+      return blocked(403, "session_not_owned", "Another device owns this stream. Steam controls are unavailable.");
+    if (has_session && (_launch_session->expected_stream_mode != "host_virtual_display" &&
+                        _launch_session->expected_stream_mode != "desktop_display"))
+      return blocked(409, "private_runtime", "These controls manage desktop Steam. End or resume a private stream using its session controls.");
+    if (_host_virtual_cleanup_pending || _retained_steam_shutdown)
+      return blocked(409, "cleanup_pending", "Finish ending the current session before controlling Steam.");
+
+    // A fresh same-account observation. Unreadable ownership is unavailable,
+    // never interpreted as stopped. Private Steam is never a desktop target.
+    auto observe = [&]() -> std::optional<nlohmann::json> {
+      bool running = false, game_active = false;
+      std::vector<std::string> identities;
+      std::error_code error;
+      for (std::filesystem::directory_iterator it {"/proc", error}, end; !error && it != end; it.increment(error)) {
+        const auto name = it->path().filename().string();
+        if (!proc_pid_dir_name(name)) continue;
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        struct stat info {};
+        if (::stat(it->path().c_str(), &info) != 0) { if (errno == ENOENT) continue; return std::nullopt; }
+        if (info.st_uid != getuid()) continue;
+        const auto comm_read = read_proc_status_file_result(pid, "comm");
+        const auto cmdline = read_proc_status_file_result(pid, "cmdline");
+        const auto status = read_proc_status_file_result(pid, "status");
+        if (!comm_read.ok() || !cmdline.ok() || !status.ok()) {
+          if (process_vanished_during_proc_read(comm_read.error) || process_vanished_during_proc_read(cmdline.error) ||
+              process_vanished_during_proc_read(status.error)) continue;
+          return std::nullopt;
+        }
+        auto comm = boost::trim_copy(comm_read.bytes);
+        const bool game = (comm == "reaper" || comm == "steam-launch-wr") && cmdline.bytes.find("SteamLaunch") != std::string::npos;
+        if (game) {
+          game_active = true;
+          const auto start = read_proc_status_file_result(pid, "stat");
+          if (!start.ok()) return std::nullopt;
+          const auto ticks = proc_start_time_from_stat(start.bytes);
+          if (!ticks) return std::nullopt;
+          identities.push_back("g" + name + ":" + std::to_string(*ticks));
+        }
+        if (!is_active_desktop_steam_client_process(comm, proc_argv0_from_cmdline(cmdline.bytes), cmdline.bytes, status.bytes)) continue;
+        const auto environ = read_proc_status_file_result(pid, "environ");
+        const auto start = read_proc_status_file_result(pid, "stat");
+        if (!environ.ok() || !start.ok() || !proc_start_time_from_stat(start.bytes)) return std::nullopt;
+        if (proc_environ_is_polaris_private_session(environ.bytes)) return std::nullopt;
+        if (!proc_environ_contains_exact_entry(environ.bytes, "HOME", account_home_directory())) return std::nullopt;
+        running = true;
+        if (comm != "steamwebhelper")
+          identities.push_back("s" + name + ":" + std::to_string(*proc_start_time_from_stat(start.bytes)));
+      }
+      if (error) return std::nullopt;
+      const auto pipe = steam_instance_pipe_path();
+      if (!running && (!pipe || steam_instance_pipe_listener_active(*pipe))) return std::nullopt;
+      std::sort(identities.begin(), identities.end());
+      std::string fingerprint;
+      for (const auto &identity : identities) fingerprint += identity + ";";
+      return nlohmann::json {{"version", 1}, {"status", true}, {"state", running ? "running" : "stopped"},
+        {"game_active", game_active}, {"revision", std::to_string(std::hash<std::string> {}(fingerprint))},
+        {"keep_running_default", config::sunshine.keep_desktop_steam_running},
+        {"effective_keep_running", has_session ? (_keep_desktop_steam || _desktop_steam_preexisting) : config::sunshine.keep_desktop_steam_running}};
+    };
+    auto state = observe();
+    if (!state) return blocked(409, "ownership_unavailable", "Steam ownership could not be checked. Refresh before continuing.");
+    if (action.empty()) return {200, *state};
+    if (action != "open" && action != "big_picture" && action != "quit")
+      return blocked(400, "invalid_action", "Choose Open Steam, Open Big Picture or Quit Steam.");
+    if (revision.empty() || revision != state->at("revision").get<std::string>())
+      return blocked(409, "stale_status", "Steam changed since it was checked. Refresh and try again.");
+    if (action == "quit" && state->at("game_active").get<bool>() && !confirm_game_quit)
+      return blocked(409, "confirmation_required", "A game is running. Quitting Steam may close it. Confirm Quit Steam to continue.");
+    auto env = has_session ? _env : boost::this_process::environment();
+    env = desktop_steam_environment(std::move(env));
+    env["HOME"] = account_home_directory();
+    std::error_code command_error;
+    if (action == "quit") {
+      if (state->at("state") == "stopped") { (*state)["accepted"] = true; return {200, *state}; }
+      const auto home = std::optional<std::string> {account_home_directory()};
+      const auto pipe = steam_instance_pipe_path(home, home);
+      const auto remote = steam_remote_command_path(home, home);
+      if (!pipe || !steam_instance_pipe_listener_active(*pipe) || !remote || access(remote->c_str(), X_OK) != 0)
+        return blocked(409, "remote_unavailable", "Steam's forwarding client is unavailable. Quit Steam on the host.");
+      boost::filesystem::path working_dir {*home};
+      auto child = run_steam_remote_shutdown_without_launch(*remote, working_dir, env, nullptr, command_error);
+      if (!command_error) child.detach();
+    } else {
+      bool desktop_available = false;
+      const auto socket_available = [](const std::string &path) {
+        struct stat info {};
+        return ::stat(path.c_str(), &info) == 0 && S_ISSOCK(info.st_mode) &&
+          (info.st_uid == getuid() || info.st_uid == 0);
+      };
+      const auto wayland = env.find("WAYLAND_DISPLAY"), runtime = env.find("XDG_RUNTIME_DIR"), display = env.find("DISPLAY");
+      if (wayland != env.end() && !wayland->to_string().empty()) {
+        const auto socket = std::filesystem::path(wayland->to_string());
+        if (socket.is_absolute()) desktop_available = socket_available(socket.string());
+        else if (runtime != env.end()) desktop_available = socket_available((std::filesystem::path(runtime->to_string()) / socket).string());
+      }
+      if (display != env.end()) {
+        const auto value = display->to_string();
+        if (value.size() > 1 && value[0] == ':') {
+          const auto number = value.substr(1, value.find('.') == std::string::npos ? std::string::npos : value.find('.') - 1);
+          if (!number.empty() && std::all_of(number.begin(), number.end(), [](unsigned char c) { return std::isdigit(c); }))
+            desktop_available = desktop_available || socket_available("/tmp/.X11-unix/X" + number);
+        }
+      }
+      if (!desktop_available)
+        return blocked(409, "desktop_unavailable", "No desktop session is available for Steam. Sign in to the host desktop first.");
+      boost::system::error_code error;
+      boost::filesystem::path working_dir {account_home_directory()};
+      auto child = platf::run_command(false, true, action == "open" ? "setsid steam steam://open/main" : "setsid steam -gamepadui",
+        working_dir, env, nullptr, error, nullptr);
+      if (error) command_error = std::error_code(error.value(), std::system_category());
+      else child.detach();
+    }
+    if (command_error) return blocked(503, "dispatch_failed", "Steam did not accept the command. Refresh before retrying.");
+    state = observe();
+    if (!state) return blocked(409, "outcome_unavailable", "The command was sent but Steam's state could not be checked. Refresh; do not repeat automatically.");
+    (*state)["accepted"] = true;
+    return {200, *state};
+#endif
+  }
+
   int proc_t::running() {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
@@ -11113,6 +11616,7 @@ namespace proc {
     }
 
 #ifdef __linux__
+    capture_desktop_title();
     if (_host_virtual_cleanup_pending) {
       // This is retained shutdown authority, not proof that a process lives or
       // permission to resume. Preserve the owner-visible app for another End.
@@ -11141,6 +11645,11 @@ namespace proc {
       return _app_id;
     }
 
+    // A Console stop owns cleanup from its admission callback through the selected media joins.
+    // Report this exited child's liveness without consuming the owner's one-shot return binding.
+#ifdef __linux__
+    if (sync.console_cleanup_owner) return 0;
+#endif
     // Perform cleanup actions now if needed
     if (_process) {
       terminate_impl(false, true);
@@ -11376,35 +11885,112 @@ namespace proc {
     stop(immediate, needs_refresh, true);
   }
 
-  void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session) {
+  void proc_t::end_session_and_retire_owned_media() {
+    stop(false, true, true, true);
+  }
+
+  void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session, bool retire_owned_media) {
+    bool stop_admitted = false;
 #ifdef __linux__
     std::shared_ptr<const char> capture_owner;
     session_media::pending_start_cancel_owner_t pending_cancel;
+    bool deferral_owned = false;
+    const auto release_deferral = [&]() {
+      if (!deferral_owned) return;
+      auto &sync = session_lifecycle_sync();
+      std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+      if (sync.console_cleanup_owner == &stop_admitted) sync.console_cleanup_owner = nullptr;
+      deferral_owned = false;
+    };
 #endif
+    // This guard exists before admission, including a throwing cancellation callback. Remove the
+    // metadata deferral before reopening admission, without nesting the metadata and gate locks.
+    auto release_stop = util::fail_guard([&]() {
+#ifdef __linux__
+      release_deferral();
+      pending_cancel = {};
+#endif
+      if (stop_admitted) _session_lifecycle_gate->finish_stop();
+    });
     if (!_session_lifecycle_gate->begin_stop([&]() {
 #ifdef __linux__
+          // begin_stop has closed admission and released its mutex before this callback. Install
+          // the scoped deferral before waiting for any admitted launch or media setup to finish.
+          // If cancellation throws, remove it before begin_stop releases its admission claim.
+          auto failed_cancel = util::fail_guard([&]() { release_deferral(); });
+          if (retire_owned_media) {
+            auto &sync = session_lifecycle_sync();
+            std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+            sync.console_cleanup_owner = &stop_admitted;
+            deferral_owned = true;
+          }
           // Admission publishes its owner under the gate lock. Read it after
           // stop closes admission, then cancel before waiting for the launch.
           capture_owner = session_lifecycle_sync().capture_owner.load();
           pending_cancel = session_media::cancel_pending_starts(capture_owner.get());
+          failed_cancel.disable();
 #endif
         })) {
       return;
     }
-    auto release_stop = util::fail_guard([&]() {
-#ifdef __linux__
-      // Reopen this owner before the lifecycle gate admits the next launch.
-      pending_cancel = {};
-#endif
-      _session_lifecycle_gate->finish_stop();
-    });
+    stop_admitted = true;
     // Marked only once this stop owns the gate. A request that lost the race to another stop
     // returned above, and neither marks nor clears that other stop.
     std::optional<session_end_request_scope_t> ending;
     if (ends_session) {
       ending.emplace(session_lifecycle_sync().stop_ends_session);
     }
-    terminate_impl(immediate, needs_refresh);
+#ifdef POLARIS_TESTS
+    std::function<void()> before_media;
+    {
+      auto &sync = session_lifecycle_sync();
+      std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+      before_media = _stop_before_media_observer_for_tests;
+    }
+    if (before_media) before_media();
+#endif
+    std::function<bool(const rtsp_stream::launch_session_t &)> prepared_matches;
+#ifdef __linux__
+    if (retire_owned_media) {
+      std::string owner, token;
+      std::optional<std::uint64_t> generation;
+      bool owns_transition = false;
+      {
+        auto &sync = session_lifecycle_sync();
+        std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+        // Only the launch that owns a Game Mode transition needs this ordering. Freeze its
+        // admitted identity before teardown clears it; a display/app label is never authority.
+        owns_transition = _prelaunch_transition_generation != 0;
+        if (owns_transition && _launch_session &&
+            !_launch_session->worker_connection_requirement()->load()) {
+          owner = _launch_session->unique_id;
+          token = _launch_session->session_token;
+          generation = _launch_session->lifecycle_generation;
+        }
+      }
+      // The prepared request may be a different Resume/Watch object from _launch_session. Apply
+      // the same frozen authority when terminate_impl retires preparation, including refusal when
+      // the owner tuple is incomplete. Clearing a weak metadata reference never cancels RTSP.
+      // An ordinary Console Close has no return transition: retain its existing cancellation
+      // so a stale published request cannot block the next launch after stop advances the gate.
+      if (owns_transition) {
+        prepared_matches = [owner, token, generation](const rtsp_stream::launch_session_t &pending) {
+          return !owner.empty() && !token.empty() && generation &&
+            !pending.worker_connection_requirement()->load() && pending.unique_id == owner &&
+            pending.session_token == token && pending.lifecycle_generation == generation;
+        };
+      }
+      // Stop admission already fences every host launch/SETUP. Claim matching ordinary host
+      // media before the one-shot restore, but join it with no process metadata lock held.
+      // Unbound, foreign or independent-worker media stays visible to the restore refusal.
+      if (!owner.empty() && !token.empty() && generation) {
+        rtsp_stream::terminate_owned_host_sessions(owner, token, *generation);
+      }
+    }
+#else
+    (void) retire_owned_media;
+#endif
+    terminate_impl(immediate, needs_refresh, prepared_matches);
   }
 
   bool proc_t::terminate_if(
@@ -11888,7 +12474,8 @@ namespace proc {
 
 #endif
 
-  void proc_t::terminate_impl(bool immediate, bool needs_refresh) {
+  void proc_t::terminate_impl(bool immediate, bool needs_refresh,
+                            const std::function<bool(const rtsp_stream::launch_session_t &)> &prepared_matches) {
     // Any committed teardown retires a paused-session timeout. Without this,
     // an explicit End session can finish before the detached timeout wakes and
     // the stale timer would enter a second stop transaction.
@@ -11899,7 +12486,9 @@ namespace proc {
     // (which may be a distinct Resume object) before clearing its app record.
     // RTSP handoff/start already share this atomic state, without lock nesting.
     if (auto pending_launch = sync.capture_launch.lock()) {
-      pending_launch->cancel_for_timeout();
+      // Native/legacy callers retain their existing cancellation. Console Close filters this
+      // otherwise unqualified reference just as it filters selected RTSP retirement.
+      if (!prepared_matches || prepared_matches(*pending_launch)) pending_launch->cancel_for_timeout();
     }
     sync.capture_launch.reset();
     if (_retained_gamepad) _retained_gamepad->retire();
@@ -11950,6 +12539,12 @@ namespace proc {
       terminate_session_owned_steam_before_cage_stop();
     }
     stop_private_session_apps_before_compositor(immediate);
+
+    if ((_keep_desktop_steam || _desktop_steam_preexisting) && !close_desktop_title()) {
+      _host_virtual_cleanup_pending = true;
+      BOOST_LOG(error) << "process: retaining desktop stream because its Steam title has not closed"sv;
+      return;
+    }
 
     // The immutable launch generation, not mutable config, owns this cleanup.
     // Keep exact-generation ancestors alive while proving pressure-vessel client
@@ -12078,6 +12673,11 @@ namespace proc {
       if (gamescope_session_stop_undo && command_requests_steam_shutdown(cmd.undo_cmd)) {
         BOOST_LOG(info) << "Skipping Steam -shutdown undo; polaris-gamescope-session stop owns nested Steam cleanup ["sv
                         << cmd.undo_cmd << ']';
+        continue;
+      }
+
+      if ((_keep_desktop_steam || _desktop_steam_preexisting) && cmd.managed_steam_cleanup) {
+        BOOST_LOG(info) << "process: keeping desktop Steam after End Session (keep policy or preexisting client)"sv;
         continue;
       }
 
@@ -12410,6 +13010,38 @@ namespace proc {
 #endif
     publish_stream_ended_after_terminate_if_needed(has_run, cleanup_complete);
 
+#ifdef __linux__
+    // #204: a session that left Game Mode for its launch returns the host only once its cleanup is
+    // complete, only on a purposeful end, and only for the generation this session committed. A
+    // teardown that retained cleanup above keeps the binding for its retry. Under this lock the
+    // coordinator only claims the restore, together with the lifecycle gate's restore fence: a
+    // launch already admitted (this teardown may run inside one) refuses the claim, and no launch
+    // or RTSP setup of any app is admitted until the worker, acting after this lock is gone, has
+    // recorded the outcome and released the fence.
+    if (cleanup_complete) {
+      if (const auto prelaunch_generation = std::exchange(_prelaunch_transition_generation, 0)) {
+        // Shared, so the worker's release cannot outlive the gate it reopens.
+        const auto gate = _session_lifecycle_gate;
+        (void) prelaunch::coordinator().on_session_end(
+          prelaunch_generation,
+          session_lifecycle_sync().stop_ends_session.load(),
+          daemon_shutdown_requested(),
+          [](std::string &reason) {
+            return prelaunch_other_sessions_now(reason);
+          },
+          {
+            [gate]() {
+              return gate->try_fence_restore();
+            },
+            [gate]() {
+              gate->release_restore_fence();
+            },
+          }
+        );
+      }
+    }
+#endif
+
     if (needs_refresh) {
       reload_configuration_from_file(config::stream.file_apps);
     }
@@ -12589,6 +13221,27 @@ namespace proc {
     placebo = true;
   }
 
+  void proc_t::set_exited_app_child_for_tests(boost::process::v1::child child) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _process = std::move(child);
+    _app.auto_detach = false;
+    _app.wait_all = false;
+    placebo = false;
+  }
+
+  void proc_t::set_stop_before_media_observer_for_tests(std::function<void()> observer) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _stop_before_media_observer_for_tests = std::move(observer);
+  }
+
+  void proc_t::set_session_shutdown_observer_for_tests(std::function<void(bool)> observer) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _session_shutdown_observer_for_tests = std::move(observer);
+  }
+
   void proc_t::clear_running_app_for_tests() {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
@@ -12634,6 +13287,20 @@ namespace proc {
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     if (_app_id == 0 || _app.uuid.empty() || !_launch_session) return std::nullopt;
     return _app;
+  }
+
+  std::optional<stream_stats_context_t> proc_t::try_stream_stats_context() const {
+    auto &sync = session_lifecycle_sync();
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex, std::try_to_lock);
+    if (!lifecycle_lock.owns_lock()) {
+      return std::nullopt;
+    }
+    return stream_stats_context_t {
+      .mangohud_configured = !_app.uuid.empty() && env_flag_enabled(_app, _env, "MANGOHUD"),
+      .virtual_display = virtual_display,
+      .game = _app_name,
+      .game_uuid = _app.uuid,
+    };
   }
 
   std::string proc_t::get_session_token() {
@@ -12874,16 +13541,66 @@ namespace proc {
     return std::move(view.snapshot.stop);
   }
 
+  struct proc_t::session_shutdown_ticket_t::state_t {
+    proc_t *process = nullptr; // server joins/drains before the proc owner can go away
+    std::shared_ptr<session_lifecycle_gate_t> gate;
+    std::shared_ptr<session_lifecycle_sync_t> sync;
+    std::shared_ptr<void> pending_cancel;
+    session_stop_result_t result;
+    std::uint64_t generation = 0;
+    bool owns_gate = false;
+    bool consumed = false;
+  };
+
+  proc_t::session_shutdown_ticket_t::session_shutdown_ticket_t(std::unique_ptr<state_t> state):
+      _state(std::move(state)) {}
+
+  proc_t::session_shutdown_ticket_t::~session_shutdown_ticket_t() {
+    if (_state->owns_gate) {
+      _state->pending_cancel.reset();
+      _state->gate->finish_stop(false, &_state->sync->native_end_ticket, _state.get());
+    }
+    const void *expected = _state.get();
+    // A late old holder cannot clear a replacement ticket's projection.
+    _state->sync->native_end_ticket.compare_exchange_strong(expected, nullptr);
+  }
+
+  bool proc_t::session_shutdown_ticket_t::publish_native_end() noexcept {
+    if (!_state->owns_gate || _state->consumed) return false;
+    _state->sync->native_end_ticket.store(_state.get());
+    return true;
+  }
+
+  session_stop_result_t proc_t::session_shutdown_ticket_t::complete() {
+    return _state->process->complete_session_shutdown(*this);
+  }
+
+  bool proc_t::native_end_pending() const {
+    return session_lifecycle_sync().native_end_ticket.load() != nullptr;
+  }
+
+  session_snapshot_guard_t proc_t::try_session_status_guard() {
+    return session_snapshot_guard_t::try_acquire_now(*_session_lifecycle_gate);
+  }
+
   session_stop_result_t proc_t::request_session_shutdown(
+      const std::string &unique_id, std::string_view expected_token,
+      bool can_launch, bool require_exact_token) {
+    auto admission = prepare_session_shutdown(unique_id, expected_token, can_launch, require_exact_token);
+    return admission.ticket ? admission.ticket->complete() : std::move(admission.result);
+  }
+
+  proc_t::session_shutdown_admission_t proc_t::prepare_session_shutdown(
     const std::string &unique_id,
     std::string_view expected_token,
     bool can_launch,
     bool require_exact_token
   ) {
-    session_stop_result_t result;
+    session_shutdown_admission_t admission;
+    auto &result = admission.result;
     if (!can_launch) {
       result.snapshot.outcome = session_stop_outcome_t::permission_denied;
-      return result;
+      return admission;
     }
     // Check authority without a snapshot gate: an interactive launch holds
     // admission, but has released the process mutex. A rejected request must
@@ -12899,16 +13616,21 @@ namespace proc {
         unique_id, can_launch, expected_token, require_exact_token,
         admission_snapshot, admission_stop_in_progress, false);
       if (result.snapshot.outcome != session_stop_outcome_t::allowed) {
-        return result;
+        return admission;
       }
       if (expected_capture_owner != sync.capture_owner.load()) {
         result.snapshot.outcome = session_stop_outcome_t::session_changed;
-        return result;
+        return admission;
       }
     }
-    std::shared_ptr<void> pending_cancel;
+    // Allocate the holder before claiming admission. Any later refusal/exception drops only
+    // this ticket's gate and pending capture cancellation; it never runs cleanup implicitly.
+    auto state = std::make_unique<session_shutdown_ticket_t::state_t>();
+    state->process = this; state->gate = _session_lifecycle_gate; state->sync = _session_lifecycle_sync;
+    auto ticket = std::unique_ptr<session_shutdown_ticket_t>(new session_shutdown_ticket_t(std::move(state)));
+    auto &owned = *ticket->_state;
     if (!_session_lifecycle_gate->begin_stop([&]() {
-          pending_cancel = cancel_capture_preparation_for_shutdown(
+          owned.pending_cancel = cancel_capture_preparation_for_shutdown(
             unique_id, expected_token, can_launch, require_exact_token);
         }, [&]() {
           return session_lifecycle_sync().capture_owner.load() == expected_capture_owner;
@@ -12916,16 +13638,11 @@ namespace proc {
       result.snapshot.stop_in_progress = _session_lifecycle_gate->stop_in_progress();
       result.snapshot.outcome = result.snapshot.stop_in_progress ?
         session_stop_outcome_t::stop_in_progress : session_stop_outcome_t::session_changed;
-      return result;
+      return admission;
     }
-    bool stop_committed = false;
-    auto release_stop = util::fail_guard([this, &stop_committed, &pending_cancel]() {
-      pending_cancel.reset();
-      _session_lifecycle_gate->finish_stop(stop_committed);
-    });
+    owned.owns_gate = true;
 
     const auto rtsp_snapshot = rtsp_stream::session_snapshot(unique_id);
-    std::uint64_t claimed_generation = 0;
     {
       auto &sync = session_lifecycle_sync();
       std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
@@ -12935,14 +13652,25 @@ namespace proc {
         expected_token,
         require_exact_token,
         rtsp_snapshot,
-        false
+        false,
+        false // metadata only: running() may itself enter blocking teardown
       );
       if (result.snapshot.outcome != session_stop_outcome_t::allowed) {
-        return result;
+        return admission;
       }
-      claimed_generation = _session_generation;
+      owned.generation = _session_generation;
     }
 
+    owned.result = result;
+    admission.ticket = std::move(ticket);
+    return admission;
+  }
+
+  session_stop_result_t proc_t::complete_session_shutdown(session_shutdown_ticket_t &ticket) {
+    auto &owned = *ticket._state;
+    if (!owned.owns_gate || owned.consumed) throw std::logic_error("Session stop ticket already consumed");
+    owned.consumed = true;
+    auto result = owned.result;
     if (result.snapshot.had_running_app || result.snapshot.active_sessions > 0) {
       confighttp::set_session_state(confighttp::session_state_e::tearing_down);
       confighttp::emit_session_event("stream_stopping", "Stopping session");
@@ -12952,13 +13680,20 @@ namespace proc {
     {
       auto &sync = session_lifecycle_sync();
       std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
-      if (_session_generation != claimed_generation) {
+      if (_session_generation != owned.generation) {
         result.snapshot.outcome = session_stop_outcome_t::session_changed;
         return result;
       }
-      if (result.snapshot.had_running_app && running() > 0) {
+      if (result.snapshot.had_running_app) {
+        // running() can itself retire an exited app; that is still this purposeful End.
         const session_end_request_scope_t ending {sync.stop_ends_session};
-        terminate_impl(false, true);
+#ifdef POLARIS_TESTS
+        if (_session_shutdown_observer_for_tests) _session_shutdown_observer_for_tests(false);
+#endif
+        if (running() > 0) terminate_impl(false, true);
+#ifdef POLARIS_TESTS
+        if (_session_shutdown_observer_for_tests) _session_shutdown_observer_for_tests(true);
+#endif
       }
 #ifdef __linux__
       if (!_host_virtual_cleanup_pending) {
@@ -12975,10 +13710,15 @@ namespace proc {
 #endif
     }
 
-    stop_committed = true;
-    pending_cancel.reset();
-    _session_lifecycle_gate->finish_stop(stop_committed);
-    release_stop.disable();
+#ifdef __linux__
+    // The restore worker may read process metadata. Wait with neither metadata nor gate
+    // mutex held; keep this ticket's stop admission/projection until its fence unwinds.
+    if (session_lifecycle_sync().native_end_ticket.load() == ticket._state.get() &&
+        _session_lifecycle_gate->restore_fenced()) prelaunch::coordinator().wait_for_restore();
+#endif
+    owned.pending_cancel.reset();
+    _session_lifecycle_gate->finish_stop(true, &owned.sync->native_end_ticket, ticket._state.get());
+    owned.owns_gate = false;
     return result;
   }
 
@@ -14108,6 +14848,14 @@ namespace proc {
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           set_launch_as(ctx, normalize_launch_as(app_node));
           ctx.close_desktop_steam_for_private = app_node.value("close-desktop-steam-for-private", false);
+          // Strict: only JSON true. A string, number or null leaves the app as it was.
+          if (const auto leave = app_node.find(std::string {prelaunch::k_app_key}); leave != app_node.end()) {
+            ctx.leave_game_mode_before_launch = leave->is_boolean() && leave->get<bool>();
+            if (!leave->is_boolean()) {
+              BOOST_LOG(warning) << "App [" << ctx.name << "] has a non-boolean [" << prelaunch::k_app_key << "]; it stays off";
+            }
+          }
+          ctx.desktop_steam_lifetime = normalize_desktop_steam_lifetime(app_node.value("desktop-steam-lifetime", "inherit"));
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
           ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);

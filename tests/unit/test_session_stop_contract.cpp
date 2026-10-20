@@ -28,10 +28,69 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+  #include <sys/prctl.h>
+#endif
 
 namespace {
   using proc::session_stop_outcome_t;
   using rtsp_stream::session_role_e;
+
+#ifdef __linux__
+  // Container PID 1 need not reap fixture orphans. Adopt only our descendants
+  // for these tests, and restore the prior process setting after their guards.
+  struct scoped_fixture_subreaper_t {
+    scoped_fixture_subreaper_t() {
+      installed = prctl(PR_GET_CHILD_SUBREAPER, &previous) == 0 &&
+                  prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
+    }
+    ~scoped_fixture_subreaper_t() {
+      if (installed) (void) prctl(PR_SET_CHILD_SUBREAPER, previous);
+    }
+    scoped_fixture_subreaper_t(const scoped_fixture_subreaper_t &) = delete;
+    scoped_fixture_subreaper_t &operator=(const scoped_fixture_subreaper_t &) = delete;
+    int previous = 0;
+    bool installed = false;
+  };
+
+  struct owned_fixture_child_t {
+    explicit owned_fixture_child_t(pid_t owned, owned_fixture_child_t *ancestor = nullptr): pid(owned), parent(ancestor) {
+      fd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+    }
+    ~owned_fixture_child_t() {
+      // On an assertion failure, exit/reap the leader before reaping its child.
+      // This makes the exact sibling an adopted child of the fixture subreaper.
+      if (!reaped && parent) parent->terminate_and_reap();
+      terminate_and_reap();
+      if (fd >= 0) close(fd);
+    }
+    void terminate_and_reap() {
+      if (!reaped) {
+        // A failed setup has not handed its direct child to production yet.
+        // After capture, signal only the exact kernel-held process identity.
+        if (fd >= 0) (void) syscall(SYS_pidfd_send_signal, fd, SIGKILL, nullptr, 0);
+        else if (waitpid(pid, nullptr, WNOHANG) == 0) (void) kill(pid, SIGKILL);
+        pid_t waited;
+        do { waited = waitpid(pid, nullptr, 0); } while (waited < 0 && errno == EINTR);
+        reaped = waited == pid || (waited < 0 && errno == ECHILD);
+      }
+    }
+    bool exit_and_reap_observed() {
+      pollfd exit {.fd = fd, .events = POLLIN, .revents = 0};
+      if (poll(&exit, 1, 2000) != 1 || !(exit.revents & POLLIN)) return false;
+      pid_t waited;
+      do { waited = waitpid(pid, nullptr, 0); } while (waited < 0 && errno == EINTR);
+      reaped = waited == pid || (waited < 0 && errno == ECHILD);
+      return reaped;
+    }
+    owned_fixture_child_t(const owned_fixture_child_t &) = delete;
+    owned_fixture_child_t &operator=(const owned_fixture_child_t &) = delete;
+    pid_t pid;
+    int fd = -1;
+    bool reaped = false;
+    owned_fixture_child_t *parent = nullptr;
+  };
+#endif
 
   session_stop_outcome_t decide(
     bool can_launch,
@@ -309,9 +368,9 @@ TEST(SessionStopContractTests, TerminateSessionsUsesGracefulStopBeforeJoin) {
   // clear()/terminate_sessions must graceful_stop every live slot first.
   const auto source = read_rtsp_source_for_contract();
   ASSERT_FALSE(source.empty());
-  const auto clear_start = source.find("void clear(bool all = true)");
+  const auto clear_start = source.find("void clear(bool all = true,");
   ASSERT_NE(clear_start, std::string::npos);
-  const auto clear_end = source.find("void remove(", clear_start);
+  const auto clear_end = source.find("void terminate_owned_host_sessions(", clear_start);
   ASSERT_NE(clear_end, std::string::npos);
   const auto clear_body = source.substr(clear_start, clear_end - clear_start);
   const auto graceful = clear_body.find("stream::session::graceful_stop(");
@@ -414,26 +473,19 @@ TEST(SessionStopContractTests, PortalCancellationIsGuardedWhenBackendIsUnavailab
     << "every optional portal cancellation call must be feature guarded";
 }
 
-TEST(SessionStopContractTests, CancelAnswersClientBeforeNestedTeardown) {
-  // SB-2 residual: nested gamescope undo can SEGV mid-cancel; Moonlight must
-  // already have cancel=1 or it maps the failed HTTP as "another device".
+TEST(SessionStopContractTests, NativeCancelClaimsBeforeReturningAndNeverRunsTeardownOnTheExecutor) {
+  // The executable TLS regression covers delivery. This check only fences the delegation seam.
   const auto source = read_nvhttp_source_for_contract();
-  ASSERT_FALSE(source.empty());
-  const auto cancel_start = source.find("void cancel(resp_https_t response, req_https_t request)");
-  ASSERT_NE(cancel_start, std::string::npos);
-  const auto cancel_end = source.find("void appasset(", cancel_start);
-  ASSERT_NE(cancel_end, std::string::npos);
-  const auto body = source.substr(cancel_start, cancel_end - cancel_start);
-  const auto preflight = body.find("get_session_stop_snapshot(");
-  const auto respond = body.find("response_written = true");
-  const auto shutdown = body.find("request_session_shutdown(");
-  EXPECT_NE(preflight, std::string::npos);
-  ASSERT_NE(respond, std::string::npos);
-  ASSERT_NE(shutdown, std::string::npos);
-  // Preflight + respond before the teardown shutdown call.
-  EXPECT_LT(preflight, respond);
-  EXPECT_LT(respond, shutdown);
-  EXPECT_NE(body.find("is_session_owner("), std::string::npos);
+  const auto start = source.find("void cancel(native_end_worker_t &ends");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("void appasset(", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  EXPECT_NE(body.find("prepare_session_shutdown("), std::string::npos);
+  EXPECT_NE(body.find("ends.submit("), std::string::npos);
+  EXPECT_EQ(body.find("request_session_shutdown("), std::string::npos);
+  EXPECT_EQ(body.find("terminate_impl("), std::string::npos);
+  EXPECT_LT(body.find("ends.submit("), body.find("response_written = true"));
 }
 
 TEST(SessionStopContractTests, PortalPipeWireTeardownDisconnectsUnderLoopLock) {
@@ -965,6 +1017,8 @@ TEST(SessionStopContractTests, RuntimeAcquisitionRejectsNestedOrIncompleteDurabl
 
 TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
 #ifdef __linux__
+  scoped_fixture_subreaper_t reaper;
+  ASSERT_TRUE(reaper.installed);
   int ready[2] {-1, -1};
   ASSERT_EQ(pipe(ready), 0);
   const pid_t leader = fork();
@@ -977,19 +1031,26 @@ TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
     if (sibling < 0) _exit(126);
     if (sibling == 0) {
       signal(SIGTERM, SIG_IGN);
+      const pid_t own_pid = getpid();
+      (void) write(ready[1], &own_pid, sizeof(own_pid));
+      close(ready[1]);
       for (;;) pause();
     }
-    (void) write(ready[1], &sibling, sizeof(sibling));
     close(ready[1]);
     for (;;) pause();
   }
+  owned_fixture_child_t leader_guard {leader};
+  ASSERT_GE(leader_guard.fd, 0);
   close(ready[1]);
   pid_t sibling = -1;
   ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
   close(ready[0]);
+  owned_fixture_child_t sibling_guard {sibling, &leader_guard};
+  ASSERT_GE(sibling_guard.fd, 0);
   const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
-  if (!drained) (void) kill(-leader, SIGKILL);
   EXPECT_TRUE(drained);
+  EXPECT_TRUE(sibling_guard.exit_and_reap_observed())
+    << "production drain did not exit the TERM-resistant owned sibling";
   errno = 0;
   EXPECT_EQ(kill(sibling, 0), -1);
   EXPECT_EQ(errno, ESRCH);
@@ -998,6 +1059,8 @@ TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
 
 TEST(SessionStopContractTests, OwnedRuntimeEscalatesAfterLeaderExitsOnTerm) {
 #ifdef __linux__
+  scoped_fixture_subreaper_t reaper;
+  ASSERT_TRUE(reaper.installed);
   int ready[2] {-1, -1};
   ASSERT_EQ(pipe(ready), 0);
   const pid_t leader = fork();
@@ -1009,19 +1072,26 @@ TEST(SessionStopContractTests, OwnedRuntimeEscalatesAfterLeaderExitsOnTerm) {
     if (sibling < 0) _exit(126);
     if (sibling == 0) {
       signal(SIGTERM, SIG_IGN);
+      const pid_t own_pid = getpid();
+      (void) write(ready[1], &own_pid, sizeof(own_pid));
+      close(ready[1]);
       for (;;) pause();
     }
-    (void) write(ready[1], &sibling, sizeof(sibling));
     close(ready[1]);
     for (;;) pause();
   }
+  owned_fixture_child_t leader_guard {leader};
+  ASSERT_GE(leader_guard.fd, 0);
   close(ready[1]);
   pid_t sibling = -1;
   ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
   close(ready[0]);
+  owned_fixture_child_t sibling_guard {sibling, &leader_guard};
+  ASSERT_GE(sibling_guard.fd, 0);
   const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
-  if (!drained) (void) kill(-leader, SIGKILL);
   EXPECT_TRUE(drained);
+  EXPECT_TRUE(sibling_guard.exit_and_reap_observed())
+    << "production drain did not exit the owned sibling after leader exit";
   errno = 0;
   EXPECT_EQ(kill(sibling, 0), -1);
   EXPECT_EQ(errno, ESRCH);
@@ -1066,6 +1136,8 @@ TEST(SessionStopContractTests, OwnedRuntimeDoesNotClearSameSessionEscapedGroup) 
 
 TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
 #ifdef __linux__
+  scoped_fixture_subreaper_t reaper;
+  ASSERT_TRUE(reaper.installed);
   int ready[2] {-1, -1};
   ASSERT_EQ(pipe(ready), 0);
   const pid_t leader = fork();
@@ -1077,24 +1149,31 @@ TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
     if (sibling < 0) _exit(126);
     if (sibling == 0) {
       signal(SIGTERM, SIG_IGN);
+      const pid_t own_pid = getpid();
+      (void) write(ready[1], &own_pid, sizeof(own_pid));
+      close(ready[1]);
       for (;;) pause();
     }
-    (void) write(ready[1], &sibling, sizeof(sibling));
     close(ready[1]);
     _exit(0);
   }
+  owned_fixture_child_t leader_guard {leader};
+  ASSERT_GE(leader_guard.fd, 0);
   close(ready[1]);
   pid_t sibling = -1;
   ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
   close(ready[0]);
+  owned_fixture_child_t sibling_guard {sibling, &leader_guard};
+  ASSERT_GE(sibling_guard.fd, 0);
   const int leader_pidfd = static_cast<int>(syscall(SYS_pidfd_open, leader, 0));
   ASSERT_GE(leader_pidfd, 0);
   pollfd leader_exit {.fd = leader_pidfd, .events = POLLIN, .revents = 0};
   ASSERT_EQ(poll(&leader_exit, 1, 5000), 1);
   const bool drained = stream_runtime::rollback_gamescope_spawn_for_tests(leader, leader_pidfd);
   close(leader_pidfd);
-  if (!drained) (void) kill(-leader, SIGKILL);
   EXPECT_TRUE(drained);
+  EXPECT_TRUE(sibling_guard.exit_and_reap_observed())
+    << "production rollback did not exit the owned sibling";
   errno = 0;
   EXPECT_EQ(kill(sibling, 0), -1);
   EXPECT_EQ(errno, ESRCH);
@@ -1212,7 +1291,9 @@ TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKil
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 3500);
+  const auto end = source.find("\n  bool proc_t::reload_configuration_from_file(", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto kill = body.find("terminate_isolated_session_generation(");
   ASSERT_NE(prepare, std::string::npos);
@@ -1953,7 +2034,9 @@ TEST(SessionStopContractTests, CapturePreparationUsesProvisionalLaunchRateUntilA
     EXPECT_EQ(av_cmp_q(announced.encode_rate, {launch_rate, 1000}), 0);
     EXPECT_EQ(announced.encodingFramerate, launch_rate);
     EXPECT_EQ(announced.framerate, 60);
-    if (launch_rate != 60000) EXPECT_NE(av_cmp_q(announced.stream_rate, prepared.stream_rate), 0);
+    if (launch_rate != 60000) {
+      EXPECT_NE(av_cmp_q(announced.stream_rate, prepared.stream_rate), 0);
+    }
     ASSERT_TRUE(video::configure_announced_rates(announced, 60, 5994, launch_rate, false));
     EXPECT_EQ(av_cmp_q(announced.stream_rate, {60000, 1001}), 0);
     EXPECT_EQ(av_cmp_q(announced.encode_rate, announced.stream_rate), 0);
@@ -2431,4 +2514,91 @@ TEST(SessionLifecycleGateTests, DuplicatePendingRaiseIsRejectedWithoutReplacingO
   EXPECT_EQ(original_snapshot.requester_role, rtsp_stream::session_role_e::controller);
   EXPECT_EQ(replacement_snapshot.requester_role, rtsp_stream::session_role_e::none);
   rtsp_stream::terminate_sessions();
+}
+
+
+TEST(SessionStopTicketTests, UnqueuedTicketReleasesOnlyItsClaim) {
+  proc::proc_t subject;
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->unique_id = "ticket-owner";
+  proc::ctx_t app; app.id = "424";
+  subject.set_active_launch_for_tests(app, launch);
+  subject.set_running_app_for_tests(app);
+  auto admitted = subject.prepare_session_shutdown(launch->unique_id, "stale", true, true);
+  ASSERT_TRUE(admitted.ticket);
+  EXPECT_TRUE(subject.session_shutdown_requested());
+  EXPECT_FALSE(subject.native_end_pending());
+  admitted.ticket.reset();
+  EXPECT_FALSE(subject.session_shutdown_requested());
+  EXPECT_EQ(subject.running(), 424);
+  subject.clear_running_app_for_tests();
+}
+
+TEST(SessionStopTicketTests, CompletedBetweenStatusClaimsAndOldHolderCannotClearReplacement) {
+  proc::proc_t subject;
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->unique_id = "ticket-owner";
+  proc::ctx_t app; app.id = "424";
+  subject.set_active_launch_for_tests(app, launch);
+  subject.set_running_app_for_tests(app);
+  auto first = subject.prepare_session_shutdown(launch->unique_id, "", true, false);
+  ASSERT_TRUE(first.ticket);
+  ASSERT_TRUE(first.ticket->publish_native_end());
+  auto refused = subject.try_session_status_guard();
+  EXPECT_FALSE(refused.owns_snapshot());
+  EXPECT_TRUE(first.ticket->complete().stopped);
+  EXPECT_FALSE(subject.native_end_pending()); // cleared before launch admission reopens
+  EXPECT_THROW(first.ticket->complete(), std::logic_error);
+  EXPECT_FALSE(first.ticket->publish_native_end());
+  // Cleanup finishes between a failed guard and its pending read, as in serverinfo.
+  first.ticket.reset();
+  EXPECT_FALSE(subject.native_end_pending());
+  { auto settled = subject.try_session_status_guard(); EXPECT_TRUE(settled.owns_snapshot()); }
+  subject.set_active_launch_for_tests(app, launch);
+  subject.set_running_app_for_tests(app);
+  auto old = subject.prepare_session_shutdown(launch->unique_id, "", true, false);
+  ASSERT_TRUE(old.ticket);
+  ASSERT_TRUE(old.ticket->publish_native_end());
+  EXPECT_TRUE(old.ticket->complete().stopped);
+  subject.set_active_launch_for_tests(app, launch);
+  subject.set_running_app_for_tests(app);
+  auto replacement = subject.prepare_session_shutdown(launch->unique_id, "", true, false);
+  ASSERT_TRUE(replacement.ticket);
+  ASSERT_TRUE(replacement.ticket->publish_native_end());
+  old.ticket.reset();
+  EXPECT_TRUE(subject.native_end_pending());
+  replacement.ticket.reset(); // never execute a second cleanup just to release its claim
+  EXPECT_FALSE(subject.native_end_pending());
+  EXPECT_EQ(subject.running(), 424);
+  subject.clear_running_app_for_tests();
+}
+
+TEST(SessionStopTicketTests, PreviousMetadataCannotClaimAReplacementLaunch) {
+  proc::proc_t subject;
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>(); launch->unique_id = "previous-owner";
+  subject.set_active_launch_for_tests(proc::ctx_t {}, launch);
+  const auto generation = subject.capture_session_launch_generation();
+  ASSERT_TRUE(generation);
+  ASSERT_TRUE(subject.try_begin_session_launch(*generation));
+  auto finish = util::fail_guard([&] { subject.finish_session_launch(); });
+  const auto refused = subject.prepare_session_shutdown(launch->unique_id, "", true, false);
+  EXPECT_FALSE(refused.ticket);
+  EXPECT_EQ(refused.result.snapshot.outcome, session_stop_outcome_t::session_changed);
+  EXPECT_FALSE(subject.native_end_pending());
+  EXPECT_FALSE(subject.session_shutdown_requested());
+  EXPECT_FALSE(launch->is_cancelled());
+  subject.clear_running_app_for_tests();
+}
+
+TEST(SessionLifecycleGateTests, ThrowingCancelReleasesOnlyTheWaitingClaimAndPreservesTheError) {
+  proc::session_lifecycle_gate_t gate;
+  const auto before = gate.capture_launch_generation();
+  ASSERT_TRUE(before);
+  EXPECT_THROW(gate.begin_stop([] { throw std::runtime_error("original cancellation failure"); }), std::runtime_error);
+  EXPECT_FALSE(gate.stop_in_progress());
+  const auto after = gate.capture_launch_generation();
+  ASSERT_TRUE(after);
+  EXPECT_NE(after, before); // no refund for cancellation effects or an uncertain partial attempt
+  EXPECT_TRUE(gate.try_begin_rtsp_launch(*after));
+  gate.finish_launch();
 }

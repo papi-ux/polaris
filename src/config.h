@@ -229,6 +229,9 @@ namespace config {
       int timeout_ms = 5000;
       int cache_ttl_hours = 168;
     } ai_optimizer;
+
+    // Private qualification opt-in; authenticated sessions snapshot it at admission.
+    bool vrr_source_pacing = false;
   };
 
   struct audio_t {
@@ -334,6 +337,7 @@ namespace config {
 
     std::string do_cmd;
     std::string undo_cmd;
+    bool managed_steam_cleanup = false;
     bool elevated;
   };
 
@@ -396,6 +400,7 @@ namespace config {
     // the machine away from everyone on it with no undo from the couch, so it
     // stays off until the host owner turns it on.
     bool host_sleep_enabled;
+    bool keep_desktop_steam_running;
   };
 
   struct recording_t {
@@ -471,6 +476,9 @@ namespace config {
    * @return The parsed value, or nullopt when the text is not a boolean.
    */
   std::optional<bool> parse_bool(std::string_view value);
+
+  /// Strict private opt-in; malformed or absent values cannot activate it.
+  bool source_pacing_setting(std::unordered_map<std::string, std::string> &vars);
 
   /**
    * @brief The capture setting in parsed configuration variables, the way startup parses it.

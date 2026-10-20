@@ -1344,11 +1344,14 @@ expected_assets = Counter(
 )
 withdrawn_sysext_asset = "Polaris-sysext-x86_64.raw"
 expected_changelog_assets = expected_assets.copy()
+# The building guide lists today's assets: each SteamOS release has its own package. The v1.4.12
+# changelog and notes above keep the four that release published.
+expected_building_assets = expected_assets + Counter({"Polaris-steamos3.9-x86_64.pkg.tar.zst": 1})
 building_packaging = markdown_section(building, "## Packaging")
 building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section, expected_section_assets in (
-    ("docs/building.md Packaging", building_packaging_prose, expected_assets),
+    ("docs/building.md Packaging", building_packaging_prose, expected_building_assets),
     ("v1.4.12 changelog", current_release_prose, expected_changelog_assets),
 ):
     actual_assets = Counter(asset_pattern.findall(section))

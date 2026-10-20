@@ -61,6 +61,16 @@ namespace wl {
       return private_compositor_capture ? std::string("private-wlr/") + typeid(*this).name() : std::string {};
     }
 
+    std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease() const override {
+      return compositor_lease_;
+    }
+
+    int presentation_peer_fd() const override {
+      if (capture_timing.presentation == platf::presentation_clock_e::none) return -1;
+      auto *connection = const_cast<wl::display_t &>(display).get();
+      return connection ? wl_display_get_fd(connection) : -1;
+    }
+
     bool capture_profile_enabled() const {
       return config::video.linux_display.capture_profile;
     }
@@ -132,6 +142,24 @@ namespace wl {
       if (display.init(wayland_target)) {
         return -1;
       }
+#ifdef __linux__
+      // Retain the expectation for exactly the generation this display just connected to: its frozen
+      // instance and socket, never the mutable config. Unowned, desktop and probe displays get none.
+      compositor_lease_ = generation_owned && use_private_compositor ?
+                            stream_runtime::labwc::compositor_lease(
+                              generation_policy.private_runtime_instance_id,
+                              generation_policy.private_wayland_socket
+                            ) :
+                            nullptr;
+#endif
+      // Screencopy pacing as capture() will choose it. No presentation clock: only ext-image-copy
+      // delivers one, and that subclass names it after its own initialization succeeds.
+      capture_timing = {
+        .pacing = screencopy_pacing_policy(private_compositor_capture) == capture_pacing_policy_e::source_driven ?
+                    platf::capture_pacing_e::source_driven :
+                    platf::capture_pacing_e::fixed_interval,
+        .presentation = platf::presentation_clock_e::none,
+      };
 
       interface.listen(display.registry());
 
@@ -325,6 +353,7 @@ namespace wl {
     bool capture_transport_logged = false;
     bool prefer_shm_screencopy = false;
     bool private_compositor_capture = false;
+    std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease_;
     std::string reported_wayland_main_device;
     std::chrono::microseconds last_dispatch_time {};
 
@@ -759,6 +788,20 @@ namespace wl {
         .device = extcopy.capture_render_node(),
       };
       stream_stats::update_capture_metadata(img->frame_metadata);
+      // Whether this frame carried a usable compositor presentation time, counted as host capture
+      // evidence only and not attributed to any stream. The frame is stamped and paced as before.
+      const auto &frame_timing = extcopy.last_timing_sample();
+      stream_stats::note_source_presentation(frame_timing.presentation_status);
+      // The raw protocol time travels with the image as evidence; frame_timestamp above stays the
+      // pacing timestamp. A frame captured inside extcopy.init(), on first use or a re-initialization,
+      // is flagged and never eligible. The capture thread stamps epoch, sequence, route and proof.
+      img->provenance.ready_at = frame_timing.ready_at;
+      img->provenance.presentation = {
+        .ns = frame_timing.presentation_ns,
+        .status = frame_timing.presentation_status,
+        .baseline = frame_timing.baseline,
+      };
+      img->provenance.prefetched_init = frame_source != extcopy_frame_source_e::capture;
       log_capture_metadata(img->frame_metadata);
       if (capture_profile_enabled()) {
         const auto handoff_end = std::chrono::steady_clock::now();
@@ -845,6 +888,11 @@ namespace wl {
 
       capture_ready = true;
       prefetched_frame_pending = true;
+      // ext-image-copy-capture-v1 presentation_time is "system monotonic time" (wayland-protocols 0091197f).
+      capture_timing = {
+        .pacing = platf::capture_pacing_e::source_driven,
+        .presentation = platf::presentation_clock_e::ext_image_copy_monotonic,
+      };
       return 0;
     }
 

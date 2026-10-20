@@ -29,6 +29,17 @@ namespace cbs {
   hevc_t make_sps_hevc(const AVCodecContext *ctx, const AVPacket *packet);
   h264_t make_sps_h264(const AVCodecContext *ctx, const AVPacket *packet);
 
+  enum class sps_vui_status_e {
+    unreadable,
+    absent,
+    present,
+  };
+
+  /**
+   * @brief Distinguishes an unreadable packet or missing active SPS from a readable SPS without VUI.
+   */
+  sps_vui_status_e inspect_sps(const AVPacket *packet, int codec_id);
+
   /**
    * @brief Validates the Sequence Parameter Set (SPS) of a given packet.
    * @param packet The packet to validate.

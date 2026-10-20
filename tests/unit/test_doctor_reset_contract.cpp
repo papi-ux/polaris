@@ -317,7 +317,7 @@ TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) 
   ASSERT_NE(preparation, std::string::npos);
   ASSERT_NE(publication, std::string::npos);
   EXPECT_LT(preparation, publication);
-  const auto callback = nvhttp.find("execute_and_raise(*app_iter, launch_session, [&]()");
+  const auto callback = nvhttp.find("execute_and_raise(admitted_app, launch_session, [&]()");
   ASSERT_NE(callback, std::string::npos);
   const auto callback_end = nvhttp.find("launch_session_raised = err == 0", callback);
   ASSERT_NE(callback_end, std::string::npos);

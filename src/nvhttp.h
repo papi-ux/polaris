@@ -237,10 +237,13 @@ namespace nvhttp {
    * to proc::execute. Host-built arguments use the host identity and do not
    * carry client key material. A trusted owned app snapshot may defer a matching fixed
    * topology pin's availability to the app-aware guard; nullptr keeps ordinary freshness.
+   * vrr_admission names which authenticated request carried clientVrrRequested (/launch or /resume);
+   * the request itself is parsed from args on every path and only recorded.
    */
   std::shared_ptr<rtsp_stream::launch_session_t>
   make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false,
-                      const proc::ctx_t *topology_app = nullptr);
+                      const proc::ctx_t *topology_app = nullptr,
+                      vrr_policy::admission_e vrr_admission = vrr_policy::admission_e::launch);
 
   /**
    * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.
@@ -535,6 +538,9 @@ namespace nvhttp {
    *                                       omitted preserves the current choice
    * @param[in]  close_desktop_steam  Whether a launch from this device may quit desktop
    *                                   Steam; omitted preserves the current choice
+   * @param[in]  recording_authorized  The host admin's stored recording approval; omitted
+   *                                    preserves it. It is always stored off for a temporary
+   *                                    (guest) authorization, whatever was asked.
    * 
    * @return     Whether the update is successful
    */
@@ -550,7 +556,8 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display,
     const std::optional<bool> temporary_authorization = std::nullopt,
-    const std::optional<bool> close_desktop_steam = std::nullopt
+    const std::optional<bool> close_desktop_steam = std::nullopt,
+    const std::optional<bool> recording_authorized = std::nullopt
   );
 
   bool update_device_info(
@@ -591,6 +598,10 @@ namespace nvhttp {
    * @brief Host-view auto-quality policy built from the live session health.
    */
   nlohmann::json auto_quality_status_json();
+  /// Use the telemetry snapshot; a busy application lifecycle suppresses advice.
+  nlohmann::json auto_quality_status_json(
+    const stream_stats::stats_t &stats,
+    const std::optional<proc::stream_stats_context_t> &context);
 
   /**
    * @brief The encoder selection the web console's Doctor shows beside the live stream stats.

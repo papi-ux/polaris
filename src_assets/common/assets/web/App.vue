@@ -1,18 +1,21 @@
 <template>
   <SpaceParticles v-if="!showNav" :dense="true" />
-  <div v-if="showNav" class="relative z-[1] flex h-screen bg-background text-foreground">
+  <!-- The shell is a size container: below 48rem of its own width (measured with the actual root
+       font size, so enlarged text counts as well as narrow screens) it is a phone shell with a
+       drawer; at or above it the sidebar stays beside the page. dvh follows mobile browser bars. -->
+  <div v-if="showNav" class="@container relative z-[1] flex h-dvh bg-background text-foreground">
     <a href="#polaris-main" class="skip-link">Skip to main content</a>
     <!-- Mobile overlay -->
-    <div v-if="sidebarOpen" class="fixed inset-0 bg-void/70 backdrop-blur-sm z-30 md:hidden transition-opacity" @click="sidebarOpen = false"></div>
+    <div v-if="sidebarOpen" data-sidebar-overlay class="fixed inset-0 bg-void/70 backdrop-blur-sm z-30 @3xl:hidden transition-opacity" @click="sidebarOpen = false"></div>
 
     <!-- Sidebar -->
     <aside
       id="polaris-sidebar"
-      class="bg-void border-r border-storm flex flex-col shrink-0 transition-[width,transform] duration-200 ease-in-out z-40"
+      class="bg-void border-r border-storm flex max-w-[calc(100vw-3rem)] flex-col shrink-0 overflow-y-auto overscroll-contain scrollbar-hidden transition-[width,transform] duration-200 ease-in-out z-40"
       :class="[
-        sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
+        sidebarOpen ? 'translate-x-0' : '-translate-x-full @3xl:translate-x-0',
         sidebarCollapsed ? 'w-16' : 'w-64',
-        'fixed inset-y-0 left-0 md:static'
+        'fixed inset-y-0 left-0 @3xl:static'
       ]"
     >
       <div class="border-b border-storm/20 px-4 py-4">
@@ -21,7 +24,9 @@
           <div v-if="!sidebarCollapsed" class="sr-only">Polaris</div>
         </h1>
       </div>
-      <nav class="flex-1 overflow-y-auto p-3 scrollbar-hidden">
+      <!-- The whole sidebar scrolls as one column, so its footer controls stay reachable on short
+           landscape screens and with enlarged text. -->
+      <nav class="flex-1 p-3">
         <div
           v-for="(section, sectionIndex) in navSections"
           :key="section.key"
@@ -30,7 +35,7 @@
         >
           <div
             v-if="!sidebarCollapsed"
-            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-eyebrow text-storm/70"
+            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-eyebrow text-storm"
           >
             {{ section.label }}
           </div>
@@ -59,7 +64,7 @@
       <router-link
         data-sidebar-update-status
         :to="{ path: '/info', hash: '#update-center' }"
-        class="focus-ring mx-3 mb-2 flex items-center gap-2 rounded-lg border border-storm/20 bg-deep/35 px-3 py-2 text-left text-sm text-silver no-underline transition-[background-color,border-color,color,box-shadow] duration-200 hover:border-ice/25 hover:bg-twilight/40 hover:text-ice"
+        class="focus-ring mx-3 mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-storm/20 bg-deep/35 px-3 py-2 text-left text-sm text-silver no-underline transition-[background-color,border-color,color,box-shadow] duration-200 hover:border-ice/25 hover:bg-twilight/40 hover:text-ice"
         :class="{ 'justify-center px-2': sidebarCollapsed }"
         :title="sidebarUpdateTitle"
         :aria-label="sidebarUpdateTitle"
@@ -72,7 +77,7 @@
           aria-hidden="true"
         ></span>
         <template v-if="!sidebarCollapsed">
-          <span class="min-w-0 flex-1 truncate text-xs font-medium text-silver">{{ sidebarUpdateLabel }}</span>
+          <span class="min-w-0 flex-auto text-xs font-medium text-silver [overflow-wrap:anywhere]">{{ sidebarUpdateLabel }}</span>
           <span class="text-[11px] text-storm">Updates</span>
         </template>
       </router-link>
@@ -91,21 +96,21 @@
           @click="signOut"
         >
           <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6A2.25 2.25 0 0 0 5.25 5.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9"/></svg>
-          <span v-if="!sidebarCollapsed" class="min-w-0 flex-1 truncate font-medium">{{ signingOut ? signOutPendingLabel : signOutLabel }}</span>
+          <span v-if="!sidebarCollapsed" class="min-w-0 flex-1 font-medium [overflow-wrap:anywhere]">{{ signingOut ? signOutPendingLabel : signOutLabel }}</span>
         </button>
       </div>
       <div class="px-3 pb-2">
         <button
           type="button"
-          class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
+          class="focus-ring flex w-full flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
           :title="paletteShortcut"
           :aria-label="`Open command palette (${paletteShortcut})`"
           @click="commandPaletteOpen = true"
         >
           <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
           <template v-if="!sidebarCollapsed">
-            <span class="min-w-0 flex-1 truncate font-medium">Command Palette</span>
-            <kbd class="rounded-md border border-storm/20 bg-void/60 px-2 py-1 text-[11px] text-storm">
+            <span class="min-w-0 flex-auto font-medium [overflow-wrap:anywhere]">Command Palette</span>
+            <kbd class="ml-auto rounded-md border border-storm/20 bg-void/60 px-2 py-1 text-[11px] text-storm">
               {{ isMac ? '\u2318K' : 'Ctrl+K' }}
             </kbd>
           </template>
@@ -132,22 +137,20 @@
     <main id="polaris-main" tabindex="-1" class="relative flex-1 overflow-auto overflow-x-hidden bg-background">
       <SpaceParticles :dense="false" :absolute="true" />
       <!-- Mobile header -->
-      <div class="flex items-center gap-3 border-b border-storm/20 px-4 py-4 md:hidden">
-        <button type="button" aria-label="Toggle navigation" aria-controls="polaris-sidebar" :aria-expanded="sidebarOpen" @click="sidebarOpen = !sidebarOpen" class="focus-ring text-silver transition-colors duration-200 hover:text-ice">
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+      <!-- One compact row: a 44px menu target, the wordmark and the page name. The drawer
+           already groups pages by section, so the header does not repeat it. -->
+      <div data-mobile-header class="flex min-h-14 items-center gap-2 border-b border-storm/20 px-2 py-1.5 @3xl:hidden">
+        <button ref="menuButton" type="button" aria-label="Toggle navigation" aria-controls="polaris-sidebar" :aria-expanded="sidebarOpen" @click="toggleSidebar" class="focus-ring inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-silver transition-colors duration-200 hover:bg-twilight/50 hover:text-ice">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
-        <div class="min-w-0">
-          <h1 class="text-lg font-bold text-ice flex items-center gap-2 leading-none">
-            <img src="/images/polaris-wordmark.svg?v=20260726" class="h-6 w-auto shrink-0 align-middle" alt="Polaris">
-          </h1>
-          <div class="text-xs text-storm truncate">{{ currentPageLabel }}</div>
-        </div>
-        <div class="ml-auto rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-[10px] font-medium text-storm">
-          {{ currentPageSection }}
-        </div>
+        <h1 class="flex min-w-0 max-w-[160px] items-center text-lg font-bold leading-none text-ice">
+          <img src="/images/polaris-wordmark.svg?v=20260726" class="h-6 w-auto max-w-full object-contain align-middle" alt="Polaris">
+        </h1>
+        <span aria-hidden="true" class="text-storm/60">/</span>
+        <span data-mobile-page-label class="min-w-0 truncate text-sm font-medium text-silver">{{ currentPageLabel }}</span>
       </div>
 
-      <div class="relative z-[1] mx-auto max-w-[1360px] px-5 py-5 md:px-6 md:py-6">
+      <div class="relative z-[1] mx-auto max-w-[1360px] px-5 py-5 @3xl:px-6 @3xl:py-6">
         <SettingsUnreadableBanner v-if="settingsBannerVisible" />
         <div :key="pageKey" class="page-enter">
           <router-view :key="$route.path" />
@@ -164,7 +167,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import CommandPalette from './CommandPalette.vue'
@@ -207,7 +210,6 @@ try {
 const navSections = computed(() => createNavSections(t, sidebarUpdateHost.value?.platform || ''))
 const currentNavItem = computed(() => getNavItemByPath(navSections.value, route.path))
 const currentPageLabel = computed(() => currentNavItem.value?.label || 'Polaris')
-const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 'Core')
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
 const displayVersion = computed(() => appVersion.value ? `v${appVersion.value}` : 'v...')
 const compactVersion = computed(() => appVersion.value ? appVersion.value.split('.')[0] : '...')
@@ -337,6 +339,20 @@ function toggleCollapse() {
   localStorage.setItem('sidebarCollapsed', sidebarCollapsed.value)
 }
 
+// The phone drawer takes focus when it opens, so keyboard users land on its first link rather than
+// behind it, and hands focus back to the menu button when Escape closes it. It reopens at its top:
+// it may have been left scrolled down to its footer, which would leave that first link off screen.
+const menuButton = ref(null)
+async function toggleSidebar() {
+  sidebarOpen.value = !sidebarOpen.value
+  if (!sidebarOpen.value) return
+  await nextTick()
+  const drawer = document.querySelector('#polaris-sidebar')
+  if (!drawer) return
+  drawer.scrollTop = 0
+  drawer.querySelector('a[href]')?.focus({ preventScroll: true })
+}
+
 function handleKeydown(e) {
   // Command palette
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
@@ -353,6 +369,8 @@ function handleKeydown(e) {
     }
     if (sidebarOpen.value) {
       sidebarOpen.value = false
+      // Only a visible menu button (the phone shell) takes focus back.
+      if (menuButton.value?.offsetParent) menuButton.value.focus()
       return
     }
   }
@@ -383,8 +401,9 @@ onUnmounted(() => {
 <style>
 @reference "./app.css";
 
+/* A badge (such as Preview) drops below its label when enlarged text leaves no room beside it. */
 .sidebar-link {
-  @apply flex items-center gap-3 px-3 py-2 rounded-lg no-underline
+  @apply flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 rounded-lg no-underline
          transition-[background-color,color,box-shadow] duration-200 relative
          hover:bg-twilight/60 hover:text-silver;
   color: var(--sidebar-fg);

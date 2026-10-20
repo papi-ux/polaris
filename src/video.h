@@ -19,8 +19,10 @@
 #include "video_rate.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,6 +37,7 @@ extern "C" {
 struct AVPacket;
 namespace config { struct video_t; }
 namespace stream_stats { struct capture_source_t; }
+namespace vrr_clock { class system_t; }
 
 namespace video {
 
@@ -74,7 +77,9 @@ namespace video {
     std::uint64_t session_generation = 0;  // Host-owned identity for source-frame diagnostics
     // What this session's capture request is measured against, taken as the session starts.
     capture_generation::request_context_t capture_request;
-
+    // Source-time pacing intent, frozen for this session generation at authenticated admission:
+    // the host's private opt-in and the client's request. Default: ineligible, so pacing is unchanged.
+    vrr_policy::pacing_intent_t vrr_pacing;
   };
 
   inline AVRational framerate_to_rational(const config_t &config) {
@@ -175,6 +180,8 @@ namespace video {
     native_handle_t native {};
     platf::frame_metadata_t source_metadata {};
     platf::frame_metadata_t metadata {};
+    /// The producer's provenance, copied whole; read-only for the frame's lifetime.
+    platf::image_provenance_t provenance {};
 
     frame_t() = default;
 
@@ -192,6 +199,7 @@ namespace video {
         native.fd = this->image->native_fd;
         source_metadata = this->image->frame_metadata;
         metadata = source_metadata;
+        provenance = this->image->provenance;
       }
     }
 
@@ -631,6 +639,15 @@ namespace video {
     // (T0->T1, T1->T2, T0->T2) from one thread without cross-thread
     // correlation.
     std::optional<std::chrono::steady_clock::time_point> encode_done_timestamp;
+    // Appended: true only for a source frame, or a recovery/liveness re-encode of a source frame's
+    // surface under its current authority, whose frame_timestamp is that pacing's emitted time.
+    // Readiness and any unproven surface are false.
+    bool source_time_paced = false;
+    // Appended: true for every packet resolved through a session's source-submission record (readiness,
+    // source, recovery, liveness and a later latched fallback alike), whose frame_timestamp is therefore
+    // in that record's emitted-time coordinates. A timestamp-coordinate fact only: never proof,
+    // authority or receiver VRR. Sessions that never record source submissions keep it false.
+    bool source_clock_timestamp = false;
   };
 
   struct packet_raw_avcodec: packet_raw_t {
@@ -1073,6 +1090,25 @@ namespace video {
                                           const std::shared_ptr<platf::display_t> &display,
                                           const stream_packets::destination_t &channel_data);
 
+  /**
+   * The same real parallel encode loop, fed by @p images instead of an empty queue, so a test can
+   * raise stamped images exactly as the capture thread would and read the packets it produces.
+   */
+  void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
+                                          const std::shared_ptr<platf::display_t> &display,
+                                          const stream_packets::destination_t &channel_data,
+                                          const img_event_t &images);
+
+  /// Run body with observer called right after each successful conversion in the parallel encode loop.
+  void with_after_convert_observer_for_tests(const std::function<void()> &observer,
+                                             const std::function<void()> &body);
+
+  /**
+   * Run body with the real software H.264 encoder selected, as a probe would select it, then restore
+   * the previous selection. False (body not run) when this build has no software H.264 encoder.
+   */
+  bool with_software_h264_for_tests(const std::function<void()> &body);
+
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type);
 
   struct encoder_probe_cache_snapshot_t {
@@ -1122,6 +1158,9 @@ namespace video {
     const probe_reuse::identity_t &identity,
     const std::function<bool(encoder_t &, bool)> &validate
   );
+
+  /// The avcodec packet decision used by validate_config(), without capture or a hardware encode.
+  int validate_avcodec_probe_packet_for_tests(const AVPacket *packet, AVCodecID codec, std::string_view encoder_name);
 
   /**
    * @brief Probe as probe_encoders_with_hooks_for_tests() does, with Auto planning for a GPU driven
@@ -1206,6 +1245,106 @@ namespace video {
     const frame_t &frame,
     std::optional<stream_stats::capture_source_t> &reported_source
   );
+
+  /// One capture epoch as the capture threads open it, after the given pushes were stamped.
+  struct capture_epoch_for_tests_t {
+    std::uint64_t epoch_id = 0;
+    platf::capture_timing_route_t route;
+    std::shared_ptr<const vrr_clock::proof_t> proof;
+  };
+
+  /**
+   * Open an epoch for disp exactly as both capture threads do, then stamp each (image, frame_captured)
+   * push in order with the production stamp. The proof, when the route has a presentation clock, is
+   * collected from the real kernel facts of disp's peer descriptor.
+   */
+  capture_epoch_for_tests_t open_capture_epoch_for_tests(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  );
+
+  /**
+   * One production epoch held open across calls, so a test can act between pushes (retire a lease,
+   * read the clock after the epoch started) exactly as a capture loop interleaves with the world.
+   * Opening and every push use the production open and stamp paths.
+   */
+  class capture_epoch_stepper_for_tests_t {
+  public:
+    /// The production open: the epoch reads the real kernel clocks and facts.
+    capture_epoch_stepper_for_tests_t(const platf::display_t &disp, std::uint64_t capture_generation_id);
+    /**
+     * Test-only: the epoch's collect() and every per-frame mapping read their facts and clock samples
+     * through clocks instead of the kernel. The stepper retains clocks for the epoch's whole life and
+     * releases it only after the epoch (and any authority it published) is closed. Limits, lease
+     * checks and pacing are unchanged. Throws std::invalid_argument when clocks is null.
+     */
+    capture_epoch_stepper_for_tests_t(const platf::display_t &disp, std::uint64_t capture_generation_id,
+                                      std::shared_ptr<vrr_clock::system_t> clocks);
+    ~capture_epoch_stepper_for_tests_t();
+    capture_epoch_stepper_for_tests_t(const capture_epoch_stepper_for_tests_t &) = delete;
+    capture_epoch_stepper_for_tests_t &operator=(const capture_epoch_stepper_for_tests_t &) = delete;
+
+    capture_epoch_for_tests_t opened() const;
+    /// The capture threads' push stamp for one (image, frame_captured).
+    void push(platf::img_t &img, bool frame_captured);
+    /// The epoch's saturating count of tracker sessions changing between mapped frames.
+    std::uint64_t baseline_changes() const;
+
+  private:
+    struct epoch_t;
+    std::unique_ptr<epoch_t> epoch_;
+  };
+
+  /// The reset both capture threads apply to a pooled image before handing it to a backend again.
+  void reset_pooled_image_for_tests(platf::img_t &img);
+
+  /**
+   * The production epoch allocator applied to a caller-owned allocator, so boundaries are tested
+   * without touching the process-wide one. Returns 0 once exhausted, permanently.
+   */
+  std::uint64_t allocate_capture_identity_for_tests(std::atomic<std::uint64_t> &allocator);
+
+  /// Stamp pushes with the production stamp from an epoch whose next sequence is seeded.
+  void stamp_seeded_epoch_for_tests(
+    std::uint64_t epoch_id,
+    std::uint64_t capture_generation_id,
+    std::uint64_t next_sequence,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  );
+
+  /**
+   * Feed provenances in order to one consumer's production accepted-capture recorder.
+   * @return How many reached a successful stream_stats::record_accepted_capture().
+   */
+  std::size_t record_accepted_captures_for_tests(
+    const config_t &config,
+    const std::vector<platf::image_provenance_t> &accepted
+  );
+
+  /**
+   * One production accepted-capture consumer that persists across calls, as an encode loop's does, so
+   * a test can register or retire its stats entry between an accepted image and the loop's retries.
+   */
+  class accepted_capture_consumer_for_tests_t {
+  public:
+    accepted_capture_consumer_for_tests_t();
+    ~accepted_capture_consumer_for_tests_t();
+    /// A newly accepted image, as the loop records it. @return Whether it was published now.
+    bool record(const config_t &config, const platf::image_provenance_t &provenance);
+    /// What an iteration that accepted no new image does. @return Whether the pending one was published.
+    bool retry(const config_t &config);
+    bool has_pending() const;
+
+  private:
+    struct state_t;
+    std::unique_ptr<state_t> state;
+  };
+
+  #ifdef __linux__
+  /// The clone a GPU conversion takes of a DMA-BUF compatibility image.
+  std::shared_ptr<platf::img_t> clone_compat_image_for_conversion_for_tests(const frame_t &frame);
+  #endif
 
   #ifdef __linux__
   /// What a session takes as it starts to measure its generation's capture request against.

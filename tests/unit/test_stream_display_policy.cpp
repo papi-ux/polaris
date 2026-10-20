@@ -1651,6 +1651,77 @@ TEST(StreamDisplayPolicyTests, CurrentModeOverrideReadsWhatCurrentModeCaptureRea
     << "an owned output keeps the configured backend";
 }
 
+TEST(StreamDisplayPolicyTests, DoctorNamesAConfiguredModeThisHostCannotEnter) {
+  // #152: a mode the host cannot enter is the one configured-host finding that is a warning, said
+  // before any stream. Its reason is the one the mode selector and a launch refusal already give,
+  // read from PATH here, which is why the case lives beside the PATH stand-ins.
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  struct EvaluationGuard {
+    ~EvaluationGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+      platf::set_capture_sources_missing_for_tests(false);
+    }
+  } evaluation_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  auto &d = config::video.linux_display;
+  set_loaded_capture_setting("kms");
+  d.stream_mode = "windowed_stream";
+  d.headless_mode = false;
+  d.use_cage_compositor = true;
+  d.private_runtime = "labwc";
+  config::video.capture = "kms";
+
+  const auto findings = [](std::string_view id) {
+    std::vector<nlohmann::json> found;
+    stream_stats::stats_t stats {};
+    const auto profile = stream_stats::linux_gpu_profile_json(stats);
+    for (const auto &warning : profile.at("configuration_warnings")) {
+      if (warning.value("id", std::string {}) == id) {
+        found.push_back(warning);
+      }
+    }
+    return found;
+  };
+
+  {
+    ScopedPrivateRuntimePath without_labwc {"wlr-randr"};
+    ASSERT_FALSE(stream_display_policy::selection_available("windowed_stream"));
+    const auto unavailable = findings("stream_mode_unavailable");
+    ASSERT_EQ(unavailable.size(), 1u);
+    const auto &finding = unavailable.front();
+    EXPECT_EQ(finding.at("severity"), "warning");
+    EXPECT_EQ(finding.at("stream_mode"), "windowed_stream");
+    EXPECT_EQ(finding.at("reason"), stream_display_policy::selection_unavailable_reason("windowed_stream"));
+    EXPECT_EQ(finding.at("reason"), "labwc binary not found on PATH");
+    const auto message = finding.at("message").get<std::string>();
+    EXPECT_NE(message.find("stream mode [windowed_stream] cannot be entered on this host: labwc binary not found on PATH"), std::string::npos);
+    EXPECT_NE(finding.at("action").get<std::string>().find("Install what the reason names"), std::string::npos);
+    EXPECT_FALSE(finding.contains("stale")) << "read from PATH now, not from the capture evaluation";
+    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u) << "the mode's own explanation stands beside it";
+  }
+  {
+    ScopedPrivateRuntimePath with_runtime;
+    ASSERT_TRUE(stream_display_policy::selection_available("windowed_stream"));
+    EXPECT_TRUE(findings("stream_mode_unavailable").empty());
+    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u);
+  }
+  {
+    // A mode the legacy booleans alone imply is the configured host mode too: a launch reads it
+    // the same way and is refused the same way, so the finding says so for it as well.
+    ScopedPrivateRuntimePath without_labwc {"wlr-randr"};
+    d.stream_mode.clear();
+    EXPECT_EQ(stream_display_policy::configured_selection(), "windowed_stream");
+    const auto unavailable = findings("stream_mode_unavailable");
+    ASSERT_EQ(unavailable.size(), 1u);
+    EXPECT_EQ(unavailable.front().at("severity"), "warning");
+    EXPECT_EQ(unavailable.front().at("stream_mode"), "windowed_stream");
+    EXPECT_EQ(unavailable.front().at("reason"), "labwc binary not found on PATH");
+    EXPECT_EQ(unavailable.front().at("reason"), stream_display_policy::selection_unavailable_reason("windowed_stream"));
+    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u) << "the mode rule reads the booleans too";
+  }
+}
+
 TEST(StreamDisplayPolicyTests, SessionTransitionOverrideNamesTheExplicitChoiceItDiscards) {
   using stream_display_policy::capture_session_transition_override;
 
@@ -1854,7 +1925,7 @@ TEST(StreamDisplayPolicyTests, EachEvaluationSaysOnceWhenTheModeSetsAnExplicitCa
     return lines_with(log.text(), "capture override:");
   };
 
-  // A private compositor mode streams through wlr whatever capture says: one warning, naming the
+  // A private compositor mode streams through wlr whatever capture says: one informational line, naming the
   // mode, the configured backend and the one it asks for instead.
   set_loaded_capture_setting("kms");
   d.stream_mode = "windowed_stream";
@@ -1863,7 +1934,13 @@ TEST(StreamDisplayPolicyTests, EachEvaluationSaysOnceWhenTheModeSetsAnExplicitCa
   platf::set_capture_backend_substitution_for_tests("");
   const auto windowed = said();
   EXPECT_EQ(std::count(windowed.begin(), windowed.end(), '\n'), 1) << windowed;
-  EXPECT_NE(windowed.find("Warning: "), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("Info: "), std::string::npos) << windowed;
+  EXPECT_EQ(windowed.find("Warning: "), std::string::npos) << windowed;
+  d.stream_mode = "headless_stream";
+  const auto headless = said();
+  EXPECT_NE(headless.find("Info: "), std::string::npos) << headless;
+  EXPECT_EQ(headless.find("Warning: "), std::string::npos) << headless;
+  EXPECT_NE(headless.find("[headless_stream]"), std::string::npos) << headless;
   EXPECT_NE(windowed.find("[windowed_stream]"), std::string::npos) << windowed;
   EXPECT_NE(windowed.find("asks for [wlr], not the configured [kms]"), std::string::npos) << windowed;
 
@@ -1924,7 +2001,8 @@ TEST(StreamDisplayPolicyTests, AnEvaluationNamesPolarisConfNotTheReplacementALoa
   ASSERT_EQ(config::video.capture, "portal");
   const auto explicit_kms = evaluate_in_windowed_stream();
   EXPECT_EQ(std::count(explicit_kms.begin(), explicit_kms.end(), '\n'), 1) << explicit_kms;
-  EXPECT_NE(explicit_kms.find("Warning: "), std::string::npos) << explicit_kms;
+  EXPECT_NE(explicit_kms.find("Info: "), std::string::npos) << explicit_kms;
+  EXPECT_EQ(explicit_kms.find("Warning: "), std::string::npos) << explicit_kms;
   EXPECT_NE(explicit_kms.find("asks for [wlr], not the configured [kms]"), std::string::npos) << explicit_kms;
   EXPECT_EQ(explicit_kms.find("[portal]"), std::string::npos) << explicit_kms;
 
@@ -1957,7 +2035,8 @@ TEST(StreamDisplayPolicyTests, ASessionTransitionMeasuresItsRewriteAgainstPolari
   auto logged = enter("host_virtual_display", "headless_stream");
   EXPECT_EQ(config::video.capture, "wlr");
   const auto warning = lines_with(logged, "capture override:");
-  EXPECT_NE(warning.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(warning.find("Info: "), std::string::npos) << logged;
+  EXPECT_EQ(warning.find("Warning: "), std::string::npos) << logged;
   EXPECT_NE(warning.find("stream mode [headless_stream] asks for [wlr], not the configured [kms]"), std::string::npos)
     << warning;
   EXPECT_NE(warning.find("for this session only"), std::string::npos) << warning;
@@ -1979,6 +2058,7 @@ TEST(StreamDisplayPolicyTests, ASessionTransitionMeasuresItsRewriteAgainstPolari
   config::video.capture = "kms";
   logged = enter("desktop_display", "gamescope_stream");
   EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_NE(lines_with(logged, "capture override:").find("Warning: "), std::string::npos) << logged;
   EXPECT_NE(lines_with(logged, "capture override:").find("asks for [portal], not the configured [kms]"), std::string::npos)
     << logged;
 

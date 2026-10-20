@@ -25,17 +25,25 @@ const messages = {
   'config.action_center': 'Action Center',
   'config.search_placeholder': 'Search settings',
   'config.pending_badge': 'Pending save',
-  'config.synced_badge': 'Synced',
+  'config.saved_badge': 'Saved',
+  'config.saved_live_badge': 'Saved · in use',
+  'config.saved_restart_needed_badge': 'Saved · restart needed',
+  'config.saved_restart_needed_note': 'Saved. Polaris uses these settings after it restarts.',
+  'config.saved_restart_needed_command_note': 'Saved. Polaris uses these settings after it restarts.',
+  'config.saved_live_note': 'Saved. Polaris is already using these settings.',
+  'config.save_and_restart': 'Save and restart Polaris',
+  'config.save_and_restart_disclosure': 'Save and restart Polaris disconnects any active streams while Polaris restarts.',
+  'config.restart_now': 'Restart Polaris',
+  'config.restarting': 'Restarting…',
   'config.reset_local': 'Reset Local Changes',
   '_common.save': 'Save',
-  '_common.apply': 'Apply',
   'config.settings_map_kicker': 'Settings Map',
   'config.settings_map_title': 'Tune Polaris by area',
   'config.settings_map_desc': 'Move between sections',
   'config.unsaved_banner': 'You have pending host changes.',
   'config.saved_banner': 'No pending host changes.',
-  'config.command_unsaved_note': 'Save stages your current edits.',
-  'config.command_saved_note': 'Browse by area or search for a setting.',
+  'config.command_unsaved_restart_note': 'Save writes your edits.',
+  'config.command_saved_restart_note': 'Browse by area or search for a setting.',
   'config.pending_changes_kicker': 'Pending changes',
   'config.pending_changes_title': 'Review local edits before saving',
   'config.pending_changes_desc': ({ count }) => `${count} local edit${count === 1 ? '' : 's'} ready to review.`,
@@ -45,7 +53,7 @@ const messages = {
   'config.pending_changes_after': 'After',
   'config.pending_changes_jump': 'Jump to setting',
   'config.pending_changes_reset_one': 'Reset this change',
-  'config.pending_changes_apply_required': 'Save + Apply restart required',
+  'config.pending_changes_restart_required': 'Takes effect after Save and restart Polaris',
   'config.pending_changes_live_apply': 'Applies after Save',
   'config.search_results': ({ query, count }) => `Showing ${query} in ${count}`,
   'config.sunshine_name': 'Polaris Name',
@@ -269,7 +277,7 @@ describe('ConfigView pending changes review', () => {
     expect(text).toContain('Polaris Name')
     expect(text).toContain('Old Host')
     expect(text).toContain('Nova Host')
-    expect(text).toContain('Save + Apply restart required')
+    expect(text).toContain('Takes effect after Save and restart Polaris')
     expect(text).toContain('Maximum Bitrate')
     expect(text).toContain('0')
     expect(text).toContain('50000')
@@ -538,6 +546,205 @@ describe('ConfigView when the host refuses its settings file', () => {
     expect(wrapper.find('[data-settings-unreadable]').exists()).toBe(false)
     expect(wrapper.find('[data-settings-loading]').exists()).toBe(false)
     expect(logged).toHaveBeenCalledWith(new Error('Config request failed with status 500'))
+    wrapper.unmount()
+  })
+})
+
+describe('ConfigView save and restart', () => {
+  afterEach(() => {
+    mockToast.mockClear()
+    vi.mocked(requestHostRestart).mockReset()
+    vi.mocked(requestHostRestart).mockImplementation(() => Promise.resolve())
+  })
+
+  const badge = (wrapper) => wrapper.find('[data-save-badge]').text()
+  const restartButton = (wrapper) => wrapper.find('[data-save-and-restart]')
+  const saveAnswer = (body) => ({ status: 200, json: async () => ({ status: true, configuration_revision: 'd'.repeat(64), ...body }) })
+
+  it('names the restart action and says before it that streams disconnect', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    expect(restartButton(wrapper).text()).toBe('Save and restart Polaris')
+    expect(wrapper.text()).not.toContain('Apply')
+    const disclosure = wrapper.find('[data-restart-disclosure]')
+    expect(disclosure.text()).toBe('Save and restart Polaris disconnects any active streams while Polaris restarts.')
+    expect(restartButton(wrapper).attributes('aria-describedby')).toBe(disclosure.attributes('id'))
+    // Nothing saved this visit: the form matches the file, which says nothing about what is live.
+    expect(badge(wrapper)).toBe('Saved')
+    expect(wrapper.text()).not.toContain('Synced')
+    expect(restartButton(wrapper).attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('keeps saved-but-needs-restart apart from saved and in use', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.config.sunshine_name = 'Nova Host'
+    await nextTick()
+    expect(badge(wrapper)).toBe('Pending save')
+
+    global.fetch.mockResolvedValueOnce(saveAnswer({ restart_required: true }))
+    await expect(wrapper.vm.save()).resolves.toBe(true)
+    await flushPromises()
+    expect(badge(wrapper)).toBe('Saved · restart needed')
+    expect(wrapper.find('[data-save-state]').attributes('data-save-state')).toBe('saved_restart_needed')
+    expect(wrapper.text()).toContain('Saved. Polaris uses these settings after it restarts.')
+    expect(mockToast).toHaveBeenCalledWith('Saved. Polaris uses these settings after it restarts.', 'success', 8000, expect.objectContaining({ label: 'Restart Polaris' }))
+    expect(restartButton(wrapper).attributes('disabled')).toBeUndefined()
+
+    // A later save the host applies live does not make the earlier change live.
+    wrapper.vm.config.max_bitrate = 42000
+    global.fetch.mockResolvedValueOnce(saveAnswer({ restart_required: false }))
+    await expect(wrapper.vm.save()).resolves.toBe(true)
+    await flushPromises()
+    expect(badge(wrapper)).toBe('Saved · restart needed')
+    expect(mockToast).not.toHaveBeenCalledWith('Saved. Polaris is already using these settings.', 'success', 5000)
+    wrapper.unmount()
+  })
+
+  it('says a live save is in use only when the host said so', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.config.max_bitrate = 42000
+    global.fetch.mockResolvedValueOnce(saveAnswer({ restart_required: false }))
+    await expect(wrapper.vm.save()).resolves.toBe(true)
+    await flushPromises()
+    expect(badge(wrapper)).toBe('Saved · in use')
+
+    // A host that predates live apply sends no restart_required: that save needs a restart.
+    wrapper.vm.config.max_bitrate = 43000
+    global.fetch.mockResolvedValueOnce(saveAnswer({}))
+    await wrapper.vm.save()
+    await flushPromises()
+    expect(badge(wrapper)).toBe('Saved · restart needed')
+    wrapper.unmount()
+  })
+
+  it('leaves edits pending when a save fails', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.config.sunshine_name = 'Nova Host'
+    global.fetch.mockResolvedValueOnce({ status: 412, text: async () => '' })
+    await expect(wrapper.vm.save()).resolves.toBe(false)
+    await flushPromises()
+    expect(badge(wrapper)).toBe('Pending save')
+    expect(mockToast).toHaveBeenCalledWith('Settings changed on the host. Refresh Settings and review your changes before saving.', 'error')
+    wrapper.unmount()
+  })
+
+  it('only marks the submitted values saved when the form changes during a save', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+    wrapper.vm.config.sunshine_name = 'Submitted host'
+    let finish
+    global.fetch.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const saving = wrapper.vm.save()
+    wrapper.vm.config.sunshine_name = 'Later edit'
+    finish({ status: 200, json: async () => ({ restart_required: false, configuration_revision: 'new-revision' }) })
+    await expect(saving).resolves.toBe(true)
+    await flushPromises()
+    expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+    expect(badge(wrapper)).toBe('Pending save')
+    expect(wrapper.vm.pendingChanges.find(change => change.key === 'sunshine_name')).toMatchObject({ before: 'Submitted host', after: 'Later edit' })
+    wrapper.unmount()
+  })
+
+  it('clears the restart-needed state only once the restart it asked for is ready', async () => {
+    let callbacks
+    vi.mocked(requestHostRestart).mockImplementation((value) => {
+      callbacks = value
+      return Promise.resolve()
+    })
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.config.sunshine_name = 'Nova Host'
+    global.fetch.mockResolvedValueOnce(saveAnswer({ restart_required: true }))
+    wrapper.vm.apply()
+    await flushPromises()
+    expect(badge(wrapper)).toBe('Restarting…')
+    expect(restartButton(wrapper).text()).toBe('Restarting…')
+
+    callbacks.onTimeout()
+    await nextTick()
+    // A restart that did not report back may not have happened.
+    expect(badge(wrapper)).toBe('Saved · restart needed')
+
+    global.fetch.mockResolvedValueOnce(saveAnswer({ restart_required: true }))
+    wrapper.vm.apply()
+    await flushPromises()
+    callbacks.onReady({})
+    await flushPromises()
+    expect(badge(wrapper)).toBe('Saved')
+    wrapper.unmount()
+  })
+})
+
+describe('ConfigView PyroWave and source pacing registration', () => {
+  const posted = () => {
+    const call = global.fetch.mock.calls.find(([, options]) => options?.method === 'POST')
+    return call ? JSON.parse(call[1].body) : null
+  }
+
+  it('finds the PyroWave card from search and opens it above the encoder switcher', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.searchQuery = 'pyrowave'
+    await flushPromises()
+    expect(wrapper.vm.currentTab).toBe('nv')
+    expect(wrapper.vm.matchedOptionByTab.nv).toBe('pyrowave')
+    const card = wrapper.findComponent({ name: 'PyroWaveCard' })
+    expect(card.exists()).toBe(true)
+    expect(card.props('platform')).toBe('linux')
+
+    // A codec search in general is not a PyroWave search.
+    wrapper.vm.searchQuery = 'codec'
+    await flushPromises()
+    expect(wrapper.vm.matchedOptionByTab.nv).not.toBe('pyrowave')
+    wrapper.unmount()
+  })
+
+  it('offers no PyroWave search off Linux, where the card never shows', async () => {
+    const wrapper = mountConfigView({ platform: 'windows' })
+    await flushConfigLoad()
+
+    wrapper.vm.searchQuery = 'pyrowave'
+    await flushPromises()
+    expect(wrapper.vm.matchingTabs).toEqual([])
+    wrapper.unmount()
+  })
+
+  it.each(['vrr', 'source pacing', 'variable refresh rate'])('finds source pacing on Audio/Video from "%s"', async (query) => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+
+    wrapper.vm.searchQuery = query
+    await flushPromises()
+    expect(wrapper.vm.currentTab).toBe('av')
+    expect(wrapper.vm.matchedOptionByTab.av).toBe('vrr_source_pacing')
+    wrapper.unmount()
+  })
+
+  it('keeps source pacing off by default and writes it only when turned on', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+    expect(wrapper.vm.config.vrr_source_pacing).toBe('disabled')
+
+    wrapper.vm.config.max_bitrate = 42000
+    await wrapper.vm.save()
+    await flushPromises()
+    expect(posted()).not.toHaveProperty('vrr_source_pacing')
+
+    global.fetch.mockClear()
+    wrapper.vm.config.vrr_source_pacing = 'enabled'
+    await wrapper.vm.save()
+    await flushPromises()
+    expect(posted().vrr_source_pacing).toBe('enabled')
     wrapper.unmount()
   })
 })

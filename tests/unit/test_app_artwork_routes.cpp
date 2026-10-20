@@ -42,7 +42,7 @@ namespace {
 TEST(AppArtworkRoutes, ReadOnlyAnAppUuidFromASmallObject) {
   using confighttp::decode_app_artwork_request;
   EXPECT_EQ(decode_app_artwork_request(std::string(R"({"uuid":")") + APP_UUID + R"("})"), APP_UUID);
-  for (const std::string body : {
+  for (const std::string &body : {
          std::string {}, std::string {"null"}, std::string {"[]"}, std::string {"{}"}, std::string {"{"},
          std::string {R"({"uuid":7})"}, std::string {R"({"uuid":"not-a-uuid"})"},
          std::string(R"({"UUID":")") + APP_UUID + R"("})",
@@ -107,6 +107,59 @@ TEST(AppArtworkRoutes, RoutesNeedTheConsoleSessionCsrfAndJson) {
   EXPECT_NE(reader.find("return app->uuid;"), std::string::npos);
   EXPECT_NE(source.find(R"(file_tree["artwork_lookup_off"] = apps_with_artwork_lookup_off(platf::appdata(), file_tree);)"),
             std::string::npos);
+}
+
+TEST(AppArtworkRoutes, LibraryArtworkIsReadLocallyAndFilledOnlyFromSteamInTheBackground) {
+  const auto source = read_source("src/confighttp.cpp");
+  // Registered by start() with its own fill workers, stopped and drained with the cover lookups.
+  const auto registration = handler_body(source, "void registerLibraryArtwork(");
+  EXPECT_NE(registration.find(R"(server.resource["^/api/apps/([^/]+)/artwork/(hero|logo)$"]["GET"])"), std::string::npos);
+  const auto start = handler_body(source, "  void start() {");
+  for (const auto *step : {
+         "cover_lookup::workers_t library_artwork_fills;",
+         "registerLibraryArtwork(server, library_artwork_fills);",
+         "library_artwork_fills.stop_accepting();",
+         "library_artwork_fills.shutdown();",
+       }) {
+    EXPECT_NE(start.find(step), std::string::npos) << step;
+  }
+  EXPECT_LT(start.find("library_artwork_fills.stop_accepting();"), start.find("server.stop();"));
+
+  // The handler authenticates first, reads under the override gate, and starts a fill only after
+  // releasing it. It never touches the network itself.
+  const auto route = handler_body(source, "void getLibraryArtwork(");
+  const auto authenticated = route.find("if (!authenticate(response, request)) return;");
+  const auto gate = route.find("game_artwork::acquire_artwork_override_read_lock()");
+  const auto read = route.find("game_artwork::find_cached_asset(");
+  const auto fill = route.find("schedule_library_artwork_fill(");
+  ASSERT_NE(authenticated, std::string::npos);
+  ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(read, std::string::npos);
+  ASSERT_NE(fill, std::string::npos);
+  EXPECT_LT(authenticated, route.find("proc::proc.get_apps()"));
+  EXPECT_LT(gate, read);
+  const auto scope = route.find("\n    {\n      auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();");
+  ASSERT_NE(scope, std::string::npos);
+  EXPECT_LT(route.find("\n    }\n", scope), fill) << "The fill starts after the read gate is released";
+  EXPECT_NE(route.find("proc::uses_bundled_utility_artwork(*app)"), std::string::npos);
+  EXPECT_NE(route.find(R"(request->header.find("If-None-Match"))"), std::string::npos);
+  EXPECT_EQ(route.find("max-age"), std::string::npos);
+  for (const auto *forbidden : {"execute_download_plan", "artwork_transport", "steamgriddb_api_key", "curl_"}) {
+    EXPECT_EQ(route.find(forbidden), std::string::npos) << forbidden;
+  }
+
+  // A fill uses no SteamGridDB key and reaches only the plan, which is Steam's public CDN.
+  const auto transport = handler_body(source, "game_artwork::providers::transport_t library_artwork_transport() {", "\n    }\n");
+  EXPECT_NE(transport.find("return nvhttp::artwork_transport({});"), std::string::npos);
+  EXPECT_EQ(transport.find("steamgriddb_api_key"), std::string::npos);
+  const auto schedule = handler_body(source, "void schedule_library_artwork_fill(", "\n    }\n");
+  EXPECT_NE(schedule.find("workers.submit_completion("), std::string::npos);
+  EXPECT_NE(schedule.find("ticket->cancelled()"), std::string::npos);
+  EXPECT_EQ(schedule.find("steamgriddb"), std::string::npos);
+  const auto plan = handler_body(source, "std::vector<game_artwork::providers::request_t> library_artwork_fill_plan(");
+  EXPECT_NE(plan.find("game_artwork::providers::plan_steam_assets(app.steam_appid)"), std::string::npos);
+  EXPECT_NE(plan.find("game_artwork::automatic_artwork_lookup_enabled(appdata, app.uuid)"), std::string::npos);
+  EXPECT_NE(plan.find("proc::uses_bundled_utility_artwork(app)"), std::string::npos);
 }
 
 TEST(AppCoverImage, ANewCoverUnderTheSameEntryNameIsFetchedAgain) {

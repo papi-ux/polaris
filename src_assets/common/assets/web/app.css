@@ -39,6 +39,10 @@
   --color-ice: #c8d6e5;
   --color-silver: #a8b0b8;
   --color-storm: #7a8e95;
+  /* Supporting copy a reader decides with: descriptions, help text, consequences.
+     Storm stays the meta and caption tier; this role holds 4.5:1 on both the
+     card base and deep, the lightest grounds copy sits on. */
+  --color-support: #a1abb3;
   --color-twilight: #4c5265;
   --color-deep: #393c51;
   --color-void: #2a2840;
@@ -116,6 +120,7 @@
   /* Nova's #555e66 sits at 2.99:1 on the solid card base; one step lighter
      clears the 3:1 large-text floor the theme suite enforces. */
   --color-storm: #5a636c;
+  --color-support: #818a92;
   --color-twilight: #1a1a22;
   --color-deep: #000000;
   --color-void: #000000;
@@ -195,6 +200,13 @@ textarea {
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--edge-glass);
+}
+
+/* A surface nested in another glass surface sits on an already blurred,
+   near-opaque ground, so a second backdrop blur only costs compositing. */
+:is(.glass, .card, .section-card, .config-page .settings-section) :is(.glass, .card, .section-card, .header-support-card, .config-page .settings-section) {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* ── Card System ── */
@@ -297,7 +309,7 @@ textarea {
 }
 
 .page-subtitle {
-  @apply mt-2 max-w-3xl text-sm leading-relaxed text-storm;
+  @apply mt-2 max-w-3xl text-sm leading-relaxed text-support;
 }
 
 .page-meta {
@@ -356,7 +368,7 @@ textarea {
 }
 
 .header-support-copy {
-  @apply mt-1 text-xs leading-relaxed text-storm;
+  @apply mt-1 text-[13px] leading-relaxed text-support;
 }
 
 .security-header-card {
@@ -1006,7 +1018,7 @@ textarea {
 }
 
 .settings-field-label {
-  @apply block text-sm font-medium text-storm;
+  @apply block text-sm font-medium text-support;
 }
 
 .settings-toggle-row {
@@ -1189,7 +1201,7 @@ textarea {
   }
 
   .settings-summary-copy {
-    @apply mt-1 text-sm leading-relaxed text-storm;
+    @apply mt-1 text-sm leading-relaxed text-support;
   }
 
   /* Interactive choice cards: pointer + hover motion when enabled, inert when not.
@@ -1215,7 +1227,7 @@ textarea {
 }
 
 .stat-tile {
-  @apply rounded-2xl border border-storm/20 bg-deep/40 p-4;
+  @apply rounded-xl border border-storm/20 bg-deep/40 p-4;
 }
 
 .stat-kicker {
@@ -1227,11 +1239,12 @@ textarea {
 }
 
 .stat-copy {
-  @apply mt-2 text-sm leading-relaxed text-storm;
+  @apply mt-2 text-sm leading-relaxed text-support;
 }
 
 .section-card {
-  @apply p-5;
+  min-width: 0;
+  @apply p-4 sm:p-5;
   background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1250,11 +1263,6 @@ textarea {
   color: var(--color-accent);
 }
 
-[data-dashboard-idle-hero],
-.dashboard-live-shell {
-  box-shadow: var(--shadow-glow-lg);
-}
-
 /* Doctor verdict card: the traffic light paints the left stripe. */
 .dashboard-doctor-card {
   @apply rounded-xl border p-4;
@@ -1264,7 +1272,7 @@ textarea {
 
 /* Strip grade badge and stage LIVE badge. */
 .dashboard-grade-badge {
-  @apply inline-flex h-9 min-w-9 items-center justify-center rounded-lg border-2 border-current px-2 font-mono text-xl font-bold leading-none;
+  @apply inline-flex h-7 min-w-7 items-center justify-center self-center rounded-md border-[1.5px] border-current px-1.5 font-mono text-base font-bold leading-none;
 }
 
 .dashboard-preview-live-badge {
@@ -1292,7 +1300,7 @@ textarea {
 
 /* Sparkline slot inside each instrument-strip tile. */
 .dashboard-strip-spark {
-  @apply h-8 w-36;
+  @apply h-8 w-full;
 }
 
 /* Inert Doctor advice: unmistakably not a button. */
@@ -1300,34 +1308,12 @@ textarea {
   @apply font-mono text-[11px] text-storm underline decoration-dashed decoration-storm/50 underline-offset-4;
 }
 
-/* Play rail: compact launchable game tiles. */
-.dashboard-play-tile {
-  @apply flex min-w-0 flex-col rounded-xl border p-2.5;
-  background: var(--surface-raised);
-  border-color: var(--edge-raised);
-}
-
-.dashboard-play-cover {
-  @apply relative h-24 w-full overflow-hidden rounded-lg bg-void/60;
-}
-
-.dashboard-play-cover-fallback {
-  @apply absolute inset-0 flex items-center justify-center text-storm/45;
-  background:
-    radial-gradient(circle at 50% 20%, color-mix(in srgb, var(--color-ice) 10%, transparent), transparent 58%),
-    color-mix(in srgb, var(--color-deep) 82%, var(--color-void));
-}
-
-.dashboard-play-launch {
-  @apply mt-2 inline-flex h-7 w-full items-center justify-center rounded-lg border border-accent/40 font-mono text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50;
-}
-
 .section-title {
   @apply mt-2 text-xl font-semibold text-silver text-balance;
 }
 
 .section-copy {
-  @apply mt-2 text-sm leading-relaxed text-storm;
+  @apply mt-2 text-sm leading-relaxed text-support;
 }
 
 .section-grid {
@@ -1335,7 +1321,10 @@ textarea {
 }
 
 .surface-subtle {
-  @apply rounded-2xl border;
+  min-width: 0;
+  /* Whole words first; only a token longer than the card (a path or hash) breaks. */
+  overflow-wrap: break-word;
+  @apply rounded-xl border;
   background: var(--surface-raised);
   border-color: var(--edge-raised);
 }
@@ -1345,7 +1334,7 @@ textarea {
 }
 
 .action-tile {
-  @apply rounded-2xl border p-4 no-underline;
+  @apply rounded-xl border p-4 no-underline;
   background: var(--surface-raised);
   border-color: var(--edge-raised);
   transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
@@ -1372,7 +1361,12 @@ textarea {
 
 /* ── Theme Picker ── */
 .theme-picker-panel {
-  @apply absolute bottom-full left-0 z-[120] mb-2 flex min-w-[264px] flex-col gap-1 rounded-xl p-2;
+  /* Placed by ThemeToggle from its button; these limits are the fallback before the first placement. */
+  @apply fixed bottom-4 left-4 z-[120] flex min-w-[264px] flex-col gap-1 rounded-xl p-2;
+  max-height: min(30rem, 70dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  max-width: calc(100vw - 2rem);
   background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1383,6 +1377,23 @@ textarea {
 .theme-picker-option {
   @apply flex w-full items-center gap-3 rounded-lg px-2.5 py-2 transition-[background-color,border-color] duration-150;
   border: 1px solid transparent;
+}
+
+/* Names are read whole: they wrap (balanced) instead of ending in an ellipsis, and the
+   Current badge drops below a name that needs the room. A word breaks only when it is
+   wider than the option can ever give it, as with enlarged text on a phone. */
+.theme-picker-text {
+  @apply min-w-0 flex-1 text-left;
+}
+
+.theme-picker-heading {
+  @apply flex flex-wrap items-center gap-x-2 gap-y-0.5;
+}
+
+.theme-picker-label {
+  @apply min-w-0 text-sm font-semibold text-silver;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 .theme-picker-option:hover {
@@ -1412,7 +1423,7 @@ textarea {
 }
 
 .theme-picker-current {
-  @apply shrink-0 rounded border px-1 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em];
+  @apply ml-auto shrink-0 rounded border px-1 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em];
   color: var(--color-accent);
   border-color: color-mix(in srgb, var(--color-accent) 50%, transparent);
 }
@@ -1561,9 +1572,7 @@ textarea {
   @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-2;
 }
 
-.operator-console .dashboard-preview-panel,
 .operator-console .dashboard-preview-frame,
-.operator-console .dashboard-client-row,
 .operator-console .settings-subtle-surface {
   border-radius: 0.5rem;
 }
@@ -1916,16 +1925,26 @@ textarea {
   @apply min-w-0;
 }
 
+/* On a short screen (a landscape phone, or enlarged text) a pinned action bar can be taller than
+   the viewport and hide its own buttons, so it scrolls with the page there too. */
+@media (max-height: 40rem) {
+  .settings-command-bar.sticky {
+    position: static;
+    top: auto;
+    z-index: auto;
+  }
+}
+
 .settings-command-title {
   @apply mt-1 text-sm font-semibold text-silver;
 }
 
 .settings-command-note {
-  @apply mt-1 max-w-2xl text-xs leading-relaxed text-storm;
+  @apply mt-1 max-w-2xl text-[13px] leading-relaxed text-support;
 }
 
 .settings-command-tools {
-  @apply grid min-w-0 gap-2 sm:grid-cols-[auto_minmax(180px,1fr)_auto] sm:items-center;
+  @apply grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 sm:grid-cols-[auto_minmax(180px,1fr)];
 }
 
 .settings-command-meta {
@@ -1937,11 +1956,11 @@ textarea {
 }
 
 .settings-command-actions {
-  @apply flex flex-wrap items-center gap-2 sm:flex-nowrap sm:justify-end;
+  @apply col-span-full flex flex-wrap items-center gap-2 sm:justify-end;
 }
 
 .settings-action-button {
-  @apply inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex max-w-full min-h-11 sm:min-h-10 items-center justify-center whitespace-normal rounded-xl px-4 py-2 text-center text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .settings-action-button-secondary {
@@ -2021,7 +2040,22 @@ textarea {
 }
 
 .settings-tab-copy {
-  @apply mt-1 max-w-3xl text-sm leading-relaxed text-storm;
+  @apply mt-1 max-w-3xl text-sm leading-relaxed text-support;
+}
+
+/* Settings panels write their help text with inline text-storm utilities.
+   Inside the panel that copy is what a reader decides with, so it takes the
+   supporting role; faded variants (text-storm/60 and the like) stay subdued,
+   and 12px help paragraphs step up to 13px. This rule is unlayered and so
+   outranks Tailwind's layered utilities: elements that carry their own state
+   colours (hover:, focus:, group-hover:, peer-) are left to them. */
+.settings-tab-content .text-storm:not([class*="hover:"], [class*="focus:"], [class*="group-"], [class*="peer-"]) {
+  color: var(--color-support);
+}
+
+.settings-tab-content p.text-xs.text-storm:not([class*=":text-"]) {
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
 }
 
 .settings-tab-meta {
@@ -2059,7 +2093,7 @@ textarea {
 }
 
 .config-page .settings-section {
-  @apply p-5;
+  @apply p-4 sm:p-5;
   background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -2081,7 +2115,7 @@ textarea {
 }
 
 .config-page .settings-section-copy {
-  @apply mt-1 text-sm leading-relaxed text-storm;
+  @apply mt-1 text-sm leading-relaxed text-support;
 }
 
 .config-page .settings-form-grid {
@@ -2098,68 +2132,6 @@ textarea {
 
 .config-page .settings-warning-surface {
   @apply rounded-2xl border border-warning/25 bg-warning/5 p-4 text-sm text-warning-bright;
-}
-
-.dashboard-live-shell {
-  @apply space-y-5;
-}
-
-.dashboard-live-header {
-  @apply flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between;
-}
-
-.dashboard-live-header-copy {
-  @apply min-w-0;
-}
-
-.dashboard-live-header-meta {
-  @apply flex flex-wrap gap-2 xl:justify-end;
-}
-
-.dashboard-live-summary-grid {
-  /* Instrument strip: bare figures over mono labels, no tile boxes. */
-  @apply flex flex-wrap items-start gap-x-10 gap-y-4;
-}
-
-.dashboard-live-summary-tile {
-  @apply flex min-w-[5.5rem] flex-col-reverse gap-1 border-0 bg-transparent p-0;
-}
-
-.dashboard-live-summary-label {
-  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
-.dashboard-live-summary-value {
-  @apply truncate font-mono text-[1.65rem] font-bold leading-none tracking-tight tabular-nums;
-}
-
-.dashboard-live-stage {
-  @apply grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.95fr)];
-  align-items: start;
-}
-
-.dashboard-live-stage.is-preview-expanded {
-  @apply xl:grid-cols-[minmax(0,1.8fr)_minmax(320px,0.85fr)];
-}
-
-.dashboard-live-stage.is-preview-hidden {
-  @apply xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,1fr)];
-}
-
-.dashboard-preview-panel {
-  @apply rounded-2xl border border-storm/20 bg-deep/35 p-4;
-}
-
-.dashboard-live-main {
-  @apply space-y-4;
-}
-
-.dashboard-preview-header {
-  @apply flex flex-col gap-3 md:flex-row md:items-start md:justify-between;
-}
-
-.dashboard-preview-actions {
-  @apply flex flex-wrap items-center gap-2 md:justify-end;
 }
 
 .dashboard-action-button {
@@ -2183,7 +2155,7 @@ textarea {
 }
 
 .dashboard-preview-frame {
-  @apply relative mt-4 aspect-video overflow-hidden rounded-2xl border border-storm/20 bg-void/80;
+  @apply relative aspect-video overflow-hidden rounded-2xl border border-storm/20 bg-void/80;
 }
 
 .dashboard-preview-frame.has-error {
@@ -2202,69 +2174,1111 @@ textarea {
   @apply text-silver;
 }
 
-.dashboard-preview-footer {
-  @apply mt-3 space-y-3;
-}
-
 .dashboard-preview-meta {
   @apply flex flex-wrap gap-2;
-}
-
-.dashboard-live-side {
-  @apply space-y-4;
-  align-self: start;
-}
-
-.dashboard-runtime-grid {
-  @apply mt-3 grid gap-3 sm:grid-cols-2;
-}
-
-.dashboard-runtime-row {
-  @apply rounded-xl border border-storm/15 bg-void/35 px-3 py-2.5;
-}
-
-.dashboard-runtime-label {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
-.dashboard-runtime-pill-grid {
-  @apply mt-3 flex flex-wrap gap-2;
-}
-
-.dashboard-runtime-pill {
-  @apply inline-flex items-center gap-2 rounded-full border border-storm/15 bg-void/35 px-3 py-1.5;
-}
-
-.dashboard-client-row {
-  @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2;
-}
-
-.dashboard-live-support-grid {
-  @apply grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)];
-}
-
-.dashboard-context-card {
-  @apply space-y-4;
-}
-
-.dashboard-context-section {
-  @apply space-y-3 border-t border-storm/15 pt-4 first:border-t-0 first:pt-0;
-}
-
-.dashboard-context-header {
-  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-rail-footnote {
   @apply mt-3 text-[11px] text-storm;
 }
 
-.dashboard-telemetry-grid {
-  @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
+/* ── Mission Control: one stage per state, then the deck ──
+   The stage is a title card: library artwork behind a stable dark scrim, the title, one main
+   action, the route and the readings on its lower edge. Every colour is a theme token, so each
+   theme keeps its own identity; Director stays near-black with no particles or glow. Component
+   rules sit in the components layer so tone utilities (text-success, text-warning-bright) still
+   colour them; the unlayered rules after it only adjust the existing unlayered dashboard rules. */
+@layer components {
+  .mc-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  /* Eyebrow labels share one mono, tracked, uppercase voice; each rule sets only size and tone. */
+  .mc-stage-top,
+  .mc-kicker,
+  .mc-panel-label,
+  .mc-node-role,
+  .mc-signal-label,
+  .mc-diag-section-title {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+  }
+
+  .mc-stage {
+    container: mc-stage / inline-size;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--color-deep);
+    color: var(--color-ice);
+    box-shadow: 0 2rem 4rem -2rem rgb(0 0 0 / 0.75);
+  }
+
+  /* The stage sizes to its content. Only the loading stage holds a height, so the first report
+     does not collapse the page. */
+  .mc-stage.is-loading {
+    min-height: 18rem;
+  }
+
+  .mc-stage-art {
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: linear-gradient(160deg, var(--color-deep), var(--color-void));
+  }
+
+  /* Each artwork layer fades in once loaded, over the one leaving. The backdrop is a softened,
+     darkened copy of the cover that settles once as it arrives; nothing loops. */
+  .mc-stage-backdrop,
+  .mc-keyart img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0;
+    transition: opacity 0.35s ease, transform 1.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .mc-stage-backdrop {
+    transform: scale(1.1);
+    filter: blur(14px) saturate(1.05) brightness(0.55);
+  }
+
+  .mc-stage-backdrop.is-loaded {
+    transform: scale(1.04);
+  }
+
+  /* A Steam background is composed to sit behind a title: shown sharp, only darkened. */
+  .mc-stage-backdrop.is-hero {
+    filter: saturate(1.05) brightness(0.6);
+  }
+
+  .mc-stage-backdrop.is-loaded,
+  .mc-keyart img.is-loaded {
+    opacity: 1;
+  }
+
+  .mc-stage img.mc-xfade-enter-from,
+  .mc-stage img.mc-xfade-leave-to {
+    opacity: 0;
+  }
+
+  /* The copy sits under the art on a narrow stage, so the scrim darkens from the bottom. */
+  .mc-stage-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: linear-gradient(0deg, var(--color-void) 50%, color-mix(in srgb, var(--color-void) 72%, transparent));
+  }
+
+  .mc-stage-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem 1rem;
+    padding: 1rem 1.25rem 0;
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--color-silver);
+  }
+
+  .mc-slate {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .mc-marker {
+    flex: none;
+    width: 0.6rem;
+    height: 0.6rem;
+    border: 1.5px solid var(--color-storm);
+    border-radius: 9999px;
+  }
+
+  /* The live marker is the page's only looping motion: a 2.4 s pulse, static under reduced motion. */
+  .mc-marker.is-live {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    animation: mc-live-pulse 2.4s ease-out infinite;
+  }
+
+  .mc-marker.is-unavailable {
+    border-style: dashed;
+    border-color: var(--color-warning);
+  }
+
+  .mc-marker.is-loading {
+    border-style: dotted;
+  }
+
+  /* Durations and ages keep their own case: "12 min", not "12 MIN". */
+  .mc-timecode {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Copy, key art and route centre on each other, so a taller route never leaves a dead band
+     above the title. */
+  .mc-stage-body {
+    flex: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    align-content: center;
+    gap: 1.25rem 2rem;
+    padding: 1.25rem;
+  }
+
+  .mc-keyart {
+    position: relative;
+    flex: none;
+    width: min(8rem, 36cqi, 26vh);
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border: 1px solid var(--edge-raised);
+    border-radius: 0.5rem;
+    background: var(--color-deep);
+    box-shadow: 0 1.25rem 2.5rem -1.25rem rgb(0 0 0 / 0.85);
+  }
+
+  .mc-stage-copy {
+    flex: 999 1 20rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-stage-aside {
+    flex: 1 1 18rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-kicker {
+    font-size: 0.8125rem;
+    line-height: 1.3;
+    color: var(--color-support);
+  }
+
+  /* Titles step down by length and wrap; they are never truncated. Sizes are in rem, so
+     enlarged text enlarges them too. */
+  .mc-stage-title {
+    margin: 0.45rem 0 0;
+    font-family: var(--font-sans);
+    font-size: clamp(2.25rem, 1.5rem + 3.2cqi, 4.75rem);
+    font-weight: 800;
+    line-height: 0.95;
+    letter-spacing: -0.035em;
+    color: var(--color-ice);
+    text-wrap: balance;
+    overflow-wrap: break-word;
+    hyphens: auto;
+  }
+
+  .mc-stage-title.is-full {
+    text-transform: uppercase;
+    letter-spacing: -0.04em;
+    line-height: 0.9;
+  }
+
+  .mc-stage-title.is-medium {
+    font-size: clamp(1.85rem, 1.25rem + 2.4cqi, 3.5rem);
+  }
+
+  .mc-stage-title.is-long {
+    font-size: clamp(1.5rem, 1.1rem + 1.6cqi, 2.6rem);
+    line-height: 1.05;
+  }
+
+  /* A logo keeps its own proportions, growing with the stage and with enlarged text. */
+  .mc-stage-logo {
+    display: block;
+    max-width: min(28rem, 100%);
+    max-height: clamp(4.5rem, 2.5rem + 9cqi, 8.5rem);
+    object-fit: contain;
+    object-position: left bottom;
+    filter: drop-shadow(0 0.25rem 1rem rgb(0 0 0 / 0.55));
+  }
+
+  .mc-rule {
+    display: block;
+    width: 3rem;
+    height: 3px;
+    margin: 1rem 0 0.85rem;
+    background: var(--color-accent);
+  }
+
+  .mc-stage-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.4;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Each separator stays with the item before it, so a wrapped line never starts with "/". */
+  .mc-stage-meta span:not(:last-child)::after {
+    content: "/";
+    margin: 0 0.6rem;
+    color: var(--color-storm);
+  }
+
+  .mc-stage-note {
+    margin: 0.75rem 0 0;
+    max-width: 42rem;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    color: var(--color-silver);
+  }
+
+  .mc-stage-reason {
+    margin: 0.5rem 0 0;
+    max-width: 42rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--color-support);
+  }
+
+  .mc-signals-loading {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
+    gap: 0.75rem;
+    padding: 0 1.25rem 1.25rem;
+  }
+
+  /* The live preview takes the key art's place inside the stage, only on request: the whole
+     captured frame at its own aspect ratio, never cropped, blurred or used as a backdrop. */
+  .mc-stage-preview {
+    flex: 1 1 22rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-stage-preview.is-expanded {
+    flex-basis: 100%;
+    order: 4;
+  }
+
+  /* Route: host, then stream, then client. */
+  .mc-route {
+    min-width: 0;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--edge-raised);
+    border-radius: 0.5rem;
+    background: var(--surface-card);
+  }
+
+  .mc-panel-label {
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-bracket {
+    font-weight: 400;
+    color: var(--color-accent);
+  }
+
+  .mc-route-list {
+    margin: 0.85rem 0 0;
+  }
+
+  .mc-node {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1rem minmax(0, 1fr);
+    gap: 0.65rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .mc-node::before {
+    content: "";
+    position: absolute;
+    top: 1.15rem;
+    bottom: 0;
+    left: 0.31rem;
+    width: 1px;
+    background: var(--edge-raised);
+  }
+
+  .mc-node:last-child {
+    padding-bottom: 0;
+  }
+
+  .mc-node:last-child::before {
+    display: none;
+  }
+
+  .mc-node-marker {
+    width: 0.65rem;
+    height: 0.65rem;
+    margin-top: 0.3rem;
+    border: 1.5px solid var(--color-silver);
+    background: var(--color-deep);
+    transform: rotate(45deg);
+  }
+
+  .mc-node.is-live .mc-node-marker {
+    border-color: var(--color-accent);
+    background: var(--color-accent);
+  }
+
+  .mc-node.is-unknown .mc-node-marker {
+    border-style: dashed;
+    border-color: var(--color-storm);
+  }
+
+  .mc-node-role {
+    font-size: 0.6875rem;
+    line-height: 1.3;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-node-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.25rem 0 0.2rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-node-badge {
+    padding: 0.05rem 0.4rem;
+    border: 1px solid currentColor;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--color-accent);
+  }
+
+  .mc-node-detail {
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+
+  .mc-node-detail + .mc-node-detail {
+    margin-top: 0.15rem;
+  }
+
+  .mc-route-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-top: 1rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--edge-card);
+  }
+
+  /* Signal strip: compact and truthful; a missing value is a dash with its reason. */
+  /* Small supporting copy: the readable support tone, wrapping anywhere rather than overflowing. */
+  .mc-node-detail,
+  .mc-signal-sub,
+  .mc-check-detail,
+  .mc-diag-summary {
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signals-wrap {
+    position: relative;
+    border-top: 1px solid var(--edge-raised);
+    background: linear-gradient(180deg, transparent, var(--color-void) 70%);
+  }
+
+  .mc-signals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
+  }
+
+  .mc-signal {
+    min-width: 0;
+    margin: -1px 0 0 -1px;
+    padding: 0.85rem 1.1rem 0.95rem;
+    border-top: 1px solid var(--edge-card);
+    border-left: 1px solid var(--edge-card);
+  }
+
+  .mc-signal-label {
+    font-size: 0.6875rem;
+    line-height: 1.25;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signal-value {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.15rem 0.35rem;
+    margin: 0.4rem 0 0;
+    font-size: 1.6rem;
+    font-weight: 750;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signal-value.is-word {
+    font-size: 1.15rem;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+
+  .mc-signal-unit {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--color-silver);
+  }
+
+  .mc-signal-tag {
+    align-self: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid currentColor;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1.4;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .mc-signal-sub {
+    margin: 0.35rem 0 0;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+  }
+
+  .mc-signal-spark {
+    margin: 0.45rem 0 0;
+  }
+
+  /* The deck: the Doctor note or the recent titles, then Diagnostics, with controls beside. */
+  .mc-deck {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-deck-main {
+    display: flex;
+    flex: 999 1 34rem;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-deck-side {
+    display: flex;
+    flex: 1 1 20rem;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-panel {
+    position: relative;
+    min-width: 0;
+    padding: 1.1rem 1.25rem;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--surface-card);
+  }
+
+  .mc-doctor-headline {
+    font-size: 1.25rem;
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* The shelf: posters in one scrolling row, the next one always peeking in. Its padding keeps
+     the hover lift, the featured outline and the focus ring inside the scroller. */
+  .mc-film {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: clamp(9rem, 19%, 13rem);
+    gap: 1rem;
+    margin-top: 0.25rem;
+    padding: 0.75rem 0.375rem 1rem;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: 0.375rem;
+    scrollbar-width: thin;
+  }
+
+  .dashboard-play-tile {
+    min-width: 0;
+    scroll-snap-align: start;
+  }
+
+  .mc-film-art {
+    position: relative;
+    transition: transform 0.16s ease;
+  }
+
+  .mc-film-art:hover {
+    transform: translateY(-4px);
+  }
+
+  .mc-film-pick {
+    position: absolute;
+    inset: 0;
+    border-radius: 0.5rem;
+    cursor: pointer;
+  }
+
+  .mc-film-pick[aria-pressed="true"] {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
+  }
+
+  .mc-film-name {
+    margin-top: 0.6rem;
+    font-size: 0.9375rem;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  /* Diagnostics: one disclosure, its summary readable while closed. */
+  .mc-diag {
+    min-width: 0;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--surface-card);
+  }
+
+  .mc-diag-toggle {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem 1rem;
+    width: 100%;
+    min-height: 2.75rem;
+    padding: 0.9rem 1.25rem;
+    border: 0;
+    border-radius: 0.75rem;
+    background: transparent;
+    color: var(--color-ice);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .mc-diag-toggle:hover {
+    background: var(--surface-raised);
+  }
+
+  .mc-diag-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  .mc-diag-chevron {
+    flex: none;
+    width: 1rem;
+    height: 1rem;
+    transition: transform 180ms ease;
+  }
+
+  .mc-diag-toggle[aria-expanded="true"] .mc-diag-chevron {
+    transform: rotate(180deg);
+  }
+
+  .mc-diag-summary {
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .mc-diag-body {
+    padding: 0.25rem 1.25rem 1.35rem;
+    border-top: 1px solid var(--edge-card);
+  }
+
+  .mc-diag-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+    gap: 1.25rem 1.75rem;
+  }
+
+  .mc-diag-wide {
+    grid-column: 1 / -1;
+  }
+
+  .mc-diag-section-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.25rem 1rem;
+  }
+
+  .mc-diag-section-title {
+    margin: 0.9rem 0 0.55rem;
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--color-storm);
+  }
+
+  .mc-inline-link {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--color-ice);
+    text-decoration: underline;
+    text-decoration-color: var(--edge-raised);
+    text-underline-offset: 0.25em;
+  }
+
+  /* Rows wrap as label and value pairs; the value drops below the label when it must. */
+  .mc-kv {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    font-size: 0.875rem;
+  }
+
+  .mc-kv > div {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.1rem 1rem;
+  }
+
+  .mc-kv dt {
+    flex: 1 1 7rem;
+    min-width: 0;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-kv dd {
+    flex: 0 1 auto;
+    max-width: 100%;
+    margin: 0 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: right;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Launch checks wrap as badge plus name, with the detail below. */
+  .mc-checks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: 0.6rem;
+  }
+
+  .mc-check {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.6rem;
+    min-height: 2.75rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.6rem;
+  }
+
+  .mc-check-state {
+    flex: none;
+    padding: 0.1rem 0.45rem;
+    border-radius: 9999px;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .mc-check-name {
+    flex: 1 1 6rem;
+    min-width: 0;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-check-detail {
+    flex: 1 1 100%;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .mc-check-link {
+    flex: 1 1 100%;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--color-ice);
+  }
+
+  .mc-history {
+  }
+
+  .mc-history li {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--edge-card);
+    font-size: 0.875rem;
+  }
+
+  .mc-history li:first-child {
+    border-top: 0;
+  }
+
+  .mc-history-grade {
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border: 1px solid var(--edge-raised);
+    font-weight: 800;
+  }
+
+  .mc-history-who {
+    display: block;
+    font-weight: 600;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-history-detail,
+  .mc-history-when {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--color-support);
+  }
+
+  .mc-history-when {
+    text-align: right;
+  }
+
+  @container mc-stage (min-width: 40rem) {
+    .mc-stage-top {
+      padding: 1.25rem 2rem 0;
+    }
+
+    .mc-stage-body {
+      padding: 1.75rem 2rem 1.5rem;
+    }
+
+    /* Framed beside the copy: large on the idle stage, smaller beside a live route. */
+    .mc-keyart {
+      width: clamp(7rem, 14cqi, 10rem);
+    }
+
+    .is-idle .mc-keyart {
+      order: 2;
+      width: clamp(10rem, 26cqi, 16rem);
+      margin-left: auto;
+    }
+
+    /* Beside the art the copy keeps a dark scrim behind it, thinning toward the art on the right. */
+    .mc-stage-scrim {
+      background:
+        linear-gradient(0deg, var(--color-void) 2%, transparent 40%),
+        linear-gradient(90deg, var(--color-void) 25%, color-mix(in srgb, var(--color-void) 65%, transparent) 55%, color-mix(in srgb, var(--color-void) 15%, transparent));
+    }
+
+    .mc-signals-loading {
+      padding: 0 2rem 1.5rem;
+    }
+  }
+
+  /* The key art sits beside the copy on a wide stage, the route at the far edge. */
+  @container mc-stage (min-width: 52rem) {
+    .mc-keyart {
+      order: 2;
+    }
+
+    .mc-stage-copy {
+      max-width: 38rem;
+    }
+
+    .mc-stage-preview:not(.is-expanded) {
+      order: 2;
+      max-width: 36rem;
+    }
+
+    .mc-stage-aside {
+      order: 3;
+    }
+  }
+
+  /* Wide enough for copy, key art and route on one line: the route keeps a reading width. */
+  @container mc-stage (min-width: 56rem) {
+    .mc-stage-aside {
+      max-width: 26rem;
+    }
+  }
+
+  /* Short landscape: a compact stage that starts at the top. */
+  @media (max-height: 500px) {
+    .mc-stage {
+      min-height: 0;
+    }
+
+    .mc-stage-body {
+      align-items: flex-start;
+      align-content: flex-start;
+      padding-top: 1rem;
+    }
+
+    .mc-keyart {
+      display: none;
+    }
+
+    .mc-signals,
+    .mc-signals-loading {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr));
+    }
+  }
+
+  /* A mid-width stage reads its six readings as three and three rather than four and two. */
+  @container mc-stage (min-width: 30rem) and (max-width: 55.99rem) {
+    .mc-signals {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+
+  @keyframes mc-live-pulse {
+    0% { box-shadow: 0 0 0 0 var(--color-accent); }
+    70%, 100% { box-shadow: 0 0 0 0.5rem transparent; }
+  }
+}
+
+/* Adjustments to the existing unlayered dashboard rules inside Mission Control. */
+/* Director's greeting replaces the console subtitle, whose 13 px size would not grow with
+   enlarged text; the greeting is sized in rem so it does. Only on a narrow shell with enlarged text
+   does the width cap apply, so "Congratulations," stays one whole word on a 360 px phone. */
+.operator-console .page-subtitle.mc-greeting {
+  font-size: min(clamp(1.15rem, 1rem + 0.8cqi, 1.6rem), 9cqi);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--color-ice);
+  overflow-wrap: break-word;
+}
+
+.mission-control-view .dashboard-action-button {
+  height: auto;
+  min-height: 2.25rem;
+  max-width: 100%;
+  padding-block: 0.45rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.mc-stage-actions .dashboard-action-button {
+  min-height: 2.75rem;
+  padding: 0.6rem 1.1rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+/* Disconnect is the page's one destructive action: a salmon outline, never the loudest fill. */
+.mission-control-view .mc-action-danger {
+  border: 1px solid var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+}
+
+.mission-control-view .mc-action-danger:hover {
+  background: var(--surface-raised);
+}
+
+/* Play rides the poster: shown on hover or keyboard focus, and always when any touch input
+   exists. Hidden, it takes no hits, and the shelf only launches a press that began on it. */
+.mc-film .mc-film-play {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.5rem;
+  gap: 0.4rem;
+  max-width: calc(100% - 1rem);
+  opacity: var(--play, 0);
+  pointer-events: var(--play-hit, none);
+  transition: opacity 0.12s ease, background-color 0.2s ease;
+}
+
+.mc-film-art:is(:hover, :focus-within) {
+  --play: 1;
+  --play-hit: auto;
+}
+
+.mc-film .mc-film-play:disabled {
+  opacity: calc(var(--play, 0) * 0.5);
+}
+
+@media (hover: none), (any-pointer: coarse) {
+  .mc-film {
+    --play: 1;
+    --play-hit: auto;
+  }
+}
+
+/* Coarse pointers get 44 px targets for every Mission Control action, including the controls the
+   page hosts (Spaces, Quick Controls) and the links inside its panels. */
+@media (pointer: coarse) {
+  .mission-control-view :is(.dashboard-action-button, .dashboard-degraded-action, .mc-inline-link, .mc-deck-side a[href]) {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .mission-control-view :is(.dashboard-action-button, .dashboard-degraded-action, .mc-inline-link, .mc-deck-side a[href], [data-dashboard-idle-vitals] > summary, .mc-deck-side button, .mc-deck-side [role="switch"]) {
+    min-height: 2.75rem;
+    touch-action: manipulation;
+  }
+
+  .mission-control-view .mc-deck-side a[href] {
+    min-width: 2.75rem;
+  }
+}
+
+/* The global reduced-motion rule already stills transitions; the live marker stops pulsing too. */
+@media (prefers-reduced-motion: reduce) {
+  .mc-marker.is-live {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .mc-stage,
+  .mc-route,
+  .mc-signal,
+  .mc-panel,
+  .mc-diag {
+    border: 1px solid CanvasText;
+  }
+
+  .mc-marker,
+  .mc-node-marker {
+    forced-color-adjust: none;
+  }
+}
+
+/* Status copy and controls must stay inside their cards when text is enlarged. */
+[data-session-snapshot] > .flex {
+  flex-wrap: wrap;
+}
+[data-session-snapshot] > .flex > div {
+  min-width: 0;
+  max-width: 100%;
+}
+[data-session-snapshot] .meta-pill {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: break-word;
+  /* A pill that does wrap keeps readable lines and a shape that fits them. */
+  line-height: 1.25;
+  border-radius: 1rem;
 }
 
 .troubleshooting-action-button {
-  @apply inline-flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-9 max-w-full items-center justify-center gap-2 whitespace-normal rounded-lg px-4 py-2 text-center text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  overflow-wrap: break-word;
+}
+
+/* Doctor headings share a row with their controls. When enlarged text leaves no
+   room for both, the controls drop below the copy as whole words instead of
+   squeezing into a column one syllable wide. Rows only wrap where they run
+   horizontally, so the stacked phone layout is unchanged. */
+@media (min-width: 64rem) {
+  .troubleshooting-action-row {
+    flex-wrap: wrap;
+  }
+  .troubleshooting-action-row > :first-child {
+    flex: 1 1 24rem;
+    min-width: 0;
+  }
+  .troubleshooting-action-row > :not(:first-child) {
+    flex: 0 1 auto;
+    max-width: 100%;
+  }
+}
+@media (min-width: 80rem) {
+  .troubleshooting-page-header {
+    flex-wrap: wrap;
+  }
+  .troubleshooting-page-header > .page-heading {
+    flex: 1 1 24rem;
+  }
+  .troubleshooting-page-header > .page-meta {
+    flex: 0 1 auto;
+    max-width: 100%;
+  }
+}
+.troubleshooting-page-header .meta-pill {
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+/* A card title and its status badge share a line until enlarged text needs both;
+   then the badge drops below and neither can push past the card. */
+.troubleshooting-card-header > * {
+  max-width: 100%;
+}
+
+/* Self-test cards keep three columns at desktop sizes, measured in text units so
+   enlarged text falls back to a single readable column instead of three slivers. */
+@media (min-width: 80rem) {
+  .troubleshooting-card-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, max(16rem, 30%)), 1fr));
+  }
 }
 
 .pairing-flow-strip {
@@ -2292,7 +3306,7 @@ textarea {
 
 .pairing-flow-text {
   min-width: 0;
-  color: var(--color-storm);
+  color: var(--color-support);
   font-size: 0.8125rem;
   line-height: 1.5;
 }
@@ -2304,8 +3318,8 @@ textarea {
   gap: 0.375rem;
   border-left: 1px solid var(--edge-raised);
   padding-left: 1rem;
-  color: var(--color-storm);
-  font-size: 0.75rem;
+  color: var(--color-support);
+  font-size: 0.8125rem;
   line-height: 1.4;
 }
 
@@ -2356,6 +3370,22 @@ textarea {
   @apply cursor-pointer rounded-xl border border-ice/25 bg-ice/5 p-3 text-left transition-[border-color,color,background-color,transform] duration-200 hover:border-ice hover:bg-ice/10 hover:text-ice active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0;
 }
 
+/* The log toolbar shares a card with its heading; viewport breakpoints alone
+   cannot account for an expanded sidebar or enlarged text. */
+.troubleshooting-log-header,
+.troubleshooting-filter-panel {
+  flex-wrap: wrap;
+}
+.troubleshooting-log-header > div,
+.troubleshooting-filter-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+.troubleshooting-filter-panel .settings-input {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .troubleshooting-filter-button {
   @apply h-7 rounded-md border border-storm/30 px-2.5 text-xs font-medium text-storm transition-[border-color,color,background-color] duration-150 hover:border-storm hover:text-silver;
 }
@@ -2386,7 +3416,8 @@ textarea {
 
   .card-interactive:hover,
   .action-tile:hover,
-  .settings-nav-button:hover {
+  .settings-nav-button:hover,
+  .mc-film-art:hover {
     transform: none;
   }
 }
@@ -2401,14 +3432,8 @@ textarea {
     -webkit-backdrop-filter: none;
   }
 
-  .dashboard-live-shell,
-  .dashboard-preview-panel,
-  .dashboard-live-summary-tile {
+  .mc-stage {
     box-shadow: none;
-  }
-
-  .dashboard-telemetry-grid {
-    @apply grid-cols-2;
   }
 }
 
@@ -2417,6 +3442,8 @@ textarea {
   --color-ice: #fff1f7;
   --color-silver: #ffd3e2;
   --color-storm: #85c7d4;
+  /* Miami's cyan caption tier already clears 4.5:1, so supporting copy keeps it. */
+  --color-support: #85c7d4;
   --color-twilight: #6c3c6f;
   --color-deep: #241429;
   --color-void: #130817;
@@ -2444,6 +3471,7 @@ textarea {
   --color-ice: #c9d1d9;
   --color-silver: #9aa4af;
   --color-storm: #838d9c;
+  --color-support: #8e98a6;
   --color-twilight: #3a424c;
   --color-deep: #1e2228;
   --color-void: #14161a;
@@ -2461,6 +3489,68 @@ textarea {
   --sidebar-active-bar: color-mix(in srgb, var(--color-accent) 90%, transparent);
 }
 
+/* ── Director Skin (Polaris "< Congratulations, Director >", a nod to Control) ── */
+/* Charcoal and near-black dominate, copy stays warm white, and red is a signal rather
+   than a surface: current and active markers, toggles, kickers and focus. Nova's Director
+   matches it from Nova #311. Ratios are on the solid card:
+   ice 15.2, silver 11.8, storm 7.5, support 9.0, accent 5.0 (4.6 on a tile). */
+[data-theme="director"] {
+  --color-ice: #f4ebe1;
+  --color-silver: #ddd0c3;
+  --color-storm: #b5a598;
+  --color-support: #c5b6a8;
+  --color-twilight: #3a3330;
+  --color-deep: #121010;
+  --color-void: #0b0a0a;
+  --color-accent: #f04e4b;
+  --color-accent-2: #cdb8a5;
+  --color-foreground: #ddd0c3;
+  /* A lighter salmon keeps danger apart from the red accent by lightness, not only by hue. */
+  --color-danger: #ff9b8f;
+  --surface-card-base: #191716;
+  --surface-card: #191716;
+  --surface-glass: #151312;
+  --surface-raised: #221f1e;
+  --surface-raised-hover: #292524;
+  --surface-pill: #0e0c0c;
+  --surface-chip: #0e0c0c;
+  --surface-shimmer: #221f1e;
+  /* Thin warm-grey rules define cards and tiles on the dark stage, as in Control's panels. */
+  --edge-glass: #342e2b;
+  --edge-card: #342e2b;
+  --edge-raised: #403835;
+  --edge-raised-hover: color-mix(in srgb, var(--color-ice) 50%, transparent);
+  --edge-pill: color-mix(in srgb, var(--color-ice) 26%, transparent);
+  --edge-chip: color-mix(in srgb, var(--color-ice) 26%, transparent);
+  --sidebar-fg: var(--color-silver);
+  --sidebar-active-bg: #221f1e;
+  --sidebar-active-bar: var(--color-accent);
+}
+/* Inputs are the near-black control surface; a 40% warm edge keeps their boundary at 3:1. */
+[data-theme="director"] .settings-input {
+  background: var(--surface-pill);
+  border-color: color-mix(in srgb, var(--color-ice) 40%, transparent);
+}
+/* Director keeps its section kickers on the full storm tone (7.5:1 on the card) for crisp
+   labels. Hero kickers keep their own accent rule. */
+:where([data-theme="director"]) .section-kicker {
+  color: var(--color-storm);
+}
+[data-theme="director"] .settings-input:focus {
+  border-color: var(--color-accent);
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+[data-theme="director"] .focus-ring {
+  @apply focus-visible:ring-accent focus-visible:ring-offset-void;
+}
+/* The informational "ahead of the newest release" update light borrows the accent. Director's
+   accent is red, which reads as an alarm beside "current", so that one state uses warm sand. */
+[data-theme="director"] :is([data-sidebar-update-status-light], [data-update-status-light]).bg-accent {
+  background-color: var(--color-accent-2);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--color-accent-2) 55%, transparent);
+}
+
 /* ── High Contrast Skin ── */
 /* Nova "high_contrast": maximum contrast, accessibility-first focus states.
    Near-opaque surfaces, pale solid edges, no glass blur. */
@@ -2468,6 +3558,7 @@ textarea {
   --color-ice: #ffffff;
   --color-silver: #e5e7eb;
   --color-storm: #cbd5e1;
+  --color-support: #cbd5e1;
   --color-twilight: #172033;
   --color-deep: #0f172a;
   --color-void: #05070c;

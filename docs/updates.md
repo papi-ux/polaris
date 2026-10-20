@@ -40,7 +40,7 @@ beta you are running, and the release a beta precedes counts as newer.
 The 1.4.13 betas are the exception. They report `1.4.13`, the same version as the
 1.4.13 release, so on those hosts Update Center shows **Current release** and never
 offers 1.4.13. Replace one by hand as described in
-[Leave a 1.4.13 beta](#leave-a-1413-beta). A later stable release, such as 1.4.14,
+[Leave a 1.4.13 beta](#leave-a-1413-beta). A later stable release, such as 1.5.0,
 is offered as usual.
 
 An upgrade keeps the existing account, paired devices, settings and library.
@@ -67,7 +67,7 @@ in the folder they were downloaded to. If `polaris-kms` is installed, reinstall
 it in the same command from the same release: a command that names only
 `polaris` leaves the beta's helper in place. Without the helper, leave out the
 `polaris-kms` package or file. Restart Polaris afterwards. Once a later stable
-release such as 1.4.14 is out, none of this is needed: an ordinary upgrade replaces
+release such as 1.5.0 is out, none of this is needed: an ordinary upgrade replaces
 a 1.4.13 beta, and the repository commands below stop working because the
 repository then carries only that newer release.
 
@@ -97,9 +97,11 @@ sudo pacman -Syu polaris polaris-kms
 ```
 
 **SteamOS** takes the same `pacman -U` its [SteamOS guide](steamos.md) installs
-with: reinstall `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and
-`Polaris-kms-steamos3.8-x86_64.pkg.tar.zst` with the helper. This reinstall was
+with: reinstall the package for the host's SteamOS release, `Polaris-steamos3.8-x86_64.pkg.tar.zst`
+or `Polaris-steamos3.9-x86_64.pkg.tar.zst`, and its `Polaris-kms-` helper beside it when the host has one. This reinstall was
 checked with pacman on Arch, not on a Steam Deck.
+The 3.9 packages begin with `v1.5.0-beta.2`: use that tagged prerelease after
+publication, as the SteamOS guide shows, rather than the latest stable download.
 
 **Bazzite** layers the package with `rpm-ostree`, and no step that replaces a
 1.4.13 beta with the release there has been verified yet.

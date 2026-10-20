@@ -67,6 +67,7 @@
 #include "logging.h"
 #include "log_tail_api.h"
 #include "network.h"
+#include "tailscale_connection.h"
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
@@ -2353,10 +2354,29 @@ namespace confighttp {
           const auto launch_as = proc::normalize_launch_as(app);
           app["launch-as"] = launch_as;
           app["launch-as-basis"] = proc::legacy_basis(app);
+          // #204, response only and only for an app that opted in: the setting is on, and whether
+          // this host can act on it now (bounded support probe), so the console never presents an
+          // unsupported host as working. The session itself is bound by the launch.
+          if (const auto leave = app.find(std::string {prelaunch::k_app_key}); leave != app.end() && leave->is_boolean() && leave->get<bool>()) {
+            const auto readiness = prelaunch::coordinator().readiness(true);
+            app["leave-game-mode-before-launch-readiness"] = {
+              {"enabled", readiness.enabled},
+              {"adapter_implemented", readiness.adapter_implemented},
+              {"command_present", readiness.command_present},
+              {"ready", readiness.ready},
+              {"code", readiness.code},
+              {"reason", readiness.reason},
+            };
+          }
         }
       }
 
-      file_tree["current_app"] = proc::proc.get_running_app_uuid();
+      // Teardown can own the lifecycle mutex for seconds. Never occupy the
+      // console's request thread waiting for identity: unavailable differs
+      // from a confirmed empty (idle) UUID, without caching another generation.
+      const auto context = proc::proc.try_stream_stats_context();
+      file_tree["current_app"] = context ? context->game_uuid : std::string {};
+      file_tree["current_app_available"] = context.has_value();
       file_tree["host_uuid"] = http::unique_id;
       file_tree["host_name"] = config::nvhttp.sunshine_name;
       file_tree["artwork_lookup_off"] = apps_with_artwork_lookup_off(platf::appdata(), file_tree);
@@ -2450,6 +2470,8 @@ namespace confighttp {
     try {
       // Read the input JSON from the request body.
       nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+      // Response-only #204 readiness the editor may send back; it is never stored.
+      if (inputTree.is_object()) inputTree.erase("leave-game-mode-before-launch-readiness");
       std::string validation_error;
       if (!validation::validate_app_payload(inputTree, validation_error)) {
         bad_request(response, request, validation_error);
@@ -2508,7 +2530,7 @@ namespace confighttp {
     print_req(request);
 
     // Close App ends the session on purpose, so on a host in Game Mode it closes the title too.
-    proc::proc.end_session();
+    proc::proc.end_session_and_retire_owned_media();
     nlohmann::json output_tree;
     output_tree["status"] = true;
     send_response(response, output_tree);
@@ -4468,11 +4490,14 @@ namespace confighttp {
    *   "do": [ { "cmd": "<command>", "elevated": false }, ... ],
    *   "undo": [ { "cmd": "<command>", "elevated": false }, ... ],
    *   "perm": <uint32_t>,
-   *   "close_desktop_steam": true
+   *   "close_desktop_steam": true,
+   *   "recording_authorized": false
    * }
    * @endcode
    *
-   * Leaving out close_desktop_steam or temporary_authorization keeps the device's current value.
+   * Leaving out close_desktop_steam, temporary_authorization or recording_authorized keeps the
+   * device's current value. recording_authorized is a stored host approval only: no client can use
+   * it yet, and it is always stored off for a temporary (guest) authorization.
    */
   void updateClient(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
@@ -4501,6 +4526,10 @@ namespace confighttp {
       if (input_tree.contains("close_desktop_steam")) {
         close_desktop_steam = input_tree.at("close_desktop_steam").get<bool>();
       }
+      std::optional<bool> recording_authorized;
+      if (input_tree.contains("recording_authorized")) {
+        recording_authorized = input_tree.at("recording_authorized").get<bool>();
+      }
       auto do_cmds = nvhttp::extract_command_entries(input_tree, "do");
       auto undo_cmds = nvhttp::extract_command_entries(input_tree, "undo");
       auto perm = static_cast<crypto::PERM>(input_tree.value("perm", static_cast<uint32_t>(crypto::PERM::_no)) & static_cast<uint32_t>(crypto::PERM::_all));
@@ -4516,7 +4545,8 @@ namespace confighttp {
         allow_client_commands,
         always_use_virtual_display,
         temporary_authorization,
-        close_desktop_steam
+        close_desktop_steam,
+        recording_authorized
       );
       output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
       if (result == nvhttp::client_mutation_result_t::not_found) {
@@ -6389,7 +6419,213 @@ namespace confighttp {
   }
 
   namespace {
+#ifdef POLARIS_TESTS
+    game_artwork::providers::transport_t library_artwork_transport_override;
+    std::optional<fs::path> library_artwork_appdata_override;
+#endif
+
+    fs::path library_artwork_appdata() {
+#ifdef POLARIS_TESTS
+      if (library_artwork_appdata_override) return *library_artwork_appdata_override;
+#endif
+      return platf::appdata();
+    }
+
+    // Without a key: a fill only ever asks Steam's public CDN, whatever SteamGridDB key is set.
+    game_artwork::providers::transport_t library_artwork_transport() {
+#ifdef POLARIS_TESTS
+      if (library_artwork_transport_override) return library_artwork_transport_override;
+#endif
+      return nvhttp::artwork_transport({});
+    }
+
+    // A Steam title without a background or logo on Steam's CDN is asked again an hour later, not on
+    // every view; a fill that got everything leaves no window. Past the bound, expired windows go
+    // first, then the rest.
+    constexpr std::int64_t library_artwork_retry_milliseconds = 60 * 60 * 1000;
+    constexpr std::size_t library_artwork_retry_bound = 256;
+
+    struct library_artwork_fills_t {
+      std::mutex mutex;
+      std::set<std::string> running;
+      std::unordered_map<std::string, std::int64_t> retry_after;
+    };
+
+    library_artwork_fills_t &library_artwork_fills() {
+      static library_artwork_fills_t fills;
+      return fills;
+    }
+
+    void forget_library_artwork_fill(const std::string &uuid, bool retry_window) {
+      auto &fills = library_artwork_fills();
+      std::lock_guard lock(fills.mutex);
+      fills.running.erase(uuid);
+      if (retry_window) fills.retry_after.erase(uuid);
+    }
+
+    /**
+     * @brief Start fetching a Steam title's missing background and logo, unless a fill for it is
+     *        running or came back incomplete within the hour.
+     *
+     * Never waits: the console's one request thread hands the downloads to `workers` and answers at
+     * once. Remove artwork is checked again before each download and at publication, so one made
+     * while a fill runs still wins. A fill refused by the full or stopping workers is forgotten, and
+     * the next view tries again.
+     */
+    void schedule_library_artwork_fill(cover_lookup::workers_t &workers, const fs::path &appdata, const proc::ctx_t &app) {
+      auto plan = library_artwork_fill_plan(appdata, app);
+      if (plan.empty()) return;
+      const auto now = nvhttp::artwork_clock_milliseconds();
+      {
+        auto &fills = library_artwork_fills();
+        std::lock_guard lock(fills.mutex);
+        if (fills.running.contains(app.uuid)) return;
+        if (const auto retry = fills.retry_after.find(app.uuid); retry != fills.retry_after.end() && now < retry->second) return;
+        if (fills.retry_after.size() >= library_artwork_retry_bound) {
+          std::erase_if(fills.retry_after, [now](const auto &entry) { return entry.second <= now; });
+          if (fills.retry_after.size() >= library_artwork_retry_bound) fills.retry_after.clear();
+        }
+        fills.running.insert(app.uuid);
+        fills.retry_after[app.uuid] = now + library_artwork_retry_milliseconds;
+      }
+
+      auto fill = [appdata, uuid = app.uuid, plan = std::move(plan), transport = library_artwork_transport()](
+                    const std::shared_ptr<cover_lookup::completion_t> &ticket) {
+        bool complete = false;
+        auto finished = util::fail_guard([&uuid, &complete] { forget_library_artwork_fill(uuid, complete); });
+        // Shutdown cancels the ticket; a download not yet started then never starts.
+        const game_artwork::providers::transport_t cancellable = [&ticket, &transport](
+          const game_artwork::providers::request_t &request, std::uintmax_t maximum_bytes
+        ) -> std::optional<game_artwork::providers::transport_response_t> {
+          if (ticket->cancelled()) return std::nullopt;
+          return transport(request, maximum_bytes);
+        };
+        try {
+          (void) game_artwork::providers::execute_download_plan(appdata, uuid, plan, cancellable);
+          // Everything arrived, so the window has nothing to hold back: if Remove artwork and Find
+          // artwork again take the images away, the next view fills them at once.
+          complete = std::all_of(plan.begin(), plan.end(), [&](const game_artwork::providers::request_t &request) {
+            return game_artwork::find_cached_asset(appdata, uuid, *request.kind).has_value();
+          });
+        } catch (...) {
+          // A failed fill keeps every valid cached image and waits out its retry window.
+        }
+      };
+      try {
+        if (workers.submit_completion(std::move(fill)) == cover_lookup::admission_e::accepted) return;
+      } catch (...) {
+      }
+      forget_library_artwork_fill(app.uuid, true);
+    }
+
+    void write_library_artwork_miss(resp_https_t response) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_common_security_headers(headers);
+      headers.emplace("Content-Type", "text/plain");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(SimpleWeb::StatusCode::client_error_not_found, "No artwork", headers);
+    }
+  }  // namespace
+
+  std::vector<game_artwork::providers::request_t> library_artwork_fill_plan(const fs::path &appdata, const proc::ctx_t &app) {
+    if (!game_artwork::is_valid_uuid(app.uuid) || proc::uses_bundled_utility_artwork(app) ||
+        !game_artwork::is_valid_steam_appid(app.steam_appid) ||
+        !game_artwork::automatic_artwork_lookup_enabled(appdata, app.uuid)) {
+      return {};
+    }
+    auto plan = game_artwork::providers::plan_steam_assets(app.steam_appid);
+    std::erase_if(plan, [&](const game_artwork::providers::request_t &request) {
+      return !request.kind || (*request.kind != game_artwork::kind_e::hero && *request.kind != game_artwork::kind_e::logo) ||
+             game_artwork::find_cached_asset(appdata, app.uuid, *request.kind).has_value();
+    });
+    return plan;
+  }
+
+  /**
+   * @brief Serve an entry's background (hero) or logo from the host artwork cache Nova reads.
+   *
+   * The image Nova shows for the entry, chosen the same way: a pick made in Nova first, then the
+   * entry's own art, then Steam's, then SteamGridDB's, except that a Desktop or utility entry never
+   * shows a SteamGridDB match. The URL names the entry, not the image, so the browser revalidates
+   * with the image's entity tag and an unchanged image answers 304 without its bytes.
+   *
+   * A Steam title missing either image answers 404 at once and fetches what it lacks from Steam's
+   * public CDN in the background, so the next view shows it. No fill runs for an entry after Remove
+   * artwork, for a Desktop or utility entry, or against SteamGridDB, and the browser only ever loads
+   * the image from the host.
+   *
+   * @api_examples{/api/apps/<uuid>/artwork/hero| GET| null}
+   */
+  void getLibraryArtwork(resp_https_t response, req_https_t request, cover_lookup::workers_t &fills) {
+    if (!authenticate(response, request)) return;
+
+    const std::string uuid = request->path_match.size() > 1 ? request->path_match[1].str() : std::string {};
+    const auto kind = game_artwork::parse_kind(request->path_match.size() > 2 ? request->path_match[2].str() : std::string {});
+    if (!game_artwork::is_valid_uuid(uuid) || !kind) {
+      bad_request(response, request, "Artwork needs an app uuid");
+      return;
+    }
+
+    const auto apps = proc::proc.get_apps();
+    const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+      return boost::iequals(candidate.uuid, uuid);
+    });
+    if (app == apps.end()) {
+      write_library_artwork_miss(response);
+      return;
+    }
+
+    const auto appdata = library_artwork_appdata();
+    if (!game_artwork::recover_interrupted_artwork_override(appdata, app->uuid)) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_common_security_headers(headers);
+      headers.emplace("Content-Type", "text/plain");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(SimpleWeb::StatusCode::server_error_internal_server_error, "Artwork unavailable", headers);
+      return;
+    }
+    {
+      auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
+      auto asset = game_artwork::find_cached_asset(appdata, app->uuid, *kind);
+      // As in Nova: a utility or desktop entry never shows an automatic SteamGridDB match, even one
+      // whose file outlived its removal.
+      if (asset && asset->source == game_artwork::source_e::steamgriddb && proc::uses_bundled_utility_artwork(*app)) {
+        asset.reset();
+      }
+      if (asset) {
+        const auto etag = cover_image_etag(asset->path);
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        append_common_security_headers(headers);
+        headers.emplace("Cache-Control", "private, no-cache");
+        if (etag) headers.emplace("ETag", *etag);
+        const auto seen = request->header.find("If-None-Match");
+        if (etag && seen != request->header.end() && seen->second == *etag) {
+          response->write(SimpleWeb::StatusCode::redirection_not_modified, headers);
+          return;
+        }
+        std::ifstream input(asset->path, std::ios::binary);
+        if (input) {
+          headers.emplace("Content-Type", asset->mime_type);
+          response->write(SimpleWeb::StatusCode::success_ok, input, headers);
+          return;
+        }
+      }
+    }
+
+    schedule_library_artwork_fill(fills, appdata, *app);
+    write_library_artwork_miss(response);
+  }
+
+  // The fill owner lives until server shutdown has joined every accepted fill.
+  void registerLibraryArtwork(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server, cover_lookup::workers_t &fills) {
+    server.resource["^/api/apps/([^/]+)/artwork/(hero|logo)$"]["GET"] = [&fills](resp_https_t response, req_https_t request) {
+      getLibraryArtwork(response, request, fills);
+    };
+  }
+
+  namespace {
     using cover_post_t = std::function<void(std::function<void()>)>;
+    using recording_save_workers_t = cover_lookup::workers_t;
     using cover_work_t = std::function<std::function<void()>(const std::shared_ptr<cover_lookup::completion_t> &)>;
     struct cover_reply_t {
       resp_https_t response;
@@ -6400,6 +6636,9 @@ namespace confighttp {
 #ifdef POLARIS_TESTS
     cover_post_t cover_post_override;
     std::function<void()> cover_commit_observer;
+    cover_post_t recording_post_override;
+    std::function<void()> recording_commit_observer;
+    std::function<void()> recording_before_launch;
 #endif
     SimpleWeb::CaseInsensitiveMultimap cover_headers() {
       SimpleWeb::CaseInsensitiveMultimap headers;
@@ -6415,6 +6654,17 @@ namespace confighttp {
       return [executor](std::function<void()> completion) {
         auto io = executor.lock();
         if (!io) throw std::runtime_error("Cover executor unavailable");
+        boost::asio::post(*io, std::move(completion));
+      };
+    }
+    cover_post_t recording_post_for(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server) {
+#ifdef POLARIS_TESTS
+      if (recording_post_override) return recording_post_override;
+#endif
+      const std::weak_ptr executor {server.io_service};
+      return [executor](std::function<void()> completion) {
+        auto io = executor.lock();
+        if (!io) throw std::runtime_error("Recording executor unavailable");
         boost::asio::post(*io, std::move(completion));
       };
     }
@@ -8434,6 +8684,48 @@ namespace confighttp {
           BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
 #ifdef __linux__
           launch_failure::clear();
+          // #204, opt-in only: hold the launch reservation from here to execute, leave Game Mode if
+          // this app asks for it, and bring the mode in line before Launch as and the desktop-launch
+          // policy read it. An app with the setting off launches exactly as before.
+          const bool prelaunch_reserved = app.leave_game_mode_before_launch && !mirror_desktop_explicit;
+          // Owned only once this request's own admission succeeded: a refused admission never
+          // finishes a reservation that belongs to another request.
+          bool owns_prelaunch_reservation = false;
+          auto release_prelaunch_reservation = util::fail_guard([&owns_prelaunch_reservation]() {
+            if (owns_prelaunch_reservation) proc::proc.finish_session_launch();
+          });
+          std::optional<prelaunch::launch_scope_t> prelaunch_scope;
+          if (prelaunch_reserved) {
+            // The same generation-checked admission /launch uses: never queued behind, or taken
+            // under, a newer generation, a stop or a pending launch.
+            const auto lifecycle_generation = proc::proc.capture_session_launch_generation();
+            if (!lifecycle_generation || !proc::proc.try_begin_session_launch(*lifecycle_generation)) {
+              nlohmann::json error_tree {{"status", false}, {"status_code", 409},
+                {"error", "The active session is stopping or changing."}, {"error_code", "prelaunch_launch_busy"}};
+              SimpleWeb::CaseInsensitiveMultimap headers;
+              append_json_security_headers(headers);
+              response->write(SimpleWeb::StatusCode::client_error_conflict, error_tree.dump(), headers);
+              return;
+            }
+            owns_prelaunch_reservation = true;
+            const auto outcome = proc::prelaunch_for_admitted_launch(
+              prelaunch::entry_e::console, app, named_cert.uuid, *lifecycle_generation, {}, {});
+            if (!outcome.proceed()) {
+              const auto record = launch_failure::take();
+              nlohmann::json error_tree {{"status", false}, {"status_code", outcome.status},
+                {"error", record ? launch_failure::status_message(*record) : outcome.message}, {"error_code", outcome.code}};
+              SimpleWeb::CaseInsensitiveMultimap headers;
+              append_json_security_headers(headers);
+              response->write(SimpleWeb::StatusCode::client_error_bad_request, error_tree.dump(), headers);
+              return;
+            }
+            prelaunch_scope.emplace(outcome);
+            prelaunch_scope->set_others([](std::string &reason) {
+              return proc::prelaunch_other_sessions_now(reason);
+            });
+            nvhttp::reconcile_game_mode_host();
+          }
+          prelaunch::note_stage("launch_as");
           if (const auto refusal = proc::refuse_app_launch_as_before_launch(app, {
                 .client_named_selection = mirror_desktop_explicit ? std::string {stream_display_policy::k_desktop_display} : std::string {},
                 .mirror_desktop = mirror_desktop_explicit,
@@ -8486,7 +8778,14 @@ namespace confighttp {
             bad_request(response, request, "Failed to build a launch session");
             return;
           }
+#ifdef __linux__
+          auto err = prelaunch_reserved ? proc::proc.execute_admitted(app, launch_session) : proc::proc.execute(app, launch_session);
+          if (!err && prelaunch_scope) {
+            proc::proc.bind_prelaunch_transition(prelaunch_scope->commit());
+          }
+#else
           auto err = proc::proc.execute(app, launch_session);
+#endif
           if (err) {
             nlohmann::json error_tree;
             error_tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_bad_request);
@@ -9349,18 +9648,53 @@ namespace confighttp {
    *
    * @api_examples{/api/recording/save-replay| POST| null}
    */
-  void saveReplay(resp_https_t response, req_https_t request) {
+  void saveReplay(resp_https_t response, req_https_t request,
+                  recording_save_workers_t &workers, https_server_t &server) {
     if (!authenticate(response, request))
       return;
 
     print_req(request);
 
-    auto file = stream_recorder::save_replay();
-
-    nlohmann::json tree;
-    tree["status"] = !file.empty();
-    tree["file"] = file;
-    send_response(response, tree);
+    // Authorization and capture happen on this request's executor. Already
+    // admitted storage finishes its captured run even if credentials change;
+    // checking auth after publication could only change the reply, not the save.
+    auto admission = stream_recorder::detail::admit_replay_save(std::chrono::steady_clock::now());
+    if (!admission.save) {
+      send_response(response, build_save_replay_json(admission.result));
+      return;
+    }
+    auto failure = admission.result;
+    failure.status = stream_recorder::detail::save_status_e::storage_error;
+    failure.path.clear();
+    std::shared_ptr<stream_recorder::detail::admitted_save_t> owned;
+    try {
+      owned = std::make_shared<stream_recorder::detail::admitted_save_t>(std::move(admission.save));
+      const auto headers = cover_headers();
+      auto post = recording_post_for(server);
+#ifdef POLARIS_TESTS
+      const auto observer = recording_commit_observer;
+#else
+      const std::function<void()> observer;
+#endif
+      const auto accepted = workers.submit_completion(
+        [owned, response, post = std::move(post), headers, observer](const auto &ticket) {
+          auto result = stream_recorder::detail::complete_replay_save(std::move(*owned));
+          // Storage has finished and released its lease/reservation. A failed
+          // post, serialization or disconnected client cannot undo publication
+          // or truthfully turn this saved result into a storage failure.
+          ticket->handoff([response, result = std::move(result), headers, observer] {
+            if (observer) observer();
+            response->write(build_save_replay_json(result).dump(), headers);
+          }, post);
+        });
+      if (accepted == cover_lookup::admission_e::accepted) return;
+    } catch (...) {
+      // Bounded worker submission is transactional: exceptions precede launch.
+    }
+    // Release captured accounting before replying, including make_shared failure.
+    owned.reset();
+    admission.save = {};
+    send_response(response, build_save_replay_json(failure));
   }
 
   /**
@@ -9376,15 +9710,166 @@ namespace confighttp {
 
     print_req(request);
 
-    auto mode = stream_recorder::current_mode();
+    send_response(response, build_recording_status_json(stream_recorder::recorder_status()));
+  }
+
+  namespace {
+    std::int64_t whole_ms(std::chrono::steady_clock::duration duration) {
+      // Recorder durations are never negative, so truncation is the floor.
+      return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    }
+
+    const char *recording_mode_name(stream_recorder::mode_t mode) {
+      return mode == stream_recorder::mode_t::disabled   ? "disabled" :
+             mode == stream_recorder::mode_t::continuous ? "continuous" :
+                                                           "replay_buffer";
+    }
+
+    const char *window_limit_name(stream_recorder::window_limit_e limit) {
+      switch (limit) {
+        case stream_recorder::window_limit_e::duration:
+          return "duration";
+        case stream_recorder::window_limit_e::payload_cap:
+          return "payload_cap";
+        case stream_recorder::window_limit_e::entry_cap:
+          return "entry_cap";
+        case stream_recorder::window_limit_e::configuration:
+          return "configuration";
+        case stream_recorder::window_limit_e::selection:
+          return "selection";
+        case stream_recorder::window_limit_e::codec:
+          return "codec";
+        case stream_recorder::window_limit_e::discontinuity:
+          return "discontinuity";
+        case stream_recorder::window_limit_e::none:
+          break;
+      }
+      return "none";
+    }
+
+    nlohmann::json codec_name(int video_format) {
+      switch (video_format) {
+        case 0:
+          return "h264";
+        case 1:
+          return "hevc";
+        case 2:
+          return "av1";
+        case 3:
+          return "pyrowave";
+        default:
+          return nullptr;
+      }
+    }
+
+    const char *save_outcome_name(stream_recorder::detail::save_status_e status) {
+      using stream_recorder::detail::save_status_e;
+      switch (status) {
+        case save_status_e::saved:
+          return "saved";
+        case save_status_e::busy:
+          return "busy";
+        case save_status_e::disabled:
+          return "disabled";
+        case save_status_e::empty:
+          return "empty";
+        case save_status_e::storage_error:
+          break;
+      }
+      return "storage_error";
+    }
+  }  // namespace
+
+  nlohmann::json build_recording_status_json(const stream_recorder::recorder_status_t &status) {
+    const auto &replay = status.replay;
     nlohmann::json tree;
+    // Legacy keys, unchanged in meaning. `recording` is the continuous writer, independent of `mode`.
     tree["status"] = true;
-    tree["recording"] = stream_recorder::is_recording();
-    tree["mode"] = (mode == stream_recorder::mode_t::disabled      ? "disabled" :
-                    mode == stream_recorder::mode_t::continuous     ? "continuous" :
-                                                                      "replay_buffer");
-    tree["file"] = stream_recorder::current_file();
-    send_response(response, tree);
+    tree["recording"] = status.recording;
+    tree["mode"] = recording_mode_name(status.mode);
+    tree["file"] = status.file;
+
+    nlohmann::json run;
+    run["present"] = replay.keyframe_start_run;
+    run["packets"] = replay.packets;
+    run["bytes"] = replay.bytes;
+    run["keyframes"] = replay.run_keyframes;
+    run["arrival_span_ms"] = whole_ms(replay.run_span);
+    run["front_age_ms"] = whole_ms(replay.run_front_age);
+
+    nlohmann::json snapshot;
+    snapshot["packets"] = replay.snapshot_packets;
+    snapshot["bytes"] = replay.snapshot_bytes;
+    snapshot["keyframes"] = replay.snapshot_keyframes;
+    snapshot["arrival_span_ms"] = whole_ms(replay.snapshot_span);
+
+    nlohmann::json save;
+    save["in_progress"] = replay.save_in_progress;
+    save["snapshot"] = std::move(snapshot);
+    save["completed"] = replay.saves_completed;
+    save["failed"] = replay.saves_failed;
+    save["refused_busy"] = replay.saves_refused_busy;
+
+    nlohmann::json budgets;
+    budgets["max_payload_bytes"] = replay.max_bytes;
+    budgets["max_entries"] = replay.max_packets;
+    budgets["max_unique_payload_bytes"] = replay.max_unique_payload_bytes;
+    budgets["max_metadata_entries"] = replay.max_metadata_entries;
+    budgets["unique_payload_bytes"] = replay.unique_payload_bytes;
+    budgets["metadata_entries"] = replay.metadata_entries;
+
+    nlohmann::json window;
+    window["configured_duration_s"] = std::chrono::duration_cast<std::chrono::seconds>(replay.duration).count();
+    window["buffered_run"] = std::move(run);
+    window["last_accepted_keyframe_age_ms"] = replay.last_accepted_keyframe_age ?
+                                                nlohmann::json(whole_ms(*replay.last_accepted_keyframe_age)) :
+                                                nlohmann::json(nullptr);
+    window["awaiting_keyframe"] = replay.awaiting_keyframe;
+    window["last_window_limit"] = window_limit_name(replay.last_window_limit);
+    window["session_selected"] = replay.selected_generation != 0;
+    window["save"] = std::move(save);
+    window["budgets"] = std::move(budgets);
+    tree["replay"] = std::move(window);
+    return tree;
+  }
+
+  nlohmann::json build_save_replay_json(const stream_recorder::detail::save_result_t &result) {
+    const bool saved = result.status == stream_recorder::detail::save_status_e::saved;
+    nlohmann::json tree;
+    // Legacy keys, unchanged in meaning: true and the published path only when saved.
+    tree["status"] = saved;
+    tree["file"] = saved ? result.path : std::string {};
+    tree["outcome"] = save_outcome_name(result.status);
+    if (result.admitted) {
+      nlohmann::json captured;
+      captured["packets"] = result.packets;
+      captured["bytes"] = result.bytes;
+      captured["keyframes"] = result.keyframes;
+      captured["arrival_span_ms"] = whole_ms(result.span);
+      captured["codec"] = codec_name(result.video_format);
+      tree["captured"] = std::move(captured);
+    } else {
+      tree["captured"] = nullptr;
+    }
+    if (saved) {
+      // The codec's elementary video stream as captured: no container, no audio.
+      tree["kind"] = "raw_video_bitstream";
+    }
+    return tree;
+  }
+
+  /**
+   * @brief Register the host-admin recording routes: start() and the test listener share this.
+   * Mutating routes keep the CSRF wrapper; every handler authenticates itself.
+   */
+  static void register_recording_routes(https_server_t &server, recording_save_workers_t &workers) {
+    server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
+    server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
+    server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(
+      [&server, &workers](resp_https_t response, req_https_t request) {
+        saveReplay(std::move(response), std::move(request), workers, server);
+      });
+    server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
   }
 
 
@@ -10343,12 +10828,16 @@ namespace confighttp {
   }
 
   nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats) {
+    const auto context = proc::proc.try_stream_stats_context();
     stats_json["tuning"] = settings_metadata::build_tuning_json(
       adaptive_bitrate::get_state(),
       stats,
-      proc::proc.current_app_has_mangohud()
+      context && context->mangohud_configured
     );
-    stats_json["auto_quality"] = nvhttp::auto_quality_status_json();
+    if (!context) {
+      stats_json["tuning"]["mangohud_configured"] = nullptr;
+    }
+    stats_json["auto_quality"] = nvhttp::auto_quality_status_json(stats, context);
     stats_json["live_tuning"] = live_tuning::snapshot(stats);
     return stats_json;
   }
@@ -10365,6 +10854,48 @@ namespace confighttp {
 
   std::string stream_stats_payload(const stream_stats::stats_t &stats) {
     return augment_stream_stats_json(stream_stats_json(stats), stats).dump();
+  }
+
+  namespace {
+    void write_network_connection(const resp_https_t &response, nlohmann::json output, std::uint64_t session_generation) {
+      output["stream_instance_id"] = stream_stats::stream_instance_id(session_generation);
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      headers.emplace("Cache-Control", "no-store");
+      response->write(output.dump(), headers);
+    }
+
+    /// The admin peer_status answer for the stream `before` named, unless that stream ended or
+    /// changed while the daemon was read.
+    nlohmann::json fenced_peer_status(const stream_stats::stats_t &before,
+                                      const std::optional<std::string> &status, std::int64_t observed_at_ms) {
+      auto output = tailscale_connection::evaluate(status, observed_at_ms, before.client_ip, {}, "peer_status");
+      const auto after = stream_stats::get_current();
+      if (!after.streaming || before.session_generation != after.session_generation || before.client_ip != after.client_ip)
+        output = tailscale_connection::unknown("peer_status", "stream_changed");
+      return output;
+    }
+  }  // namespace
+
+  /**
+   * The admin peer_status readout. Authenticated before the daemon is asked and again before the
+   * answer is written; the daemon read runs on `collector`'s worker, not on this server's thread.
+   */
+  void getNetworkConnection(tailscale_connection::status_collector_t &collector, resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    const auto before = stream_stats::get_current();
+    if (!before.streaming || before.client_ip.empty()) {
+      write_network_connection(response, tailscale_connection::unknown("peer_status", "no_active_stream"), before.session_generation);
+      return;
+    }
+    const bool accepted = collector.submit([response, request, before](const std::optional<std::string> &status, std::int64_t observed_at_ms) {
+      if (!authenticate(response, request)) return;
+      write_network_connection(response, fenced_peer_status(before, status, observed_at_ms), before.session_generation);
+    });
+    if (!accepted) {
+      // Too many reads already waiting, or the server is stopping: say so now rather than queue.
+      write_network_connection(response, fenced_peer_status(before, std::nullopt, 0), before.session_generation);
+    }
   }
 
   void getStreamStats(resp_https_t response, req_https_t request) {
@@ -10443,6 +10974,92 @@ namespace confighttp {
     });
   }
 
+  /// `collector` must outlive `server` and be stopped once the server has stopped.
+  void register_apps_stats_routes(https_server_t &server, tailscale_connection::status_collector_t &collector) {
+    server.resource["^/api/apps$"]["GET"] = getApps;
+    server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
+    server.resource["^/api/network/connection$"]["GET"] = [&collector](resp_https_t response, req_https_t request) {
+      getNetworkConnection(collector, std::move(response), std::move(request));
+    };
+  }
+
+#ifdef POLARIS_TESTS
+  void run_apps_stats_server_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready,
+    const std::function<void()> &before_apps,
+    const std::function<void(std::function<bool(std::size_t, std::chrono::milliseconds)>)> &network_queued
+  ) {
+    https_server_t server {cert, key};
+    tailscale_connection::status_collector_t network_collector;
+    if (network_queued) {
+      network_queued([&network_collector](std::size_t count, std::chrono::milliseconds timeout) {
+        return network_collector.wait_queued_for_tests(count, timeout);
+      });
+    }
+    auto stop_collector = util::fail_guard([&]() { network_collector.stop(); });
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    register_apps_stats_routes(server, network_collector);
+    const auto apps = server.resource["^/api/apps$"]["GET"];
+    server.resource["^/api/apps$"]["GET"] = [apps, before_apps](resp_https_t response, req_https_t request) {
+      before_apps();
+      apps(std::move(response), std::move(request));
+    };
+    server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
+  }
+
+  void run_recording_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  ) {
+    // Exactly the production recording route table: same wrappers, same handlers.
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    recording_save_workers_t recording_saves; // Drained before the server is destroyed.
+    recording_saves.set_before_launch_for_tests(recording_before_launch);
+    register_recording_routes(server, recording_saves);
+    server.start([&](unsigned short port) {
+      ready(port, [&]() { recording_saves.stop_accepting(); server.stop(); });
+    });
+    recording_saves.shutdown();
+  }
+
+  void run_library_artwork_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  ) {
+    // The production route with the console's 404 for any other GET, as start() serves them.
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    cover_lookup::workers_t fills; // Drained before the server is destroyed.
+    server.default_resource["GET"] = not_found;
+    registerLibraryArtwork(server, fills);
+    server.start([&](unsigned short port) {
+      ready(port, [&]() { fills.stop_accepting(); server.stop(); });
+    });
+    fills.shutdown();
+  }
+
+  void run_console_app_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  ) {
+    // The production console app handlers on an owned loopback TLS listener.
+    // Their own authentication runs; the CSRF wrapper the console adds in front is a separate layer.
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    server.resource["^/api/apps$"]["GET"] = getApps;
+    server.resource["^/api/apps$"]["POST"] = saveApp;
+    server.resource["^/api/apps/launch$"]["POST"] = launchApp;
+    server.resource["^/api/apps/close$"]["POST"] = closeApp;
+    server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
+  }
+#endif
+
   // Session event bus (file-scope for access from emit_session_event and SSE handler)
   static std::mutex s_event_mtx;
   static session_event_queue::event_queue s_events;
@@ -10470,7 +11087,11 @@ namespace confighttp {
     auto port_https = net::map_port(PORT_HTTPS);
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     cover_lookup::workers_t cover_lookups;
+    cover_lookup::workers_t library_artwork_fills; // Background Steam fills; never a cover lookup's slot.
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
+    recording_save_workers_t recording_saves; // Owns deferred responses while server lives.
+    // Declared after the server so it is destroyed first; stopped explicitly below as well.
+    tailscale_connection::status_collector_t network_collector;
 
     server.verify = [](req_https_t request, SSL *ssl) {
       if (auto named_cert_p = nvhttp::verify_client_cert(ssl)) {
@@ -10644,7 +11265,7 @@ namespace confighttp {
     server.resource["^/api/pin$"]["POST"] = withCsrf(savePin);
     server.resource["^/api/pin$"]["DELETE"] = withCsrf(cancelPairing);
     server.resource["^/api/otp$"]["POST"] = withCsrf(getOTP);
-    server.resource["^/api/apps$"]["GET"] = getApps;
+    register_apps_stats_routes(server, network_collector);
     server.resource["^/api/apps$"]["POST"] = withCsrf(saveApp);
     server.resource["^/api/apps/reorder$"]["POST"] = withCsrf(reorderApps);
     server.resource["^/api/apps/delete$"]["POST"] = withCsrf(deleteApp);
@@ -10665,6 +11286,7 @@ namespace confighttp {
     server.resource["^/api/apps/close$"]["POST"] = withCsrf(closeApp);
     server.resource["^/api/apps/artwork/remove$"]["POST"] = withCsrf(removeAppArtwork);
     server.resource["^/api/apps/artwork/find$"]["POST"] = withCsrf(findAppArtwork);
+    registerLibraryArtwork(server, library_artwork_fills);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
     server.resource["^/api/library/sources$"]["GET"] = getLibrarySources;
@@ -10730,15 +11352,11 @@ namespace confighttp {
     server.resource["^/api/stats/system$"]["GET"] = getSystemStats;
     server.resource["^/api/setup/hardware$"]["GET"] = getSetupHardware;
     server.resource["^/api/setup/networks$"]["GET"] = getSetupNetworks;
-    server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
     server.resource["^/api/stats/stream-sse$"]["GET"] = getStreamStatsSSE;
     server.resource["^/api/support/network-path-probe$"]["GET"] = getNetworkPathProbe;
     server.resource["^/api/host/power$"]["GET"] = getHostPower;
     server.resource["^/api/support/gamescope-helper$"]["GET"] = getGamescopeHelperProbe;
-    server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
-    server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
-    server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);
-    server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
+    register_recording_routes(server, recording_saves);
 #ifdef __linux__
     server.resource["^/api/browser-stream/status$"]["GET"] = getBrowserStreamStatus;
     server.resource["^/api/browser-stream/session/start$"]["POST"] = withCsrf(postBrowserStreamStart);
@@ -10831,11 +11449,17 @@ namespace confighttp {
     shutdown_event->view();
 
     cover_lookups.stop_accepting();
+    library_artwork_fills.stop_accepting();
+    recording_saves.stop_accepting();
     server.stop();
     wait_for_background_tasks();
 
     tcp.join();
+    // Any network-evidence request still waiting is answered unknown before the server goes.
+    network_collector.stop();
     cover_lookups.shutdown();
+    library_artwork_fills.shutdown();
+    recording_saves.shutdown();
   }
   static std::atomic<session_state_e> s_session_state{session_state_e::idle};
 
@@ -10903,6 +11527,9 @@ namespace confighttp {
   }
 
   void set_cover_post_for_tests(cover_post_t post) { cover_post_override = std::move(post); }
+  void set_recording_post_for_tests(cover_post_t post) { recording_post_override = std::move(post); }
+  void set_recording_commit_observer_for_tests(std::function<void()> observer) { recording_commit_observer = std::move(observer); }
+  void set_recording_before_launch_for_tests(std::function<void()> hook) { recording_before_launch = std::move(hook); }
   void set_cover_commit_observer_for_tests(std::function<void()> observer) { cover_commit_observer = std::move(observer); }
   bool revoke_cover_cookie_for_tests(const std::string &cookie) { return invalidate_web_session_cookie(cookie); }
   void set_cover_csrf_for_tests(std::string csrf) { csrfToken = std::move(csrf); }
@@ -10925,6 +11552,31 @@ namespace confighttp {
   void set_cover_apply_for_tests(game_artwork::providers::transport_t transport, std::optional<fs::path> appdata) {
     cover_apply_transport_override = std::move(transport);
     cover_apply_appdata_override = std::move(appdata);
+  }
+
+  void set_library_artwork_for_tests(game_artwork::providers::transport_t transport, std::optional<fs::path> appdata) {
+    library_artwork_transport_override = std::move(transport);
+    library_artwork_appdata_override = std::move(appdata);
+  }
+
+  bool wait_for_library_artwork_fills_for_tests(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+      {
+        auto &fills = library_artwork_fills();
+        std::lock_guard lock(fills.mutex);
+        if (fills.running.empty()) return true;
+      }
+      if (std::chrono::steady_clock::now() >= deadline) return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    }
+  }
+
+  void forget_library_artwork_fills_for_tests() {
+    auto &fills = library_artwork_fills();
+    std::lock_guard lock(fills.mutex);
+    fills.running.clear();
+    fills.retry_after.clear();
   }
 
   void set_cover_sweep_lookup_for_tests(artwork_sweep::lookup_fn_t lookup) {

@@ -4,6 +4,7 @@
  */
 // standard includes
 #ifdef __linux__
+  #include "platform/linux/game_mode_host.h"
   #include "platform/linux/gamescope_process.h"
   #include "platform/linux/labwc_supervisor.h"
 
@@ -508,6 +509,9 @@ int main(int argc, char *argv[]) {
       lifetime::debug_trap();
     };
 
+    // #204: before the teardown below can end a session, so no restore to Game Mode starts while
+    // Polaris stops, and any transition or restore in flight ends at its next check. Lock-free.
+    prelaunch::request_stop();
     proc::proc.terminate();
 
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
@@ -522,6 +526,7 @@ int main(int argc, char *argv[]) {
     // Whoever sent SIGTERM (systemctl stop or restart, a session ending) wants
     // this process gone. A restart requested earlier must not re-exec in its place.
     lifetime::set_restart_in_place_pending(false);
+    prelaunch::request_stop();
 
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
@@ -800,6 +805,10 @@ int main(int argc, char *argv[]) {
 
   bool start_tray = tray_is_enabled && config::sunshine.system_tray;
 #ifdef __linux__
+  if (start_tray && platf::game_mode_host::suppress_tray_for_headless_boot()) {
+    BOOST_LOG(info) << "Not starting the system tray: the headless-boot service must outlive the desktop compositor"sv;
+    start_tray = false;
+  }
   if (start_tray) {
     const char *runtime = std::getenv("XDG_RUNTIME_DIR");
     const auto runtime_dir = (runtime && *runtime) ? std::filesystem::path(runtime) :
@@ -835,6 +844,8 @@ int main(int argc, char *argv[]) {
 
   // Wait for shutdown, this is not necessary when we're using the main event loop
   shutdown_event->view();
+  // #204: joins a restore worker that is still settling, outside every lock (it was told to stop).
+  prelaunch::shutdown();
 
 #ifdef __linux__
   if (profile_service) profile_service->stop_admission();
@@ -844,6 +855,9 @@ int main(int argc, char *argv[]) {
   httpThread.join();
   configThread.join();
   rtspThread.join();
+
+  // Packet producers have stopped. Drain the recorder worker before its dependencies.
+  stream_recorder::shutdown();
 
 #ifdef __linux__
   if (profile_service && !profile_service->shutdown(5s)) {

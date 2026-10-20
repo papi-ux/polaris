@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures/mocked.js'
 
 const viewports = [
   { width: 320, height: 900 },
