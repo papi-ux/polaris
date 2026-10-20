@@ -1,0 +1,34 @@
+{
+  "version": "1.5.0-beta.2",
+  "capturedDate": "2026-10-20",
+  "images": [
+    {
+      "file": "polaris-mission-control-aurora.webp",
+      "width": 1289,
+      "height": 864,
+      "theme": "polaris",
+      "capturedAt": "2026-10-20T13:28:36.745980+00:00",
+      "sha256": "46aa71ce42f629429b2eb24d793ca0209fe5f9642b76b80b4cf91e5a00089b7b",
+      "bytes": 116514,
+      "originalPNGsha256": "0d3cc5e6eb4dab73d7ee0dd78c28ee8aae564ad4e253e31daba3db399419561b",
+      "encoding": "WebP quality90, original dimensions, no crop or compositing",
+      "capture": "Installed Fedora packaged web UI rendered locally with read-only host responses; host display labels neutralized before rendering; no host config writes.",
+      "package": "polaris-1.5.0~beta.2-1.x86_64",
+      "binarySHA256": "5b3d1ce34cd17bc2b12743fdedbacac10d6900d2ad7be4ffb26396eb9ae7e378"
+    },
+    {
+      "file": "polaris-mission-control-director.webp",
+      "width": 1289,
+      "height": 864,
+      "theme": "director",
+      "capturedAt": "2026-10-20T13:29:40.863183+00:00",
+      "sha256": "2cf14ad21a252b8a4dfe40495141575eb13d1734dd4309448c8b216feff1bf3b",
+      "bytes": 114082,
+      "originalPNGsha256": "2c5e9e13f8dbbebe047ca92c9bf7be0af4616881b2ca69c6f5b10518d8541bf7",
+      "encoding": "WebP quality90, original dimensions, no crop or compositing",
+      "capture": "Installed Fedora packaged web UI rendered locally with read-only host responses; host display labels neutralized before rendering; no host config writes.",
+      "package": "polaris-1.5.0~beta.2-1.x86_64",
+      "binarySHA256": "5b3d1ce34cd17bc2b12743fdedbacac10d6900d2ad7be4ffb26396eb9ae7e378"
+    }
+  ]
+}
