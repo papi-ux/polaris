@@ -32,15 +32,13 @@ the host is ready, how the game will launch and how your GPU is doing.</sub>
 
 ## What Polaris does
 
-Most streaming hosts borrow your desktop. They change your resolution, wake
-your monitors and leave the cleanup to you. Polaris gives each game a place of
-its own, uses your GPU to keep the picture sharp, and tells you plainly how the
-stream is going. It's free, open source and self-hosted: there's no cloud
-account or subscription, and pairing, settings and your library stay on your
-PC.
+Give each game a space of its own, bring your library together, and manage it
+from a browser. Polaris uses your GPU to stream and keeps you informed about
+the connection. It's free, open source and self-hosted: there's no cloud account
+or subscription, and pairing, settings and your library stay on your PC.
 
 - **Your desktop stays yours.** Private Stream runs each game in its own
-  invisible session, so your monitors, windows and layout never move, and it
+  invisible session, so your monitors, windows and layout stay put, and it
   can even run on a PC with no monitor attached. When you do want the real
   desktop, Mirror Desktop streams it, Host Virtual Display adds a screen sized
   to your client, and Gamescope Stream suits a Steam-first, Deck-style host.
@@ -57,7 +55,7 @@ PC.
   tells you whether it's ready to stream and the first thing to fix if it
   isn't. The console fits a phone or tablet as well as a desktop.
 - **A Doctor for bad streams.** When a game feels wrong, Doctor tells you
-  whether the network, the host or the client is behind it. When it can help,
+  whether the network, the host or the client may be behind it. When it can help,
   it offers one safe fix, checks whether it worked and undoes it if it didn't.
 - **Your library comes along.** Steam, Heroic (GOG and Epic), Lutris and ROM
   folders with their emulators arrive with artwork, and each game shows its
