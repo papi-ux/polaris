@@ -25,7 +25,7 @@ stays exactly as you left it.
 
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
-![Polaris Aurora Mission Control during a live session, with stream health, Doctor and the GPU-native runtime path](docs/screenshots/polaris-mission-control-live-v1.3.8.webp)
+![Polaris Mission Control in the Polaris Aurora theme, with Control Ultimate Edition up next and the host ready for clients](docs/screenshots/beta2/polaris-mission-control-aurora.webp)
 
 ## Why Polaris
 
@@ -52,7 +52,11 @@ its own and tells you plainly how the stream is going.
   no cloud account or subscription: pairing, settings and your library stay on
   your PC.
 
-![Polaris Aurora Library with Control Ultimate Edition and other ready games](docs/screenshots/polaris-library-control-v1.3.8.webp)
+Prefer charcoal and red? `< Congratulations, Director >` is a separate theme
+in the 1.5.0 beta, so nothing changes until you pick it. Polaris Aurora stays
+the default.
+
+![Polaris Mission Control in the < Congratulations, Director > theme: charcoal, warm white and red](docs/screenshots/beta2/polaris-mission-control-director.webp)
 
 ## Get started
 
@@ -109,7 +113,8 @@ runs on Android, with native Linux and Steam Deck builds in alpha.
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [Changelog](docs/changelog.md) · [Releases](https://github.com/papi-ux/polaris/releases)
 - [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions) · [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md)
 
-The screenshots come from a tagged public release; [their sources are listed here](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json).
+Screenshot sources: [these 1.5.0-beta.2 captures](docs/screenshots/beta2/provenance.json)
+and [the website gallery](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json).
 
 ## Acknowledgments
 
