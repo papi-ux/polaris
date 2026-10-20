@@ -333,7 +333,6 @@ jobs:
         # executable in both this build list and the anchored ctest expression;
         # narrow deliberately only if a suite earns it.
         run: |
-          umask 077
           recorder_evidence="$(mktemp -d "$GITHUB_WORKSPACE/build-sanitize/recorder-fixture-evidence.XXXXXX")"
           mkdir -m 700 "$recorder_evidence/negative" "$recorder_evidence/window" \
             "$recorder_evidence/expiry" "$recorder_evidence/timing"
@@ -514,7 +513,6 @@ jobs:
         # cannot silently reduce this gate to host-only coverage.
         run: |
           set -euo pipefail
-          umask 077
           # The worker authority intentionally refuses root. This container
           # builds as root, so exercise admission with an ordinary service UID.
           # A private TMPDIR also avoids the preceding root suite's temp files.
