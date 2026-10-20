@@ -52,9 +52,9 @@ runtime path in one web console.
   step with verification and Undo. Missing data stays unknown; a named GPU
   encoder does not prove capture avoided CPU copies.
 
-This README includes the **1.5.0-beta.2 candidate; public delivery is pending**.
-Latest remains stable. Match packages and instructions to your installed
-version; [candidate notes](docs/release-notes/v1.5.0.md) and the
+This README describes **1.5.0-beta.2** features. A source branch can lead
+available packages: match assets and instructions to an actually published
+release. Latest remains stable. The [release notes](docs/release-notes/v1.5.0.md) and the
 [changelog](docs/changelog.md) record features, changes and remaining limits.
 
 ## Choose a launch mode
@@ -101,8 +101,8 @@ Every capture above and across [papi-ux.com](https://papi-ux.com/polaris/) comes
 ## Install and start a first stream
 
 Choose an official package from [Latest](https://github.com/papi-ux/polaris/releases/latest)
-for stable, or the exact published prerelease for a beta. Do not use a stable
-package URL to install a pending beta.
+for stable, or the exact published prerelease for a beta. A stable package URL
+does not select a beta.
 
 | Linux host | Installation path |
 | --- | --- |
@@ -141,13 +141,13 @@ and [published betas](https://github.com/papi-ux/nova/releases) have separate
 channels. Native x86_64 Linux is an Alpha; see the
 [Linux install guide](https://papi-ux.com/docs/nova/linux/).
 
-Steam Frame has a separate experimental ARM64 alpha planned for beta.2.
+Steam Frame has a separate experimental ARM64 alpha in releases that include it.
 Short checks covered 1080p SDR at requested 60 fps, H.264/HEVC/PyroWave picture,
 sound, controllers and readable Command Center actions. Sustained performance,
 higher rates, color/clarity, XR and HDR remain unqualified; this is not Steam
-Frame Verified support. The [planned beta.2 Frame guide](https://github.com/papi-ux/nova/blob/v1.5.0-beta.2/clients/deck/docs/steam-frame.md#public-alpha)
-link becomes available with that tag; use its matching alpha pair after
-publication. Public beta.2 delivery is pending.
+Frame Verified support. The [beta.2 Frame guide](https://github.com/papi-ux/nova/blob/v1.5.0-beta.2/clients/deck/docs/steam-frame.md#public-alpha)
+is available when that tag is published; use the matching alpha pair only if
+it is attached to that release.
 
 Nova reviews the launch plan before play.
 
