@@ -296,13 +296,14 @@ TEST(SourceSafetyContracts, UbuntuSnapshotInstallsMayDowngradeRunnerPackages) {
   };
 
   constexpr std::string_view unprotected_snapshot_install = R"(sudo apt-get "${apt_options[@]}" install -y \)";
-  constexpr std::string_view protected_snapshot_install = R"(sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \)";
+  constexpr std::string_view protected_snapshot_install = R"(sudo apt-get "${apt_options[@]}" --no-download install -y --allow-downgrades "${snapshot_packages[@]}")";
 
   constexpr std::string_view curl_snapshot_lookup = "madison libcurl4-openssl-dev";
   constexpr std::string_view curl_runtime_pin = R"("libcurl4t64=$curl_snapshot_version")";
   constexpr std::string_view curl_dev_pin = R"("libcurl4-openssl-dev=$curl_snapshot_version")";
 
   EXPECT_EQ(count_exact(workflow, unprotected_snapshot_install), 0u);
+  EXPECT_EQ(count_exact(workflow, R"(sudo apt-get "${apt_options[@]}" --no-download install -y "${snapshot_packages[@]}")"), 0u);
   EXPECT_EQ(count_exact(workflow, protected_snapshot_install), 2u);
   EXPECT_EQ(count_exact(workflow, curl_snapshot_lookup), 2u);
   EXPECT_EQ(count_exact(workflow, curl_runtime_pin), 2u);
