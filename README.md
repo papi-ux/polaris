@@ -37,86 +37,55 @@ runtime path in one web console.
 
 ## Built for the whole player loop
 
-Polaris is the matched host for Nova. Together they make the whole player loop
-explicit:
+- **Choose where the game runs.** Private Stream, Gamescope Stream, virtual
+  displays and desktop modes state their physical-screen impact. Unavailable
+  routes refuse with a reason; per-game **Launch as** keeps host defaults intact.
+- **Keep ownership clear.** Disconnect leaves a game available to resume;
+  End Session can stop only the title the session owns. Heroic on Host Virtual
+  Display still has unconfirmed-shutdown cases: prefer Private Stream there.
+- **Build a library.** Steam, Heroic, Lutris and ROM imports retain their
+  launcher identity, artwork and launch-health checks.
+- **Spaces are a preview.** A player's own sign-in, library and saves in a
+  container; one Space runs at a time. See [Spaces](https://papi-ux.com/docs/spaces/)
+  and [emulators](https://papi-ux.com/docs/emulators/).
+- **Doctor uses evidence.** Fresh media loss can justify one reversible bitrate
+  step with verification and Undo. Missing data stays unknown; a named GPU
+  encoder does not prove capture avoided CPU copies.
 
-- **Where games run is a real choice.** Private Stream, Gamescope Stream, Host
-  Virtual Display, Headless Dongle and Mirror Desktop are described by their
-  display and privacy impact, unavailable modes fail closed, each app can pin its
-  mode with **Launch as**, and stream displays go up to 240 FPS.
-- **Steam Game Mode is supported.** Stream a gamescope Steam session, launch a
-  Steam title from Nova, and end only the title the stream opened; proven on
-  Steam Deck OLED ([handhelds guide](https://papi-ux.com/docs/handhelds/)).
-- **Desktop Steam stays yours.** On Host Virtual Display and Mirror Desktop,
-  End Session can close only the game it launched, and Nova can open or quit
-  Steam on the host.
-- **Spaces, an early preview.** A player's own sign-in, library and saves with
-  Steam, Heroic or Lutris. Host Setup installs the runtime, NVIDIA Spaces use the
-  host driver, and one Space runs at a time ([Spaces](https://papi-ux.com/docs/spaces/),
-  [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/)).
-- **Anyone can watch.** A second device can watch the running stream at its own
-  resolution; Nova asks for the stream the host offers.
-- **ROM folders become a library.** Import once and rescan, with emulator
-  presets, local covers and launch-health checks
-  ([emulators guide](https://papi-ux.com/docs/emulators/)).
-- **Refusals say why.** A refused launch carries what went wrong, the one change
-  that fixes it and a code Nova shows, instead of error 503.
-- **Doctor acts only when it can prove the step is safe.** One reversible
-  bitrate change, verified against fresh encoder evidence and undone if it
-  fails. Everything else is read-only
-  guidance: before a stream, the host's configuration findings and whether
-  capture will copy frames through system memory; during one, a Tailscale peer
-  readout from the host's own tailscaled.
-- **Experimental and off by default.** Source-paced VRR and leaving Steam Deck
-  Game Mode before launch, each hands-on checked, and host Recording with
-  unqualified playback ([release notes](docs/release-notes/v1.5.0.md)).
-- **Launches are deterministic.** Auto, Quality, High FPS and Stability resolve
-  into one app- and topology-bound envelope that Nova sends back unchanged.
-- **The Library keeps identity intact.** Heroic GOG and Epic imports keep their
-  runner and install identity, native or Flatpak, and built-in utilities keep
-  their artwork unless you pick another.
+This README includes the **1.5.0-beta.2 candidate; public delivery is pending**.
+Latest remains stable. Match packages and instructions to your installed
+version; [candidate notes](docs/release-notes/v1.5.0.md) and the
+[changelog](docs/changelog.md) record features, changes and remaining limits.
 
-Read the [changelog](docs/changelog.md) for the release-by-release change and
-validation record.
+## Choose a launch mode
 
-## Why Polaris
+| Mode | What happens to the host display |
+| --- | --- |
+| Private Stream | A session-owned compositor runs the game separately from your desktop |
+| Gamescope Stream | A gamescope session provides the stream; hardware and portal support still matter |
+| Host Virtual Display | An added or borrowed output; its backend determines layout and privacy impact |
+| Mirror Desktop | Streams the visible desktop deliberately |
+| Desktop Takeover | Temporarily moves a Hyprland desktop and blanks its physical displays; recovery must be provable |
+| Headless Dongle | Uses a configured dummy plug; panel blanking needs the supported setup |
 
-<table>
-<tr>
-<td width="50%" valign="top"><img src="docs/screenshots/glyph-isolation.svg" width="22" height="22" alt=""><br>
-<b>A private streaming desktop.</b> Private Stream runs a game in its own compositor instead of changing your physical monitor layout.</td>
-<td width="50%" valign="top"><img src="docs/screenshots/glyph-truth.svg" width="22" height="22" alt=""><br>
-<b>Operational truth, not a mystery box.</b> Mission Control shows the chosen runtime, capture path, encoder, viewers, latency, loss, and Doctor guidance.</td>
-</tr>
-<tr>
-<td valign="top"><img src="docs/screenshots/glyph-client.svg" width="22" height="22" alt=""><br>
-<b>A client-aware launch model.</b> Nova can present available display modes, session ownership, safe disconnects, and host-backed tuning before and during play.</td>
-<td valign="top"><img src="docs/screenshots/glyph-local.svg" width="22" height="22" alt=""><br>
-<b>Local-first and open.</b> Pairing state, permissions, library data, and core streaming remain on your host. Optional AI features use only the provider you configure.</td>
-</tr>
-</table>
+[Launch modes](https://papi-ux.com/docs/launch-modes/) and the
+[runtime guide](https://papi-ux.com/docs/runtime/) explain providers, restrictions
+and capture paths. A Space has its own runtime; it is not another display mode.
 
-## How isolation works
+## Mission Control, Director and mobile access
 
-1. **Choose a game.** Launch from Polaris, Nova, or a compatible Moonlight
-   client.
-2. **Resolve where this session runs.** Private and Gamescope modes get a
-   session-owned compositor; Host Virtual Display gets an extra output; Mirror
-   Desktop deliberately uses the physical desktop. A Space runs its own Steam
-   in a container, chosen per device. Polaris validates the matching capture
-   and encoder path before admitting the stream.
-3. **Observe and recover.** Mission Control reports what actually happened;
-   Doctor suggests bounded corrections when live evidence needs attention.
+Mission Control features the current or next game, recent titles, live readings
+and one Diagnostics section for frame health, pacing, host vitals and launch
+checks. A missing reading shows its reason rather than zero. Open the web
+console from a trusted browser on the host, phone or tablet; access policy and
+authentication still apply.
 
-Read the [runtime guide](https://papi-ux.com/docs/runtime/) for the detailed
-Private Stream, virtual-display, and desktop-mirroring behavior.
-
-## <img src="docs/screenshots/pulse-ready.svg" width="14" height="14" alt=""> Ready, live, and back to the library
-
-The same Mission Control surface changes from an idle host with a paired client
-to an active stream with live telemetry, Doctor status, and the observed
-capture and encoder paths. Capture can involve CPU copies even when encoding
-runs on the GPU; an idle capability forecast does not verify a live path.
+Polaris Aurora stays the default. **`< Congratulations, Director >`** offers
+charcoal, warm white and red; saved themes stay. Narrow screens use a drawer,
+and portrait/landscape layouts support enlarged text. Browser-emulated mobile
+checks passed; physical phone/tablet console validation remains pending.
+Nova Android's embedded Host Console can hand a launch back to Nova without
+changing the console's saved theme. See [Mission Control](docs/mission-control.md).
 
 ![Polaris Aurora Mission Control during a live Android Handheld session, showing Doctor and the GPU-native runtime path](docs/screenshots/polaris-mission-control-live-v1.3.8.webp)
 
@@ -131,39 +100,54 @@ Every capture above and across [papi-ux.com](https://papi-ux.com/polaris/) comes
 
 ## Install and start a first stream
 
-Use an official package from the [latest GitHub
-release](https://github.com/papi-ux/polaris/releases/latest), then perform the
-explicit host setup. On Bazzite, follow the [RPM installation guide](docs/bazzite.md)
-and reboot into the staged deployment before setup:
+Choose an official package from [Latest](https://github.com/papi-ux/polaris/releases/latest)
+for stable, or the exact published prerelease for a beta. Do not use a stable
+package URL to install a pending beta.
+
+| Linux host | Installation path |
+| --- | --- |
+| Fedora 44, Arch/CachyOS | [Quick start](https://papi-ux.com/docs/quickstart/); signed repositories serve stable |
+| Bazzite | [RPM guide](docs/bazzite.md): stage through rpm-ostree, reboot, then setup |
+| SteamOS 3.8 / 3.9 | [SteamOS guide](https://papi-ux.com/docs/steamos/); beta.2 uses separate matching packages |
+| Ubuntu 24.04 | [Ubuntu guide](docs/ubuntu.md); experimental tester package |
+| NixOS | [Flake/module guide](nix/README.md); separate system/per-user configuration, community validation limits |
+| Other distributions | [Compatibility](https://papi-ux.com/docs/compatibility/) and [source build](docs/building.md) |
+
+For the package paths that call for host setup:
 
 ```bash
 sudo -H polaris --setup-host
 polaris
 ```
 
-**Fresh install:** open `https://localhost:47990/#/welcome` and create the web
-account. **Upgrade or reinstall:** open `https://localhost:47990/#/login` and
-use the existing account; package operations intentionally preserve credentials,
-pairing keys, settings, and the library under `~/.config/polaris`. The
-[quick-start guide](https://papi-ux.com/docs/quickstart/) contains the current
-Fedora, Arch, SteamOS, Ubuntu, Bazzite, openSUSE, and source paths, and on a
-Steam Deck the [SteamOS guide](https://papi-ux.com/docs/steamos/) also keeps
-Polaris running in Game Mode. Only use
-`polaris --setup-host --enable-kms` when the guide says your DRM/KMS capture path
-needs it.
+**Fresh install:** open `https://localhost:47990/#/welcome` to create the account.
+**Upgrade or reinstall:** use `https://localhost:47990/#/login`; package operations preserve
+credentials, pairing, settings and library in `~/.config/polaris`.
+Only add `--enable-kms` when your capture guide requires it. Diagnostics name
+missing permissions, dependencies or providers; a successful setup is not a
+live-stream or hardware pass.
+
+On Steam Deck, follow the service/Game Mode steps in the guide. Leaving Game
+Mode before a private launch is a separate **default-off** per-app beta opt-in
+requiring SteamOS Manager 26.4.1 (SteamOS 3.9); 3.8 refuses before changing state.
+Focused checks on Deck OLED covered H.264 around 60 fps and owned return to
+Game Mode; they do not qualify HEVC, HDR or 120 fps on that host.
 
 ## Clients and compatibility
 
-[Nova](https://papi-ux.com/nova/) is the enhanced client for Android and for
-**x86_64 Linux desktops, laptops and handhelds**, including Steam Deck, as an
-Alpha. It adds a host-backed Library, the Space chooser, Play Setup, Private
-Stream choices, Command Center, NovaHUD, session ownership and tuning provenance.
-Choose Android APKs or the standard Linux Flatpak from
-[stable](https://github.com/papi-ux/nova/releases/latest) or
-[beta releases](https://github.com/papi-ux/nova/releases); the
-[Linux install guide](https://papi-ux.com/docs/nova/linux/) covers native
-streaming and Steam Input. Steam Frame uses a separate experimental ARM64
-development route; sustained 1080p/90 and color/clarity qualification remain open.
+[Nova](https://papi-ux.com/nova/) adds a host-backed Library, Play Setup,
+Command Center, NovaHUD and session ownership. [Stable Android](https://github.com/papi-ux/nova/releases/latest)
+and [published betas](https://github.com/papi-ux/nova/releases) have separate
+channels. Native x86_64 Linux is an Alpha; see the
+[Linux install guide](https://papi-ux.com/docs/nova/linux/).
+
+Steam Frame has a separate experimental ARM64 alpha planned for beta.2.
+Short checks covered 1080p SDR at requested 60 fps, H.264/HEVC/PyroWave picture,
+sound, controllers and readable Command Center actions. Sustained performance,
+higher rates, color/clarity, XR and HDR remain unqualified; this is not Steam
+Frame Verified support. The [planned beta.2 Frame guide](https://github.com/papi-ux/nova/blob/v1.5.0-beta.2/clients/deck/docs/steam-frame.md#public-alpha)
+link becomes available with that tag; use its matching alpha pair after
+publication. Public beta.2 delivery is pending.
 
 Nova reviews the launch plan before play.
 
@@ -179,18 +163,19 @@ to Nova. Check the maintained [compatibility
 guide](https://papi-ux.com/docs/compatibility/) before choosing a distro, GPU,
 capture path, HDR mode, or experimental Browser Stream setup.
 
-### PyroWave and Doctor
+### PyroWave, pacing and diagnostics
 
-PyroWave is experimental SDR and needs compatible host, client and network
-capabilities. Nova Linux includes it in its standard bundle from 1.5.0, now in beta, with
-a device check on selection. Read the [PyroWave guide](https://papi-ux.com/docs/pyrowave/)
-for request versus encoder units and limits; a suggested target does not prove
-network capacity.
+PyroWave is experimental and needs compatible host, client and network paths.
+Nova Linux's 1.5 beta standard bundle includes SDR support with a device check
+on selection. [PyroWave](https://papi-ux.com/docs/pyrowave/) explains requested,
+encoded and network bitrate units; advice is not a capacity measurement.
 
-Doctor grades fresh media-loss evidence, not control-channel retransmissions.
-A verified loss reduction can pause Live Tuning for that stream; Undo restores
-bitrate and tuning without changing host settings. See
-[Doctor](https://papi-ux.com/docs/doctor/).
+Source-paced VRR is a **default-off** beta opt-in; Nova does not request it yet.
+The inspected compositor feedback is not a measured panel-cadence result.
+Host Recording is experimental raw video without audio/timestamps; playback
+is unqualified. The host's Tailscale peer fact describes its control connection,
+not the media route. [Doctor](https://papi-ux.com/docs/doctor/) keeps stale or
+missing evidence separate from measured zero and explains reversible actions.
 
 Newly paired clients receive **Game Control** by default: enough access to browse,
 launch, and play, without clipboard, file-transfer, or server-command permissions.
