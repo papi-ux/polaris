@@ -8,6 +8,10 @@
 | **hjem** | `hjemModules.polaris` | per-user units + packages |
 | **home-manager** | `homeModules.polaris` | same via `systemd.user` |
 
+Importing the NixOS module reserves `services.polaris` for the game-streaming
+host and disables nixpkgs' unrelated Polaris music-server module, which uses the
+same option name. The two service modules cannot share that namespace.
+
 GPU selection is **only** Polaris web UI `adapter_name` (or leave empty for auto).  
 No hybrid “nvidia pin” rewrite of conf.
 
@@ -27,6 +31,10 @@ No hybrid “nvidia pin” rewrite of conf.
 | changes under `nix/` or `flake.*` | the patch stacks against their pinned sources; `nix flake check`; every package evaluates |
 | the same, then | `nix build` of `gamescope-polaris` and the portal — the only place the `+polhdr` install check can run |
 | manual and weekly | `nix build` of `polaris-stream`, which is what catches a stale `npmDepsHash` |
+
+The x86_64 flake check also evaluates the NixOS host module with the host enabled
+and disabled. It catches collisions with the ordinary nixpkgs module set; it
+does not boot NixOS or test streaming.
 
 Not covered: the home-manager module, and evaluation for `aarch64-linux`.
 

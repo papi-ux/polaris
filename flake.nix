@@ -79,6 +79,10 @@
         nixpkgs.overlays = [ self.overlays.default ];
       };
 
+      checks.x86_64-linux.nixos-module = import ./nix/tests/nixos-module.nix {
+        inherit self nixpkgs;
+      };
+
       hjemModules.polaris = import ./nix/modules/hjem.nix;
       hjemModules.default = self.hjemModules.polaris;
 
