@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The private-stream launch cards name Private Stream as the starting point for AMD and Intel, and GPU-native for supported NVIDIA hosts. Thanks to coreydeli for the hint clarification in [#804](https://github.com/papi-ux/polaris/pull/804).
+
 - The release in progress is 1.5.0, not 1.4.14. The number changed at beta.2 to say how much the train carries since 1.4.13; nothing else about the beta channel changes. Every version pin moves with it (`project(Polaris VERSION 1.5.0)`, the SteamOS `EXPECTED_PKGVER`, the reviewed namcap warning, the benchmark collector version, the notes file `docs/release-notes/v1.5.0.md` and its contract test). `v1.4.14-beta.1` stays published as the prerelease it was; a host on it reaches `1.5.0-beta.2` through an ordinary upgrade, and the Update Center offers it with betas on.
 - SteamOS 3.9 gets its own package trio, `Polaris-steamos3.9-x86_64.pkg.tar.zst` with its `Polaris-kms-steamos3.9-x86_64.pkg.tar.zst` helper and `Polaris-debug-steamos3.9-x86_64.pkg.tar.zst` symbols, built against Valve's SteamOS 3.9 repositories, because SteamOS 3.9 cannot load the 3.8 package's Boost libraries. Each SteamOS package now depends on the exact Boost libraries of its own release, so pacman refuses the other release's package, and the Update Center selects the package for the release the host runs. The 3.9 package declares the split `libgcc` and `libstdc++` runtimes where 3.8 keeps `gcc-libs`; the 3.8 package, compiler flags, native code and units are unchanged. The 3.9 install guide names the `v1.5.0-beta.2` tag, because `releases/latest` does not select a prerelease.
 
