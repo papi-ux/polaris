@@ -21,7 +21,7 @@ class Unavailable(RuntimeError):
 def parse_plan(text, snapshot, local_deb=None):
     prefix = f'/ubuntu/{snapshot}/'
     rows, names = [], set()
-    local_seen = False
+    local_filename = None
     for line in text.splitlines():
         if not line.startswith("'"):
             if '://' in line or '.deb' in line:
@@ -31,14 +31,19 @@ def parse_plan(text, snapshot, local_deb=None):
         # APT 2.8.3 emits file:/absolute/path, cache name, size, with no hash
         # for a local-only DEB. Only this caller-bound file may lack that hash.
         if local_deb is not None and fields and fields[0] == 'file:' + str(local_deb[0].resolve(strict=True)):
-            if (len(fields) not in (3, 4) or local_seen
+            if (len(fields) not in (3, 4) or local_filename is not None
                     or not re.fullmatch(r'[a-z0-9][A-Za-z0-9_+~.%:-]*\.deb', fields[1])
+                    or re.search(r'%(?![0-9a-fA-F]{2})|%2f|%5c|%25', fields[1], re.I)
+                    or not re.fullmatch(r'[a-z0-9][A-Za-z0-9_+~.:-]*\.deb', unquote(fields[1]))
                     or fields[1] in names or fields[2] != str(local_deb[1])
                     or (len(fields) == 4 and fields[3] != local_deb[2])):
                 raise ValueError('Local APT row does not match the bound DEB')
             names.add(fields[1])
-            local_seen = True
-            continue  # Never fetch or admit the local DEB into APT's cache.
+            # Use APT's emitted basename; do not derive one from the input path
+            # or reconstruct its package/version encoding. Trust is the caller's
+            # size/SHA256 binding, not the local row's absent repository hash.
+            local_filename = fields[1]
+            continue
         if len(fields) != 4:
             raise ValueError('APT payload row needs URI, filename, size and a strong hash')
         uri, filename, size, digest = fields
@@ -62,10 +67,10 @@ def parse_plan(text, snapshot, local_deb=None):
             raise ValueError('APT payload requires an authenticated SHA256 or SHA512')
         names.add(filename)
         rows.append((uri, filename, int(size), digest, path))
-    return rows
+    return rows, local_filename
 
 
-def verify(path, size, digest):
+def verify(path, size, digest, copy_to=None):
     # Restored actions/cache entries receive the same check as new downloads.
     # APT itself can accept a cached archive by size alone.
     algorithm, expected = digest.split(':', 1)
@@ -77,6 +82,8 @@ def verify(path, size, digest):
         hasher = hashlib.new(algorithm.lower())
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             hasher.update(chunk)
+            if copy_to is not None:
+                copy_to.write(chunk)
         actual = hasher.hexdigest()
     if actual != expected:
         raise ValueError(f'{algorithm} mismatch for {path.name}')
@@ -129,6 +136,26 @@ def acquire(row, archives):
         target.unlink()
 
 
+def cache_local_deb(local_deb, filename, archives):
+    # --no-download also requires the local-only DEB in APT's archive cache.
+    # This is one explicitly bound file, never another network payload source.
+    destination = archives / filename
+    if os.path.lexists(destination):
+        verify(destination, *local_deb[1:])
+        return
+    with tempfile.TemporaryDirectory(prefix='.polaris-local-', dir=archives) as directory:
+        target = Path(directory) / 'payload.deb'
+        with target.open('xb') as output:
+            verify(*local_deb, copy_to=output)
+        target.chmod(0o644)
+        try:
+            os.link(target, destination)  # Atomic, same filesystem, no overwrite.
+        except FileExistsError:
+            verify(destination, *local_deb[1:])
+        target.unlink()
+    verify(destination, *local_deb[1:])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--local-deb', nargs=3, metavar=('PATH', 'SIZE', 'SHA256'))
@@ -169,15 +196,19 @@ def main():
         ], stdout=subprocess.PIPE, text=True, env=os.environ | {'LC_ALL': 'C'})
     print(plan.stdout, end='', flush=True)
     plan.check_returncode()
-    rows = parse_plan(plan.stdout, args.snapshot, local_deb)
+    rows, local_filename = parse_plan(plan.stdout, args.snapshot, local_deb)
     if local_deb is not None:
         verify(*local_deb)
+    if local_filename is not None:
+        cache_local_deb(local_deb, local_filename, args.archives)
     # Validate the whole plan before acquiring anything. Four bounded transfers
     # keep a snapshot outage from serializing hundreds of per-payload timeouts.
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(lambda row: acquire(row, args.archives), rows))
     if local_deb is not None:
         verify(*local_deb)
+    if local_filename is not None:
+        verify(args.archives / local_filename, *local_deb[1:])
 
 
 if __name__ == '__main__':
