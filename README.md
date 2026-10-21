@@ -71,6 +71,17 @@ or subscription, and pairing, settings and your library stay on your PC.
   device in your hands. Moonlight and other compatible clients pair, browse and
   play too.
 
+### Better with Nova
+
+Nova is the client built for Polaris. It reads the launch modes your PC can
+run, so Play Setup names where a game will run and at what resolution, frame
+rate and codec before anything starts, and Command Center keeps the session's
+controls a shortcut away. Nova runs on Android, with Linux, Steam Deck and
+Steam Frame builds in Beta. [Meet Nova](https://papi-ux.com/nova/) or
+[get the latest release](https://github.com/papi-ux/nova/releases/latest).
+
+![Nova Play Setup for Control on a Retroid Pocket 6: what will happen, where it runs, resolution, frame rate, codec and launch preset, shown before the game starts](docs/screenshots/beta2/nova-play-setup-aurora.webp)
+
 Want a different look? The console comes in a choice of themes under
 **Appearance**.
 
@@ -128,11 +139,6 @@ play.
   [Recording](docs/configuration.md#recording-tab) (video only, no audio) and
   [source-paced VRR](docs/configuration.md#audio-and-video-tab) (experimental,
   not yet requested by Nova) are off by default.
-
-Looking for the client? [Get Nova](https://papi-ux.com/downloads/?product=nova)
-for Android, or take its [latest release](https://github.com/papi-ux/nova/releases/latest).
-Its native Linux and Steam Deck builds are alphas, and Steam Frame has a
-separate experimental alpha.
 
 ## Learn more
 
