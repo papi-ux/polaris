@@ -10,6 +10,10 @@ let
   cfg = config.services.polaris;
 in
 {
+  # This module owns services.polaris for the game host. nixpkgs' unrelated
+  # music server declares the same options, so the two modules cannot coexist.
+  disabledModules = [ "services/misc/polaris.nix" ];
+
   options.services.polaris = import ./options.nix { inherit lib pkgs; };
 
   config = lib.mkIf cfg.enable {
