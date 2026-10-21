@@ -1476,7 +1476,6 @@ jobs:
           test ! -L "$deb_path"
           test "$(stat -c %s -- "$deb_path")" = "$deb_size"
           test "$(sha256sum -- "$deb_path" | cut -d ' ' -f 1)" = "$deb_sha256"
-          sudo apt-get "${apt_options[@]}" -o "Dir::Cache::archives=$snapshot_archives" --no-download install -y "./$deb_path"
           kms_identity="$(dpkg-deb --field "$kms_deb_path" Package)|$(dpkg-deb --field "$kms_deb_path" Version)|$(dpkg-deb --field "$kms_deb_path" Architecture)"
           test "$kms_identity" = "polaris-kms|${expected_package_version}|amd64"
           test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${expected_package_version}), libcap2-bin, passwd"
@@ -1492,7 +1491,6 @@ jobs:
           test ! -L "$kms_deb_path"
           test "$(stat -c %s -- "$kms_deb_path")" = "$kms_deb_size"
           test "$(sha256sum -- "$kms_deb_path" | cut -d ' ' -f 1)" = "$kms_deb_sha256"
-          sudo apt-get "${apt_options[@]}" -o "Dir::Cache::archives=$snapshot_archives" --no-download install -y "./$kms_deb_path"
           helper=/usr/libexec/polaris/polaris-kms
           test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
           test "$(getcap "$helper")" = "$helper cap_sys_admin=ep"

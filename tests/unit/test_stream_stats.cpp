@@ -14023,7 +14023,8 @@ TEST(StreamStatsMediaReportCadence, RejectedReportsChangeNoCounter) {
             stream_stats::client_media_ingest_state_e::coverage_gap_reset);
   ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(3'000, 300, 290)).state,
             stream_stats::client_media_ingest_state_e::observed);
-  const auto before = current_media_interval_json();
+  const auto before_snapshot = stream_stats::get_current();
+  auto before = stream_stats::client_media_interval_json(before_snapshot);
   ASSERT_TRUE(before.contains("cadence")) << before.dump();
   EXPECT_EQ(before.at("cadence").at("accepted_reports"), 3);
   EXPECT_EQ(before.at("cadence").at("gap_resets"), 1);
@@ -14048,10 +14049,18 @@ TEST(StreamStatsMediaReportCadence, RejectedReportsChangeNoCounter) {
     EXPECT_FALSE(rejected.accepted);
     EXPECT_FALSE(rejected.receipt.has_value());
   }
-  const auto after = current_media_interval_json();
+  const auto after_snapshot = stream_stats::get_current();
+  auto after = stream_stats::client_media_interval_json(after_snapshot);
   ASSERT_TRUE(after.contains("cadence")) << after.dump();
   EXPECT_EQ(after.at("cadence"), before.at("cadence")) << "no rejected report counts, gaps or extends an interval";
-  EXPECT_EQ(after, before) << "the receipt is untouched too";
+  EXPECT_EQ(after_snapshot.client_media_interval_receipt.host_start, before_snapshot.client_media_interval_receipt.host_start);
+  EXPECT_EQ(after_snapshot.client_media_interval_receipt.host_end, before_snapshot.client_media_interval_receipt.host_end)
+    << "a rejected report must not refresh the receipt time";
+  // Snapshot age advances with the host clock; every stable receipt field stays exact.
+  EXPECT_GE(after.at("host_receipt_age_ms").get<std::int64_t>(), before.at("host_receipt_age_ms").get<std::int64_t>());
+  before.erase("host_receipt_age_ms");
+  after.erase("host_receipt_age_ms");
+  EXPECT_EQ(after, before) << "all stable receipt fields are untouched too";
 
   // The next admitted report counts from where the scope left off.
   ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(4'100, 320, 310)).state,

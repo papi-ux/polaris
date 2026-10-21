@@ -8,8 +8,8 @@
 **Stream games from your Linux PC without giving up your desktop.**
 
 Polaris turns a Linux gaming PC or a Steam Deck into your own game-streaming
-host. Play on Nova for Android, Moonlight or another compatible client while
-your desktop stays exactly as you left it.
+host. Pick up a handheld, phone, tablet or TV, open Nova or a Moonlight client,
+and play your library while your desktop stays exactly as you left it.
 
 [![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1f1d31)](https://github.com/papi-ux/polaris/stargazers)
 [![Matrix](https://img.shields.io/badge/Matrix-Join_chat-0dbd8b?style=for-the-badge&logo=matrix&logoColor=white&labelColor=1f1d31)](https://matrix.to/#/#papi-ux:papi-ux.com)
@@ -25,38 +25,65 @@ your desktop stays exactly as you left it.
 
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
-![Polaris Mission Control in the default Aurora theme: Control Ultimate Edition is next up, 5 of 5 launch checks are ready and the mode is Private Stream](docs/screenshots/beta2/polaris-mission-control-aurora.webp)
+![Polaris Mission Control: Control Ultimate Edition is next up, the host is ready for clients with 5 of 5 launch checks passing, the launch mode is Private Stream, and recent games wait below](docs/screenshots/beta2/polaris-mission-control-aurora.webp)
 
-## Why Polaris
+<sub>Mission Control, the Polaris console in your browser: the next game, whether
+the host is ready, how the game will launch and how your GPU is doing.</sub>
 
-Most streaming hosts borrow your desktop. They change your resolution, wake
-your monitors and leave the cleanup to you. Polaris gives each game a place of
-its own and tells you plainly how the stream is going.
+## What Polaris does
 
-- **Your desktop stays yours.** Private Stream runs the game in its own
-  compositor, so your monitors, windows and layout stay put. When you do want
-  the real desktop, Mirror Desktop and virtual displays are there too, each
-  named for what it does to your screens.
-- **You can see what's happening.** Mission Control, the web console, shows
-  what's playing, who's connected, how healthy the stream is, and which
-  capture path and encoder Polaris really chose. When the network struggles,
-  Doctor can offer a lower bitrate, check whether it helped and undo it.
-- **Your library comes along.** Steam, Heroic, Lutris and ROM collections
-  arrive with their artwork, and each game keeps a launch check you can see
-  before you press play.
-- **Step away without losing your place.** Disconnect keeps the game running so you can pick
-  it up later. End Session stops only the game that session started. A second
-  device can watch without taking over.
-- **It works with what you have.** Nova gets the richest experience, and
-  Moonlight and other compatible clients still pair, browse and play. There's
-  no cloud account or subscription: pairing, settings and your library stay on
-  your PC.
+Give each game a space of its own, bring your library together, and manage it
+from a browser. Polaris uses your GPU to stream and keeps you informed about
+the connection. It's free, open source and self-hosted: there's no cloud account
+or subscription, and pairing, settings and your library stay on your PC.
 
-Prefer charcoal and red? 1.5.0-beta.2 adds `< Congratulations, Director >`, a
-theme shared with Nova. Nothing changes until you pick it, and Polaris Aurora
-stays the default.
+- **Your desktop stays yours.** Private Stream runs each game in its own
+  invisible session, so your monitors, windows and layout stay put, and it
+  can even run on a PC with no monitor attached. When you do want the real
+  desktop, Mirror Desktop streams it, Host Virtual Display adds a screen sized
+  to your client, and Gamescope Stream suits a Steam-first, Deck-style host.
+  Each choice says what it will do to your screens, and one your PC can't run
+  yet names what's missing instead of failing at launch.
+- **A sharp picture from your own GPU.** Polaris encodes in hardware on NVIDIA,
+  AMD and Intel graphics and keeps frames on the GPU when the capture path
+  allows. It checks which of H.264, HEVC and AV1 your GPU can really encode
+  before offering them to clients, streams HDR when the capture path delivers
+  real HDR, and Live Tuning can adjust the bitrate to your network as you play.
+- **You can see what's happening.** Mission Control shows what's playing,
+  who's connected, a live quality grade with latency, frame rate and loss, and
+  the capture path and encoder Polaris really chose. When the host is idle, it
+  tells you whether it's ready to stream and the first thing to fix if it
+  isn't. The console fits a phone or tablet as well as a desktop.
+- **A Doctor for bad streams.** When a game feels wrong, Doctor tells you
+  whether the network, the host or the client may be behind it. When it can help,
+  it offers one safe fix, checks whether it worked and undoes it if it didn't.
+- **Your library comes along.** Steam, Heroic (GOG and Epic), Lutris and ROM
+  folders with their emulators arrive with artwork, and each game shows its
+  launch checks before you press play.
+- **Step away without losing your place.** Disconnect keeps the game running
+  so you can resume later. End Session stops only the game that session
+  started, and a second device can watch without taking over.
+- **You decide what each device can do.** New pairings can browse, launch and
+  play without clipboard, file or command access, and watch-only access is
+  there for viewers.
+- **It works with the clients you have.** Nova gets the richest experience:
+  launch choices, Play Setup, watch and resume, Doctor and live tuning on the
+  device in your hands. Moonlight and other compatible clients pair, browse and
+  play too.
 
-![Polaris Mission Control in the < Congratulations, Director > theme: charcoal, warm white and red](docs/screenshots/beta2/polaris-mission-control-director.webp)
+### Better with Nova
+
+Nova is the client built for Polaris. It reads the launch modes your PC can
+run, so Play Setup names where a game will run and at what resolution, frame
+rate and codec before anything starts, and Command Center keeps the session's
+controls a shortcut away. Nova runs on Android, with Linux, Steam Deck and
+Steam Frame builds in Beta. [Meet Nova](https://papi-ux.com/nova/) or
+[get the latest release](https://github.com/papi-ux/nova/releases/latest).
+
+![Nova Play Setup for Control on a Retroid Pocket 6: what will happen, where it runs, resolution, frame rate, codec and launch preset, shown before the game starts](docs/screenshots/beta2/nova-play-setup-aurora.webp)
+
+Want a different look? The console comes in a choice of themes under
+**Appearance**.
 
 ## Get started
 
@@ -94,24 +121,28 @@ play.
   connect from their own platforms; the [client table](https://papi-ux.com/docs/compatibility/#clients)
   shows what each one gets.
 - **Graphics.** NVIDIA is the most tested. AMD and Intel work through VAAPI,
-  with software encoding as a fallback.
+  with software encoding as a fallback. Codecs and HDR depend on what your GPU
+  and capture path can deliver; [Compatibility](https://papi-ux.com/docs/compatibility/)
+  has the details.
 - **Stable or beta.** [Latest](https://github.com/papi-ux/polaris/releases/latest)
   is always stable; betas are opt-in prereleases. This page follows the source,
-  which can be ahead of the newest package. The
-  [1.5.0 release notes](docs/release-notes/v1.5.0.md) cover 1.5.0-beta.2 and
+  which can be ahead of the newest package. The [release notes](docs/release-notes/)
+  and [changelog](docs/changelog.md) cover what changed in each version and
   what's still being checked.
-- **Experimental and preview.** PyroWave runs only when a client asks for it.
-  Source-paced VRR (Nova doesn't request it yet) and Recording (video only, no
-  audio) stay off until you turn them on. Spaces is a preview.
-
-Looking for the client? [Get Nova](https://papi-ux.com/downloads/?product=nova)
-for Android, or take its [latest release](https://github.com/papi-ux/nova/releases/latest).
-Its native Linux and Steam Deck builds are alphas, and Steam Frame has a
-separate experimental alpha.
+- **Extras to try when you want them.** These stay out of the way until you
+  choose them. [Spaces](https://papi-ux.com/docs/spaces/) (preview) gives each
+  player their own launcher sign-in, library and saves on one PC.
+  [PyroWave](https://papi-ux.com/docs/pyrowave/) (experimental) trades
+  bandwidth for very fast decoding on a wired local network and runs only when
+  a client asks for it. Browser Stream (experimental) plays in a web browser on
+  your local network, best tested in Chromium-family browsers.
+  [Recording](docs/configuration.md#recording-tab) (video only, no audio) and
+  [source-paced VRR](docs/configuration.md#audio-and-video-tab) (experimental,
+  not yet requested by Nova) are off by default.
 
 ## Learn more
 
-- [Documentation](https://papi-ux.com/docs/) · [How the runtime works](https://papi-ux.com/docs/runtime/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Mission Control](https://papi-ux.com/docs/mission-control/) · [Doctor](https://papi-ux.com/docs/doctor/) · [Spaces](https://papi-ux.com/docs/spaces/) · [Emulators](https://papi-ux.com/docs/emulators/) · [Play with Moonlight](https://papi-ux.com/docs/moonlight/) · [FAQ](https://papi-ux.com/docs/faq/)
+- [Documentation](https://papi-ux.com/docs/) · [How the runtime works](https://papi-ux.com/docs/runtime/) · [Launch modes](https://papi-ux.com/docs/launch-modes/) · [Mission Control](https://papi-ux.com/docs/mission-control/) · [Doctor](https://papi-ux.com/docs/doctor/) · [Live Tuning](https://papi-ux.com/docs/live-tuning/) · [Library and artwork](https://papi-ux.com/docs/library-and-artwork/) · [Spaces](https://papi-ux.com/docs/spaces/) · [Emulators](https://papi-ux.com/docs/emulators/) · [Play with Moonlight](https://papi-ux.com/docs/moonlight/) · [FAQ](https://papi-ux.com/docs/faq/)
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [Changelog](docs/changelog.md) · [Releases](https://github.com/papi-ux/polaris/releases)
 - [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions) · [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md)
 

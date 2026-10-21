@@ -29,6 +29,27 @@
       "capture": "Installed Fedora packaged web UI rendered locally with read-only host responses; host display labels neutralized before rendering; no host config writes.",
       "package": "polaris-1.5.0~beta.2-1.x86_64",
       "binarySHA256": "5b3d1ce34cd17bc2b12743fdedbacac10d6900d2ad7be4ffb26396eb9ae7e378"
+    },
+    {
+      "file": "nova-play-setup-aurora.webp",
+      "width": 1920,
+      "height": 1080,
+      "theme": "polaris",
+      "capturedAt": "2026-10-20T13:25:29.188202+00:00",
+      "sha256": "cf0e577a693de1a5b19859799ec0c67a5795b6652cba349313099873a20a0314",
+      "bytes": 79606,
+      "originalPNGsha256": "6d8f32e0a6b936fdb4880f1806048d8c78bf61a4b7e74717084bbb0c2e20d743",
+      "encoding": "WebP quality90, original dimensions, no crop or compositing",
+      "capture": "Actual Retroid Pocket 6 Android interface; no stream launched for this capture.",
+      "package": "com.papi.nova.debug",
+      "versionName": "1.5.0",
+      "APKsha256": "a1e5153d97ea50059fcefb7de7b589c4bfb11e06248cf09bcd2ef335aefe8796",
+      "reusedFrom": {
+        "repository": "papi-ux/nova",
+        "commit": "9dae5ddb2dd0a96550723695323bd50af28aee73",
+        "path": "docs/screenshots/beta2/nova-play-setup-aurora.webp",
+        "purpose": "Reciprocal companion-app feature showcase; original capture reused byte-exact."
+      }
     }
   ]
 }
