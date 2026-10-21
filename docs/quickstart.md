@@ -146,6 +146,10 @@ leave its displayed four-digit PIN open. In the Polaris web UI, open **Devices â
 that PIN, keep **Game Control** selected, and choose **Send**. Return to Moonlight and refresh the
 host if its library does not appear immediately. Steam is not required on the client.
 
+Polaris does not open firewall ports. If the host runs firewalld or ufw and a client on the same
+network cannot find, pair with, or stream from it, allow the ports from your local network only as
+shown in [Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
+
 The Moonlight flow step by step, including which client settings matter, is in
 [Play with Moonlight](moonlight.md). What Moonlight, Artemis and Browser Stream get next to Nova is
 in [Clients](compatibility.md#clients). The access presets and the device editor are in

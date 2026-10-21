@@ -183,8 +183,9 @@ Check each of these. On a host that only ever ran the packaged Polaris, most of 
   systemctl --user restart plasma-plasmashell.service
   ```
 - **Your own additions.** Unit overrides under `~/.config/systemd/user/`, udev rules you wrote for
-  a virtual display, firewall openings for the Polaris ports, or an extra binary you copied into
-  `/usr/bin` while testing. Only you know about these; `ls /usr/bin/polaris*` and
+  a virtual display, firewall openings for the Polaris ports
+  ([how to remove them](moonlight.md#allow-the-ports-through-a-linux-firewall)), or an extra
+  binary you copied into `/usr/bin` while testing. Only you know about these; `ls /usr/bin/polaris*` and
   `ls /etc/udev/rules.d/ | grep polaris` find the common ones.
 - **Steam Input.** If you applied the Doctor fix that turns off Steam's Xbox configuration
   support, Steam keeps that setting after Polaris is gone. Turn it back on in Steam under

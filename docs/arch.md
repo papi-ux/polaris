@@ -28,6 +28,11 @@ Arch and CachyOS package operations preserve credentials, pairing keys, settings
 under `~/.config/polaris`; removing the package does not reset the web account. If needed, follow
 the [credential reset](troubleshooting.md#web-ui-credentials) instead of returning to Welcome.
 
+Neither the package nor `--setup-host` opens firewall ports. If the host runs firewalld or ufw and
+a client on your network cannot find, pair with, or stream from it, allow the ports from your
+local network only as shown in
+[Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
+
 ## What `--setup-host` does
 
 It installs the udev rules and modules-load configuration that make virtual input work unless
