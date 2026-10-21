@@ -63,6 +63,11 @@ keys, settings, and the library under `~/.config/polaris`. If needed, follow the
 [credential reset](troubleshooting.md#web-ui-credentials) instead of returning
 to Welcome.
 
+Neither the build nor `--setup-host` opens firewall ports. If the host runs
+firewalld or ufw and a client on your network cannot find, pair with, or stream
+from it, allow the ports from your local network only as shown in
+[Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
+
 ### openSUSE-specific notes
 
 - **`-DBOOST_USE_STATIC=OFF` is required.** openSUSE ships only *shared* Boost. With the

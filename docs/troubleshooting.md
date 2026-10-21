@@ -93,7 +93,9 @@ works.
 1. Confirm Polaris is running.
 2. Check that you are opening `https://localhost:47990` or `https://localhost:<port + 1>` if you changed `port`.
 3. Accept the local HTTPS certificate warning in the browser.
-4. Check your local firewall rules if the UI is unreachable from another device on the LAN.
+4. From another device on the LAN, the console also needs the host firewall to allow its port
+   and **Origin Web UI Allowed** under **Settings, Network** to permit the local network; see
+   [Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
 
 ## Settings will not load or save
 
@@ -127,6 +129,25 @@ systemctl --user enable --now polaris
 
 If Sunshine runs as a system service on your distro, use the matching system-service command instead.
 To switch back, stop Polaris and start Sunshine again.
+
+## A client on the LAN cannot connect
+
+When a client on the same network cannot find the host, cannot pair, or connects and then fails to
+start a stream:
+
+1. Note the client's exact error and save the host log from the same attempt
+   ([Support bundle and logs](#support-bundle-and-logs)). A log that shows only a normal startup
+   does not say why a connection failed.
+2. Check the base port under **Settings, Network**. Every other port follows from it
+   ([Ports](moonlight.md#ports)), and a client that adds the host by hand on a changed base port
+   needs that port. Another host such as Sunshine on the same ports also gets in the way
+   ([Polaris and Sunshine on the same host](#polaris-and-sunshine-on-the-same-host)).
+3. If the host runs firewalld or ufw, allow the required ports from your local network only, as
+   shown in [Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
+   Keep the firewall on.
+4. A host log line that begins `Initial Ping Timeout` names the UDP port the host waited on, and
+   Doctor reports the same start
+   ([When the stream never started](doctor.md#when-the-stream-never-started)).
 
 ## Paired client gets Permission denied (403) when starting a stream
 
