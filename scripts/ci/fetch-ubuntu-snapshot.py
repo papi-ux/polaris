@@ -2,6 +2,7 @@
 """Acquire the pinned APT plan; the live archive supplies bytes, never metadata."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -136,24 +137,34 @@ def acquire(row, archives):
         target.unlink()
 
 
+@contextmanager
 def cache_local_deb(local_deb, filename, archives):
-    # --no-download also requires the local-only DEB in APT's archive cache.
-    # This is one explicitly bound file, never another network payload source.
+    # Local artifacts have no repository authentication and must not persist in
+    # the shared dependency cache. Own only this copy for this one APT call.
+    if filename is None:
+        yield None
+        return
     destination = archives / filename
     if os.path.lexists(destination):
-        verify(destination, *local_deb[1:])
-        return
+        raise ValueError('Local APT cache slot is already occupied')
     with tempfile.TemporaryDirectory(prefix='.polaris-local-', dir=archives) as directory:
         target = Path(directory) / 'payload.deb'
         with target.open('xb') as output:
             verify(*local_deb, copy_to=output)
         target.chmod(0o644)
+        verify(target, *local_deb[1:])
+        owned = target.stat()
+        os.link(target, destination)  # Atomic, same filesystem, no overwrite.
         try:
-            os.link(target, destination)  # Atomic, same filesystem, no overwrite.
-        except FileExistsError:
+            target.unlink()
             verify(destination, *local_deb[1:])
-        target.unlink()
-    verify(destination, *local_deb[1:])
+            yield destination
+        finally:
+            current = destination.lstat()
+            if (not stat.S_ISREG(current.st_mode)
+                    or (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino)):
+                raise ValueError('Replaced local APT cache entry; refusing cleanup')
+            destination.unlink()
 
 
 def main():
@@ -199,16 +210,25 @@ def main():
     rows, local_filename = parse_plan(plan.stdout, args.snapshot, local_deb)
     if local_deb is not None:
         verify(*local_deb)
-    if local_filename is not None:
-        cache_local_deb(local_deb, local_filename, args.archives)
+    if local_filename is not None and os.path.lexists(args.archives / local_filename):
+        raise ValueError('Local APT cache slot is already occupied')
     # Validate the whole plan before acquiring anything. Four bounded transfers
     # keep a snapshot outage from serializing hundreds of per-payload timeouts.
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(lambda row: acquire(row, args.archives), rows))
     if local_deb is not None:
         verify(*local_deb)
-    if local_filename is not None:
-        verify(args.archives / local_filename, *local_deb[1:])
+        # Stage only after remote acquisition, immediately around the unchanged
+        # offline install; a local build must never become a restored cache hit.
+        with cache_local_deb(local_deb, local_filename, args.archives):
+            verify(*local_deb)
+            install = command.index('install')
+            subprocess.run([
+                'apt-get', *command[:install],
+                '-o', f'Dir::Cache::archives={args.archives}', '--no-download',
+                *command[install:],
+            ], check=True)
+            verify(*local_deb)
 
 
 if __name__ == '__main__':
