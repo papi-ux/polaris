@@ -263,7 +263,9 @@ The host log names that start in one line that begins
 `Stream failed to start for [<client>]: the client left during video setup`. A client that stays
 connected while its video never arrives, or leaves only after waiting several seconds for it, logs
 `Initial Ping Timeout` instead, with the UDP port it waited on. That usually means a firewall or a
-UDP path problem between the client and the host.
+UDP path problem between the client and the host. The ports for the host's base port, and
+firewall rules limited to the local network, are in
+[Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
 
 ## Pick the offered action
 

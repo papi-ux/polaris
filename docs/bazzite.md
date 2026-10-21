@@ -110,6 +110,11 @@ Pair Nova or Moonlight from the console. If you forgot the existing web password
 use [credential reset](troubleshooting.md#web-ui-credentials); an update does not
 require repeating first-run signup.
 
+Neither the package nor `--setup-host` opens firewall ports. If the host runs
+firewalld or ufw and a client on your network cannot find, pair with, or stream
+from it, allow the ports from your local network only as shown in
+[Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
+
 ## First stream
 
 Start with a modest client profile such as 1920×1080 at 60 FPS. Select the launch

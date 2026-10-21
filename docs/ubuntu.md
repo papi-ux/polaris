@@ -41,6 +41,11 @@ APT package operations preserve credentials, pairing keys, settings, and the lib
 `~/.config/polaris`; removing the DEB does not reset the web account. If needed, follow the
 [credential reset](troubleshooting.md#web-ui-credentials) instead of returning to Welcome.
 
+Neither the package nor `--setup-host` opens firewall ports. If the host runs firewalld or ufw and
+a client on your network cannot find, pair with, or stream from it, allow the ports from your
+local network only as shown in
+[Allow the ports through a Linux firewall](moonlight.md#allow-the-ports-through-a-linux-firewall).
+
 ## Source Build Fallback
 
 ```bash

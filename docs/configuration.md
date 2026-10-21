@@ -384,7 +384,8 @@ events), and extras (an input-only app entry for TV workflows, rumble forwarding
 ### Network tab
 
 Exposure (whether the host announces itself for discovery, whether pairing is enabled, UPnP port
-forwarding, the address family, the base port and the port map derived from it, which origins may
+forwarding, the address family, the base port and the port map derived from it
+([Ports](moonlight.md#ports)), which origins may
 reach the web UI, and an external IP for clients outside the network) and transport security (the
 encryption mode for LAN and WAN sessions, Trusted Subnet Auto-Pairing, and the trusted subnet
 list in CIDR form). Keys: `enable_discovery`, `enable_pairing`, `upnp`, `address_family`, `port`,

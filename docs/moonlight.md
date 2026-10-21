@@ -98,21 +98,102 @@ is one. Change one Moonlight setting at a time and watch that strip.
 
 ## Ports
 
-Polaris listens on a block of ports derived from its base port (47989 by default). The web UI
-lists the live map under **Settings, Network**.
+Polaris listens on a block of ports derived from one base port, the **Port** setting (`port`)
+under **Settings, Network**, which is 47989 by default. Every other port is a fixed offset from
+it, so changing the base port moves the whole block. The port map on the same page shows the
+block for the saved base port.
 
-| Port | Protocol | Purpose |
-|---|---|---|
-| 47984 | TCP | HTTPS pairing and control |
-| 47989 | TCP | HTTP discovery and launch |
-| 47990 | TCP | Web UI |
-| 48010 | TCP | RTSP session setup |
-| 47998 to 48000 | UDP | Video, control, and audio |
+| Default port | Offset from the base port | Protocol | Used for | Needed on the LAN |
+|---|---|---|---|---|
+| 47984 | -5 | TCP | HTTPS for paired clients: the library, launch, resume and quit, and Nova's Polaris requests | Yes |
+| 47989 | 0 | TCP | HTTP host information and PIN pairing. With a changed base port, this is the port to give a client that adds the host by hand | Yes |
+| 47990 | +1 | TCP | Web console (HTTPS), and Nova's live session events | Optional |
+| 47998 | +9 | UDP | Video | Yes |
+| 47999 | +10 | UDP | Control and input | Yes |
+| 48000 | +11 | UDP | Audio | Yes |
+| 48010 | +21 | TCP | RTSP session setup | Yes |
+
+With a base port of 50000, for example, the block is TCP 49995, 50000, 50001 and 50021, and UDP
+50009 to 50011.
+
+The web console port is the only optional one. Moonlight never uses it, and on the host itself the
+console is at `https://localhost:<port + 1>`. Allow it from the local network only if you manage
+Polaris from another device's browser, or if you use Nova, which follows live session events on
+it during a stream; the stream itself uses the other ports. Who may use the console is a separate
+choice, **Origin Web UI Allowed** on the same page, which allows the local network by default.
+
+Automatic discovery is not part of this block. On Linux the host announces itself through Avahi
+over mDNS (UDP 5353), and the announcement carries the base port. If a client does not list the
+host by itself, add it by its address ([step 2](#2-add-the-host)), or allow mDNS from your local
+network as shown below.
 
 Across networks, forward those ports to the host or let **UPnP** under **Settings, Network** do
 it, and set the encryption mode for WAN sessions on the same page. The web UI itself stays
-reachable only from the host or the local network unless **Web UI origin** on that page allows
-more.
+reachable only from the host or the local network unless **Origin Web UI Allowed** on that page
+allows more.
+
+### Allow the ports through a Linux firewall
+
+Polaris does not change the host's firewall on Linux, and neither does `polaris --setup-host`.
+If the host runs firewalld or ufw, a client on the same network may not reach it until the
+firewall allows the ports above. Keep the firewall on and allow those ports from your local
+network only. Streaming inside your home network needs no router forwarding.
+
+A firewall is one possible cause among several, so check it against a failed attempt. Note the
+client's error and save the host log from that same attempt: a log that shows only a normal
+startup does not say why a connection failed. A host that waited in vain for a client's first
+video or audio packet logs a line beginning `Initial Ping Timeout: no video ping arrived on UDP`
+(or `audio`) with the port, which points at a firewall or a UDP path problem; Doctor reports the
+same start as described in [When the stream never started](doctor.md#when-the-stream-never-started).
+
+The commands below are examples to adapt, not something Polaris runs. They assume the default
+base port, IPv4, a local network of `192.168.1.0/24`, and a network interface named `enp5s0`.
+Replace those with your own values, and with your ports from the table if you changed the base
+port. `ip -brief address` lists each interface with its address: an interface showing
+`192.168.1.20/24` is on the `192.168.1.0/24` network. To see which firewall is active, run
+`sudo firewall-cmd --state` and `sudo ufw status verbose`, and use the one that reports `running`
+or `Status: active`.
+
+**firewalld.** Find the zone that holds the LAN interface, then add rich rules limited to your
+network in that zone. `--permanent` saves the rules, and `--reload` makes the saved configuration
+the running one.
+
+```bash
+sudo firewall-cmd --get-active-zones
+sudo firewall-cmd --permanent --zone=ZONE \
+  --add-rich-rule='rule family="ipv4" source address="192.168.1.0/24" port port="47984" protocol="tcp" accept' \
+  --add-rich-rule='rule family="ipv4" source address="192.168.1.0/24" port port="47989" protocol="tcp" accept' \
+  --add-rich-rule='rule family="ipv4" source address="192.168.1.0/24" port port="48010" protocol="tcp" accept' \
+  --add-rich-rule='rule family="ipv4" source address="192.168.1.0/24" port port="47998-48000" protocol="udp" accept'
+sudo firewall-cmd --reload
+sudo firewall-cmd --zone=ZONE --list-rich-rules
+```
+
+Replace `ZONE` with the zone that `--get-active-zones` lists for `enp5s0`. The rules apply only in
+that zone and only to clients inside `192.168.1.0/24`. For the optional web console, add the same
+rule with `port port="47990" protocol="tcp"`. For discovery, if
+`sudo firewall-cmd --zone=ZONE --list-services` does not include `mdns`, add the same rule with
+`service name="mdns"` in place of the port. To undo a rule, repeat it with `--remove-rich-rule` in
+place of `--add-rich-rule`, then reload.
+
+**ufw.** Add rules limited to the LAN interface and your network. ufw writes a port range with a
+colon. To see what a rule would add without adding it, put `--dry-run` straight after `ufw`.
+
+```bash
+sudo ufw allow in on enp5s0 proto tcp from 192.168.1.0/24 to any port 47984,47989,48010 comment 'Polaris'
+sudo ufw allow in on enp5s0 proto udp from 192.168.1.0/24 to any port 47998:48000 comment 'Polaris'
+sudo ufw status verbose
+```
+
+For the optional web console, add another TCP rule like the first with `port 47990` in place of
+the port list. Upstream ufw's default rules already accept IPv4 mDNS, so discovery needs no rule
+of its own unless your distribution changed them. To undo a rule, repeat it with `delete`
+straight after `ufw`, or find its number with `sudo ufw status numbered` and run
+`sudo ufw delete NUMBER`.
+
+These examples cover IPv4, the default **Address Family**. If you set it to IPv4+IPv6 and clients
+connect over IPv6, add the same rules for your IPv6 prefix: `family="ipv6"` with that prefix for
+firewalld, or the prefix after `from` for ufw with IPv6 enabled in its configuration.
 
 ## MoonDeck on Steam Deck
 
