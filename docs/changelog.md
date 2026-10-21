@@ -7,8 +7,6 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
-- The private-stream launch cards name Private Stream as the starting point for AMD and Intel, and GPU-native for supported NVIDIA hosts. Thanks to coreydeli for the hint clarification in [#804](https://github.com/papi-ux/polaris/pull/804).
-
 - The release in progress is 1.5.0, not 1.4.14. The number changed at beta.2 to say how much the train carries since 1.4.13; nothing else about the beta channel changes. Every version pin moves with it (`project(Polaris VERSION 1.5.0)`, the SteamOS `EXPECTED_PKGVER`, the reviewed namcap warning, the benchmark collector version, the notes file `docs/release-notes/v1.5.0.md` and its contract test). `v1.4.14-beta.1` stays published as the prerelease it was; a host on it reaches `1.5.0-beta.2` through an ordinary upgrade, and the Update Center offers it with betas on.
 - SteamOS 3.9 gets its own package trio, `Polaris-steamos3.9-x86_64.pkg.tar.zst` with its `Polaris-kms-steamos3.9-x86_64.pkg.tar.zst` helper and `Polaris-debug-steamos3.9-x86_64.pkg.tar.zst` symbols, built against Valve's SteamOS 3.9 repositories, because SteamOS 3.9 cannot load the 3.8 package's Boost libraries. Each SteamOS package now depends on the exact Boost libraries of its own release, so pacman refuses the other release's package, and the Update Center selects the package for the release the host runs. The 3.9 package declares the split `libgcc` and `libstdc++` runtimes where 3.8 keeps `gcc-libs`; the 3.8 package, compiler flags, native code and units are unchanged. The 3.9 install guide names the `v1.5.0-beta.2` tag, because `releases/latest` does not select a prerelease.
 
@@ -45,6 +43,7 @@ starts at `v1.0.0`.
 
 - Desktop Takeover on Hyprland supports the Lua dispatcher interface and restores monitor power even when the desktop has no windows to move. The existing special-workspace safety checks stay in place. ([#783](https://github.com/papi-ux/polaris/pull/783))
 - Moonlight players can opt in to **Close Steam on the host to start games** for each paired device. It is off by default, asks desktop Steam to quit before a private Steam launch, and refuses the launch if Steam does not finish closing. It leaves SteamOS Game Mode and unsaved game state alone. Nova for Android keeps asking the player at launch. ([#797](https://github.com/papi-ux/polaris/pull/797))
+- The **Where games run** cards name Private Stream as the starting point for AMD and Intel GPUs, and Private Stream (GPU-native) for supported NVIDIA hosts. Thanks to coreydeli for the hint clarification. ([#804](https://github.com/papi-ux/polaris/pull/804))
 
 - The 1.5.0 beta notes and PyroWave guide distinguish a client bitrate request from the encoder
   rate, give the calibrated handheld 31 dB target (214.898 Mbps requested / 192.396 Mbps video at
