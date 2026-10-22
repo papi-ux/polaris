@@ -2484,6 +2484,66 @@ namespace stream_stats {
       });
     }
 
+    /**
+     * What the saved Steam Input settings mean for the pads Polaris made. Under strict isolation Steam
+     * cannot make a replacement controller, so a pad Steam Input claims is lost to the game. The
+     * settings are summed over every local Steam profile and every saved per-game override, and the
+     * Xbox opt-in covers only Xbox pads, so Doctor calls the conflict definite only for an active Xbox
+     * pad that every inspected profile opts in. Any other saved setting stays a watch. Pads are
+     * recorded as they are made, but only since the last stream ended.
+     */
+    struct steam_input_risk_t {
+      bool saved = false;  ///< A saved setting could claim a Polaris pad under strict isolation
+      bool definite = false;  ///< An active Xbox pad that every inspected profile opts in
+      std::string detail;
+    };
+
+    steam_input_risk_t steam_input_risk(const stats_t &stats) {
+      steam_input_risk_t risk;
+      const int profiles = stats.input_steam_profiles_checked;
+      const int opted_in = stats.input_steam_profiles_with_xbox_support;
+      const int forced = stats.input_steam_forced_app_count;
+      if (stats.input_host_controller_isolation != "strict_bwrap" || (opted_in <= 0 && forced <= 0)) {
+        return risk;
+      }
+      risk.saved = true;
+
+      int xbox_pads = 0;
+      int other_pads = 0;
+      int unknown_pads = 0;
+      for (const auto &pad : stats.input_virtual_pads) {
+        if (pad.kind == "Xbox One") {
+          ++xbox_pads;
+        } else if (pad.kind == "DualSense" || pad.kind == "Nintendo Pro") {
+          ++other_pads;
+        } else {
+          ++unknown_pads;
+        }
+      }
+      risk.definite = xbox_pads > 0 && profiles > 0 && opted_in >= profiles;
+
+      std::string pads;
+      if (risk.definite) {
+        pads = "An active Polaris Xbox pad is opted in by every inspected Steam profile.";
+      } else if (xbox_pads > 0) {
+        pads = opted_in > 0 ?
+          "An Xbox pad is active, but only " + std::to_string(opted_in) + " of " + std::to_string(profiles) +
+            " inspected Steam profiles opt Xbox controllers in, and Doctor cannot tell which one Steam uses." :
+          std::string {"An Xbox pad is active, and no inspected Steam profile opts Xbox controllers in."};
+      } else if (unknown_pads > 0) {
+        pads = "Doctor does not know the kind of every active Polaris pad.";
+      } else if (other_pads > 0) {
+        pads = "The active Polaris pads are DualSense or Nintendo Pro pads, which the Xbox opt-in does not cover.";
+      } else {
+        pads = "No Polaris pad is recorded since the last stream ended, so Doctor cannot tell whether one is affected.";
+      }
+      if (forced > 0 && !risk.definite) {
+        pads += " A per-game Force On override covers any pad, but only in its own game, and Doctor does not match the saved overrides to the launched game.";
+      }
+      risk.detail = stats.input_steam_input_detail.empty() ? pads : stats.input_steam_input_detail + " " + pads;
+      return risk;
+    }
+
     /// How long a failed start stays the thing Doctor leads with once nothing is streaming.
     constexpr auto DOCTOR_FAILED_START_WINDOW = std::chrono::minutes {15};
 
@@ -3205,10 +3265,8 @@ namespace stream_stats {
     const bool steam_input_known =
       stats.input_steam_input_status != "unknown" &&
       stats.input_steam_input_status != "not_applicable";
-    const bool steam_input_conflict =
-      strict_gamepad_isolation &&
-      (stats.input_steam_profiles_with_xbox_support > 0 ||
-       stats.input_steam_forced_app_count > 0);
+    const auto steam_input = steam_input_risk(stats);
+    const bool steam_input_conflict = steam_input.definite;
     const auto doctor_now = std::chrono::system_clock::now();
     const ended_session_t *const failed_start = recent_failed_start(stats, doctor_now);
 
@@ -3692,8 +3750,9 @@ namespace stream_stats {
       "Steam Input compatibility",
       stats.input_steam_input_status,
       "",
-      steam_input_conflict ? "fail" : strict_gamepad_isolation && steam_input_known ? "pass" : "unknown",
+      steam_input_conflict ? "fail" : steam_input.saved ? "watch" : strict_gamepad_isolation && steam_input_known ? "pass" : "unknown",
       "local_steam_config",
+      steam_input.saved ? steam_input.detail :
       stats.input_steam_input_detail.empty() ?
         (strict_gamepad_isolation ? "Steam Input compatibility has not been inspected yet." : "Strict gamepad isolation is not active.") :
         stats.input_steam_input_detail

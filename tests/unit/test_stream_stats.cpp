@@ -3450,12 +3450,17 @@ TEST(StreamStatsDoctorTests, SteamInputFindingSurvivesTheEndOfTheStream) {
   EXPECT_EQ(after.input_steam_input_status, "xbox_opt_in");
   EXPECT_EQ(after.input_steam_profiles_with_xbox_support, 1);
 
-  // The idle Doctor payload still reports the finding, but this release exposes
-  // read-only manual guidance rather than a host mutation.
+  // The idle Doctor payload still reports the saved settings. With no Polaris pad
+  // active it cannot call them a conflict, so they stay a watch, not the lead finding.
   const auto doctor = stream_stats::build_doctor_json(after, nlohmann::json::object());
-  EXPECT_EQ(doctor.at("primary_issue"), "steam_input_conflict");
-  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
-  EXPECT_EQ(doctor.at("safe_recovery_action").at("kind"), "manual_guidance");
+  EXPECT_NE(doctor.at("primary_issue"), "steam_input_conflict");
+  const auto &evidence = doctor.at("evidence");
+  const auto steam = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+    return item.at("id") == "steam_input_compatibility";
+  });
+  ASSERT_NE(steam, evidence.end());
+  EXPECT_EQ(steam->at("status"), "watch");
+  EXPECT_EQ(steam->at("value"), "xbox_opt_in");
 
   // Session telemetry is still gone; only the host facts carry over.
   EXPECT_EQ(after.client_name, "");
@@ -3479,10 +3484,12 @@ TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
   stats.input_host_controller_isolation = "strict_bwrap";
   stats.input_steam_input_status = "xbox_opt_in_and_per_app_forced";
   stats.input_steam_profiles_checked = 2;
-  stats.input_steam_profiles_with_xbox_support = 1;
+  stats.input_steam_profiles_with_xbox_support = 2;
   stats.input_steam_forced_app_count = 2;
   stats.input_steam_input_detail =
-    "Steam Input is opted in for Xbox controllers in 1 local profile(s), and 2 app override(s) force Steam Input on.";
+    "Steam Input is opted in for Xbox controllers in 2 local profile(s), and 2 app override(s) force Steam Input on.";
+  // An Xbox pad is active, and every profile Steam could sign in with opts it in.
+  stats.input_virtual_pads.push_back({0, 0, "Xbox One", 1});
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -3524,6 +3531,158 @@ TEST(StreamStatsDoctorTests, WarnsWhenSteamInputConflictsWithStrictIsolation) {
     }
   }
   EXPECT_TRUE(saw_conflict);
+}
+
+namespace {
+  /**
+   * A stream under strict isolation with nothing else wrong, saved Steam Input settings summed over
+   * `profiles` local profiles, and the Polaris pads the host made, in creation order.
+   */
+  stream_stats::stats_t strict_steam_stream(int profiles, int xbox_opt_in, int forced, const std::vector<std::string> &pad_kinds) {
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.capture_transport = platf::frame_transport_e::dmabuf;
+    stats.capture_residency = platf::frame_residency_e::gpu;
+    stats.encode_target_residency = platf::frame_residency_e::gpu;
+    stats.encode_time_ms = 4.0;
+    stats.input_host_controller_isolation = "strict_bwrap";
+    stats.input_steam_input_status = xbox_opt_in > 0 && forced > 0 ? "xbox_opt_in_and_per_app_forced" :
+                                     xbox_opt_in > 0               ? "xbox_opt_in" :
+                                     forced > 0                    ? "per_app_forced" :
+                                                                     "clear";
+    stats.input_steam_profiles_checked = profiles;
+    stats.input_steam_profiles_with_xbox_support = xbox_opt_in;
+    stats.input_steam_forced_app_count = forced;
+    stats.input_steam_input_detail = "Saved Steam Input settings.";
+    for (const auto &kind : pad_kinds) {
+      const auto slot = static_cast<int>(stats.input_virtual_pads.size());
+      stats.input_virtual_pads.push_back({slot, slot, kind, static_cast<std::uint64_t>(slot) + 1});
+    }
+    return stats;
+  }
+
+  nlohmann::json steam_doctor(const stream_stats::stats_t &stats) {
+    return stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+  }
+
+  nlohmann::json steam_input_row(const nlohmann::json &doctor) {
+    for (const auto &item : doctor.at("evidence")) {
+      if (item.at("id") == "steam_input_compatibility") {
+        return item;
+      }
+    }
+    return nullptr;
+  }
+
+  bool reports_steam_conflict(const nlohmann::json &doctor) {
+    const auto &codes = doctor.at("advanced_evidence").at("recent_issue_codes");
+    return doctor.at("primary_issue") == "steam_input_conflict" ||
+           std::find(codes.begin(), codes.end(), "steam_input_conflict") != codes.end();
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, SteamXboxOptInDoesNotClaimActiveDualSensePads) {
+  // A Steam Controller player whose client makes a DualSense pad. The Xbox opt-in saved in the
+  // only Steam profile covers Xbox controllers, so it is not a conflict for this pad.
+  const auto doctor = steam_doctor(strict_steam_stream(1, 1, 0, {"DualSense"}));
+
+  EXPECT_FALSE(reports_steam_conflict(doctor));
+  EXPECT_EQ(doctor.at("summary").get<std::string>().find("Xbox virtual controller"), std::string::npos);
+  const auto row = steam_input_row(doctor);
+  ASSERT_TRUE(row.is_object());
+  EXPECT_EQ(row.at("status"), "watch");
+  EXPECT_EQ(row.at("value"), "xbox_opt_in");
+  EXPECT_NE(row.at("detail").get<std::string>().find("DualSense"), std::string::npos);
+}
+
+TEST(StreamStatsDoctorTests, SteamXboxOptInConflictsWithAnActiveXboxPadBesideADualSense) {
+  // Mixed pads: the Xbox one is claimed whichever profile Steam signs in with.
+  const auto doctor = steam_doctor(strict_steam_stream(1, 1, 0, {"DualSense", "Xbox One"}));
+
+  EXPECT_EQ(doctor.at("primary_issue"), "steam_input_conflict");
+  EXPECT_EQ(doctor.at("confidence").at("level"), "high");
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("kind"), "manual_guidance");
+  EXPECT_EQ(steam_input_row(doctor).at("status"), "fail");
+}
+
+TEST(StreamStatsDoctorTests, SteamXboxOptInInSomeProfilesIsNotADefiniteConflict) {
+  // The counts are summed over every local Steam profile, and Doctor cannot tell which one Steam
+  // is signed in with. One opt-in among two profiles may not apply to the active Xbox pad.
+  const auto partial = steam_doctor(strict_steam_stream(2, 1, 0, {"Xbox One"}));
+  EXPECT_FALSE(reports_steam_conflict(partial));
+  const auto row = steam_input_row(partial);
+  EXPECT_EQ(row.at("status"), "watch");
+  EXPECT_NE(row.at("detail").get<std::string>().find("1 of 2"), std::string::npos);
+
+  // Every profile opting in leaves no profile Steam could use without it.
+  const auto every = steam_doctor(strict_steam_stream(2, 2, 0, {"Xbox One"}));
+  EXPECT_EQ(every.at("primary_issue"), "steam_input_conflict");
+  EXPECT_EQ(steam_input_row(every).at("status"), "fail");
+}
+
+TEST(StreamStatsDoctorTests, SteamForceOnOverridesAloneAreNotADefiniteConflict) {
+  // Per-game Force On applies to any pad, but only in its own game, and the saved overrides are not
+  // matched against the launched game. They stay visible as a watch for Xbox and DualSense pads.
+  for (const auto *kind : {"Xbox One", "DualSense"}) {
+    const auto doctor = steam_doctor(strict_steam_stream(1, 0, 2, {kind}));
+    EXPECT_FALSE(reports_steam_conflict(doctor)) << kind;
+    const auto row = steam_input_row(doctor);
+    EXPECT_EQ(row.at("status"), "watch") << kind;
+    EXPECT_EQ(row.at("value"), "per_app_forced") << kind;
+  }
+}
+
+TEST(StreamStatsDoctorTests, SteamInputWithoutAKnownPadKindIsNotAPassOrAConflict) {
+  // No pad recorded, or a pad of a kind Doctor does not recognise: the saved opt-in can neither be
+  // ruled out nor confirmed for it.
+  for (const auto &pads : std::vector<std::vector<std::string>> {{}, {""}, {"Unknown pad"}}) {
+    const auto doctor = steam_doctor(strict_steam_stream(1, 1, 0, pads));
+    EXPECT_FALSE(reports_steam_conflict(doctor)) << pads.size();
+    EXPECT_EQ(steam_input_row(doctor).at("status"), "watch") << pads.size();
+  }
+}
+
+TEST(StreamStatsDoctorTests, SteamInputCompatibilityStaysPassOrUnknownWithoutSavedSettings) {
+  // Nothing saved claims a pad: a pass under strict isolation, even with an Xbox pad active.
+  const auto clear = steam_doctor(strict_steam_stream(1, 0, 0, {"Xbox One"}));
+  EXPECT_FALSE(reports_steam_conflict(clear));
+  EXPECT_EQ(steam_input_row(clear).at("status"), "pass");
+
+  // Without strict isolation Steam can make its own controller, so saved settings are no conflict.
+  auto loose = strict_steam_stream(1, 1, 2, {"Xbox One"});
+  loose.input_host_controller_isolation = "best_effort_sdl";
+  const auto doctor = steam_doctor(loose);
+  EXPECT_FALSE(reports_steam_conflict(doctor));
+  EXPECT_EQ(steam_input_row(doctor).at("status"), "unknown");
+}
+
+TEST(StreamStatsDoctorTests, SteamInputFindingFollowsThePadsTheHostMakes) {
+  stream_stats::update_stream_active(true, "client", "10.0.0.5");
+  stream_stats::update_controller_input_state(true, 0, "auto", "", "strict_bwrap", "strict isolation active", true, "");
+  stream_stats::update_steam_input_state("xbox_opt_in", 1, 1, 0, "Steam Input is opted in for Xbox controllers in 1 local profile(s).");
+
+  stream_stats::note_virtual_pad(0, 0, "DualSense");
+  auto doctor = stream_stats::build_doctor_json(stream_stats::get_current(), nlohmann::json::object());
+  EXPECT_FALSE(reports_steam_conflict(doctor));
+  EXPECT_EQ(steam_input_row(doctor).at("status"), "watch");
+
+  // A second client's pad is an Xbox pad: now the opt-in claims it.
+  stream_stats::note_virtual_pad(1, 0, "Xbox One");
+  doctor = stream_stats::build_doctor_json(stream_stats::get_current(), nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "steam_input_conflict");
+  EXPECT_EQ(steam_input_row(doctor).at("status"), "fail");
+
+  // That pad is gone again.
+  stream_stats::forget_virtual_pad(1);
+  doctor = stream_stats::build_doctor_json(stream_stats::get_current(), nlohmann::json::object());
+  EXPECT_FALSE(reports_steam_conflict(doctor));
+  EXPECT_EQ(steam_input_row(doctor).at("status"), "watch");
+
+  stream_stats::forget_virtual_pad(0);
+  stream_stats::update_stream_active(false, "", "");
+  // The host facts outlive the stream; leave none of them for later tests.
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
 }
 
 TEST(StreamStatsDoctorTests, EncoderAutoFallbackIsVisibleAsWatchEvidence) {
