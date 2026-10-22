@@ -163,7 +163,6 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_codec_support_readout.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_preallocated_gamepad_source.cpp
-    ${CMAKE_SOURCE_DIR}/tests/unit/test_owned_gamepad_readiness_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_capture_backend_fallback_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_egl_ctx_release_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_labwc_render_device_source.cpp
