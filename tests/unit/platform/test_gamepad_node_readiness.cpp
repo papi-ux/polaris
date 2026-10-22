@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/platform/test_gamepad_node_readiness.cpp
- * @brief Test the bounded wait for a virtual gamepad's own input nodes.
+ * @brief Test the bounded wait for a virtual gamepad's own input nodes, and the retry spacing after they never appear.
  *
  * A fake device stands in for a UHID DualSense: its nodes appear in sysfs and /dev on a scripted
  * timeline, and the fake clock advances only when the wait sleeps.
@@ -12,6 +12,7 @@
 
   #include <algorithm>
   #include <chrono>
+  #include <memory>
   #include <optional>
   #include <set>
   #include <stdexcept>
@@ -21,7 +22,6 @@
 namespace {
   using namespace std::chrono_literals;
   using std::chrono::milliseconds;
-  using platf::gamepad::readiness::backoff_t;
   using platf::gamepad::readiness::environment_t;
   using platf::gamepad::readiness::policy_t;
   using platf::gamepad::readiness::result_t;
@@ -210,10 +210,10 @@ TEST(GamepadNodeReadinessTests, AListedNodeJoinsOnlyOnceItsDeviceFileExists) {
   EXPECT_GE(result.waited, 30ms + policy_t {}.settle);
 }
 
-TEST(GamepadNodeReadinessTests, ADepartingPadWithTheSameMacIsNotAdmitted) {
+TEST(GamepadNodeReadinessTests, NodesWithoutADeviceFileAreNotAdmitted) {
   auto device = dualsense_registered_at(10ms);
-  // A previous pad with this MAC still enumerates until its nodes go at 20 ms, and one stale entry
-  // stays listed with no device file at all.
+  // A node that goes away at 20 ms, and an entry still listed with no device file, are left out.
+  // This does not model how long a destroyed pad's nodes linger in a real kernel.
   device.owned.push_back({"/dev/input/event150", 0ms, 0ms, 20ms});
   device.owned.push_back({"/dev/input/event149", 0ms, 1h});
   const auto result = device.wait();
@@ -282,26 +282,92 @@ TEST(GamepadNodeReadinessTests, TheDefaultPolicyIsBounded) {
   EXPECT_LT(policy.settle, policy.timeout);
 }
 
-TEST(GamepadNodeReadinessTests, BackoffSpacesOutRetriesAndClearsOnSuccess) {
-  backoff_t backoff {30s, 5min};
-  const auto start = time_point_t {} + 1h;
-  EXPECT_FALSE(backoff.blocks(start));
+namespace {
+  /// Stands in for an allocation owner, such as a session's feedback queue.
+  struct session_t {};
 
-  backoff.failed(start);
-  EXPECT_TRUE(backoff.blocks(start + 29s));
-  EXPECT_FALSE(backoff.blocks(start + 30s));
+  using spacing_t = platf::gamepad::readiness::retry_spacing_t<session_t>;
 
-  backoff.failed(start + 30s);
-  EXPECT_TRUE(backoff.blocks(start + 89s));
-  EXPECT_FALSE(backoff.blocks(start + 90s));
-
-  for (int i = 0; i < 10; ++i) {
-    backoff.failed(start);
+  /// Allocated on its own, so a later session can be created at the address of one that ended.
+  std::shared_ptr<session_t> new_session() {
+    return std::shared_ptr<session_t> {new session_t};
   }
-  EXPECT_EQ(backoff.retry_at(), start + 5min);
 
-  backoff.succeeded();
-  EXPECT_FALSE(backoff.blocks(start));
+  const auto spacing_start = time_point_t {} + 1h;
+}  // namespace
+
+TEST(GamepadRetrySpacingTests, AFailureHoldsBackOnlyThatOwnersController) {
+  spacing_t spacing {16};
+  const auto client = new_session();
+  const auto other_client = new_session();
+
+  spacing.failed(client, 0, spacing_start);
+
+  EXPECT_TRUE(spacing.holds_back(client, 0, spacing_start + 1s));
+  EXPECT_FALSE(spacing.holds_back(client, 1, spacing_start + 1s)) << "another controller of the same client";
+  EXPECT_FALSE(spacing.holds_back(other_client, 0, spacing_start + 1s)) << "the same controller number of another client";
+}
+
+TEST(GamepadRetrySpacingTests, TheHoldIsBriefAndDoesNotGrow) {
+  spacing_t spacing {16};
+  const auto client = new_session();
+  const auto gap = spacing.spacing();
+
+  // At most one wait per spacing, so a failing controller stalls input for at most half the time
+  EXPECT_GE(gap, policy_t {}.timeout);
+  EXPECT_LE(gap, 30s);
+
+  for (int i = 0; i < 6; ++i) {
+    const auto failed_at = spacing_start + i * gap;
+    spacing.failed(client, 0, failed_at);
+    EXPECT_TRUE(spacing.holds_back(client, 0, failed_at + gap - 1ms)) << i;
+    EXPECT_FALSE(spacing.holds_back(client, 0, failed_at + gap)) << i;
+  }
+}
+
+TEST(GamepadRetrySpacingTests, ANewOwnerDoesNotInheritAnEndedOwnersHold) {
+  spacing_t spacing {16};
+  auto client = new_session();
+  spacing.failed(client, 0, spacing_start);
+  ASSERT_TRUE(spacing.holds_back(client, 0, spacing_start));
+
+  client.reset();
+  const auto next_client = new_session();
+
+  EXPECT_FALSE(spacing.holds_back(next_client, 0, spacing_start + 1s));
+  EXPECT_EQ(spacing.size(), 0u);
+}
+
+TEST(GamepadRetrySpacingTests, ASuccessClearsOnlyThatControllersHold) {
+  spacing_t spacing {16};
+  const auto client = new_session();
+  spacing.failed(client, 0, spacing_start);
+  spacing.failed(client, 1, spacing_start);
+
+  spacing.succeeded(client, 0);
+
+  EXPECT_FALSE(spacing.holds_back(client, 0, spacing_start + 1s));
+  EXPECT_TRUE(spacing.holds_back(client, 1, spacing_start + 1s));
+}
+
+TEST(GamepadRetrySpacingTests, HoldsStayBoundedAndAnAbsentOwnerIsNeverHeld) {
+  spacing_t spacing {4};
+  std::vector<std::shared_ptr<session_t>> clients;
+  for (int i = 0; i < 10; ++i) {
+    clients.push_back(new_session());
+    spacing.failed(clients.back(), 0, spacing_start + milliseconds {i});
+    EXPECT_LE(spacing.size(), 4u);
+  }
+
+  // The newest holds are kept, and holds that have run out are dropped
+  EXPECT_TRUE(spacing.holds_back(clients.back(), 0, spacing_start + 1s));
+  EXPECT_FALSE(spacing.holds_back(clients.front(), 0, spacing_start + 1s));
+  EXPECT_FALSE(spacing.holds_back(clients.back(), 0, spacing_start + spacing.spacing() + 10ms));
+  EXPECT_EQ(spacing.size(), 0u);
+
+  spacing.failed(nullptr, 0, spacing_start);
+  EXPECT_EQ(spacing.size(), 0u);
+  EXPECT_FALSE(spacing.holds_back(nullptr, 0, spacing_start));
 }
 
 #endif

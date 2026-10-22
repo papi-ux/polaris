@@ -1,6 +1,6 @@
 /**
  * @file src/platform/linux/input/inputtino_gamepad_readiness.h
- * @brief Bounded wait for a virtual gamepad's own input nodes, and the retry back-off after they never appear.
+ * @brief Bounded wait for a virtual gamepad's own input nodes, and the retry spacing after they never appear.
  *
  * A virtual DualSense is a UHID device. inputtino's create() returns once the device is written to
  * /dev/uhid; hid-playstation then registers the gamepad, motion and touchpad inputs asynchronously,
@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -28,32 +30,6 @@ namespace platf::gamepad::readiness {
     std::chrono::milliseconds timeout {2000};
     std::chrono::milliseconds poll_interval {20};
     std::chrono::milliseconds settle {50};  ///< How long the node set must stay the same to be complete.
-  };
-
-  enum class status_e {
-    ready,  ///< The owned nodes, including an event node, stayed the same for the settle time.
-    partial,  ///< Owned nodes existed at the timeout but had not settled.
-    empty,  ///< No owned node existed at the timeout.
-    error,  ///< The last probe failed, so no node could be confirmed.
-  };
-
-  struct result_t {
-    status_e status = status_e::empty;
-    std::vector<std::string> nodes;  ///< Sorted owned nodes that existed at the last successful probe.
-    std::chrono::milliseconds waited {0};
-    int probes = 0;
-    std::string detail;
-
-    bool usable() const {
-      return (status == status_e::ready || status == status_e::partial) && !nodes.empty();
-    }
-  };
-
-  struct environment_t {
-    std::function<std::vector<std::string>()> probe;  ///< Lists the device's own nodes; may throw.
-    std::function<bool(const std::string &)> node_exists;
-    std::function<time_point_t()> now;
-    std::function<void(std::chrono::milliseconds)> sleep;
   };
 
   inline bool has_numeric_suffix(std::string_view node, std::string_view prefix) {
@@ -74,6 +50,33 @@ namespace platf::gamepad::readiness {
   inline bool is_device_node(std::string_view node) {
     return is_event_node(node) || has_numeric_suffix(node, "/dev/input/js") || has_numeric_suffix(node, "/dev/hidraw");
   }
+
+  enum class status_e {
+    ready,  ///< The owned nodes, including an event node, stayed the same for the settle time.
+    partial,  ///< Owned nodes existed at the timeout but had not settled.
+    empty,  ///< No owned node existed at the timeout.
+    error,  ///< The last probe failed, so no node could be confirmed.
+  };
+
+  struct result_t {
+    status_e status = status_e::empty;
+    std::vector<std::string> nodes;  ///< Sorted owned nodes that existed at the last successful probe.
+    std::chrono::milliseconds waited {0};
+    int probes = 0;
+    std::string detail;
+
+    /// Games read the gamepad through its event node, so nodes without one are not a usable pad.
+    bool usable() const {
+      return (status == status_e::ready || status == status_e::partial) && std::any_of(nodes.begin(), nodes.end(), is_event_node);
+    }
+  };
+
+  struct environment_t {
+    std::function<std::vector<std::string>()> probe;  ///< Lists the device's own nodes; may throw.
+    std::function<bool(const std::string &)> node_exists;
+    std::function<time_point_t()> now;
+    std::function<void(std::chrono::milliseconds)> sleep;
+  };
 
   /// The listed nodes that are device nodes and exist, sorted and unique. Nothing outside the list is considered.
   inline std::vector<std::string> present_owned_nodes(const std::vector<std::string> &listed, const std::function<bool(const std::string &)> &node_exists) {
@@ -156,42 +159,84 @@ namespace platf::gamepad::readiness {
   }
 
   /**
-   * Spaces out new attempts after a device's nodes never appeared. Client input retries allocation
-   * for every controller report, so each attempt would otherwise stall input for the whole timeout.
-   * The delay doubles with each consecutive failure, up to `longest`, and a success clears it.
+   * Spaces out new attempts for one controller of one allocation owner (a client session, or the
+   * preallocation before launch) after its nodes never appeared. Client input retries allocation
+   * for every controller report, so each attempt would otherwise stall input for the whole wait.
+   *
+   * A hold applies only to that owner's controller: other controllers, other owners, and a new
+   * owner that replaced an expired one are never held back. Owners are held weakly, so an owner
+   * that has gone matches nothing even if another is later created at the same address. At most
+   * `capacity` holds are kept, and holds that have run out or lost their owner are dropped first.
    */
-  class backoff_t {
+  template<class Owner>
+  class retry_spacing_t {
   public:
-    explicit backoff_t(std::chrono::seconds first = std::chrono::seconds {30}, std::chrono::seconds longest = std::chrono::minutes {5}):
-        first_ {first},
-        longest_ {longest} {
+    static constexpr std::chrono::milliseconds default_spacing {10000};
+
+    explicit retry_spacing_t(std::size_t capacity, std::chrono::milliseconds spacing = default_spacing):
+        capacity_ {capacity},
+        spacing_ {spacing} {
     }
 
-    bool blocks(time_point_t now) const {
-      return failures_ > 0 && now < retry_at_;
+    std::chrono::milliseconds spacing() const {
+      return spacing_;
     }
 
-    time_point_t retry_at() const {
-      return retry_at_;
+    /// The number of holds kept.
+    std::size_t size() const {
+      return holds_.size();
     }
 
-    void failed(time_point_t now) {
-      auto delay = first_;
-      for (int i = 0; i < failures_ && delay < longest_; ++i) {
-        delay *= 2;
+    bool holds_back(const std::shared_ptr<Owner> &owner, int controller, time_point_t now) {
+      prune(now);
+      return find(owner, controller) != holds_.end();
+    }
+
+    void failed(const std::shared_ptr<Owner> &owner, int controller, time_point_t now) {
+      if (!owner || capacity_ == 0) {
+        return;
       }
-      retry_at_ = now + std::min(delay, longest_);
-      ++failures_;
+
+      prune(now);
+      if (auto hold = find(owner, controller); hold != holds_.end()) {
+        hold->retry_at = now + spacing_;
+        return;
+      }
+      if (holds_.size() >= capacity_) {
+        holds_.erase(std::min_element(holds_.begin(), holds_.end(), [](const hold_t &a, const hold_t &b) {
+          return a.retry_at < b.retry_at;
+        }));
+      }
+      holds_.push_back({owner, controller, now + spacing_});
     }
 
-    void succeeded() {
-      failures_ = 0;
+    void succeeded(const std::shared_ptr<Owner> &owner, int controller) {
+      if (auto hold = find(owner, controller); hold != holds_.end()) {
+        holds_.erase(hold);
+      }
     }
 
   private:
-    std::chrono::seconds first_;
-    std::chrono::seconds longest_;
-    int failures_ = 0;
-    time_point_t retry_at_ {};
+    struct hold_t {
+      std::weak_ptr<Owner> owner;
+      int controller;
+      time_point_t retry_at;
+    };
+
+    void prune(time_point_t now) {
+      std::erase_if(holds_, [now](const hold_t &hold) {
+        return hold.owner.expired() || now >= hold.retry_at;
+      });
+    }
+
+    typename std::vector<hold_t>::iterator find(const std::shared_ptr<Owner> &owner, int controller) {
+      return std::find_if(holds_.begin(), holds_.end(), [&](const hold_t &hold) {
+        return owner && hold.controller == controller && hold.owner.lock() == owner;
+      });
+    }
+
+    std::size_t capacity_;
+    std::chrono::milliseconds spacing_;
+    std::vector<hold_t> holds_;
   };
 }  // namespace platf::gamepad::readiness

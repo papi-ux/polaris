@@ -82,33 +82,22 @@ namespace platf::gamepad {
     return readiness::wait_for_owned_nodes(environment, readiness::policy_t {});
   }
 
-  std::mutex ds5_readiness_mutex;
-  readiness::backoff_t ds5_readiness_backoff;
-  bool ds5_backoff_reported = false;
+  std::mutex ds5_retry_mutex;
+  /// Controllers whose last DualSense never got its nodes, held per allocation owner: the feedback queue of a session or of the preallocation.
+  readiness::retry_spacing_t<feedback_queue_t::element_type> ds5_retry_spacing {MAX_GAMEPADS};
 
-  /// True while new DualSense pads are refused because the last one's nodes never appeared.
-  bool ds5_readiness_backed_off(int globalIndex) {
-    std::scoped_lock lock {ds5_readiness_mutex};
-    const auto now = std::chrono::steady_clock::now();
-    if (!ds5_readiness_backoff.blocks(now)) {
-      return false;
-    }
-    if (!ds5_backoff_reported) {
-      ds5_backoff_reported = true;
-      BOOST_LOG(warning) << "Gamepad " << globalIndex << ": not creating a virtual DualShock 5 controller for "sv
-                         << std::chrono::ceil<std::chrono::seconds>(ds5_readiness_backoff.retry_at() - now).count()
-                         << " s because the last one's input nodes never appeared"sv;
-    }
-    return true;
+  /// True while this owner's controller waits out the spacing after its last DualSense never got its nodes.
+  bool ds5_retry_held_back(const feedback_queue_t &owner, int controller) {
+    std::scoped_lock lock {ds5_retry_mutex};
+    return ds5_retry_spacing.holds_back(owner, controller, std::chrono::steady_clock::now());
   }
 
-  void note_ds5_readiness(bool usable) {
-    std::scoped_lock lock {ds5_readiness_mutex};
+  void note_ds5_readiness(const feedback_queue_t &owner, int controller, bool usable) {
+    std::scoped_lock lock {ds5_retry_mutex};
     if (usable) {
-      ds5_readiness_backoff.succeeded();
+      ds5_retry_spacing.succeeded(owner, controller);
     } else {
-      ds5_readiness_backoff.failed(std::chrono::steady_clock::now());
-      ds5_backoff_reported = false;
+      ds5_retry_spacing.failed(owner, controller, std::chrono::steady_clock::now());
     }
   }
 
@@ -209,6 +198,8 @@ namespace platf::gamepad {
       }
     }
 
+    // The session, or the preallocation, this pad is allocated for
+    const auto allocation_owner = feedback_queue;
     auto gamepad = std::make_shared<joypad_state>(joypad_state {});
     gamepad->feedback_router = std::make_shared<gamepad_feedback_router_t>(std::move(feedback_queue));
     auto on_rumble_fn = [feedback_router = gamepad->feedback_router, idx = id.clientRelativeIndex, gamepad](int low_freq, int high_freq) {
@@ -255,7 +246,7 @@ namespace platf::gamepad {
         }
       case DualSenseWired:
         {
-          if (ds5_readiness_backed_off(id.globalIndex)) {
+          if (ds5_retry_held_back(allocation_owner, id.clientRelativeIndex)) {
             return -1;
           }
           auto ds5 = create_ds5(id.globalIndex);
@@ -278,11 +269,12 @@ namespace platf::gamepad {
 
             // hid-playstation registers the inputs after create() returns; register them only once they exist
             const auto ready = wait_for_owned_ds5_nodes(*ds5);
-            note_ds5_readiness(ready.usable());
+            note_ds5_readiness(allocation_owner, id.clientRelativeIndex, ready.usable());
             if (!ready.usable()) {
               // Fail rather than register no nodes: the pad is destroyed and the caller reports the failed allocation
               BOOST_LOG(warning) << "Virtual DualShock 5 controller " << id.globalIndex << " is unusable: "sv << ready.detail
-                                 << " within "sv << ready.waited.count() << " ms ("sv << ready.probes << " probes)"sv;
+                                 << " within "sv << ready.waited.count() << " ms ("sv << ready.probes << " probes); not retrying this controller for "sv
+                                 << std::chrono::duration_cast<std::chrono::seconds>(ds5_retry_spacing.spacing()).count() << " s"sv;
               return -1;
             }
             if (ready.status == readiness::status_e::partial) {
