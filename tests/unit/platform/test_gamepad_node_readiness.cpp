@@ -240,6 +240,28 @@ TEST(GamepadNodeReadinessTests, NodesThatKeepChangingEndPartialWithOnlyPresentNo
   EXPECT_LE(result.waited, policy.timeout + policy.poll_interval);
 }
 
+TEST(GamepadNodeReadinessTests, AResultWithoutAnEventNodeIsNeverUsable) {
+  for (const auto status : {status_e::ready, status_e::partial}) {
+    const result_t result {.status = status, .nodes = {"/dev/hidraw7", "/dev/input/js5"}};
+    EXPECT_FALSE(result.usable()) << static_cast<int>(status);
+  }
+}
+
+TEST(GamepadNodeReadinessTests, OwnedNodesWithoutAnEventNodeTimeOutUnusable) {
+  fake_device_t device;
+  device.owned = {
+    {"/dev/input/js5", 0ms, 0ms},
+    {"/dev/hidraw7", 0ms, 0ms},
+  };
+  const policy_t policy;
+  const auto result = device.wait(policy);
+
+  EXPECT_EQ(result.status, status_e::partial);
+  EXPECT_NE(result.detail.find("no event node"), std::string::npos);
+  EXPECT_FALSE(result.usable());
+  EXPECT_LE(result.waited, policy.timeout + policy.poll_interval);
+}
+
 TEST(GamepadNodeReadinessTests, AClockThatNeverAdvancesStillStops) {
   fake_device_t device;
   device.clock_frozen = true;
