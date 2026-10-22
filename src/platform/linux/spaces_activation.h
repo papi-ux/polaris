@@ -15,6 +15,9 @@ namespace multiseat::spaces {
     std::filesystem::path drm = "/sys/class/drm", nvidia = "/proc/driver/nvidia/gpus", pci = "/sys/bus/pci/devices";
   };
   std::vector<graphics_t> discover_graphics(container::host_t &host, const graphics_roots_t &roots = {});
+  // The one rule for which discovered graphics a runtime can use. The choices offered for a
+  // runtime and the GPU its activation accepts both follow it.
+  bool graphics_fits_runtime(const graphics_t &graphics, const runtime_t &runtime);
   nlohmann::json graphics_choices(const runtime_t &runtime);
   struct activation_paths_t {
     std::filesystem::path native, controller, profiles, ipc;
