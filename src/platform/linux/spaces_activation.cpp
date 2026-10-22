@@ -100,7 +100,9 @@ namespace multiseat::spaces {
   }
 
   bool graphics_fits_runtime(const graphics_t &graphics, const runtime_t &runtime) {
-    return graphics.variant == runtime.variant;
+    // NVIDIA cards keep their discovery tag whether the runtime ships a driver or borrows it.
+    return (graphics.variant == "nvidia" && (runtime.variant == "nvidia" || runtime.variant == "nvidia-host")) ||
+      (graphics.variant == "default" && runtime.variant == "default");
   }
 
   json graphics_choices(const runtime_t &runtime) {
