@@ -1592,15 +1592,15 @@ namespace {
     const auto options = nvhttp::launch_profile_request(client, hdr, false, [](const auto &) { return true; });
     ASSERT_TRUE(options);
     EXPECT_EQ(options->code, "space_display_options");
-    // The same refusal covers the bitrate and the size, so its fix names them: a player at 20 Mbps
-    // who followed the rest of it was refused again with nothing new to go on.
+    // Each refusal names its own setting, rather than asking the player to check every limit.
     auto fast = args();
     fast.emplace("bitrateKbps", "20000");
     const auto bitrate = nvhttp::launch_profile_request(client, fast, false, [](const auto &) { return true; });
     ASSERT_TRUE(bitrate);
     EXPECT_EQ(bitrate->code, "space_display_options");
     EXPECT_NE(bitrate->action.find("8 Mbps or less"), std::string::npos) << bitrate->action;
-    EXPECT_NE(bitrate->action.find("4096x2160"), std::string::npos) << bitrate->action;
+    EXPECT_EQ(bitrate->action.find("4096x2160"), std::string::npos) << bitrate->action;
+    EXPECT_NE(options->action.find("HDR"), std::string::npos) << options->action;
     auto keyless = args();
     keyless.erase("rikey");
     const auto keys = nvhttp::launch_profile_request(client, keyless, false, [](const auto &) { return true; });
