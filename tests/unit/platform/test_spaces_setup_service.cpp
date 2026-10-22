@@ -567,6 +567,135 @@ TEST_F(SpacesSetupService, GraphicsDiscoveryPairsPhysicalNodesAndRejectsMissingA
   fs::create_directory_symlink(device, roots.drm / "renderD129/device");
   EXPECT_EQ(spaces::discover_graphics(host, roots).size(), 1U);
 }
+
+TEST_F(SpacesSetupService, GraphicsChoicesOfferEachNvidiaCardToTheRuntimeThatBorrowsItsDriver) {
+  namespace fs = std::filesystem;
+  using ids = std::vector<std::string>;
+  activation_host_t host;
+  spaces::graphics_roots_t roots;
+  fs::path devices;
+  // Each layout has its own sysfs and NVIDIA trees, so one cannot leak into the next.
+  auto layout = [&](const std::string &name) {
+    roots = {root / name / "class", root / name / "nvidia"};
+    devices = root / name / "devices";
+  };
+  auto card = [&](const std::string &render, const std::string &pci, const std::string &vendor, const std::string &node) {
+    fs::create_directories(devices / pci / "drm" / node);
+    fs::create_directories(roots.drm / render);
+    fs::create_directory_symlink(devices / pci, roots.drm / render / "device");
+    std::ofstream(devices / pci / "vendor") << vendor << "\n";
+  };
+  auto information = [&](const std::string &pci, const std::string &text) {
+    fs::create_directories(roots.nvidia / pci);
+    std::ofstream(roots.nvidia / pci / "information", std::ios::trunc) << text;
+  };
+  auto nvidia_nodes = [](const std::string &render, const std::string &node, const std::string &minor) {
+    return std::vector<fs::path> {"/dev/dri/" + render, "/dev/dri/" + node, "/dev/nvidia" + minor,
+      "/dev/nvidiactl", "/dev/nvidia-modeset", "/dev/nvidia-uvm"};
+  };
+  // Setup offers what discovery finds that fits the runtime, in discovery order...
+  auto offered = [&](const std::string &variant) {
+    auto image = runtime(); image.variant = variant;
+    ids result;
+    for (const auto &entry : spaces::discover_graphics(host, roots))
+      if (spaces::graphics_fits_runtime(entry, image)) result.push_back(entry.gpu.logical_gpu_id);
+    return result;
+  };
+  // ...and activation takes only the entry with the selected id, by the same rule.
+  auto selected = [&](const std::string &variant, const std::string &id) {
+    auto image = runtime(); image.variant = variant;
+    for (const auto &entry : spaces::discover_graphics(host, roots))
+      if (entry.gpu.logical_gpu_id == id && spaces::graphics_fits_runtime(entry, image)) return entry.gpu.devices;
+    return std::vector<fs::path> {};
+  };
+
+  // One NVIDIA card. Discovery tags it nvidia; the runtime that borrows this PC's driver is
+  // offered it and activates it with its own /dev/nvidiaN and the shared NVIDIA nodes.
+  layout("single");
+  card("renderD128", "0000:01:00.0", "0x10de", "card1");
+  information("0000:01:00.0", "Model: \t NVIDIA GeForce RTX 4090\nDevice Minor: \t 3\n");
+  auto found = spaces::discover_graphics(host, roots);
+  ASSERT_EQ(found.size(), 1U);
+  EXPECT_EQ(found[0].variant, "nvidia");
+  EXPECT_EQ(found[0].gpu.devices, nvidia_nodes("renderD128", "card1", "3"));
+  EXPECT_EQ(offered("nvidia-host"), (ids {"pci-0000_01_00.0"}));
+  EXPECT_EQ(selected("nvidia-host", "pci-0000_01_00.0"), nvidia_nodes("renderD128", "card1", "3"));
+  EXPECT_EQ(offered("nvidia"), (ids {"pci-0000_01_00.0"}));
+  EXPECT_TRUE(offered("default").empty());
+
+  // Two NVIDIA cards are two choices, each with its own Device Minor. A selection takes only its card.
+  layout("dual");
+  card("renderD128", "0000:01:00.0", "0x10de", "card1");
+  card("renderD129", "0000:02:00.0", "0x10de", "card2");
+  information("0000:01:00.0", "Device Minor: \t 0\n");
+  information("0000:02:00.0", "Device Minor: \t 1\n");
+  found = spaces::discover_graphics(host, roots);
+  ASSERT_EQ(found.size(), 2U);
+  EXPECT_EQ(found[0].gpu.devices, nvidia_nodes("renderD128", "card1", "0"));
+  EXPECT_EQ(found[1].gpu.devices, nvidia_nodes("renderD129", "card2", "1"));
+  EXPECT_EQ(offered("nvidia-host"), (ids {"pci-0000_01_00.0", "pci-0000_02_00.0"}));
+  EXPECT_EQ(selected("nvidia-host", "pci-0000_01_00.0"), nvidia_nodes("renderD128", "card1", "0"));
+  EXPECT_EQ(selected("nvidia-host", "pci-0000_02_00.0"), nvidia_nodes("renderD129", "card2", "1"));
+  EXPECT_EQ(offered("nvidia"), (ids {"pci-0000_01_00.0", "pci-0000_02_00.0"}));
+  // Discovery's own rejections still decide: a denied /dev/nvidiaN or a missing Device Minor
+  // drops that card, and only that card, for either NVIDIA runtime.
+  host.denied.insert("/dev/nvidia1");
+  EXPECT_EQ(offered("nvidia-host"), (ids {"pci-0000_01_00.0"}));
+  EXPECT_TRUE(selected("nvidia-host", "pci-0000_02_00.0").empty());
+  EXPECT_EQ(offered("nvidia"), (ids {"pci-0000_01_00.0"}));
+  host.denied.clear();
+  information("0000:02:00.0", "Model: \t NVIDIA GeForce RTX 3090\n");
+  EXPECT_EQ(offered("nvidia-host"), (ids {"pci-0000_01_00.0"}));
+  EXPECT_TRUE(selected("nvidia-host", "pci-0000_02_00.0").empty());
+  EXPECT_EQ(offered("nvidia"), (ids {"pci-0000_01_00.0"}));
+
+  // NVIDIA beside AMD: each runtime is offered only the cards it can drive, and a card from
+  // any other vendor is never offered.
+  layout("mixed");
+  card("renderD128", "0000:01:00.0", "0x10de", "card1");
+  card("renderD129", "0000:03:00.0", "0x1002", "card2");
+  card("renderD130", "0000:04:00.0", "0x1a03", "card3");
+  information("0000:01:00.0", "Device Minor: \t 0\n");
+  found = spaces::discover_graphics(host, roots);
+  ASSERT_EQ(found.size(), 2U);
+  EXPECT_EQ(found[0].variant, "nvidia");
+  EXPECT_EQ(found[1].variant, "default");
+  EXPECT_EQ(offered("nvidia-host"), (ids {"pci-0000_01_00.0"}));
+  EXPECT_EQ(selected("nvidia-host", "pci-0000_01_00.0"), nvidia_nodes("renderD128", "card1", "0"));
+  EXPECT_TRUE(selected("nvidia-host", "pci-0000_03_00.0").empty());
+  EXPECT_EQ(offered("default"), (ids {"pci-0000_03_00.0"}));
+  EXPECT_TRUE(selected("default", "pci-0000_01_00.0").empty());
+  EXPECT_EQ(offered("nvidia"), (ids {"pci-0000_01_00.0"}));
+  for (const auto *variant : {"nvidia", "nvidia-host", "default"})
+    EXPECT_TRUE(selected(variant, "pci-0000_04_00.0").empty()) << variant;
+}
+
+TEST_F(SpacesSetupService, GraphicsFitARuntimeOnlyByAnExactVariantPair) {
+  auto fits = [](std::string graphics, std::string variant) {
+    spaces::graphics_t card; card.variant = std::move(graphics);
+    auto image = runtime(); image.variant = std::move(variant);
+    return spaces::graphics_fits_runtime(card, image);
+  };
+  // Discovery tags NVIDIA cards nvidia and AMD or Intel cards default. An NVIDIA card fits both
+  // NVIDIA runtimes: the one with its own driver and the one that borrows this PC's.
+  EXPECT_TRUE(fits("nvidia", "nvidia"));
+  EXPECT_TRUE(fits("nvidia", "nvidia-host"));
+  EXPECT_TRUE(fits("default", "default"));
+  EXPECT_FALSE(fits("nvidia", "default"));
+  EXPECT_FALSE(fits("default", "nvidia"));
+  EXPECT_FALSE(fits("default", "nvidia-host"));
+  // No case folding, trimming, prefix or near spelling admits a pair.
+  for (const auto *variant : {"", "NVIDIA", "Nvidia-Host", "nvidia-host ", " nvidia-host", "nvidia-host\n",
+         "nvidia_host", "nvidiahost", "nvidia-", "default "}) {
+    EXPECT_FALSE(fits("nvidia", variant)) << "runtime '" << variant << "'";
+    EXPECT_FALSE(fits("default", variant)) << "runtime '" << variant << "'";
+  }
+  // nvidia-host names a runtime, never a card, and no other tag fits a runtime either.
+  for (const auto *graphics : {"nvidia-host", "", "NVIDIA", "nvidia "})
+    for (const auto *variant : {"nvidia", "nvidia-host", "default"})
+      EXPECT_FALSE(fits(graphics, variant)) << "graphics '" << graphics << "' with runtime '" << variant << "'";
+}
+
 TEST_F(SpacesSetupService, ConfigurationSavesTheGpuByItsPciIdentity) {
   activation_host_t host;
   const spaces::activation_paths_t paths {root / "polaris.conf", root / "controller.json", root / "profiles.json", root / "ipc"};
