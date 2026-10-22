@@ -5312,6 +5312,49 @@ namespace nvhttp {
     }
 
     if (profile_worker) {
+      enum class space_option_e { hdr, encoder, assertion, mode, width, height, rate, bitrate, audio, paired_mode };
+      auto refuse_space_media = [](space_option_e option) {
+        const char *field = "", *message = "", *action = "";
+        switch (option) {
+          case space_option_e::hdr:
+            field = "hdr"; message = "Space streams are SDR only.";
+            action = "Turn HDR off and try again."; break;
+          case space_option_e::encoder:
+            field = "encoder"; message = "A Space stream uses its own hardware encoder.";
+            action = "Set the video encoder to Auto and try again."; break;
+          case space_option_e::assertion:
+            field = "resolved_launch"; message = "This launch's Space settings are incomplete or out of date.";
+            action = "Refresh the library and try again."; break;
+          case space_option_e::mode:
+            field = "display_mode"; message = "This launch's resolution and frame rate could not be read.";
+            action = "Choose them again and try again."; break;
+          case space_option_e::width:
+            field = "display_width"; message = "This Space launch requests an unsupported width.";
+            action = "Choose an even width from 320 to 4096 pixels and try again."; break;
+          case space_option_e::height:
+            field = "display_height"; message = "This Space launch requests an unsupported height.";
+            action = "Choose an even height from 240 to 2160 pixels and try again."; break;
+          case space_option_e::rate:
+            field = "frame_rate"; message = "Space streams need a whole frame rate of 240 FPS or less.";
+            action = "Choose a whole frame rate such as 60 and try again."; break;
+          case space_option_e::bitrate:
+            field = "bitrate"; message = "This Space launch requests an unsupported bitrate.";
+            action = "Set the bitrate to 8 Mbps or less and try again."; break;
+          case space_option_e::audio:
+            field = "audio_channels"; message = "Space streams carry stereo audio only.";
+            action = "Set audio to stereo and try again."; break;
+          case space_option_e::paired_mode:
+            field = "paired_display_mode"; message = "The display mode saved for this device in Polaris is not supported for a Space stream.";
+            action = "Change or clear this device's saved display mode in Polaris, then try again."; break;
+        }
+        launch_failure::refuse(400, "space_display_options", message, action);
+        // The enum and text are host-owned; never echo a query, key, device or profile identity.
+        BOOST_LOG(warning) << "Refusing Space launch [space_display_options]: field=" << field;
+        return nullptr;
+      };
+      auto refuse_display = [&](space_option_e option) {
+        return refuse_space_media(named_cert_p->display_mode.empty() ? option : space_option_e::paired_mode);
+      };
       // Worker display and encoder ownership come from the saved profile. Do
       // not probe host capture or apply a host optimizer envelope to this seat.
       const bool worker_contract = args.contains("workerProfile") &&
@@ -5320,14 +5363,25 @@ namespace nvhttp {
         get_arg(args, "resolvedHdr", "") == "0" && args.count("bitrateKbps") == 1;
       if ((!worker_contract && get_arg(args, "resolvedProfile", "0") != "0") ||
           (args.contains("workerProfile") && !worker_contract) || get_arg(args, "hdrMode", "0") != "0" ||
-          get_arg(args, "encoderBackend", "auto") != "auto" || args.contains("expectedEncoder")) return nullptr;
+          get_arg(args, "encoderBackend", "auto") != "auto" || args.contains("expectedEncoder")) {
+        // Classify only an already-refused request. Unresolved hints retain their old admission.
+        if (get_arg(args, "hdrMode", "0") != "0" ||
+            (args.contains("workerProfile") && args.contains("resolvedHdr") && get_arg(args, "resolvedHdr") != "0"))
+          return refuse_space_media(space_option_e::hdr);
+        if (get_arg(args, "encoderBackend", "auto") != "auto" || args.contains("expectedEncoder"))
+          return refuse_space_media(space_option_e::encoder);
+        if (args.contains("workerProfile") && args.count("bitrateKbps") != 1)
+          return refuse_space_media(space_option_e::bitrate);
+        return refuse_space_media(space_option_e::assertion);
+      }
       const auto requested = named_cert_p->display_mode.empty() ?
         get_arg(args, "mode", "1920x1080x60") : named_cert_p->display_mode;
-      if (requested.size() > 64 || std::count(requested.begin(), requested.end(), 'x') != 2) return nullptr;
+      if (requested.size() > 64 || std::count(requested.begin(), requested.end(), 'x') != 2)
+        return refuse_display(space_option_e::mode);
       std::istringstream mode(requested);
       std::array<std::string, 3> parts;
-      for (auto &part : parts) if (!std::getline(mode, part, 'x')) return nullptr;
-      if (mode.peek() != std::char_traits<char>::eof()) return nullptr;
+      for (auto &part : parts) if (!std::getline(mode, part, 'x')) return refuse_display(space_option_e::mode);
+      if (mode.peek() != std::char_traits<char>::eof()) return refuse_display(space_option_e::mode);
       auto integer = [](std::string_view text) -> std::optional<unsigned> {
         if (text.empty()) return std::nullopt;
         unsigned value = 0;
@@ -5341,19 +5395,23 @@ namespace nvhttp {
       const auto width = integer(parts[0]);
       const auto height = integer(parts[1]);
       const auto rate = integer(parts[2]);
-      if (!width || !height || !rate || *width < 320 || *width > 4096 || *width % 2 ||
-          *height < 240 || *height > 2160 || *height % 2 || *rate <= 0 || *rate > 240000) return nullptr;
+      if (!width || !height || !rate) return refuse_display(space_option_e::mode);
+      if (*width < 320 || *width > 4096 || *width % 2) return refuse_display(space_option_e::width);
+      if (*height < 240 || *height > 2160 || *height % 2) return refuse_display(space_option_e::height);
+      if (*rate <= 0 || *rate > 240000) return refuse_display(space_option_e::rate);
       const auto fps = *rate < 1000 ? *rate * 1000 : *rate;
-      if (fps > 240000 || fps % 1000 != 0) return nullptr;
+      if (fps > 240000 || fps % 1000 != 0) return refuse_display(space_option_e::rate);
       const auto bitrate = integer(get_arg(args, "bitrateKbps", "8000"));
-      if (!bitrate || *bitrate == 0 || *bitrate > 8000 || args.count("bitrateKbps") > 1) return nullptr;
+      if (!bitrate || *bitrate == 0 || *bitrate > 8000 || args.count("bitrateKbps") > 1)
+        return refuse_space_media(space_option_e::bitrate);
       launch_session->target_bitrate_kbps = *bitrate;
       if (named_cert_p->target_bitrate_kbps > 0)
         launch_session->target_bitrate_kbps = std::min(*launch_session->target_bitrate_kbps, named_cert_p->target_bitrate_kbps);
       if (config::video.max_bitrate > 0)
         launch_session->target_bitrate_kbps = std::min(*launch_session->target_bitrate_kbps, config::video.max_bitrate);
       const auto surround = integer(get_arg(args, "surroundAudioInfo", "196610"));
-      if (!surround || (*surround & 0xffff) != 2 || !get_arg(args, "surroundParams", "").empty()) return nullptr;
+      if (!surround || (*surround & 0xffff) != 2 || !get_arg(args, "surroundParams", "").empty())
+        return refuse_space_media(space_option_e::audio);
       launch_session->width = launch_session->requested_width = *width;
       launch_session->height = launch_session->requested_height = *height;
       launch_session->fps = launch_session->requested_fps = fps;
@@ -6532,9 +6590,14 @@ namespace nvhttp {
       return profile_launch_response_t {400, "This launch did not name the device's Space.", {}, "space_app_identity", "Open the Space from the library."};
     if (!args.contains("rikey") || !args.contains("rikeyid"))
       return profile_launch_response_t {400, "The Space launch is missing its key material.", {}, "space_key_material", "Update the client app and try again."};
+    launch_failure::clear();
     auto launch = make_launch_session(false, false, args, current.get(), true);
-    if (!launch) return profile_launch_response_t {400, "These display or media options are not supported for a Space stream.", {},
-      "space_display_options", "Launch with HDR off, stereo audio, the encoder on Auto, a bitrate of 8 Mbps or less, and a resolution from 320x240 to 4096x2160 in even numbers at a whole frame rate such as 60."};
+    if (!launch) {
+      if (const auto reason = launch_failure::take())
+        return profile_launch_response_t {reason->status, reason->message, {}, reason->code, reason->action};
+      return profile_launch_response_t {400, "These display or media options are not supported for a Space stream.", {},
+        "space_display_options", "Launch with HDR off, stereo audio, the encoder on Auto, a bitrate of 8 Mbps or less, and a resolution from 320x240 to 4096x2160 in even numbers at a whole frame rate such as 60."};
+    }
     if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Space streams require encrypted RTSP.", {}, "space_encryption_required",
       "Update the client app to a version that encrypts stream setup."};
     if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)

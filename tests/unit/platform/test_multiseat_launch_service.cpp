@@ -1592,15 +1592,15 @@ namespace {
     const auto options = nvhttp::launch_profile_request(client, hdr, false, [](const auto &) { return true; });
     ASSERT_TRUE(options);
     EXPECT_EQ(options->code, "space_display_options");
-    // The same refusal covers the bitrate and the size, so its fix names them: a player at 20 Mbps
-    // who followed the rest of it was refused again with nothing new to go on.
+    // Each refusal names its own setting, rather than asking the player to check every limit.
     auto fast = args();
     fast.emplace("bitrateKbps", "20000");
     const auto bitrate = nvhttp::launch_profile_request(client, fast, false, [](const auto &) { return true; });
     ASSERT_TRUE(bitrate);
     EXPECT_EQ(bitrate->code, "space_display_options");
     EXPECT_NE(bitrate->action.find("8 Mbps or less"), std::string::npos) << bitrate->action;
-    EXPECT_NE(bitrate->action.find("4096x2160"), std::string::npos) << bitrate->action;
+    EXPECT_EQ(bitrate->action.find("4096x2160"), std::string::npos) << bitrate->action;
+    EXPECT_NE(options->action.find("HDR"), std::string::npos) << options->action;
     auto keyless = args();
     keyless.erase("rikey");
     const auto keys = nvhttp::launch_profile_request(client, keyless, false, [](const auto &) { return true; });
@@ -1617,6 +1617,101 @@ namespace {
       EXPECT_EQ(result->action.find("Play Setup"), std::string::npos) << result->code;
     }
     EXPECT_EQ(state->begins.load(), 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, SpaceMediaRefusalNamesTheUnsupportedSetting) {
+    struct invalid_t { const char *key, *value, *message, *action, *field; };
+    const std::vector<invalid_t> invalid {
+      {"bitrateKbps", "8001", "This Space launch requests an unsupported bitrate.", "Set the bitrate to 8 Mbps or less and try again.", "bitrate"},
+      {"bitrateKbps", "0", "This Space launch requests an unsupported bitrate.", "Set the bitrate to 8 Mbps or less and try again.", "bitrate"},
+      {"bitrateKbps", "4000.5", "This Space launch requests an unsupported bitrate.", "Set the bitrate to 8 Mbps or less and try again.", "bitrate"},
+      {"hdrMode", "1", "Space streams are SDR only.", "Turn HDR off and try again.", "hdr"},
+      {"encoderBackend", "SECRET-untrusted-encoder", "A Space stream uses its own hardware encoder.", "Set the video encoder to Auto and try again.", "encoder"},
+      {"expectedEncoder", "SECRET-untrusted-encoder", "A Space stream uses its own hardware encoder.", "Set the video encoder to Auto and try again.", "encoder"},
+      {"mode", "1921x1080x60", "This Space launch requests an unsupported width.", "Choose an even width from 320 to 4096 pixels and try again.", "display_width"},
+      {"mode", "1920x2162x60", "This Space launch requests an unsupported height.", "Choose an even height from 240 to 2160 pixels and try again.", "display_height"},
+      {"mode", "1920x1080x59940", "Space streams need a whole frame rate of 240 FPS or less.", "Choose a whole frame rate such as 60 and try again.", "frame_rate"},
+      {"mode", "1920x1080x241", "Space streams need a whole frame rate of 240 FPS or less.", "Choose a whole frame rate such as 60 and try again.", "frame_rate"},
+      {"mode", "1920x1080x59.94", "This launch's resolution and frame rate could not be read.", "Choose them again and try again.", "display_mode"},
+      {"mode", "1920x1080x60000x", "This launch's resolution and frame rate could not be read.", "Choose them again and try again.", "display_mode"},
+      {"mode", "-1x1080x60", "This launch's resolution and frame rate could not be read.", "Choose them again and try again.", "display_mode"},
+      {"mode", "999999999999999999x1080x60", "This launch's resolution and frame rate could not be read.", "Choose them again and try again.", "display_mode"},
+      {"surroundAudioInfo", "393222", "Space streams carry stereo audio only.", "Set audio to stereo and try again.", "audio_channels"},
+      {"surroundParams", "SECRET-untrusted-audio", "Space streams carry stereo audio only.", "Set audio to stereo and try again.", "audio_channels"},
+      {"resolvedProfile", "1", "This launch's Space settings are incomplete or out of date.", "Refresh the library and try again.", "resolved_launch"},
+    };
+    for (const auto &bad : invalid) {
+      SCOPED_TRACE(bad.key);
+      auto request = args(); request.erase(bad.key); request.emplace(bad.key, bad.value);
+      test_log_capture_t logs;
+      launch_failure::refuse(503, "stale", "SECRET-stale-message", "SECRET-stale-action");
+      const auto result = nvhttp::launch_profile_request(client, request, false, [](const auto &) { return true; });
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->status, 400);
+      EXPECT_EQ(result->code, "space_display_options");
+      EXPECT_EQ(result->message, bad.message);
+      EXPECT_EQ(result->action, bad.action);
+      boost::property_tree::ptree tree;
+      nvhttp::put_profile_launch_response_for_tests(tree, *result, false);
+      EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.status_message"), std::string(bad.message) + " " + bad.action);
+      EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_code"), "space_display_options");
+      EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_action"), bad.action);
+      EXPECT_NE(logs.text().find(std::string("field=") + bad.field), std::string::npos);
+      for (const auto &secret : {std::string("SECRET-"), request.find("rikey")->second, client->uuid, client->name}) {
+        EXPECT_EQ((result->message + result->action).find(secret), std::string::npos);
+        EXPECT_EQ(logs.text().find(secret), std::string::npos);
+      }
+    }
+    EXPECT_EQ(state->begins.load(), 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, ResolvedSpaceMediaRefusalNamesTheInvalidWorkerField) {
+    auto request = args();
+    request.emplace("workerProfile", *service->profile_for_client(client->uuid));
+    request.emplace("resolvedProfile", "1"); request.emplace("expectedTopology", "gamescope_stream");
+    request.emplace("resolvedHdr", "0"); request.emplace("bitrateKbps", "8000");
+    auto hdr = request; hdr.erase("resolvedHdr"); hdr.emplace("resolvedHdr", "1");
+    auto duplicate = request; duplicate.emplace("bitrateKbps", "8000");
+    auto missing = request; missing.erase("bitrateKbps");
+    for (const auto &bad : {duplicate, missing}) {
+      const auto result = nvhttp::launch_profile_request(client, bad, false, [](const auto &) { return true; });
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->status, 400);
+      EXPECT_EQ(result->code, "space_display_options");
+      EXPECT_EQ(result->message, "This Space launch requests an unsupported bitrate.");
+    }
+    const auto result = nvhttp::launch_profile_request(client, hdr, false, [](const auto &) { return true; });
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->message, "Space streams are SDR only.");
+    EXPECT_EQ(state->begins.load(), 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, SpaceMediaRefusalPointsToThePairedDisplayOverride) {
+    auto replacement = std::make_shared<crypto::named_cert_t>();
+    replacement->uuid = client->uuid; replacement->name = client->name; replacement->cert = client->cert;
+    replacement->display_mode = "1921x1080x60";
+    ASSERT_TRUE(nvhttp::add_authorized_client_for_tests(replacement, crypto::PERM::_all));
+    client = nvhttp::resolve_authorized_client(replacement);
+    ASSERT_TRUE(client);
+    const auto result = nvhttp::launch_profile_request(client, args(), false, [](const auto &) { return true; });
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 400);
+    EXPECT_EQ(result->code, "space_display_options");
+    EXPECT_EQ(result->message, "The display mode saved for this device in Polaris is not supported for a Space stream.");
+    EXPECT_EQ(result->action, "Change or clear this device's saved display mode in Polaris, then try again.");
+    EXPECT_EQ(state->begins.load(), 0U);
+  }
+
+  TEST_F(MultiseatProfileHttp, UnresolvedSpaceHintsKeepTheirExistingAdmissionAndDropStaleReasons) {
+    auto request = args();
+    request.emplace("resolvedHdr", "1"); request.emplace("expectedTopology", "desktop_display");
+    launch_failure::refuse(503, "stale", "An earlier attempt", "Ignore it");
+    const auto result = nvhttp::launch_profile_request(client, request, false, [](const auto &) { return true; });
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 200);
+    EXPECT_FALSE(launch_failure::take());
+    ASSERT_TRUE(result->launch);
+    result->launch->cancel();
   }
 
   TEST_F(MultiseatProfileHttp, UnmappedDeviceUsesOrdinaryRequestPath) {
