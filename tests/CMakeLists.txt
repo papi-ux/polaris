@@ -262,6 +262,7 @@ if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_PLATFORM_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_seat_isolation.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamepad_isolation.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamepad_node_readiness.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_group_access.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_ei_virtual_input.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_virtual_input.cpp

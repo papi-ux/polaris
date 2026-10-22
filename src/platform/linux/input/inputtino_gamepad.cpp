@@ -4,15 +4,21 @@
  */
 // lib includes
 #include <boost/locale.hpp>
+#include <chrono>
+#include <filesystem>
 #include <inputtino/input.hpp>
 #include <libevdev/libevdev.h>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <thread>
 
 // local includes
 #include "inputtino_common.h"
 #include "inputtino_gamepad.h"
 #include "inputtino_gamepad_isolation.h"
+#include "inputtino_gamepad_readiness.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -51,6 +57,59 @@ namespace platf::gamepad {
 
   void register_created_joypad_nodes(int globalIndex, const joypads_t &joypad) {
     isolation::register_virtual_gamepad_nodes(globalIndex, joypad_nodes(joypad));
+  }
+
+  /**
+   * Wait, bounded, for a new DualSense's own input nodes. get_nodes() lists only inputs whose uniq
+   * is this pad's MAC, so no other device can be admitted.
+   */
+  readiness::result_t wait_for_owned_ds5_nodes(const inputtino::PS5Joypad &joypad) {
+    const readiness::environment_t environment {
+      .probe = [&joypad]() {
+        return joypad.get_nodes();
+      },
+      .node_exists = [](const std::string &node) {
+        std::error_code ec;
+        return std::filesystem::exists(node, ec);
+      },
+      .now = []() {
+        return std::chrono::steady_clock::now();
+      },
+      .sleep = [](std::chrono::milliseconds duration) {
+        std::this_thread::sleep_for(duration);
+      },
+    };
+    return readiness::wait_for_owned_nodes(environment, readiness::policy_t {});
+  }
+
+  std::mutex ds5_readiness_mutex;
+  readiness::backoff_t ds5_readiness_backoff;
+  bool ds5_backoff_reported = false;
+
+  /// True while new DualSense pads are refused because the last one's nodes never appeared.
+  bool ds5_readiness_backed_off(int globalIndex) {
+    std::scoped_lock lock {ds5_readiness_mutex};
+    const auto now = std::chrono::steady_clock::now();
+    if (!ds5_readiness_backoff.blocks(now)) {
+      return false;
+    }
+    if (!ds5_backoff_reported) {
+      ds5_backoff_reported = true;
+      BOOST_LOG(warning) << "Gamepad " << globalIndex << ": not creating a virtual DualShock 5 controller for "sv
+                         << std::chrono::ceil<std::chrono::seconds>(ds5_readiness_backoff.retry_at() - now).count()
+                         << " s because the last one's input nodes never appeared"sv;
+    }
+    return true;
+  }
+
+  void note_ds5_readiness(bool usable) {
+    std::scoped_lock lock {ds5_readiness_mutex};
+    if (usable) {
+      ds5_readiness_backoff.succeeded();
+    } else {
+      ds5_readiness_backoff.failed(std::chrono::steady_clock::now());
+      ds5_backoff_reported = false;
+    }
   }
 
   auto create_xbox_one(int globalIndex) {
@@ -196,6 +255,9 @@ namespace platf::gamepad {
         }
       case DualSenseWired:
         {
+          if (ds5_readiness_backed_off(id.globalIndex)) {
+            return -1;
+          }
           auto ds5 = create_ds5(id.globalIndex);
           if (ds5) {
             (*ds5).set_on_rumble(on_rumble_fn);
@@ -214,12 +276,26 @@ namespace platf::gamepad {
               feedback_router->raise(gamepad_feedback_msg_t::make_adaptive_triggers(idx, trigger_effect.event_flags, trigger_effect.type_left, trigger_effect.type_right, trigger_effect.left, trigger_effect.right));
             });
 
+            // hid-playstation registers the inputs after create() returns; register them only once they exist
+            const auto ready = wait_for_owned_ds5_nodes(*ds5);
+            note_ds5_readiness(ready.usable());
+            if (!ready.usable()) {
+              // Fail rather than register no nodes: the pad is destroyed and the caller reports the failed allocation
+              BOOST_LOG(warning) << "Virtual DualShock 5 controller " << id.globalIndex << " is unusable: "sv << ready.detail
+                                 << " within "sv << ready.waited.count() << " ms ("sv << ready.probes << " probes)"sv;
+              return -1;
+            }
+            if (ready.status == readiness::status_e::partial) {
+              BOOST_LOG(warning) << "Virtual DualShock 5 controller " << id.globalIndex << ": "sv << ready.detail << " after "sv
+                                 << ready.waited.count() << " ms; registering the "sv << ready.nodes.size() << " present"sv;
+            }
+
             // Activate the motion sensors
             gamepad->feedback_router->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_ACCEL, 100));
             gamepad->feedback_router->raise(gamepad_feedback_msg_t::make_motion_event_state(id.clientRelativeIndex, LI_MOTION_TYPE_GYRO, 100));
 
             gamepad->joypad = std::make_unique<joypads_t>(std::move(*ds5));
-            register_created_joypad_nodes(id.globalIndex, *gamepad->joypad);
+            isolation::register_virtual_gamepad_nodes(id.globalIndex, ready.nodes);
             stream_stats::note_virtual_pad(id.globalIndex, id.clientRelativeIndex, std::string {controller_type_label(selectedGamepadType)});
             raw->gamepads[id.globalIndex] = std::move(gamepad);
             return 0;
