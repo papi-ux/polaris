@@ -11,9 +11,11 @@
 #include <nlohmann/json.hpp>
 
 namespace multiseat::spaces {
-  // The catalog entry this PC needs: the NVIDIA runtime built for the loaded
-  // NVIDIA driver, otherwise the default runtime for AMD and Intel graphics.
-  // First-Space setup pairs variants and graphics cards the same way.
+  // The catalog entry this PC needs. With an NVIDIA driver loaded, that is the
+  // runtime that borrows it, unless the driver is older than that runtime's
+  // minimum, and otherwise the NVIDIA runtime built for exactly that driver.
+  // With none loaded, it is the default runtime for AMD and Intel graphics.
+  // graphics_fits_runtime says which graphics cards First-Space setup offers for it.
   struct runtime_choice_t {
     std::optional<runtime_t> runtime;
     // Why no entry fits: runtime_not_published, driver_mismatch or graphics_unsupported.

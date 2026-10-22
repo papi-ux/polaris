@@ -99,11 +99,17 @@ namespace multiseat::spaces {
     return result;
   }
 
+  bool graphics_fits_runtime(const graphics_t &graphics, const runtime_t &runtime) {
+    // NVIDIA cards keep their discovery tag whether the runtime ships a driver or borrows it.
+    return (graphics.variant == "nvidia" && (runtime.variant == "nvidia" || runtime.variant == "nvidia-host")) ||
+      (graphics.variant == "default" && runtime.variant == "default");
+  }
+
   json graphics_choices(const runtime_t &runtime) {
     container::local_host_t host;
     json choices = json::array();
     for (const auto &entry : discover_graphics(host)) {
-      if (entry.variant == runtime.variant) choices.push_back({{"id", entry.gpu.logical_gpu_id}, {"label", entry.label}});
+      if (graphics_fits_runtime(entry, runtime)) choices.push_back({{"id", entry.gpu.logical_gpu_id}, {"label", entry.label}});
     }
     return choices;
   }
@@ -265,7 +271,7 @@ namespace multiseat::spaces {
     if (!label) return false;
     const auto choices = discover_graphics(host);
     const auto found = std::find_if(choices.begin(), choices.end(), [&](const auto &g) {
-      return g.gpu.logical_gpu_id == gpu_id && g.variant == runtime.variant;
+      return g.gpu.logical_gpu_id == gpu_id && graphics_fits_runtime(g, runtime);
     });
     if (found == choices.end()) return false;
     // Recheck the local exact image and matching NVIDIA driver without pulling.
