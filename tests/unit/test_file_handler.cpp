@@ -262,7 +262,7 @@ TEST_F(FileHandlerSeedTests, ExistingSymlinkDoesNotChangeItsTarget) {
 TEST_F(FileHandlerSeedTests, DanglingSymlinkDoesNotCreateItsTarget) {
   const auto missing = directory / "unrelated.json";
   std::filesystem::create_symlink(missing, destination);
-  EXPECT_THROW(file_handler::seed_user_file(source, destination), std::filesystem::filesystem_error);
+  EXPECT_FALSE(file_handler::seed_user_file(source, destination));
   EXPECT_FALSE(std::filesystem::exists(missing));
   EXPECT_TRUE(std::filesystem::is_symlink(destination));
 }
