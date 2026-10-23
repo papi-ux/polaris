@@ -3,8 +3,12 @@ import { reactive, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // The composable is unit-tested on its own; here we mock it to drive the panel's UI logic.
+// A test that leaves h.api null drives the panel through the real composable instead.
 const h = vi.hoisted(() => ({ api: null }))
-vi.mock('../composables/useEpicSession.js', () => ({ useEpicSession: () => h.api }))
+vi.mock('../composables/useEpicSession.js', async importOriginal => {
+  const actual = await importOriginal()
+  return { useEpicSession: options => h.api ?? actual.useEpicSession(options) }
+})
 
 import EpicSessionControls from './EpicSessionControls.vue'
 
@@ -20,8 +24,15 @@ function makeApi(stateOverrides = {}) {
   }
 }
 
+const reply = (body, ok = true, status = ok ? 200 : 409) => ({ ok, status, json: async () => body })
+const active = extra => ({
+  status: true, version: 1, available: true, app_uuid: 'u1', app_name: 'Alan Wake 2',
+  session_id: 's1', revision: 's1:a', state: 'confirmable', runtime: 'proton', can_adopt: true, message: '', ...extra,
+})
+const unverified = { state: 'unavailable', revision: 's1:', can_adopt: false }
+
 let wrapper
-afterEach(() => { wrapper?.unmount() })
+afterEach(() => { wrapper?.unmount(); h.api = null; vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('EpicSessionControls', () => {
   it('renders nothing when there is no active Epic session', () => {
@@ -87,6 +98,85 @@ describe('EpicSessionControls', () => {
     await previousConfirm.trigger('click')
     expect(h.api.adopt).not.toHaveBeenCalled()
     expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(false)
+    expect(wrapper.find('[data-epic-consent-reset]').exists()).toBe(true)
+  })
+
+  it('holds consent across polls, pauses it while unverified and posts only the same verified revision', async () => {
+    vi.useFakeTimers()
+    const gets = [active(), active(), active(unverified), active()]
+    const fetchMock = vi.fn(async (_url, opt) => (opt?.method === 'POST'
+      ? reply({ status: true })
+      : reply(gets.length > 1 ? gets.shift() : gets[0])))
+    vi.stubGlobal('fetch', fetchMock)
+    wrapper = mount(EpicSessionControls) // real composable
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    await vi.advanceTimersByTimeAsync(5000) // the same verified revision
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(true)
+    expect(wrapper.get('[data-epic-adopt-confirm]').attributes('disabled')).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(5000) // an inconclusive census
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(true)
+    expect(wrapper.find('[data-epic-consent-paused]').exists()).toBe(true)
+    expect(wrapper.get('[data-epic-adopt-confirm]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-epic-adopt-confirm]').trigger('click')
+    expect(fetchMock.mock.calls.filter(c => c[1]?.method === 'POST')).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(5000) // the same verified revision returns
+    expect(wrapper.find('[data-epic-consent-paused]').exists()).toBe(false)
+    await wrapper.get('[data-epic-adopt-confirm]').trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    const sent = fetchMock.mock.calls.filter(c => c[1]?.method === 'POST')
+    expect(sent).toHaveLength(1)
+    expect(JSON.parse(sent[0][1].body)).toEqual({ action: 'adopt', session_id: 's1', revision: 's1:a', confirm: true })
+  })
+
+  it('pauses consent while the status cannot be read', async () => {
+    h.api = makeApi()
+    wrapper = mount(EpicSessionControls)
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    h.api.loadError.value = 'Epic session status is not available right now.'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-epic-consent-paused]').exists()).toBe(true)
+    expect(wrapper.get('[data-epic-adopt-confirm]').attributes('disabled')).toBeDefined()
+    h.api.loadError.value = ''
+    await wrapper.vm.$nextTick()
+    await wrapper.get('[data-epic-adopt-confirm]').trigger('click')
+    expect(h.api.adopt).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['revision', { revision: 'r2' }],
+    ['session', { session_id: 's2', revision: 's2:a' }],
+  ])('a different verified %s after a pause visibly requires a fresh confirmation', async (_kind, next) => {
+    h.api = makeApi()
+    wrapper = mount(EpicSessionControls)
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    Object.assign(h.api.state, unverified)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-epic-consent-paused]').exists()).toBe(true)
+    Object.assign(h.api.state, { state: 'confirmable', can_adopt: true, ...next })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(false)
+    expect(wrapper.find('[data-epic-consent-reset]').exists()).toBe(true)
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    expect(wrapper.find('[data-epic-consent-reset]').exists()).toBe(false)
+    await wrapper.get('[data-epic-adopt-confirm]').trigger('click')
+    expect(h.api.adopt).toHaveBeenCalledOnce()
+  })
+
+  it('labels the grant as permission to close on End Session and says where End is', async () => {
+    h.api = makeApi()
+    wrapper = mount(EpicSessionControls)
+    expect(wrapper.get('[data-epic-adopt-start]').text()).toContain('End Session')
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    const consent = wrapper.get('[data-epic-adopt-consent]').text()
+    expect(consent).toContain('does not close the game now')
+    expect(consent).toContain('End Session in your streaming client')
+    expect(consent).toContain('Disconnect Client')
+    expect(consent).toContain('Disconnect and Resume in your streaming client keep the game running')
+    h.api.state.state = 'managed'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('Disconnect leaves it running')
+    expect(wrapper.text()).toContain('Disconnect Client here in Mission Control')
   })
 
   it('can clear retained permission when the current game cannot be verified', async () => {

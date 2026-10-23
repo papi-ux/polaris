@@ -5,32 +5,46 @@ import { useEpicSession } from '../composables/useEpicSession.js'
 
 // Owner-confirmed control for an active Epic Preview game in Mission Control.
 // The game is unmanaged by default. A signed-in host-console owner may, in two
-// explicit steps, adopt the exact observed game so that ending the session can
-// close it; otherwise End leaves it running and the owner closes it in the
-// Epic launcher. Cancelling sends nothing. This panel never ends or kills a
-// process itself — End stays the existing session action.
+// explicit steps, adopt the exact observed game so that ending the session on
+// purpose (End Session in the streaming client, or Disconnect Client here) can
+// close it; otherwise it keeps running and the owner closes it in the Epic
+// launcher. Cancelling sends nothing. This panel never ends or kills a process
+// itself — End stays the existing session action.
 const { state, loading, loadError, actionError, acting, load, adopt, release, start } = useEpicSession()
-const confirming = ref(false)
-let consentFor = ''
-const currentIdentity = () => state.session_id + ':' + state.revision
-watch(currentIdentity, () => { confirming.value = false; consentFor = '' }, { flush: 'sync' })
+// The verified session/revision the owner is confirming. An inconclusive poll
+// pauses it and only the same verified revision resumes it; a different game or
+// session drops it visibly, so it needs a fresh confirmation.
+const consent = ref(null)
+const consentReset = ref(false)
 
 onMounted(() => { start() })
 
 const canAdopt = computed(() => state.available && state.can_adopt && state.state === 'confirmable')
 const isManaged = computed(() => state.available && state.state === 'managed')
+const confirming = computed(() => consent.value !== null)
+const consentPaused = computed(() => confirming.value && (state.state === 'unavailable' || Boolean(loadError.value)))
+const consentMatches = () => state.session_id === consent.value.session_id && state.revision === consent.value.revision
 const runtimeLabel = computed(() =>
   state.runtime === 'proton' ? 'Proton' : state.runtime === 'native' ? 'Native Linux' : 'Runtime unknown')
 
-function startConfirm() { consentFor = currentIdentity(); confirming.value = true }
-function cancelConfirm() { confirming.value = false; consentFor = '' } // no request, no signal
+function dropConsent(visibly) { consent.value = null; consentReset.value = visibly }
+// Default (pre) flush sees each poll's whole snapshot, never a half-applied one.
+watch(() => [state.available, state.session_id, state.revision, state.state, state.can_adopt], () => {
+  if (!state.available || isManaged.value) dropConsent(false) // ended, or the grant already exists
+  else if (consent.value && state.session_id !== consent.value.session_id) dropConsent(true)
+  else if (consent.value && state.state !== 'unavailable' && !(canAdopt.value && consentMatches())) dropConsent(true)
+})
+
+function startConfirm() { consent.value = { session_id: state.session_id, revision: state.revision }; consentReset.value = false }
+function cancelConfirm() { dropConsent(false) } // no request, no signal
 async function confirmAdopt() {
-  if (!confirming.value || consentFor !== currentIdentity() || !canAdopt.value || acting.value) {
-    cancelConfirm()
+  if (!consent.value || consentPaused.value || acting.value) return
+  if (!canAdopt.value || !consentMatches()) {
+    dropConsent(true)
     return
   }
   const ok = await adopt()
-  if (ok) confirming.value = false
+  if (ok) consent.value = null
 }
 async function leaveRunning() { await release() }
 </script>
@@ -53,7 +67,7 @@ async function leaveRunning() { await release() }
           </div>
         </div>
         <span class="meta-pill" data-epic-state>{{
-          isManaged ? 'Close permission granted'
+          isManaged ? 'Close on End allowed'
           : state.state === 'closing' ? 'Closing…'
           : state.state === 'unavailable' ? 'State unavailable'
           : 'Unmanaged'
@@ -78,9 +92,10 @@ async function leaveRunning() { await release() }
       <!-- Managed: Polaris holds the owner's grant; offer to hand it back. -->
       <template v-else-if="isManaged">
         <p class="mt-3 text-xs text-support">
-          You gave Polaris permission to ask this exact game to close on End. If it cannot verify or close
-          the game, it will tell you to close it on the host. The launcher and other games stay untouched.
-          Disconnect leaves it running. A restarted game needs a new confirmation.
+          Polaris will ask this exact game to close when the session ends: End Session in your streaming client,
+          or Disconnect Client here in Mission Control. Disconnect and Resume in your streaming client keep it
+          running. If Polaris cannot verify or close the game, it will tell you to close it on the host. The
+          launcher and other games stay untouched. A restarted game needs a new confirmation.
         </p>
         <div class="mt-3">
           <Button variant="outline" size="sm" :loading="acting" :disabled="acting" data-epic-release @click="leaveRunning">
@@ -92,36 +107,45 @@ async function leaveRunning() { await release() }
       <!-- Default unmanaged: explain manual close, and offer the two-step grant when adoptable. -->
       <template v-else>
         <p class="mt-3 text-xs text-support" data-epic-unmanaged>
-          Polaris is not managing this game's lifetime. Ending the session leaves it running — close it yourself in the Epic
-          launcher. Disconnecting and resuming keep it running.
+          Polaris is not managing this game's lifetime. Ending the session (End Session in your streaming client, or
+          Disconnect Client here) leaves it running — close it yourself in the Epic launcher. Disconnect and Resume in
+          your streaming client keep it running too.
         </p>
 
-        <template v-if="canAdopt">
-          <div v-if="!confirming" class="mt-3">
-            <Button variant="outline" size="sm" data-epic-adopt-start @click="startConfirm">
-              Let Polaris close this game
-            </Button>
-          </div>
-
-          <!-- Step two: explicit consent before any request is sent. -->
-          <div v-else class="mt-3 rounded-lg border border-storm/25 bg-deep/55 p-3" data-epic-adopt-consent>
-            <div class="text-sm font-semibold text-silver">Let Polaris close this game?</div>
-            <p class="mt-1 text-xs text-support">
-              Polaris is watching the game currently running for this Epic session. It may have been started
-              outside Polaris. If you confirm, ending the session can close this game. By default Polaris leaves
-              it running on disconnect or End. If the game restarts, you'll need to confirm again.
-            </p>
-            <div class="mt-3 flex flex-wrap gap-2">
-              <Button variant="primary" size="sm" :loading="acting" :disabled="acting" data-epic-adopt-confirm @click="confirmAdopt">
-                Yes, let Polaris close it
-              </Button>
-              <Button variant="outline" size="sm" :disabled="acting" data-epic-adopt-cancel @click="cancelConfirm">
-                Cancel
-              </Button>
-            </div>
-          </div>
-        </template>
+        <div v-if="canAdopt && !confirming" class="mt-3">
+          <Button variant="outline" size="sm" data-epic-adopt-start @click="startConfirm">
+            Allow close on End Session
+          </Button>
+        </div>
       </template>
+
+      <p v-if="consentReset" class="mt-3 text-xs text-warning-bright" data-epic-consent-reset>
+        The game or session changed before you confirmed, so nothing was granted. Confirm again if you still want it.
+      </p>
+
+      <!-- Step two: explicit consent before any request is sent. Held, not dropped, while verification is paused. -->
+      <div v-if="confirming" class="mt-3 rounded-lg border border-storm/25 bg-deep/55 p-3" data-epic-adopt-consent>
+        <div class="text-sm font-semibold text-silver">Allow Polaris to close this game on End Session?</div>
+        <p class="mt-1 text-xs text-support">
+          This does not close the game now. It lets Polaris ask this exact game to close when the session ends on
+          purpose: End Session in your streaming client (Nova or Moonlight), or Disconnect Client here in Mission
+          Control. Disconnect and Resume in your streaming client keep the game running. Polaris is watching the game
+          currently running for this Epic session, which may have been started outside Polaris. If the game restarts,
+          you'll need to confirm again.
+        </p>
+        <p v-if="consentPaused" class="mt-2 text-xs text-warning-bright" data-epic-consent-paused>
+          Verification paused. Polaris can't verify this game right now, so you can't confirm yet. Your choice is kept
+          only if the same game is verified again.
+        </p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <Button variant="primary" size="sm" :loading="acting" :disabled="acting || consentPaused" data-epic-adopt-confirm @click="confirmAdopt">
+            Yes, allow close on End Session
+          </Button>
+          <Button variant="outline" size="sm" :disabled="acting" data-epic-adopt-cancel @click="cancelConfirm">
+            Cancel
+          </Button>
+        </div>
+      </div>
 
       <Button v-if="state.state === 'unavailable' && state.can_release" class="mt-3" variant="outline" size="sm"
         :loading="acting" :disabled="acting" data-epic-release @click="leaveRunning">

@@ -112,6 +112,26 @@ describe('useEpicSession', () => {
     expect(wrapper.vm.actionError).toBe('')
   })
 
+  it('keeps a refused action visible across same-session flaps until the session changes', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(active())) // load #1
+      .mockResolvedValueOnce(reply({ status: false, code: 'adoption_refused', error: 'No permission was granted.' }, false, 409))
+      .mockResolvedValueOnce(reply(active({ state: 'unavailable', revision: 's1:', can_adopt: false }))) // inconclusive read-back
+      .mockResolvedValueOnce(reply(active({ revision: 'r2' }))) // same session, another revision
+      .mockResolvedValueOnce(reply(active({ session_id: 's2', revision: 'r3' }))) // a different session
+    vi.stubGlobal('fetch', fetchMock)
+    host()
+    await wrapper.vm.load()
+    expect(await wrapper.vm.adopt()).toBe(false)
+    expect(wrapper.vm.state.state).toBe('unavailable')
+    expect(wrapper.vm.actionError).toBe('No permission was granted.')
+    await wrapper.vm.load()
+    expect(wrapper.vm.actionError).toBe('No permission was granted.')
+    await wrapper.vm.load()
+    expect(wrapper.vm.actionError).toBe('')
+    expect(posts(fetchMock)).toHaveLength(1)
+  })
+
   it('shows an unreadable active game honestly, distinct from no active session', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(reply(active({ state: 'unavailable', can_adopt: false })))

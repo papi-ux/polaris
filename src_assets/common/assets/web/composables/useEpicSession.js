@@ -25,7 +25,7 @@ export function useEpicSession(options = {}) {
   // Honest transport / non-2xx error from the GET. Distinct from a backend
   // "unavailable" state, which means an active game whose state could not be read.
   const loadError = ref('')
-  // The result of the owner's last adopt/release, surfaced once; never auto-replayed.
+  // The result of the owner's last adopt/release; never auto-replayed.
   const actionError = ref('')
   const acting = ref(false)
   const loaded = ref(false)
@@ -35,9 +35,10 @@ export function useEpicSession(options = {}) {
   let mounted = false
   let disposed = false
   let started = false
-  // The session/revision a surfaced actionError belongs to, so a later snapshot
-  // that moved on (new game, cleared grant, host restart) drops the stale error.
-  let errorFor = ''
+  // The session a surfaced actionError belongs to. The error outlasts revision
+  // and unavailable flaps within that session; only a new action, a success or a
+  // different session (new stream, host restart, session ended) drops it.
+  let errorSession = null
 
   function emptyState() {
     return {
@@ -49,10 +50,6 @@ export function useEpicSession(options = {}) {
 
   function hidden() {
     return typeof document !== 'undefined' && document.hidden
-  }
-
-  function identity() {
-    return state.session_id + ':' + state.revision
   }
 
   async function load() {
@@ -97,10 +94,10 @@ export function useEpicSession(options = {}) {
           message: data.message || '',
         })
       }
-      // Drop a stale action error once the session identity has moved on.
-      if (actionError.value && errorFor && errorFor !== identity()) {
+      // Drop a stale action error once the session itself has moved on.
+      if (actionError.value && errorSession !== null && errorSession !== state.session_id) {
         actionError.value = ''
-        errorFor = ''
+        errorSession = null
       }
       return true
     } catch (cause) {
@@ -117,7 +114,7 @@ export function useEpicSession(options = {}) {
   async function post(payload) {
     acting.value = true
     actionError.value = ''
-    errorFor = ''
+    errorSession = null
     try {
       const response = await fetch('./api/epic/session', {
         credentials: 'include',
@@ -133,13 +130,13 @@ export function useEpicSession(options = {}) {
         return true
       }
       actionError.value = (body && body.error) || ('Polaris could not apply that (' + response.status + ').')
-      errorFor = payload.session_id + ':' + payload.revision
+      errorSession = payload.session_id
       // Reflect the real current state after a refusal; still no replay.
       await load()
       return false
     } catch (e) {
       actionError.value = 'That request could not be sent. Try again.'
-      errorFor = payload.session_id + ':' + payload.revision
+      errorSession = payload.session_id
       return false
     } finally {
       acting.value = false
@@ -155,7 +152,7 @@ export function useEpicSession(options = {}) {
     if (acting.value) return false
     if (!state.available || !state.can_adopt || state.state !== 'confirmable' || !state.session_id || !state.revision) {
       actionError.value = 'This game can no longer be adopted. Refresh and try again.'
-      errorFor = identity()
+      errorSession = state.session_id
       return false
     }
     return post({ action: 'adopt', session_id: state.session_id, revision: state.revision, confirm: true })
@@ -166,7 +163,7 @@ export function useEpicSession(options = {}) {
     if (acting.value) return false
     if (!state.available || !state.session_id || !state.revision) {
       actionError.value = 'There is no current Epic session to leave.'
-      errorFor = identity()
+      errorSession = state.session_id
       return false
     }
     return post({ action: 'release', session_id: state.session_id, revision: state.revision })
