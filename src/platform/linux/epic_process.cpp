@@ -309,6 +309,59 @@ namespace platf::epic {
                same_image(process.image, stat(path / "root" / process.exe.relative_path()));
       }
 
+      std::vector<process_t> launchers() {
+        // This is a presence-only prerequisite, never game selection or signal authority. An
+        // unrelated protected desktop process cannot supply a launcher or an AppImage proof.
+        // Once an executable is a candidate, every identity/namespace/bookend remains required.
+        const auto owner = backend.owner_uid();
+        require(owner != 0, "host_owner_uid_required");
+        group_namespace = needed(backend.link("/proc/self/ns/cgroup"), "unknown_cgroup_namespace");
+        const auto ns = group_namespace.string();
+        require(ns.size() > 9 && ns.compare(0, 8, "cgroup:[") == 0 && ns.back() == ']' &&
+                  number(std::string_view(ns).substr(8, ns.size() - 9)) > 0, "unknown_cgroup_namespace");
+        const auto names = needed(backend.list("/proc", process_limit), "incomplete_process_table");
+        std::set<std::uint64_t> seen;
+        std::vector<process_t> result;
+        for (const auto &name : names) {
+          if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            continue;
+          }
+          const auto pid = number(name);
+          require(pid > 0 && pid <= INT_MAX && seen.insert(pid).second, "ambiguous_process_table");
+          if (pid == 1) {
+            continue;
+          }
+          const auto path = fs::path("/proc") / name;
+          const auto exe = backend.link(path / "exe");
+          if (!exe) {
+            continue;
+          }
+          auto extension = exe->extension().string();
+          std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : static_cast<char>(c);
+          });
+          if (exe->filename() != "EpicGamesLauncher" && extension != ".appimage") {
+            continue;
+          }
+          require(safe_absolute_path(*exe), "unresolved_process_link");
+          if (!check_uid(read(path / "status"), owner)) {
+            continue;
+          }
+          require(stat(path).uid == owner, "unreadable_owner_process");
+          const auto first = parse_stat(read(path / "stat"));
+          require(first.pid == pid, "process_pid_changed");
+          if (first.state == 'Z' || first.state == 'X' || first.state == 'x') {
+            continue;
+          }
+          process_t row {first, *exe, link(path / "cwd"), stat(path / "exe"), cgroup(read(path / "cgroup")), {}};
+          require(backend.link(path / "ns/cgroup") == group_namespace, "foreign_cgroup_namespace");
+          require(same_image(row.image, stat(row.exe)) && same_image(row.image, stat(path / "root" / row.exe.relative_path())), "process_executable_view_changed");
+          require(unchanged(row), "process_changed_during_read");
+          result.push_back(std::move(row));
+        }
+        return result;
+      }
+
       std::vector<process_t> table(const fs::path &game_image = {}) {
         const auto owner = backend.owner_uid();
         require(owner != 0, "host_owner_uid_required");
@@ -819,7 +872,7 @@ namespace platf::epic {
       const auto boot = read.boot();
       const auto own_group = cgroup(read.read("/proc/self/cgroup"));
       require(own_group != "/", "unknown_polaris_cgroup");
-      const auto table = read.table();
+      const auto table = read.launchers();
       const process_t *launcher = nullptr;
       for (const auto &process : table) {
         if (process.exe.filename() == "EpicGamesLauncher") {

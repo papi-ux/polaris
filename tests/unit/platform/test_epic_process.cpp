@@ -569,6 +569,27 @@ TEST_F(EpicProcess, FuseConnectionAndOpenImageIdentifyTheOriginalAppImage) {
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, LauncherPresenceDoesNotRequireUnrelatedProcessAccessOrGrantGameAuthority) {
+  const auto appimage = host->fuse_launcher();
+  // The game process is uninspectable. It cannot supply a launcher candidate, and must still
+  // make the strict game observation unavailable rather than silently authorizing adoption.
+  host->links.erase("/proc/41/exe");
+  const auto found = ep::testing::desktop_launcher_executable(error, host);
+  ASSERT_TRUE(found) << error;
+  EXPECT_EQ(*found, appimage);
+  const auto game = observe();
+  EXPECT_FALSE(game.available);
+  EXPECT_EQ(game.reason, "unreadable_process_link");
+  EXPECT_FALSE(ep::testing::adopt(host->title(), game, error, host));
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+
+  // A visible candidate with incomplete identity still refuses; this is no blanket skip.
+  host->links.erase("/proc/43/cwd");
+  EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
+  EXPECT_EQ(error, "unreadable_process_link");
+}
+
 TEST_F(EpicProcess, FuseConnectionMetadataMustBeUniquePositiveAndMatchTheMount) {
   host->fuse_launcher();
   for (const std::string info : {"mnt_id: 90\n", "fuse_connection: 91\n", "fuse_connection: 0\n",
