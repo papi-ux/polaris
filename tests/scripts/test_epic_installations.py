@@ -53,14 +53,16 @@ class EpicInstallationsTest(unittest.TestCase):
         self.assertIsNone(current.title)
 
     def test_uninstall_tombstone_removes_completed_install(self):
-        self.assertEqual(self.parse(log(row(), {"uid": "installation-1", "deleted": True,
+        self.assertEqual(self.parse(log(row(), {"installationId": "installation-1", "deleted": True,
                                                "writtenAt": "2026-10-23T00:00:00Z"})), ())
 
-    def test_tombstone_never_requires_older_complete_fallback(self):
-        self.assertEqual(self.parse(log(row(), {"uid": "installation-1", "deleted": True})), ())
+    def test_tombstone_missing_timestamp_refuses_instead_of_recovering_old_complete(self):
+        with self.assertRaises(installed.ManifestError):
+            self.parse(log(row(), {"installationId": "installation-1", "deleted": True}))
 
     def test_reinstall_after_tombstone_is_new_current_record(self):
-        current, = self.parse(log(row(), {"uid": "installation-1", "deleted": True}, row(version="2")))
+        current, = self.parse(log(row(), {"installationId": "installation-1", "deleted": True,
+                                         "writtenAt": "2026-10-23T00:00:00Z"}, row(version="2")))
         self.assertEqual(current.version, "2")
 
     def test_header_entries_is_not_assumed_equal_to_append_count(self):
@@ -75,7 +77,8 @@ class EpicInstallationsTest(unittest.TestCase):
                 self.parse(log(row(), header=header))
 
     def test_conflicting_tombstone_identity_refuses_snapshot(self):
-        for bad in ({"deleted": True}, {"uid": "installation-1", "deleted": True,
+        for bad in ({"deleted": True}, {"uid": "installation-1", "deleted": True},
+                    {"uid": "installation-1", "deleted": True,
                                        "installationId": "other"},
                     {"uid": "installation-1", "deleted": "true"}):
             with self.subTest(bad=bad), self.assertRaises(installed.ManifestError):
@@ -157,7 +160,8 @@ class EpicInstallationsTest(unittest.TestCase):
 
     def test_deleting_conflicting_installation_resolves_live_identity(self):
         current, = self.parse(log(row(), row(installationId="installation-2"),
-                                 {"uid": "installation-2", "deleted": True}))
+                                 {"installationId": "installation-2", "deleted": True,
+                                  "writtenAt": "2026-10-23T00:00:00Z"}))
         self.assertEqual(current.status, "candidate")
 
     def test_two_different_titles_and_directories_remain_separate(self):

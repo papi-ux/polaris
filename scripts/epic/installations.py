@@ -98,8 +98,9 @@ def _row(installation_id, record, data_root):
 def parse_installations(raw, data_root):
     """Resolve a bounded v1 log; return one current result per surviving install.
 
-    Normal records use installationId; observed tombstone framing uses uid and
-    deleted=true. Conflicting or unkeyable framing refuses the entire snapshot.
+    Both records and tombstones use installationId on disk; deleted=true marks
+    a tombstone. The reader's internal Discriminant calls the key uid, but that
+    is not a serialized field. Conflicting framing refuses the entire snapshot.
     Last raw record wins before validation, so a malformed newer installation
     cannot resurrect an older completed installation. This conservative rule
     does not claim to reproduce Epic's recovery/window-settlement machinery.
@@ -139,8 +140,9 @@ def parse_installations(raw, data_root):
         if type(deleted) is not bool:
             raise ManifestError("Unknown installed-state discriminant")
         if deleted:
-            key = record.get("uid")
-            if not _text(key, 256) or ("installationId" in record and record["installationId"] != key):
+            key = record.get("installationId")
+            if (not _text(key, 256) or "writtenAt" not in record
+                    or record["writtenAt"] is None or ("uid" in record and record["uid"] != key)):
                 raise ManifestError("Ambiguous installed-state tombstone")
             current.pop(key, None)
         else:
