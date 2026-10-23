@@ -198,19 +198,29 @@ def match_activation(title, image, prefix, before, after, launcher_identity,
         raise AttributionError("Epic must outlive the Polaris service")
     server_dir = prefix.server_dir(launcher.uid)
 
-    for process in before.processes:
+    def belongs_to_title(process):
         if process.uid != launcher.uid:
-            continue
+            return False
         runtime = (_runtime(title, process, "wineserver")
                    or _runtime(title, process, "wine64-preloader"))
-        if (image in process.images
+        return (image in process.images
                 or (runtime and (process.cwd == server_dir
                                  or _inside(process.cwd, title.prefix)
                                  or process.cwd == title.install_dir))
-                or (process.parent_pid == launcher.pid and process.cwd == title.install_dir)):
+                or (process.parent_pid == launcher.pid and process.cwd == title.install_dir))
+
+    for process in before.processes:
+        if belongs_to_title(process):
             raise AttributionError("The title or its runtime was already running")
 
     previous = {p.identity for p in before.processes}
+    # A before-snapshot and the request cannot be atomic. A relevant process
+    # appearing in that gap is already running when we request activation;
+    # do not discard it while selecting a later, apparently fresh triple.
+    for process in after.processes:
+        if (process.identity not in previous and process.start_ticks < request_start_ticks
+                and belongs_to_title(process)):
+            raise AttributionError("The title or runtime started before activation")
     fresh = [p for p in after.processes
              if p.uid == launcher.uid and p.identity not in previous
              and request_start_ticks <= p.start_ticks <= after.captured_ticks]

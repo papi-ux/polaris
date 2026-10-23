@@ -133,8 +133,23 @@ class EpicOwnershipTest(unittest.TestCase):
                 self.claim(after=after)
 
     def test_processes_before_activation_are_not_claimed(self):
-        with self.assertRaisesRegex(epic.AttributionError, "title process"):
+        with self.assertRaisesRegex(epic.AttributionError, "before activation"):
             self.claim(after=self.after_replacing(self.game, replace(self.game, start_ticks=1999)))
+
+    def test_runtime_starting_in_snapshot_to_request_gap_is_not_overlooked(self):
+        # A before-snapshot cannot see this process. It is already running at
+        # request time, so a later fresh triple must not hide the busy prefix.
+        for process in (self.server, self.wrapper):
+            gap = replace(process, pid=process.pid + 1000, start_ticks=2000)
+            with self.subTest(process=process.pid), self.assertRaisesRegex(epic.AttributionError, "before activation"):
+                self.claim(request_start_ticks=2001,
+                           after=replace(self.after, processes=self.after.processes + (gap,)))
+
+    def test_unrelated_runtime_in_snapshot_to_request_gap_does_not_block(self):
+        gap = replace(self.other, pid=1500, start_ticks=2000)
+        binding = self.claim(request_start_ticks=2001,
+                             after=replace(self.after, processes=self.after.processes + (gap,)))
+        self.assertEqual(binding.game, self.game)
 
     def test_missing_clock_interval_is_refused(self):
         for tick in (1998, 2011):
