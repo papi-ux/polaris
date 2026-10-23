@@ -90,6 +90,10 @@
         inherit self nixpkgs;
       };
 
+      checks.x86_64-linux.session-wrapper = import ./nix/tests/session-wrapper.nix {
+        inherit self nixpkgs;
+      };
+
       hjemModules.polaris = import ./nix/modules/hjem.nix;
       hjemModules.default = self.hjemModules.polaris;
 

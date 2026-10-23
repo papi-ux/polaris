@@ -68,6 +68,9 @@ does not boot NixOS or test streaming.
 The GPU-defaults check evaluates both CUDA variants, their Vulkan inputs and
 loader wrapper, both generated stream seeds and the configured helper's
 profile priority. These assertions do not compile Polaris or run a GPU.
+The session-wrapper check builds the configured wrapper with stock Gamescope,
+so its real ShellCheck runs without compiling Polaris or the patched compositor.
+It never starts the wrapper or a stream.
 
 Not covered: the home-manager module, and evaluation for `aarch64-linux`.
 
