@@ -181,10 +181,11 @@ seccomp file.
 Docker hosts using AppArmor, including a typical Ubuntu installation, do not
 yet have verified Spaces security support. Host Setup reports that requirement
 instead of marking the host ready, and Steam Space launches are refused before
-a worker starts. Docker's default AppArmor profile blocks sandbox mounts that
-Steam needs; Steam can describe this as unavailable user namespaces even when
+a worker starts. Docker's built-in default AppArmor profile blocks sandbox mounts
+that Steam needs; Steam can describe this as unavailable user namespaces even when
 basic user namespaces work. Installing the seccomp file does not address an
-AppArmor denial. Keep AppArmor and your host's user-namespace restrictions
+AppArmor denial. A customized Docker AppArmor policy is also unverified by Polaris.
+Keep AppArmor and your host's user-namespace restrictions
 enabled; do not use privileged or unconfined containers as a workaround.
 
 On a mutable Fedora installation:

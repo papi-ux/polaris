@@ -1748,7 +1748,7 @@ namespace multiseat::container {
       }
       const auto engine = require_docker_engine();
       // Steam's nested sandbox needs mount operations denied by Docker's
-      // default AppArmor profile. No verified Polaris AppArmor policy exists.
+      // built-in AppArmor profile. Custom policies are also unverified here.
       // Refuse before creating anything, never relax the daemon's security.
       if (engine.apparmor && options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
         return worker_command_result_e::rejected;

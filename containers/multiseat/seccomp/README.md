@@ -5,8 +5,9 @@ default policy blocks those operations when the outer worker drops all
 capabilities. Steam workers therefore use the fixed `steam.json` policy.
 Gamescope validation workers retain Docker's default policy.
 
-This seccomp file does not override AppArmor: Docker's default AppArmor profile
-also denies the nested sandbox mounts. Polaris has no verified AppArmor support
+This seccomp file does not override AppArmor: Docker's built-in default AppArmor
+profile also denies the nested sandbox mounts. Polaris has no verified support
+for a customized AppArmor policy either, and no verified AppArmor support
 for Steam Spaces yet; see [Spaces security support](../../../docs/spaces.md#prepare-spaces-security-support).
 
 `docker-default.json` is an unchanged copy from the Moby profiles revision and
