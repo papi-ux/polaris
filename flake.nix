@@ -53,7 +53,9 @@
         xdg-desktop-portal-gamescope = final.callPackage ./nix/packages/xdg-desktop-portal-gamescope { };
         polaris-stream = final.callPackage ./nix/packages/polaris-stream {
           polarisSrc = polarisSrc;
-          cudaSupport = true;
+          # Respect the importing host's GPU build choice. mkPkgs keeps the
+          # standalone flake's existing CUDA-enabled default.
+          cudaSupport = final.config.cudaSupport;
         };
       };
 
