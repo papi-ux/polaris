@@ -608,4 +608,16 @@ TEST(SpacesSecurity, EnforcingHostsRequireEveryPieceOfTheMatchingInstallation) {
   f.seccomp = false;
   EXPECT_EQ(spaces::describe_security(f).code, "package_missing");
 }
+
+TEST(SpacesSecurity, AppArmorDoesNotOfferAnUnconfinedOrSelinuxInstallFallback) {
+  spaces::security_facts_t f {.seccomp = true, .selinux = true, .kernel_probe = true,
+    .enforcing = true, .contexts = true, .rule = true, .receipt = true, .apparmor = true};
+  EXPECT_FALSE(spaces::describe_security(f).ready);
+  EXPECT_EQ(spaces::describe_security(f).code, "apparmor_unsupported");
+  EXPECT_FALSE(spaces::installed_worker_label(f));
+  f.selinux = false;
+  EXPECT_FALSE(spaces::installed_worker_label(f));
+  f.seccomp = false;
+  EXPECT_EQ(spaces::describe_security(f).code, "package_missing");
+}
 #endif

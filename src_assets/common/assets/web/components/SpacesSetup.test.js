@@ -463,6 +463,24 @@ describe('Spaces setup', () => {
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 
+  it('shows AppArmor guidance without offering the SELinux installer', async () => {
+    const result = { ...snapshot(true), distribution: 'ubuntu', host_prerequisites_ready: false }
+    const security = result.checks.find(check => check.id === 'security')
+    Object.assign(security, { state: 'required', action: 'apparmor_unsupported', detail: 'Docker uses AppArmor; review Spaces security support.' })
+    delete security.host_action
+    vi.stubGlobal('fetch', vi.fn(async () => reply(result)))
+    wrapper = start()
+    await flushPromises()
+    expect(wrapper.get('[data-setup-check=security]').text()).toContain('AppArmor')
+    expect(wrapper.get('[data-setup-check=security] a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#prepare-spaces-security-support')
+    expect(wrapper.find('spaces-first-setup-stub').attributes('hostready')).toBe('false')
+    expect(wrapper.find('[data-setup-check=security] [data-setup-steps]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain(installSpacesSecurity)
+    for (const action of ['apparmor_unsupported', 'probe_failed', 'not_enforcing', 'package_missing', 'unknown']) {
+      expect(setupSteps(result, { id: 'security', state: 'required', action })).toEqual([])
+    }
+  })
+
   it('uses service account identity, never a browser user or shell payload', () => {
     expect(dockerAccessCommand(1027)).toContain('id -nu -- 1027')
     for (const bad of [0, -1, 3.5, '1000', '$(touch /tmp/unsafe)', 2147483648]) expect(dockerAccessCommand(bad)).toBe('')

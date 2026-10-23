@@ -2992,6 +2992,27 @@ TEST(MultiseatDockerBackend, SteamLaunchRefusesAppArmorBeforeCreatingAWorker) {
   }
 }
 
+TEST(MultiseatDockerBackend, AppArmorDoesNotBlockValidationOrAlterItsSecurityArguments) {
+  auto options = docker_options_for_tests();
+  const auto spec = valid_spec();
+  fake_host_t host; fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  auto info = docker_info_for_tests(); info["SecurityOptions"].push_back("name=apparmor");
+  host.push({.exit_status = 0, .output = info.dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+  ASSERT_EQ(backend.launch(spec), worker_command_result_e::applied);
+  ASSERT_EQ(host.calls.size(), 3U);
+  const auto &run = host.calls.back();
+  EXPECT_TRUE(has_argument(run, "run"));
+  EXPECT_TRUE(has_argument(run, "--cap-drop=all"));
+  EXPECT_TRUE(has_argument(run, "--security-opt=no-new-privileges"));
+  EXPECT_FALSE(any_argument_contains(run, "apparmor="));
+  EXPECT_FALSE(any_argument_contains(run, "unconfined"));
+  EXPECT_FALSE(has_argument(run, "--privileged"));
+  EXPECT_FALSE(any_argument_contains(run, "--cap-add"));
+}
+
 TEST(MultiseatDockerBackend, SteamRecoveryChecksExactNetworkAndDeniesPublishedPorts) {
   for (unsigned kind = 0; kind != 9; ++kind) {
     auto options = docker_options_for_tests(); options.media_enabled = true;
@@ -3054,6 +3075,29 @@ TEST(MultiseatDockerBackend, SteamStopSurvivesMissingNetworkAuthority) {
   ASSERT_EQ(host.calls.size(), previous_calls + 4U);
   EXPECT_TRUE(has_argument(host.calls.back(), "--force"));
   EXPECT_EQ(host.calls.back().back(), first_id);
+}
+
+TEST(MultiseatDockerBackend, AppArmorDoesNotPreventStoppingAnExistingSteamWorker) {
+  auto options = docker_options_for_tests(); options.media_enabled = true;
+  options.profiles.front().profile_key = "profile-alpha";
+  options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
+  auto spec = valid_spec(); spec.workload = options.workloads.front();
+  spec.profile_key = options.profiles.front().profile_key; spec.display_mode.hdr = false;
+  fake_host_t host; fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  auto record = docker_container_for(spec, first_id);
+  record["Config"]["Cmd"].push_back("--media=enabled");
+  record["HostConfig"]["SecurityOpt"].push_back("seccomp=" +
+    json::parse(multiseat::container::steam_seccomp_data).dump());
+  auto info = docker_info_for_tests(); info["SecurityOptions"].push_back("name=apparmor");
+  host.push({.exit_status = 0, .output = info.dump()});
+  queue_inventory(host, {record});
+  host.push({.exit_status = 0});
+  ASSERT_EQ(backend.stop(spec.identity, worker_stop_mode_e::force), worker_command_result_e::applied);
+  ASSERT_EQ(host.calls.size(), 4U);
+  EXPECT_TRUE(has_argument(host.calls.back(), "--force"));
+  EXPECT_EQ(host.calls.back().back(), first_id);
+  for (const auto &call : host.calls) EXPECT_FALSE(has_argument(call, "run"));
 }
 
 TEST(MultiseatDockerBackend, AdmitsOnlyTheReviewedSelinuxTypeAndChecksItOnRecovery) {
