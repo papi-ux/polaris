@@ -356,6 +356,7 @@ namespace rtsp_stream {
 #ifdef POLARIS_TESTS
   std::optional<std::string> watch_profile_mismatch_for_tests(const launch_session_t &session, const stream::config_t &config);
   bool worker_media_matches_launch_for_tests(const launch_session_t &launch, const stream::config_t &config);
+  std::optional<std::string> worker_media_mismatch_for_tests(const launch_session_t &launch, const stream::config_t &config);
   std::int64_t bound_session_bitrate_for_tests(
     std::int64_t requested_bitrate_kbps,
     std::size_t warp_factor,

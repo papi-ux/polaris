@@ -159,6 +159,43 @@ TEST(MultiseatWorkerMediaPump, SelectsTheNegotiatedVideoBudgetBeforeAcknowledgem
   }
 }
 
+TEST(MultiseatWorkerMediaPump, ExplainsWorkerBitrateClampingWithoutChangingSelection) {
+  for (const auto requested : {4000U, 20000U}) {
+    temporary_root_t root;
+    std::vector<std::string> notes;
+    authority_store_t store {root.path(), deterministic_capability(0x42)};
+    auto authority = create_authority(store, identity_for(), "generation-pump-clamp");
+    fake_worker_t worker {authority, fake_behavior_e::media_contract};
+    controller_client_t client;
+    ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+    delivered_t delivered;
+    auto expected = matching_expectation();
+    expected.bitrate_kbps = requested;
+    auto sinks = delivered.sinks();
+    sinks.bitrate_clamped = [&](std::uint32_t request, std::uint32_t selected, std::uint32_t ceiling) {
+      EXPECT_EQ(request, requested);
+      EXPECT_EQ(selected, 15000U);
+      EXPECT_EQ(ceiling, 15000U);
+      notes.push_back(bitrate_clamp_message(request, selected, ceiling));
+    };
+    const auto report = run(client.lease_connection(), expected, sinks, quiet_host());
+    EXPECT_EQ(report.selected_bitrate_kbps, std::min(requested, 15000U));
+    EXPECT_EQ(worker.selected_bitrate(), report.selected_bitrate_kbps);
+    EXPECT_EQ(worker.contract_messages(),
+      (std::vector<message_e> {message_e::select_media_bitrate, message_e::media_config_ack}));
+    if (requested > 15000U) {
+      ASSERT_EQ(notes.size(), 1U);
+      const auto &text = notes.front();
+      EXPECT_NE(text.find("Spaces video bitrate clamped by worker contract"), std::string::npos);
+      EXPECT_NE(text.find("requested 20000 kbps"), std::string::npos);
+      EXPECT_NE(text.find("selected 15000 kbps"), std::string::npos);
+      EXPECT_NE(text.find("ceiling 15000 kbps"), std::string::npos);
+    } else {
+      EXPECT_TRUE(notes.empty());
+    }
+  }
+}
+
 TEST(MultiseatWorkerMediaPump, DeliversAnAcknowledgedContractsFramesToTheStream) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability(0x41)};
@@ -228,15 +265,20 @@ TEST(MultiseatWorkerMediaPump, RefusesAContractTheClientDidNotNegotiate) {
 
   auto expectation = matching_expectation();
   expectation.height = 1080;  // the worker announced 720
+  expectation.bitrate_kbps = 20000;
   delivered_t delivered;
+  auto sinks = delivered.sinks();
+  bool reported_clamp = false;
+  sinks.bitrate_clamped = [&](std::uint32_t, std::uint32_t, std::uint32_t) { reported_clamp = true; };
   const auto report = run(
-    client.lease_connection(), expectation, delivered.sinks(), quiet_host()
+    client.lease_connection(), expectation, sinks, quiet_host()
   );
 
   EXPECT_EQ(report.status, pump_status_e::mismatched_contract);
   EXPECT_EQ(report.video_frames, 0U);
   EXPECT_EQ(report.audio_frames, 0U);
   EXPECT_FALSE(report.detail.empty());
+  EXPECT_FALSE(reported_clamp) << "an unaccepted contract has no effective bitrate to report";
   EXPECT_TRUE(worker.contract_messages().empty())
     << "a contract the client did not negotiate must never be acknowledged";
 
