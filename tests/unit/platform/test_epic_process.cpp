@@ -114,7 +114,7 @@ namespace {
       files[path / "status"] = "Name:\tfixture\nUid:\t1000\t1000\t1000\t1000\n";
       files[path / "cgroup"] = "0::/user.slice/app.slice/epic.scope\n";
       files[path / "maps"] = "9000-a000 rw-p 00000000 00:00 0\n";
-      files[path / "mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:34 /@home /home rw - btrfs /dev/fixture rw\n";
+      files[path / "mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:34 /@fixture /fixture rw - btrfs /dev/fixture rw\n";
     }
 
     ep::title_t title() const {
@@ -451,7 +451,7 @@ TEST_F(EpicProcess, AnUnreadableOwnerProcessAndNonBtrfsDeviceMismatchAreRefused)
   host->identities["/proc/41"].uid = 0;
   EXPECT_EQ(observe().reason, "unreadable_owner_process");
   host->identities["/proc/41"].uid = 1000;
-  host->files["/proc/41/mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:34 / /home rw - ext4 /dev/fixture rw\n";
+  host->files["/proc/41/mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:34 / /fixture rw - ext4 /dev/fixture rw\n";
   EXPECT_EQ(observe().reason, "mapped_game_device_mismatch");
 }
 
