@@ -80,7 +80,36 @@ namespace rtsp_stream {
       if (worker_media_matches_launch(launch, config)) {
         return std::nullopt;
       }
-      return "BAD REQUEST";
+      std::vector<std::string_view> fields;
+      const auto fps = launch.fps / 1000;
+      const bool valid_launch_rate = launch.fps > 0 && launch.fps % 1000 == 0;
+      if (!valid_launch_rate) fields.emplace_back("launch frame rate");
+      if (config.monitor.videoFormat != 0) fields.emplace_back("codec");
+      if (config.monitor.dynamicRange != 0) fields.emplace_back("dynamic range");
+      if (config.monitor.chromaSamplingType != 0) fields.emplace_back("chroma");
+      if (config.monitor.enableIntraRefresh != 0) fields.emplace_back("intra refresh");
+      if (config.audio.channels != 2) fields.emplace_back("audio channels");
+      if (config.audio.packetDuration != 5) fields.emplace_back("audio packet duration");
+      if (config.monitor.width != launch.width) fields.emplace_back("width");
+      if (config.monitor.height != launch.height) fields.emplace_back("height");
+      if (valid_launch_rate) {
+        if (config.monitor.framerate != fps) {
+          fields.emplace_back("frame rate");
+        } else {
+          if (av_cmp_q(video::framerate_to_rational(config.monitor), AVRational {fps, 1}) != 0)
+            fields.emplace_back("stream cadence");
+          if (av_cmp_q(video::encoding_framerate_to_rational(config.monitor), AVRational {fps, 1}) != 0)
+            fields.emplace_back("encoder cadence");
+        }
+      }
+      std::string reason {"Spaces RTSP media mismatch: "};
+      for (const auto field : fields) {
+        if (reason.back() != ' ') reason += ", ";
+        reason += field;
+      }
+      if (fields.empty()) reason += "worker contract";
+      reason += ". Use the launch resolution and whole FPS, H.264 SDR 4:2:0, intra refresh off, and stereo audio in 5 ms packets.";
+      return reason;
     }
 
     std::int64_t bound_session_bitrate(
