@@ -35,6 +35,18 @@ namespace file_handler {
     return std::filesystem::create_directories(path);
   }
 
+  bool seed_user_file(const std::filesystem::path &source, const std::filesystem::path &destination) {
+    if (!std::filesystem::copy_file(source, destination, std::filesystem::copy_options::skip_existing)) {
+      return false;
+    }
+    // Immutable packages (such as the Nix store) carry read-only templates.
+    // Only the new user copy needs write access; never chmod a substituted link.
+    std::filesystem::permissions(destination,
+      std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+      std::filesystem::perm_options::add | std::filesystem::perm_options::nofollow);
+    return true;
+  }
+
   std::string read_file(const char *path) {
     if (!std::filesystem::exists(path)) {
       BOOST_LOG(debug) << "Missing file: " << path;

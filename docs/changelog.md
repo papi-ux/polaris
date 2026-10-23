@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Newly created game libraries remain writable when the packaged template is read-only, including Nix store installs. Existing library files and permissions stay unchanged.
+
 - Nix packages honor the importing host's CUDA choice and retain Vulkan headers and the loader in non-CUDA builds. New per-user configurations use automatic encoder selection and translate the `labwc` option to Private Stream's `headless_stream` token; existing settings stay untouched. The configured Gamescope helper wins its name in Home Manager/hjem profiles. The package now reports the current project version and its flake's Git revision when available, instead of a fixed July version and commit; path-only inputs report an unknown commit. These packaging/default changes do not establish NixOS GPU or streaming acceptance.
 
 - The release in progress is 1.5.0, not 1.4.14. The number changed at beta.2 to say how much the train carries since 1.4.13; nothing else about the beta channel changes. Every version pin moves with it (`project(Polaris VERSION 1.5.0)`, the SteamOS `EXPECTED_PKGVER`, the reviewed namcap warning, the benchmark collector version, the notes file `docs/release-notes/v1.5.0.md` and its contract test). `v1.4.14-beta.1` stays published as the prerelease it was; a host on it reaches `1.5.0-beta.2` through an ordinary upgrade, and the Update Center offers it with betas on.

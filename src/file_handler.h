@@ -7,6 +7,7 @@
 // standard includes
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -47,6 +48,14 @@ namespace file_handler {
    * @examples_end
    */
   bool make_directory(const std::string &path);
+
+  /**
+   * @brief Seed a writable user file from a packaged template, only if absent.
+   * Existing files are left untouched. The source is never modified.
+   * @return true when a new file was copied, false if the destination exists.
+   * @throws std::filesystem::filesystem_error when copying or permissions fail.
+   */
+  bool seed_user_file(const std::filesystem::path &source, const std::filesystem::path &destination);
 
   /**
    * @brief Read a file to string.
