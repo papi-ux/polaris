@@ -76,6 +76,13 @@ namespace rtsp_stream {
         av_cmp_q(video::encoding_framerate_to_rational(config.monitor), AVRational {fps, 1}) == 0;
     }
 
+    std::optional<std::string> worker_media_mismatch(const launch_session_t &launch, const stream::config_t &config) {
+      if (worker_media_matches_launch(launch, config)) {
+        return std::nullopt;
+      }
+      return "BAD REQUEST";
+    }
+
     std::int64_t bound_session_bitrate(
         std::int64_t requested_bitrate_kbps,
         std::size_t warp_factor,
@@ -613,6 +620,10 @@ namespace rtsp_stream {
 
   bool worker_media_matches_launch_for_tests(const launch_session_t &launch, const stream::config_t &config) {
     return worker_media_matches_launch(launch, config);
+  }
+
+  std::optional<std::string> worker_media_mismatch_for_tests(const launch_session_t &launch, const stream::config_t &config) {
+    return worker_media_mismatch(launch, config);
   }
 
   std::int64_t bound_session_bitrate_for_tests(
@@ -1861,9 +1872,12 @@ namespace rtsp_stream {
       return;
     }
 
-    if (session.worker_connection_requirement()->load() && !worker_media_matches_launch(session, config)) {
-      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-      return;
+    if (session.worker_connection_requirement()->load()) {
+      if (const auto mismatch = worker_media_mismatch(session, config)) {
+        BOOST_LOG(warning) << *mismatch;
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
     }
 
     // When using stereo audio, the audio quality is (strangely) indicated by whether the Host field
