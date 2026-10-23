@@ -21,6 +21,27 @@ No hybrid “nvidia pin” rewrite of conf.
 - `gamescope-polaris` — Valve gamescope + HDR PW patches (`gamescope-hdr` alias)
 - `xdg-desktop-portal-gamescope` — private ScreenCast backend
 
+## GPU build and first-run defaults
+
+The standalone flake keeps its CUDA-enabled package default. A host importing
+our overlay now honors its own `nixpkgs.config.cudaSupport`; to explicitly
+build without CUDA, use:
+
+```nix
+services.polaris.package = pkgs.polaris-stream.override { cudaSupport = false; };
+```
+
+Both variants keep Vulkan headers and the runtime loader. This makes Vulkan
+available to the non-CUDA build; it does not install a GPU driver or establish
+AMD/Intel streaming support on a particular host.
+
+A new per-user configuration leaves the encoder on automatic selection.
+The `streamMode = "labwc"` option seeds Polaris's `headless_stream` mode;
+`gamescope_stream` keeps its existing mode. Existing `polaris.conf` files are
+left alone, so check an older explicit `encoder = nvenc` setting in the web UI
+when moving a configuration to another GPU. The configured Gamescope helper
+also takes priority over the package's copy in Home Manager/hjem profiles.
+
 ## CI coverage
 
 `.github/workflows/nix.yml`, scoped by cost:
@@ -35,6 +56,9 @@ No hybrid “nvidia pin” rewrite of conf.
 The x86_64 flake check also evaluates the NixOS host module with the host enabled
 and disabled. It catches collisions with the ordinary nixpkgs module set; it
 does not boot NixOS or test streaming.
+The GPU-defaults check evaluates both CUDA variants, their Vulkan inputs and
+loader wrapper, both generated stream seeds and the configured helper's
+profile priority. These assertions do not compile Polaris or run a GPU.
 
 Not covered: the home-manager module, and evaluation for `aarch64-linux`.
 

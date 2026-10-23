@@ -25,7 +25,13 @@ let
     };
   gamescopeSeed = (session "gamescope_stream").polarisConfSeed.text;
   labwcSeed = (session "labwc").polarisConfSeed.text;
+  configuredHelper = lib.findFirst
+    (package: lib.getName package == "polaris-gamescope-session")
+    (throw "Missing configured Gamescope session helper")
+    (session "gamescope_stream").packages;
   facts = {
+    configuredHelperWinsProfile = (configuredHelper.meta.priority or 5)
+      < (noCuda.meta.priority or 5);
     overlayHonorsCudaChoice = builtins.elem (lib.cmakeBool "POLARIS_ENABLE_CUDA" false) pkgs.polaris-stream.cmakeFlags;
     nonCudaDisablesCuda = builtins.elem (lib.cmakeBool "POLARIS_ENABLE_CUDA" false) noCuda.cmakeFlags;
     cudaVariantRetainsCuda = !(builtins.elem (lib.cmakeBool "POLARIS_ENABLE_CUDA" false) withCuda.cmakeFlags);

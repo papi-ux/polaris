@@ -451,7 +451,9 @@ in
     pkgs.dbus
     pkgs.xdg-desktop-portal
     idleApp
-    sessionBin
+    # The package also ships this basename; the configured wrapper owns it in
+    # Home Manager/hjem profiles, including its Gamescope/tool environment.
+    (lib.hiPrio sessionBin)
     pkgs.steam
     pkgs.bubblewrap
     pkgs.util-linux
