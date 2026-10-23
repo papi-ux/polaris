@@ -1,5 +1,4 @@
-# polaris-stream — luxus/polaris fork (stream mode + runtime foundation) + phase patches.
-# Base tracks github:luxus/polaris (not papi-ux tip) until the mode/runtime work is upstreamed.
+# Polaris, built from the flake's current source, with an optional CUDA toolchain.
 # Packaging pattern adapted from Sunshine / nixpkgs GameStream hosts:
 # LizardByte ffmpeg prebuilt, separate npm UI, optional CUDA, Linux udev paths.
 # Linux-only (no Darwin focus). Browser Stream helper is prebuilt with buildGoModule.
@@ -88,6 +87,8 @@
   # Source tree. Flake always passes self (cleanSource). Optional absolute path
   # for out-of-tree overrides.
   polarisSrc,
+  # Git-backed flakes supply their own revision; path inputs have no Git proof.
+  sourceRevision ? null,
 }:
 let
   stdenv' = if cudaSupport then cudaPackages.backendStdenv else stdenv;
@@ -122,11 +123,8 @@ assert (!phase2VulkanCuda || enablePhase1Portal);
 assert (!enablePortalPrivateBus || enablePhase1Portal);
 stdenv'.mkDerivation (finalAttrs: {
   pname = "polaris-stream";
-  # luxus/polaris fork. Phase1/2/4 + private bus + portal lock contract are on
-  # feat/linux-stream-runtime tip (559aac4+). Historical topics/phase patches under
-  # ../../polaris/ and ../../archived/polaris/ for older pins only.
-  # After pushing feat/linux-stream-runtime (or master), update rev + hash.
-  version = "0-unstable-2026-07-28";
+  # Keep the package version aligned with CMakeLists.txt (checked by the flake).
+  version = "1.5.0";
 
   # fetchgit (not fetchFromGitHub): nested submodules (e.g. moonlight-common-c/enet)
   # must be present or cmake fails. Hash is recursive-submodule narHash.
@@ -253,6 +251,7 @@ stdenv'.mkDerivation (finalAttrs: {
     libgbm
     amf-headers
     svt-av1
+    vulkan-headers
     vulkan-loader
     pipewire
     libappindicator
@@ -261,7 +260,6 @@ stdenv'.mkDerivation (finalAttrs: {
   ++ lib.optionals cudaSupport [
     cudaPackages.cudatoolkit
     cudaPackages.cuda_cudart
-    vulkan-headers
   ];
 
   runtimeDependencies = [
@@ -287,7 +285,7 @@ stdenv'.mkDerivation (finalAttrs: {
     (lib.cmakeBool "POLARIS_ENABLE_NATIVE_ARCH" false)
     (lib.cmakeBool "POLARIS_ENABLE_BROWSER_STREAM" enableBrowserStream)
     (lib.cmakeFeature "POLARIS_PUBLISHER_NAME" "polaris")
-    (lib.cmakeFeature "POLARIS_PUBLISHER_WEBSITE" "https://github.com/luxus/polaris")
+    (lib.cmakeFeature "POLARIS_PUBLISHER_WEBSITE" "https://github.com/papi-ux/polaris")
     (lib.cmakeFeature "POLARIS_PUBLISHER_ISSUE_URL" "https://github.com/papi-ux/polaris/issues")
     (lib.cmakeFeature "FFMPEG_PREPARED_BINARIES" "${ffmpegPrebuilt}")
     (lib.cmakeBool "POLARIS_DOWNLOAD_PREPARED_FFMPEG" false)
@@ -305,10 +303,9 @@ stdenv'.mkDerivation (finalAttrs: {
   ];
 
   env = {
-    BUILD_VERSION = "0-unstable-2026-07-28";
-    BRANCH = "feat/linux-stream-runtime";
-    # Matches src.rev (EasyEffects capture when host default is a processing sink).
-    COMMIT = "ad0ed6bf0e6a73457c9ce0b3dd4762fb350b7479";
+    # CMake uses its own project version. Do not overwrite it with a historical
+    # CI branch/version, or claim a commit unrelated to the checked-out source.
+    COMMIT = if sourceRevision == null then "unknown" else sourceRevision;
   };
 
   # cmake runs in $source/build; stamp files so web-ui / browser-stream targets
@@ -356,9 +353,7 @@ stdenv'.mkDerivation (finalAttrs: {
           xdg-utils
         ]
       } \
-      ${lib.optionalString cudaSupport "--prefix LD_LIBRARY_PATH : ${
-        lib.makeLibraryPath [ vulkan-loader ]
-      }"}
+      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ vulkan-loader ]}
   '';
 
   meta = {

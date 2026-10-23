@@ -175,8 +175,18 @@ checked again when the Space starts.
 
 On hosts with SELinux, the **Spaces security support** check verifies that
 SELinux is enforcing and that the dedicated policies and input rule are
-installed at the matching version. Hosts without SELinux need only the Steam
-seccomp file, which the native package includes.
+installed at the matching version. The native package also includes the Steam
+seccomp file.
+
+Docker hosts using AppArmor, including a typical Ubuntu installation, do not
+yet have verified Spaces security support. Host Setup reports that requirement
+instead of marking the host ready, and Steam Space launches are refused before
+a worker starts. Docker's built-in default AppArmor profile blocks sandbox mounts
+that Steam needs; Steam can describe this as unavailable user namespaces even when
+basic user namespaces work. Installing the seccomp file does not address an
+AppArmor denial. A customized Docker AppArmor policy is also unverified by Polaris.
+Keep AppArmor and your host's user-namespace restrictions
+enabled; do not use privileged or unconfined containers as a workaround.
 
 On a mutable Fedora installation:
 

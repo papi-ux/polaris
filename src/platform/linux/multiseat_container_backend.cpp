@@ -820,8 +820,9 @@ namespace multiseat::container {
            host_.trusted_runtime_file(options_.runtime_executable);
   }
 
-  void backend_t::require_docker_engine() {
-    if (options_.engine != engine_e::docker) return;
+  backend_t::docker_engine_facts_t backend_t::require_docker_engine() {
+    docker_engine_facts_t facts;
+    if (options_.engine != engine_e::docker) return facts;
     auto argv = command_prefix(options_);
     argv.insert(argv.end(), {"info", "--format={{json .}}"});
     const auto result = host_.run(argv, options_.command_timeout, options_.max_command_output_bytes);
@@ -842,7 +843,10 @@ namespace multiseat::container {
       if (!entry.is_string() || entry.get<std::string>().starts_with("name=rootless")) {
         throw std::runtime_error {"rootless Docker UID and device mappings are not admitted"};
       }
+      const auto value = entry.get<std::string>();
+      if (value == "name=apparmor" || value.starts_with("name=apparmor,")) facts.apparmor = true;
     }
+    return facts;
   }
 
   namespace {
@@ -1742,7 +1746,13 @@ namespace multiseat::container {
       if (!launching_groups || !launch_host_ready(spec, *input_allocation)) {
         return worker_command_result_e::rejected;
       }
-      require_docker_engine();
+      const auto engine = require_docker_engine();
+      // Steam's nested sandbox needs mount operations denied by Docker's
+      // built-in AppArmor profile. Custom policies are also unverified here.
+      // Refuse before creating anything, never relax the daemon's security.
+      if (engine.apparmor && options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
+        return worker_command_result_e::rejected;
+      }
     } catch (...) {
       return worker_command_result_e::indeterminate;
     }

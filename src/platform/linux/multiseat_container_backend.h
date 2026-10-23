@@ -290,7 +290,10 @@ namespace multiseat::container {
     [[nodiscard]] bool workload_allowed(const workload_plan_t &workload) const;
     [[nodiscard]] bool base_host_ready() const;
     [[nodiscard]] bool runtime_ready() const;
-    void require_docker_engine();
+    struct docker_engine_facts_t {
+      bool apparmor = false;
+    };
+    docker_engine_facts_t require_docker_engine();
     [[nodiscard]] std::vector<std::string> docker_launch_arguments(
       const worker_launch_spec_t &spec,
       const profile_t &profile,

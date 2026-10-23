@@ -2611,6 +2611,11 @@ namespace stream {
         std::copy(bytes.begin(), bytes.end(), std::begin(buffer));
         audio_packets->raise(destination, std::move(buffer));
       },
+      .bitrate_clamped = [](std::uint32_t requested, std::uint32_t selected, std::uint32_t ceiling) {
+        // A normal worker limit is useful information while the stream starts,
+        // not a warning about stream health or a teardown-only summary.
+        BOOST_LOG(info) << multiseat::media::bitrate_clamp_message(requested, selected, ceiling);
+      },
     };
     const multiseat::media::host_requests_t requests {
       .stop_requested = [&] {

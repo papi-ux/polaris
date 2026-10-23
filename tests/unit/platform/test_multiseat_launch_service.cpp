@@ -10,6 +10,7 @@
 #include "src/stream.h"
 
 #include <atomic>
+#include <array>
 #include <condition_variable>
 #include <cstdlib>
 #include <future>
@@ -1072,6 +1073,51 @@ namespace {
       }
       EXPECT_FALSE(rtsp_stream::worker_media_matches_launch_for_tests(*value, bad)) << kind;
     }
+  }
+
+  TEST_F(MultiseatLaunchService, RtspRefusalNamesEveryMismatchedWorkerMediaField) {
+    const auto value = launch();
+    stream::config_t config {};
+    config.audio.channels = 2;
+    config.audio.packetDuration = 5;
+    config.monitor.width = value->width; config.monitor.height = value->height;
+    ASSERT_TRUE(video::configure_announced_rates(config.monitor, 60, 6000, value->fps, true));
+    EXPECT_FALSE(rtsp_stream::worker_media_mismatch_for_tests(*value, config));
+    const std::array<std::string_view, 11> fields {
+      "audio packet duration", "audio channels", "codec", "dynamic range", "width", "height",
+      "chroma", "intra refresh", "frame rate", "stream cadence", "encoder cadence",
+    };
+    for (unsigned kind = 0; kind != fields.size(); ++kind) {
+      auto bad = config;
+      switch (kind) {
+        case 0: bad.audio.packetDuration = 10; break;
+        case 1: bad.audio.channels = 6; break;
+        case 2: bad.monitor.videoFormat = 1; break;
+        case 3: bad.monitor.dynamicRange = 1; break;
+        case 4: bad.monitor.width = 1280; break;
+        case 5: bad.monitor.height = 720; break;
+        case 6: bad.monitor.chromaSamplingType = 1; break;
+        case 7: bad.monitor.enableIntraRefresh = 1; break;
+        case 8: bad.monitor.framerate = std::numeric_limits<int>::max(); break;
+        case 9: bad.monitor.stream_rate = {60000, 1001}; break;
+        case 10: bad.monitor.encode_rate = {60000, 1001}; break;
+      }
+      const auto mismatch = rtsp_stream::worker_media_mismatch_for_tests(*value, bad);
+      ASSERT_TRUE(mismatch) << kind;
+      EXPECT_NE(mismatch->find(fields[kind]), std::string::npos) << *mismatch;
+    }
+    const auto invalid_launch = launch();
+    invalid_launch->fps = 59940;
+    const auto mismatch = rtsp_stream::worker_media_mismatch_for_tests(*invalid_launch, config);
+    ASSERT_TRUE(mismatch);
+    EXPECT_NE(mismatch->find("launch frame rate"), std::string::npos) << *mismatch;
+    auto combined = config;
+    combined.monitor.videoFormat = 2;
+    combined.audio.channels = 6;
+    const auto both = rtsp_stream::worker_media_mismatch_for_tests(*value, combined);
+    ASSERT_TRUE(both);
+    EXPECT_NE(both->find("codec"), std::string::npos);
+    EXPECT_NE(both->find("audio channels"), std::string::npos);
   }
 
   class MultiseatLaunchConfiguration : public ::testing::Test {

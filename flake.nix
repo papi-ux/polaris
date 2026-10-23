@@ -53,7 +53,10 @@
         xdg-desktop-portal-gamescope = final.callPackage ./nix/packages/xdg-desktop-portal-gamescope { };
         polaris-stream = final.callPackage ./nix/packages/polaris-stream {
           polarisSrc = polarisSrc;
-          cudaSupport = true;
+          sourceRevision = self.rev or self.dirtyRev or null;
+          # Respect the importing host's GPU build choice. mkPkgs keeps the
+          # standalone flake's existing CUDA-enabled default.
+          cudaSupport = final.config.cudaSupport;
         };
       };
 
@@ -80,6 +83,14 @@
       };
 
       checks.x86_64-linux.nixos-module = import ./nix/tests/nixos-module.nix {
+        inherit self nixpkgs;
+      };
+
+      checks.x86_64-linux.gpu-defaults = import ./nix/tests/gpu-defaults.nix {
+        inherit self nixpkgs;
+      };
+
+      checks.x86_64-linux.session-wrapper = import ./nix/tests/session-wrapper.nix {
         inherit self nixpkgs;
       };
 
