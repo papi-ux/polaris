@@ -31,9 +31,9 @@ let
     nonCudaHasVulkanHeaders = builtins.elem pkgs.vulkan-headers noCuda.buildInputs;
     cudaHasVulkanHeaders = builtins.elem pkgs.vulkan-headers withCuda.buildInputs;
     nonCudaFindsVulkanLoader = lib.hasInfix
-      "--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.vulkan-loader ]}" noCuda.postFixup;
+      (builtins.unsafeDiscardStringContext "--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.vulkan-loader ]}") noCuda.postFixup;
     cudaFindsVulkanLoader = lib.hasInfix
-      "--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.vulkan-loader ]}" withCuda.postFixup;
+      (builtins.unsafeDiscardStringContext "--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.vulkan-loader ]}") withCuda.postFixup;
     gamescopeSeedKeepsMode = lib.hasInfix "linux_stream_mode = gamescope_stream" gamescopeSeed;
     labwcSeedUsesPrivateMode = lib.hasInfix "linux_stream_mode = headless_stream" labwcSeed;
     seedsLeaveEncoderAutomatic = !(lib.hasInfix "encoder =" gamescopeSeed)
