@@ -5571,12 +5571,13 @@ namespace proc {
   }
 
   bool uses_bundled_utility_artwork(const ctx_t &app) {
-    return app.uuid == VIRTUAL_DISPLAY_UUID ||
+    if (app.uuid == VIRTUAL_DISPLAY_UUID ||
       app.uuid == FALLBACK_DESKTOP_UUID ||
       app.uuid == REMOTE_INPUT_UUID ||
-      app.uuid == TERMINATE_APP_UUID ||
-      app.desktop_mirror ||
-      launches_nothing(app);
+      app.uuid == TERMINATE_APP_UUID) return true;
+    // Official Epic games use the desktop display but still have game artwork.
+    if (app.source == "epic_launcher" && epic_library::valid_identity(app.epic_identity)) return false;
+    return app.desktop_mirror || launches_nothing(app);
   }
 
   bool is_stock_low_res_desktop(const ctx_t &app) {

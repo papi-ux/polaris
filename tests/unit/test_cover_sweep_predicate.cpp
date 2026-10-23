@@ -155,6 +155,47 @@ TEST(CoverSweepPredicate, TheEntriesPolarisShipsArtworkForAreNeverAskedAbout) {
     << "a title search for one of these finds a coincidental game, not nothing";
 }
 
+TEST(CoverSweepPredicate, AnOfficialEpicGameUsesTheExistingMissingCoverPolicy) {
+  scoped_appdata_t appdata;
+  auto epic = game(kOne, "Alan Wake 2");
+  epic.cmd.clear();
+  epic.source = "epic_launcher";
+  epic.epic_identity = {"sandbox", "catalog", "artifact"};
+  proc::set_launch_as(epic, "desktop_display");
+  const auto candidates = [&](const proc::ctx_t &app) {
+    return confighttp::games_without_a_cover(appdata.path, list_with({{app.uuid, ""}}), {app});
+  };
+
+  EXPECT_EQ(names_of(candidates(epic)), (std::vector<std::string> {"Alan Wake 2"}));
+
+  for (const auto &identity : std::vector<epic_library::identity_t> {
+         {"", "catalog", "artifact"}, {"sandbox", "", "artifact"}, {"sandbox", "catalog", ""}}) {
+    auto invalid = epic;
+    invalid.epic_identity = identity;
+    EXPECT_TRUE(candidates(invalid).empty());
+  }
+  auto desktop = game(kTwo, "Desktop");
+  proc::set_launch_as(desktop, "desktop_display");
+  EXPECT_TRUE(candidates(desktop).empty());
+
+  // Even valid Epic metadata cannot turn a reserved utility into an artwork candidate.
+  for (const auto *uuid : {VIRTUAL_DISPLAY_UUID, FALLBACK_DESKTOP_UUID, REMOTE_INPUT_UUID, TERMINATE_APP_UUID}) {
+    auto utility = epic;
+    utility.uuid = uuid;
+    EXPECT_TRUE(candidates(utility).empty()) << uuid;
+  }
+
+  const auto cover = appdata.path / "epic.png";
+  write_png(cover);
+  epic.image_path = cover.string();
+  EXPECT_TRUE(candidates(epic).empty());
+  epic.image_path.clear();
+  ASSERT_TRUE(game_artwork::remove_downloaded_artwork(appdata.path, epic.uuid));
+  EXPECT_TRUE(candidates(epic).empty());
+  ASSERT_TRUE(game_artwork::enable_automatic_artwork_lookup(appdata.path, epic.uuid));
+  EXPECT_EQ(names_of(candidates(epic)), (std::vector<std::string> {"Alan Wake 2"}));
+}
+
 TEST(CoverSweepPredicate, AnEntryWithoutAUsableNameOrUuidIsSkipped) {
   scoped_appdata_t appdata;
   const std::vector<proc::ctx_t> apps {
