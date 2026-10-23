@@ -248,12 +248,15 @@ TEST_F(FileHandlerSeedTests, ExistingLibraryKeepsItsContentsAndReadOnlyMode) {
 
 #ifndef _WIN32
 TEST_F(FileHandlerSeedTests, ExistingSymlinkDoesNotChangeItsTarget) {
-  std::filesystem::create_symlink(source, destination);
-  const auto mode = std::filesystem::status(source).permissions();
+  const auto unrelated = directory / "unrelated.json";
+  ASSERT_EQ(file_handler::write_file(unrelated.string().c_str(), "unrelated-library"), 0);
+  std::filesystem::permissions(unrelated, std::filesystem::perms::owner_read);
+  std::filesystem::create_symlink(unrelated, destination);
+  const auto mode = std::filesystem::status(unrelated).permissions();
   EXPECT_FALSE(file_handler::seed_user_file(source, destination));
   EXPECT_TRUE(std::filesystem::is_symlink(destination));
-  EXPECT_EQ(std::filesystem::status(source).permissions(), mode);
-  EXPECT_EQ(file_handler::read_file(source.string().c_str()), R"({"apps":[]})");
+  EXPECT_EQ(std::filesystem::status(unrelated).permissions(), mode);
+  EXPECT_EQ(file_handler::read_file(unrelated.string().c_str()), "unrelated-library");
 }
 
 TEST_F(FileHandlerSeedTests, DanglingSymlinkDoesNotCreateItsTarget) {
