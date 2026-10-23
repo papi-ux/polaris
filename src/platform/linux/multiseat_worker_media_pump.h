@@ -11,6 +11,7 @@
   #include <cstdint>
   #include <functional>
   #include <optional>
+  #include <string>
   #include <string_view>
   #include <utility>
   #include <vector>
@@ -61,6 +62,9 @@ namespace multiseat::media {
   /** True for the two ways a stream ends without a fault. */
   [[nodiscard]] bool ended_cleanly(pump_status_e status);
 
+  /** The bounded operator message for an acknowledged worker bitrate clamp. */
+  [[nodiscard]] std::string bitrate_clamp_message(std::uint32_t requested, std::uint32_t selected, std::uint32_t ceiling);
+
   /**
    * Where delivered media goes. The pump owns no packet type of its own, so
    * the caller decides what a frame becomes; production builds the host's own
@@ -69,6 +73,8 @@ namespace multiseat::media {
   struct delivery_sinks_t {
     std::function<void(std::vector<std::uint8_t> &&bytes, std::int64_t frame_index, bool idr)> video;
     std::function<void(std::vector<std::uint8_t> &&bytes)> audio;
+    /** Only after acknowledgement, when a nonzero request exceeds the worker ceiling. */
+    std::function<void(std::uint32_t requested, std::uint32_t selected, std::uint32_t ceiling)> bitrate_clamped;
   };
 
   /**
