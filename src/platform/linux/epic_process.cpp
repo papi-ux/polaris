@@ -71,7 +71,7 @@ namespace platf::epic {
       return result;
     }
 
-    bool absolute(const fs::path &path) {
+    bool safe_absolute_path(const fs::path &path) {
       const auto text = path.string();
       return path.is_absolute() && text.size() <= 4096 && text.find('\0') == std::string::npos &&
              std::none_of(path.begin(), path.end(), [](const auto &part) { return part == ".." || part == "."; });
@@ -144,7 +144,7 @@ namespace platf::epic {
           result = line.substr(3);
         }
       }
-      require(result && absolute(*result), "missing_unified_cgroup");
+      require(result && safe_absolute_path(*result), "missing_unified_cgroup");
       return *result;
     }
 
@@ -234,7 +234,7 @@ namespace platf::epic {
         const auto major = number(std::string_view(fields[2]).substr(0, colon));
         const auto minor = number(std::string_view(fields[2]).substr(colon + 1));
         const fs::path point = unescape(fields[4]);
-        require(absolute(point) && absolute(unescape(fields[3])), "malformed_mount_path");
+        require(safe_absolute_path(point) && safe_absolute_path(unescape(fields[3])), "malformed_mount_path");
         if (!inside(image, point)) {
           continue;
         }
@@ -270,7 +270,7 @@ namespace platf::epic {
 
       fs::path link(const fs::path &path) {
         auto value = needed(backend.link(path), "unreadable_process_link");
-        require(absolute(value), "unresolved_process_link");
+        require(safe_absolute_path(value), "unresolved_process_link");
         return value;
       }
 
@@ -280,7 +280,7 @@ namespace platf::epic {
 
       fs::path canonical(const fs::path &path) {
         auto value = needed(backend.canonical(path), "unresolved_title_path");
-        require(absolute(value), "unresolved_title_path");
+        require(safe_absolute_path(value), "unresolved_title_path");
         return value;
       }
 
@@ -420,9 +420,9 @@ namespace platf::epic {
       reader_t read {backend};
       require(token(title.namespace_id) && token(title.item_id) && token(title.artifact_id), "invalid_title_identity");
       require(title.platform == "Windows" || title.platform == "Linux", "unknown_title_runtime");
-      require(absolute(title.install_dir) && absolute(title.data_root), "invalid_title_path");
+      require(safe_absolute_path(title.install_dir) && safe_absolute_path(title.data_root), "invalid_title_path");
       const fs::path relative = title.launch_executable;
-      require(!relative.empty() && !relative.is_absolute() && absolute(fs::path("/") / relative) &&
+      require(!relative.empty() && !relative.is_absolute() && safe_absolute_path(fs::path("/") / relative) &&
                 title.launch_executable.find('\\') == std::string::npos, "invalid_title_executable");
       const auto install = read.canonical(title.install_dir);
       const auto data = read.canonical(title.data_root);
@@ -731,7 +731,7 @@ namespace platf::epic {
         // Do not guess Desktop/Downloads paths or use an unpacked AppImage binary without its runtime.
         // Only an absolute kernel mount source can prove the backing AppImage in this first slice.
         const fs::path source = mount.source;
-        require(absolute(source), "launcher_appimage_path_unproven");
+        require(safe_absolute_path(source), "launcher_appimage_path_unproven");
         executable = read.canonical(source);
         backing_source = source;
         executable_file = read.stat(executable);

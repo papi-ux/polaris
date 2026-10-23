@@ -509,6 +509,26 @@ TEST_F(EpicProcess, MountedLauncherElfCannotBeUsedAsAnUnprovenAppImage) {
   EXPECT_EQ(error, "unsafe_launcher_appimage");
 }
 
+TEST_F(EpicProcess, KnownOwnerAppImageProcessDoesNotProveTheMountedLauncherSource) {
+  const fs::path exe = "/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher";
+  const fs::path appimage = "/home/owner/My Desktop/EpicGamesLauncher.appimage";
+  host->add_process(43, exe, "/home/owner", 10003);
+  host->add_process(44, appimage, "/home/owner", 10004);
+  host->headers[appimage] = std::string("\177ELF\0\0\0\0AI\002", 11);
+  // A matching live executable and its open original file still do not identify which FUSE
+  // mount it serves. Without that relationship, the basename is not a backing-file proof.
+  host->links["/proc/44/fd/3"] = appimage;
+  host->identities["/proc/44/fd/3"] = host->identities[appimage];
+  const std::string mounts = "21 1 0:1 / / rw - tmpfs tmpfs rw\n60 21 0:90 / /tmp/.mount_EpicXXX ro - fuse.AppImage ";
+  for (const std::string source : {"EpicGamesLauncher.appimage", "../EpicGamesLauncher.appimage", "/home/owner/../owner/My\\040Desktop/EpicGamesLauncher.appimage"}) {
+    host->files["/proc/43/mountinfo"] = mounts + source + " ro\n";
+    EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
+    EXPECT_EQ(error, "launcher_appimage_path_unproven");
+  }
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks) {
   auto pattern = (fs::temp_directory_path() / "polaris-epic-reader-XXXXXX").string();
   const auto made = mkdtemp(pattern.data());
