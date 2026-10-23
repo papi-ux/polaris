@@ -58,7 +58,6 @@ let
         linux_prefer_gpu_native_capture = disabled
         linux_stream_mode = gamescope_stream
         capture = portal
-        encoder = nvenc
         hevc_mode = 3
         av1_mode = 0
         stream_audio = enabled
@@ -71,8 +70,7 @@ let
         headless_mode = enabled
         linux_use_cage_compositor = enabled
         linux_prefer_gpu_native_capture = disabled
-        linux_stream_mode = labwc
-        encoder = nvenc
+        linux_stream_mode = headless_stream
         stream_audio = enabled
         enable_pairing = enabled
         enable_discovery = enabled
@@ -453,7 +451,9 @@ in
     pkgs.dbus
     pkgs.xdg-desktop-portal
     idleApp
-    sessionBin
+    # The package also ships this basename; the configured wrapper owns it in
+    # Home Manager/hjem profiles, including its Gamescope/tool environment.
+    (lib.hiPrio sessionBin)
     pkgs.steam
     pkgs.bubblewrap
     pkgs.util-linux
