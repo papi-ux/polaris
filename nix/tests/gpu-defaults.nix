@@ -9,7 +9,7 @@ let
     config = { allowUnfree = true; cudaSupport = false; };
     overlays = [ self.overlays.default ];
   };
-  noCuda = pkgs.polaris-stream;
+  noCuda = pkgs.polaris-stream.override { cudaSupport = false; };
   withCuda = noCuda.override { cudaSupport = true; };
   session = streamMode:
     let
@@ -26,6 +26,7 @@ let
   gamescopeSeed = (session "gamescope_stream").polarisConfSeed.text;
   labwcSeed = (session "labwc").polarisConfSeed.text;
   facts = {
+    overlayHonorsCudaChoice = builtins.elem "-DPOLARIS_ENABLE_CUDA=OFF" pkgs.polaris-stream.cmakeFlags;
     nonCudaDisablesCuda = builtins.elem "-DPOLARIS_ENABLE_CUDA=OFF" noCuda.cmakeFlags;
     cudaVariantRetainsCuda = !(builtins.elem "-DPOLARIS_ENABLE_CUDA=OFF" withCuda.cmakeFlags);
     nonCudaHasVulkanHeaders = builtins.elem pkgs.vulkan-headers noCuda.buildInputs;
