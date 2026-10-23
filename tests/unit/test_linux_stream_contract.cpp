@@ -172,7 +172,10 @@ TEST(LinuxStreamContractTests, RootMediaFenceSurvivesThroughCompositorTerminatio
 
   const auto terminate = process.find("void proc_t::terminate_impl(");
   ASSERT_NE(terminate, std::string::npos);
-  const auto body = process.substr(terminate, 4200);
+  // Bound the whole function, rather than truncating it when a new teardown lane is added.
+  const auto terminate_end = process.find("\n  }\n", terminate);
+  ASSERT_NE(terminate_end, std::string::npos);
+  const auto body = process.substr(terminate, terminate_end + 5 - terminate);
   // Function-scoped holder so the fence outlives early #ifdef blocks through undo.
   const auto fence = body.find("media_stop.fence = session_media::prepare_for_stop()");
   const auto compositor = body.find("terminate_isolated_session_generation()");

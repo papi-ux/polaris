@@ -54,6 +54,9 @@ process-group, launcher, prefix, wineserver or forced-kill fallback.
 - Use Mirror Desktop. This Preview does not move the launcher into a private compositor.
 - An AppImage's mounted internal executable is not a supported standalone launch command.
   Polaris must establish the original launcher backing file; otherwise launch is refused.
+  For filename-only FUSE mounts, this also needs the kernel’s `fuse_connection` descriptor
+  metadata to match the running AppImage to that exact mount. Older kernels without that
+  metadata keep this route unavailable.
 - A game may be playable while its exact process cannot be verified. In that case it remains
   unmanaged; the warning is not evidence of software encoding, a broken save or a stopped game.
 - Keep using your existing Heroic entry if the official provider is unavailable. Its own setup,

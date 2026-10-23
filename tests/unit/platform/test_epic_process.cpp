@@ -64,6 +64,8 @@ namespace {
     std::map<fs::path, std::string> files, headers;
     std::map<fs::path, fs::path> links, resolved;
     std::map<fs::path, file_t> identities;
+    std::map<fs::path, std::vector<std::string>> listings;
+    std::function<void(const fs::path &)> after_read;
     std::vector<std::string> pids;
     std::vector<fs::path> reads;
     std::vector<std::uint64_t> opened;
@@ -117,6 +119,29 @@ namespace {
       files[path / "mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:34 /@fixture /fixture rw - btrfs /dev/fixture rw\n";
     }
 
+    fs::path fuse_launcher() {
+      const fs::path exe = "/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher";
+      const fs::path appimage = "/fixture/owner/My Desktop/EpicGamesLauncher.appimage";
+      add_process(43, exe, "/fixture/owner", 10003);
+      identities[exe].device = makedev(0, 90);
+      identities["/proc/43/exe"] = identities[exe];
+      add_process(44, appimage, "/fixture/owner", 10004);
+      headers[appimage] = std::string("\177ELF\0\0\0\0AI\002", 11);
+      const std::string mounts = "21 1 0:1 / / rw - tmpfs tmpfs rw\n60 21 0:90 / /tmp/.mount_EpicXXX ro - fuse.AppImage EpicGamesLauncher.appimage ro\n";
+      for (const char *proc : {"/proc/self", "/proc/43", "/proc/44"}) {
+        links[fs::path(proc) / "ns/mnt"] = "mnt:[321]";
+        files[fs::path(proc) / "mountinfo"] = mounts;
+      }
+      identities["/dev/fuse"] = {makedev(0, 7), 267, 0, S_IFCHR | 0600, 0, 111, 222};
+      listings["/proc/44/fd"] = {"3", "5"};
+      links["/proc/44/fd/3"] = appimage;
+      identities["/proc/44/fd/3"] = identities[appimage];
+      links["/proc/44/fd/5"] = "/dev/fuse";
+      identities["/proc/44/fd/5"] = identities["/dev/fuse"];
+      files["/proc/44/fdinfo/5"] = "pos:\t0\nflags:\t02100002\nmnt_id:\t39\nino:\t267\nfuse_connection:\t90\n";
+      return appimage;
+    }
+
     ep::title_t title() const {
       return {"namespace", "item", "artifact", install, "Game.exe", data, "Windows"};
     }
@@ -129,7 +154,11 @@ namespace {
       if (found == files.end() || found->second.size() > limit) {
         return std::nullopt;
       }
-      return found->second;
+      const auto value = found->second;
+      if (after_read) {
+        after_read(path);
+      }
+      return value;
     }
 
     std::optional<std::string> prefix(const fs::path &path, std::size_t length) override {
@@ -165,10 +194,11 @@ namespace {
     }
 
     std::optional<std::vector<std::string>> list(const fs::path &path, std::size_t limit) override {
-      if (path != "/proc" || pids.size() > limit) {
-        return std::nullopt;
+      if (path == "/proc") {
+        return pids.size() <= limit ? std::make_optional(pids) : std::nullopt;
       }
-      return pids;
+      const auto found = listings.find(path);
+      return found != listings.end() && found->second.size() <= limit ? std::make_optional(found->second) : std::nullopt;
     }
 
     int open_pidfd(std::uint64_t pid) override {
@@ -527,6 +557,100 @@ TEST_F(EpicProcess, KnownOwnerAppImageProcessDoesNotProveTheMountedLauncherSourc
   }
   EXPECT_TRUE(host->opened.empty());
   EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FuseConnectionAndOpenImageIdentifyTheOriginalAppImage) {
+  const auto appimage = host->fuse_launcher();
+  const auto found = ep::testing::desktop_launcher_executable(error, host);
+  ASSERT_TRUE(found) << error;
+  EXPECT_EQ(*found, appimage);
+  EXPECT_NE(*found, "/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FuseConnectionMetadataMustBeUniquePositiveAndMatchTheMount) {
+  host->fuse_launcher();
+  for (const std::string info : {"mnt_id: 90\n", "fuse_connection: 91\n", "fuse_connection: 0\n",
+                                 "fuse_connection: -90\n", "fuse_connection: 90 extra\n",
+                                 "fuse_connection: 90\nfuse_connection: 90\n"}) {
+    host->files["/proc/44/fdinfo/5"] = info;
+    EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host)) << info;
+    EXPECT_EQ(error, "launcher_appimage_path_unproven");
+  }
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FuseProofRequiresTheOriginalOpenImageAndRealFuseDevice) {
+  const std::vector<std::function<void()>> changes {
+    [&] { host->listings["/proc/44/fd"] = {"5"}; },
+    [&] { host->identities["/proc/44/fd/3"].inode++; },
+    [&] { host->links["/proc/44/fd/3"] = "/fixture/owner/other.appimage"; },
+    [&] { host->identities["/proc/44/fd/5"].inode++; },
+    [&] { host->identities["/dev/fuse"].mode = S_IFREG | 0600; },
+    [&] { host->headers[host->links["/proc/44/exe"]] = std::string("\177ELF", 11); },
+    [&] { host->identities[host->links["/proc/44/exe"]].mode |= S_IWGRP; },
+  };
+  for (const auto &change : changes) {
+    host = std::make_shared<fixture_t>();
+    host->fuse_launcher();
+    change();
+    EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
+    EXPECT_TRUE(host->opened.empty());
+    EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, FuseProofRejectsDifferentNamespaceMountOrServiceAndAmbiguousDescriptors) {
+  const std::vector<std::function<void()>> changes {
+    [&] { host->links["/proc/44/ns/mnt"] = "mnt:[322]"; },
+    [&] { host->links.erase("/proc/self/ns/mnt"); },
+    [&] { host->files["/proc/44/mountinfo"] = "60 21 0:91 / /tmp/.mount_EpicXXX ro - fuse.AppImage EpicGamesLauncher.appimage ro\n"; },
+    [&] { host->files["/proc/44/cgroup"] = "0::/user.slice/polaris.service\n"; },
+    [&] { host->listings["/proc/44/fd"].push_back("5"); },
+    [&] { host->listings["/proc/44/fd"] = std::vector<std::string>(257, "5"); },
+    [&] {
+      host->listings["/proc/44/fd"].push_back("6");
+      host->links["/proc/44/fd/6"] = "/dev/fuse";
+      host->identities["/proc/44/fd/6"] = host->identities["/dev/fuse"];
+      host->files["/proc/44/fdinfo/6"] = host->files["/proc/44/fdinfo/5"];
+    },
+  };
+  for (const auto &change : changes) {
+    host = std::make_shared<fixture_t>();
+    host->fuse_launcher();
+    change();
+    EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
+    EXPECT_EQ(error, "launcher_appimage_path_unproven");
+  }
+}
+
+TEST_F(EpicProcess, FuseProofBookendsProcessImageNamespaceMountAndSelectedDescriptors) {
+  const std::vector<std::function<void()>> changes {
+    [&] { host->files["/proc/44/stat"] = stat_line(44, 10005); },
+    [&] { host->identities[host->links["/proc/44/exe"]].inode++; },
+    [&] { host->links["/proc/44/ns/mnt"] = "mnt:[322]"; },
+    [&] { host->files["/proc/44/mountinfo"] = "60 21 0:91 / /tmp/.mount_EpicXXX ro - fuse.AppImage EpicGamesLauncher.appimage ro\n"; },
+    [&] { host->links["/proc/44/fd/3"] = "/fixture/owner/replaced.appimage"; },
+    [&] { host->links["/proc/44/fd/5"] = "/dev/null"; },
+    [&] { host->files["/proc/44/fdinfo/5"] = "fuse_connection: 91\n"; },
+  };
+  for (const auto &change : changes) {
+    host = std::make_shared<fixture_t>();
+    host->fuse_launcher();
+    bool changed = false;
+    host->after_read = [&](const fs::path &path) {
+      if (!changed && path == "/proc/44/fdinfo/5") {
+        changed = true;
+        change();
+      }
+    };
+    EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
+    EXPECT_TRUE(changed);
+    EXPECT_TRUE(host->opened.empty());
+    EXPECT_TRUE(host->signals.empty());
+  }
 }
 
 TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks) {

@@ -705,6 +705,115 @@ namespace platf::epic {
       return std::make_shared<linux_backend_t>();
     }
 
+    struct appimage_keeper_t {
+      const process_t *process {nullptr};
+      fs::path mount_namespace, image_fd, fuse_fd;
+      file_t fuse_file;
+      std::string fuse_info;
+    };
+
+    fs::path mount_namespace(backend_t &backend, const fs::path &process) {
+      const auto value = needed(backend.link(process / "ns/mnt"), "unknown_mount_namespace");
+      const auto text = value.string();
+      require(text.size() > 6 && text.compare(0, 5, "mnt:[") == 0 && text.back() == ']' &&
+                number(std::string_view(text).substr(5, text.size() - 6)) > 0, "unknown_mount_namespace");
+      return value;
+    }
+
+    std::optional<std::uint64_t> fuse_connection(const std::string &info) {
+      std::istringstream stream(info);
+      std::string line;
+      std::optional<std::uint64_t> result;
+      while (std::getline(stream, line)) {
+        if (line.compare(0, 16, "fuse_connection:") == 0) {
+          const auto fields = words(line.substr(16));
+          require(!result && fields.size() == 1, "malformed_fuse_connection");
+          result = number(fields[0]);
+          require(*result > 0, "malformed_fuse_connection");
+        }
+      }
+      return result;
+    }
+
+    appimage_keeper_t appimage_keeper(reader_t &read, const std::vector<process_t> &table,
+                                     const process_t &launcher, const mount_t &mount,
+                                     const std::string &own_group) {
+      // New kernels expose the FUSE connection device ID in fdinfo. It binds the daemon to
+      // the mount's minor device, unlike an AppImage basename or an open image file alone.
+      // Older kernels without this metadata remain unavailable; never guess a backing path.
+      const fs::path source = mount.source;
+      require(mount.major == 0 && mount.type.compare(0, 5, "fuse.") == 0 &&
+                source == source.filename() && safe_absolute_path(fs::path("/") / source), "unproven_fuse_mount");
+      const auto launcher_proc = fs::path("/proc") / std::to_string(launcher.stat.pid);
+      const auto ns = mount_namespace(read.backend, "/proc/self");
+      require(mount_namespace(read.backend, launcher_proc) == ns, "foreign_launcher_mount_namespace");
+      const auto fuse_file = read.stat("/dev/fuse");
+      require(S_ISCHR(fuse_file.mode), "unknown_fuse_device");
+      std::optional<appimage_keeper_t> result;
+      for (const auto &process : table) {
+        if (process.exe.filename() != source) {
+          continue;
+        }
+        const auto proc = fs::path("/proc") / std::to_string(process.stat.pid);
+        require(!service_cgroup(process.group, own_group) && process.image.uid == read.backend.owner_uid() &&
+                  safe_file(process.image, read.backend.owner_uid(), true) && read.canonical(process.exe) == process.exe,
+                "unsafe_appimage_keeper");
+        require(mount_namespace(read.backend, proc) == ns &&
+                  image_mount(read.read(proc / "mountinfo", mount_limit), launcher.exe).identity == mount.identity,
+                "foreign_appimage_mount");
+        const auto header = needed(read.backend.prefix(process.exe, 11), "unreadable_launcher_appimage");
+        require(header.substr(0, 4) == std::string("\177ELF", 4) && header.substr(8, 3) == std::string("AI\002", 3),
+                "unknown_launcher_appimage");
+        const auto fds = needed(read.backend.list(proc / "fd", 256), "incomplete_appimage_descriptors");
+        std::set<std::uint64_t> seen;
+        appimage_keeper_t candidate {&process, ns, {}, {}, fuse_file, {}};
+        for (const auto &name : fds) {
+          const auto descriptor = number(name);
+          require(descriptor <= INT_MAX && seen.insert(descriptor).second, "ambiguous_appimage_descriptors");
+          const auto path = proc / "fd" / name;
+          const auto target = needed(read.backend.link(path), "unreadable_appimage_descriptor");
+          require(target.string().size() <= 4096, "unreadable_appimage_descriptor");
+          if (target == process.exe) {
+            require(same_image(process.image, read.stat(path)), "changed_appimage_descriptor");
+            // Multiple descriptors for the same exact file add no different backing candidate.
+            candidate.image_fd = path;
+          }
+          else if (target == "/dev/fuse") {
+            require(same_file(fuse_file, read.stat(path)), "changed_fuse_descriptor");
+            const auto info = read.read(proc / "fdinfo" / name, 4096);
+            if (fuse_connection(info) == mount.minor) {
+              require(candidate.fuse_fd.empty(), "ambiguous_fuse_descriptors");
+              candidate.fuse_fd = path;
+              candidate.fuse_info = info;
+            }
+          }
+        }
+        if (!candidate.image_fd.empty() && !candidate.fuse_fd.empty()) {
+          require(!result, "ambiguous_appimage_keeper");
+          result = std::move(candidate);
+        }
+      }
+      require(result.has_value(), "appimage_keeper_not_proven");
+      return *result;
+    }
+
+    bool unchanged_keeper(reader_t &read, const appimage_keeper_t &keeper, const process_t &launcher,
+                          const mount_t &mount) {
+      const auto proc = fs::path("/proc") / std::to_string(keeper.process->stat.pid);
+      const auto launcher_proc = fs::path("/proc") / std::to_string(launcher.stat.pid);
+      return read.unchanged(*keeper.process) &&
+             mount_namespace(read.backend, "/proc/self") == keeper.mount_namespace &&
+             mount_namespace(read.backend, proc) == keeper.mount_namespace &&
+             mount_namespace(read.backend, launcher_proc) == keeper.mount_namespace &&
+             image_mount(read.read(proc / "mountinfo", mount_limit), launcher.exe).identity == mount.identity &&
+             read.canonical(keeper.process->exe) == keeper.process->exe &&
+             read.backend.link(keeper.image_fd) == keeper.process->exe &&
+             same_image(keeper.process->image, read.stat(keeper.image_fd)) &&
+             read.backend.link(keeper.fuse_fd) == fs::path("/dev/fuse") &&
+             same_file(keeper.fuse_file, read.stat(keeper.fuse_fd)) &&
+             read.read(proc / "fdinfo" / keeper.fuse_fd.filename(), 4096) == keeper.fuse_info;
+    }
+
     fs::path launcher_path(backend_t &backend) {
       reader_t read {backend};
       const auto boot = read.boot();
@@ -727,13 +836,23 @@ namespace platf::epic {
       auto executable = launcher->exe;
       auto executable_file = launcher->image;
       std::optional<fs::path> backing_source;
+      std::optional<appimage_keeper_t> keeper;
       if (mount.point.filename().string().compare(0, 7, ".mount_") == 0 || mount.type.compare(0, 4, "fuse") == 0 || mount.type == "squashfs") {
         // Do not guess Desktop/Downloads paths or use an unpacked AppImage binary without its runtime.
-        // Only an absolute kernel mount source can prove the backing AppImage in this first slice.
         const fs::path source = mount.source;
-        require(safe_absolute_path(source), "launcher_appimage_path_unproven");
-        executable = read.canonical(source);
-        backing_source = source;
+        if (safe_absolute_path(source)) {
+          executable = read.canonical(source);
+          backing_source = source;
+        }
+        else {
+          try {
+            keeper = appimage_keeper(read, table, *launcher, mount, own_group);
+          }
+          catch (const refusal_t &) {
+            throw refusal_t("launcher_appimage_path_unproven");
+          }
+          executable = keeper->process->exe;
+        }
         executable_file = read.stat(executable);
         require(executable_file.uid == backend.owner_uid() && safe_file(executable_file, backend.owner_uid(), true), "unsafe_launcher_appimage");
         const auto header = needed(backend.prefix(executable, 11), "unreadable_launcher_appimage");
@@ -741,6 +860,7 @@ namespace platf::epic {
       }
       require(read.unchanged(*launcher) && boot == read.boot() &&
                 (!backing_source || read.canonical(*backing_source) == executable) &&
+                (!keeper || unchanged_keeper(read, *keeper, *launcher, mount)) &&
                 same_image(executable_file, read.stat(executable)) &&
                 image_mount(read.read(proc / "mountinfo", mount_limit), launcher->exe).identity == mount.identity, "desktop_launcher_changed");
       return executable;
