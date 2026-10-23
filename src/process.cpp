@@ -11551,7 +11551,7 @@ namespace proc {
       {"uninspected_process_count", observed.uninspected_process_count},
       {"state", state},
       {"can_adopt", !managed && available}, {"can_release", managed},
-      {"message", managed ? (available ? "End Session may close this exact game. Disconnect leaves it running." :
+      {"message", managed ? (available ? "End Session or Mission Control Disconnect Client may close this exact game. Disconnect in the streaming client leaves it running." :
         "The retained game cannot currently be verified. Polaris will not switch to a replacement process.") :
         (available ? "This observed game may have been started outside Polaris. You decide whether End Session may close it." :
         "Games are left running by default. Open the game on the host; permission is offered only when its exact instance can be verified.")}};

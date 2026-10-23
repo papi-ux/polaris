@@ -33,20 +33,27 @@ to merge titles, and uncertain catalog data does not authorize a provider change
 
 ## Disconnect, End and close permission
 
-Games are **unmanaged by default**. Disconnect and Resume leave the game running. End stops the
-stream and leaves the game running too; close it on the host when you are finished.
+Games are **unmanaged by default**. Disconnect and Resume in Nova or Moonlight leave the game
+running. End Session, or **Disconnect Client** in Mission Control, ends the session and leaves
+an unmanaged game running too; close it on the host when you are finished.
 
-While the stream is open, the signed-in **host web console** can offer **Let Polaris close this
-game** in Mission Control. The second confirmation grants permission for the exact game instance
+While the stream is open, the signed-in **host web console** can offer **Allow close on End
+Session** in Mission Control. **Yes, allow close on End Session** grants permission for the exact game instance
 currently observed, including one you may have started outside Polaris. This is your explicit
 permission, not a claim that the earlier launch request started that process. A paired client's
 launch permission does not grant this access.
 
-With permission granted, End can ask that exact instance to close. **Leave it running** clears
-permission without sending a signal. Disconnect/Resume keep the grant for the same instance;
+Granting permission does not close the game immediately. With permission granted, **End Session**
+in the streaming client, or **Disconnect Client** in Mission Control, can ask that exact instance
+to close. **Leave it running** clears permission without sending a signal. Disconnect/Resume in
+the streaming client keep the grant for the same instance;
 replacement, restart or a changed process cannot silently inherit it. If identity cannot be
 verified or exit is not confirmed, close the game on the host. Polaris does not escalate to a
 process-group, launcher, prefix, wineserver or forced-kill fallback.
+
+If a status check cannot verify the game, confirmation pauses with **Yes** disabled. It resumes
+only when the same game is verified again. A changed game or session needs a new confirmation;
+refused requests remain visible instead of being silently retried.
 
 Some desktop processes restrict inspection. When this happens, the console shows how many
 could not be inspected before you confirm. Permission still concerns only the verified game

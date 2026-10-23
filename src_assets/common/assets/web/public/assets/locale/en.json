@@ -1860,7 +1860,7 @@
     "quick_controls": "Quick Controls",
     "disconnect_client_confirm_title": "Disconnect this client?",
     "disconnect_client_confirm_message": "{client} will be removed from the active stream.",
-    "disconnect_client_impact_stream": "The active viewer's stream is interrupted immediately.",
+    "disconnect_client_impact_stream": "The active session ends immediately. Games managed by Polaris may close.",
     "disconnect_client_impact_reconnect": "The client can reconnect after the host returns to a ready state.",
     "disconnect_client_pending": "Disconnecting client…",
     "disconnect_client_success": "Client disconnected.",
