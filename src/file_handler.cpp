@@ -35,6 +35,10 @@ namespace file_handler {
     return std::filesystem::create_directories(path);
   }
 
+  bool seed_user_file(const std::filesystem::path &source, const std::filesystem::path &destination) {
+    return std::filesystem::copy_file(source, destination, std::filesystem::copy_options::skip_existing);
+  }
+
   std::string read_file(const char *path) {
     if (!std::filesystem::exists(path)) {
       BOOST_LOG(debug) << "Missing file: " << path;

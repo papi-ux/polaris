@@ -6,6 +6,7 @@
 #include "../tests_paths.h"
 
 #include <format>
+#include <chrono>
 #include <src/file_handler.h>
 
 struct FileHandlerParentDirectoryTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
@@ -194,4 +195,86 @@ TEST(FileHandlerTailTests, LargeFileStillReturnsAtMostTheRequestedBytes) {
   EXPECT_EQ(result.start_offset, content.size() - 4096);
   EXPECT_EQ(result.end_offset, content.size());
   EXPECT_TRUE(result.truncated);
+}
+
+namespace {
+  class FileHandlerSeedTests: public testing::Test {
+  protected:
+    std::filesystem::path directory;
+    std::filesystem::path source;
+    std::filesystem::path destination;
+
+    void SetUp() override {
+      directory = test_paths::root() / ("seed-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+      ASSERT_TRUE(std::filesystem::create_directory(directory));
+      source = directory / "packaged-apps.json";
+      destination = directory / "apps.json";
+      ASSERT_EQ(file_handler::write_file(source.string().c_str(), R"({"apps":[]})"), 0);
+      std::filesystem::permissions(source, std::filesystem::perms::owner_read |
+        std::filesystem::perms::group_read | std::filesystem::perms::others_read);
+    }
+
+    void TearDown() override {
+      std::error_code error;
+      std::filesystem::permissions(source, std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::add, error);
+      std::filesystem::remove_all(directory, error);
+    }
+  };
+}  // namespace
+
+TEST_F(FileHandlerSeedTests, ReadOnlyTemplateSeedsAUserWritableLibrary) {
+  const auto original = file_handler::read_file(source.string().c_str());
+  const auto original_mode = std::filesystem::status(source).permissions();
+  ASSERT_TRUE(file_handler::seed_user_file(source, destination));
+  EXPECT_NE(std::filesystem::status(destination).permissions() & std::filesystem::perms::owner_write,
+    std::filesystem::perms::none);
+  EXPECT_EQ(file_handler::read_file(destination.string().c_str()), original);
+  EXPECT_EQ(file_handler::write_file(destination.string().c_str(), R"({"apps":[{"name":"Saved"}]})"), 0);
+  EXPECT_EQ(file_handler::read_file(destination.string().c_str()), R"({"apps":[{"name":"Saved"}]})");
+  EXPECT_EQ(file_handler::read_file(source.string().c_str()), original);
+  EXPECT_EQ(std::filesystem::status(source).permissions(), original_mode);
+}
+
+TEST_F(FileHandlerSeedTests, ExistingLibraryKeepsItsContentsAndReadOnlyMode) {
+  ASSERT_EQ(file_handler::write_file(destination.string().c_str(), "existing-library"), 0);
+  std::filesystem::permissions(destination, std::filesystem::perms::owner_read);
+  const auto mode = std::filesystem::status(destination).permissions();
+  EXPECT_FALSE(file_handler::seed_user_file(source, destination));
+  EXPECT_EQ(file_handler::read_file(destination.string().c_str()), "existing-library");
+  EXPECT_EQ(std::filesystem::status(destination).permissions(), mode);
+}
+
+#ifndef _WIN32
+TEST_F(FileHandlerSeedTests, ExistingSymlinkDoesNotChangeItsTarget) {
+  std::filesystem::create_symlink(source, destination);
+  const auto mode = std::filesystem::status(source).permissions();
+  EXPECT_FALSE(file_handler::seed_user_file(source, destination));
+  EXPECT_TRUE(std::filesystem::is_symlink(destination));
+  EXPECT_EQ(std::filesystem::status(source).permissions(), mode);
+  EXPECT_EQ(file_handler::read_file(source.string().c_str()), R"({"apps":[]})");
+}
+
+TEST_F(FileHandlerSeedTests, DanglingSymlinkDoesNotCreateItsTarget) {
+  const auto missing = directory / "unrelated.json";
+  std::filesystem::create_symlink(missing, destination);
+  EXPECT_THROW(file_handler::seed_user_file(source, destination), std::filesystem::filesystem_error);
+  EXPECT_FALSE(std::filesystem::exists(missing));
+  EXPECT_TRUE(std::filesystem::is_symlink(destination));
+}
+#endif
+
+TEST_F(FileHandlerSeedTests, MissingTemplateDoesNotCreateAFile) {
+  EXPECT_THROW(file_handler::seed_user_file(directory / "missing-template", destination),
+    std::filesystem::filesystem_error);
+  EXPECT_FALSE(std::filesystem::exists(destination));
+}
+
+TEST_F(FileHandlerSeedTests, PrivateTemplateDoesNotGainPublicPermissions) {
+  const auto private_mode = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
+  std::filesystem::permissions(source, private_mode);
+  ASSERT_TRUE(file_handler::seed_user_file(source, destination));
+  EXPECT_EQ(std::filesystem::status(destination).permissions() & std::filesystem::perms::all, private_mode);
+  EXPECT_EQ(std::filesystem::status(source).permissions() & std::filesystem::perms::all, private_mode);
 }

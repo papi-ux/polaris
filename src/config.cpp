@@ -1455,7 +1455,7 @@ namespace config {
 #ifndef __ANDROID__
     // TODO: Android can possibly support this
     if (!fs::exists(stream.file_apps.c_str())) {
-      fs::copy_file(POLARIS_ASSETS_DIR "/apps.json", stream.file_apps);
+      file_handler::seed_user_file(POLARIS_ASSETS_DIR "/apps.json", stream.file_apps);
     }
 #endif
 
