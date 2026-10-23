@@ -378,7 +378,25 @@
                   <span v-if="game.slug" class="control-chip">{{ game.slug }}</span>
                   <span v-if="game.emulator_label" class="control-chip">{{ game.emulator_label }}</span>
                   <span v-if="game.source === 'emulator' && game.platform" class="control-chip">{{ game.platform }}</span>
+                  <span v-if="game.source === 'epic_launcher' && game.provider" class="control-chip">{{ game.provider === 'official' ? 'Epic Launcher' : 'Heroic' }}</span>
+                  <span v-if="game.source === 'epic_launcher' && game.installed_platform" class="control-chip">{{ game.installed_platform }}</span>
+                  <span v-if="game.source === 'epic_launcher' && game.runtime" class="control-chip">{{ game.runtime }}</span>
                   <span v-if="game.game_category && game.game_category !== 'unknown'" class="control-chip">{{ formatCategory(game.game_category) }}</span>
+                </div>
+                <!-- Explicit, two-step provider switch for a deduped title both launchers can provide. -->
+                <div v-if="canSwitchEpicProvider(game)" class="mt-2 text-[11px]" @click.stop.prevent>
+                  <button
+                    v-if="providerSwitchKey !== importGameKey(game)"
+                    type="button"
+                    class="focus-ring mc-inline-link"
+                    :data-epic-provider-switch="importGameKey(game)"
+                    @click.stop.prevent="beginEpicProviderSwitch(game)"
+                  >{{ epicProviderSwitchLabel(game) }}</button>
+                  <span v-else class="flex flex-wrap items-center gap-2 text-storm">
+                    <span>Switch to {{ epicProviderSwitchLabel(game) }}? Your imported entry, art and settings are kept.</span>
+                    <button type="button" class="focus-ring mc-inline-link text-ice" :disabled="gameSwitching" data-epic-provider-confirm @click.stop.prevent="confirmEpicProviderSwitch(game)">Confirm</button>
+                    <button type="button" class="focus-ring mc-inline-link" :disabled="gameSwitching" data-epic-provider-cancel @click.stop.prevent="cancelEpicProviderSwitch">Cancel</button>
+                  </span>
                 </div>
               </div>
             </label>
@@ -1376,10 +1394,10 @@ import {
 
 const { toast: showToast } = useToast()
 const {
-  scanning: gameScanning, importing: gameImporting,
-  steamGames, lutrisGames, heroicGames, emulatorGames, librarySources,
+  scanning: gameScanning, importing: gameImporting, switching: gameSwitching,
+  steamGames, lutrisGames, heroicGames, emulatorGames, epicGames, librarySources,
   error: gameScanError, importedGames,
-  scan: scanGames, importSelected, toggleAll: gameToggleAll
+  scan: scanGames, importSelected, switchEpicProvider, toggleAll: gameToggleAll
 } = useGameScanner()
 const showImport = ref(false)
 const showImportReview = ref(false)
@@ -1602,6 +1620,7 @@ const importPools = computed(() => ({
   lutris: lutrisGames.value,
   heroic: heroicGames.value,
   emulator: emulatorGames.value,
+  epic: epicGames.value,
 }))
 const importSources = computed(() => ([
   {
@@ -1628,9 +1647,15 @@ const importSources = computed(() => ([
     ...summarizeImportGames(emulatorGames.value),
     activeClass: 'border-success/30 bg-success/10 text-success',
   },
+  {
+    key: 'epic',
+    label: 'Epic (Preview)',
+    ...summarizeImportGames(epicGames.value),
+    activeClass: 'border-ice/30 bg-ice/10 text-ice',
+  },
 ]).filter((source) => importPools.value[source.key]?.length > 0))
 const hasImportSources = computed(() => importSources.value.length > 0)
-const allImportGames = computed(() => [...steamGames.value, ...lutrisGames.value, ...heroicGames.value, ...emulatorGames.value])
+const allImportGames = computed(() => [...steamGames.value, ...lutrisGames.value, ...heroicGames.value, ...emulatorGames.value, ...epicGames.value])
 const availableImportCount = computed(() => allImportGames.value.filter((game) => !game.already_imported).length)
 const selectedImportCount = computed(() => allImportGames.value.filter((game) => game.selected && !game.already_imported).length)
 const importedImportCount = computed(() => allImportGames.value.filter((game) => game.already_imported).length)
@@ -1721,7 +1746,33 @@ function importSourceChip(game) {
 }
 
 function importGameKey(game) {
-  return game.appid || game.slug || game.rom_path || game.name
+  // Official Epic entries have no appid/slug; their exact triple keeps the key unique.
+  return game.appid || game.slug || game.rom_path || game.artifact_id || game.item_id || game.name
+}
+
+// Explicit, confirmed Epic launch-provider switch from an already-imported candidate.
+// Never automatic: a two-step confirm, and the host preserves the existing entry.
+const providerSwitchKey = ref('')
+function otherEpicProvider(game) {
+  return game.provider === 'official' ? 'heroic' : 'official'
+}
+function epicProviderSwitchLabel(game) {
+  return otherEpicProvider(game) === 'official' ? 'Use Epic Launcher' : 'Use Heroic'
+}
+function canSwitchEpicProvider(game) {
+  return game.source === 'epic_launcher' && game.already_imported && Boolean(game.existing_uuid) &&
+    Array.isArray(game.providers) && game.providers.includes(otherEpicProvider(game))
+}
+function beginEpicProviderSwitch(game) { providerSwitchKey.value = importGameKey(game) }
+function cancelEpicProviderSwitch() { providerSwitchKey.value = '' }
+async function confirmEpicProviderSwitch(game) {
+  const ok = await switchEpicProvider(game.existing_uuid, {
+    provider: otherEpicProvider(game),
+    namespace: game.namespace,
+    item_id: game.item_id,
+    artifact_id: game.artifact_id,
+  })
+  if (ok) providerSwitchKey.value = ''
 }
 
 function importGameStateLabel(game) {

@@ -15,6 +15,9 @@
 
     <DashboardSpaces v-if="hostPlatform === 'linux' && dashboardSpaces.visible" :model="dashboardSpaces" :loading="spacesLoading" @refresh="refreshSpaces" />
 
+    <!-- Owner-confirmed control for an active Epic Preview game; renders itself only while such a session exists. -->
+    <EpicSessionControls v-if="hostPlatform === 'linux'" class="mb-4" />
+
     <div class="mc-shell" :class="{ 'dashboard-live-shell': stageMode === 'live', 'is-preview-expanded': stageMode === 'live' && showPreview && previewExpanded }">
       <!-- The stage: what is playing (or next up), its main action, the route, then the readings.
            Space sessions keep their own section above and no stage. -->
@@ -493,6 +496,7 @@ import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { useFavicon } from '../composables/useFavicon'
 import Skeleton from '../components/Skeleton.vue'
 import DashboardSpaces from '../components/DashboardSpaces.vue'
+import EpicSessionControls from '../components/EpicSessionControls.vue'
 import { useSpacesSnapshot } from '../composables/useSpacesSnapshot.js'
 import { summarizeDashboardSpaces } from '../dashboard-spaces.js'
 import GaugeArc from '../components/GaugeArc.vue'
