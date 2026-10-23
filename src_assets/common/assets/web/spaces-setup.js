@@ -118,7 +118,7 @@ export function setupSteps(setup, check) {
       ...(access ? [{ title: 'Let the Polaris service account use Docker', command: access }] : [])]
   }
   if (check.id === 'security') {
-    if (setup.immutable_host) return []
+    if (setup.immutable_host || check.action !== 'install_selinux') return []
     return [...(setup.distribution === 'fedora' ? [{ title: 'Install the policy tools', command: fedoraSecurityPackages }] : []),
       { title: 'Run the helper from the native package, with Polaris stopped', command: installSpacesSecurity }]
   }

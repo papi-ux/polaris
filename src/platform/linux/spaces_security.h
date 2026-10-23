@@ -9,6 +9,8 @@ namespace multiseat::spaces {
     bool seccomp = false;
     bool selinux = false;
     bool kernel_probe = false, enforcing = false, contexts = false, rule = false, receipt = false;
+    // The selected local Docker daemon reports AppArmor confinement.
+    bool apparmor = false;
   };
   struct security_status_t {
     bool ready = false;

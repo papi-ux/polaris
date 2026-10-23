@@ -279,7 +279,7 @@ namespace multiseat::spaces {
 
   nlohmann::json inspect_setup(container::host_t &host, bool enabled, bool available, const std::optional<security_facts_t> &security) {
     setup_facts_t f;
-    f.security = describe_security(security ? *security : inspect_security(host));
+    auto security_facts = security ? *security : inspect_security(host);
     f.uid = host.effective_uid(); f.gid = host.effective_gid();
     f.controller_enabled = enabled; f.controller_available = available;
     std::error_code error;
@@ -310,7 +310,9 @@ namespace multiseat::spaces {
             f.daemon_replied = true; f.daemon_linux = info.value("OSType", "") == "linux";
             for (const auto &option : info["SecurityOptions"]) {
               if (!option.is_string()) { f.daemon_replied = false; break; }
-              if (option.get<std::string>().starts_with("name=rootless")) f.daemon_rootless = true;
+              const auto value = option.get<std::string>();
+              if (value.starts_with("name=rootless")) f.daemon_rootless = true;
+              if (value == "name=apparmor" || value.starts_with("name=apparmor,")) security_facts.apparmor = true;
             }
             auto runtime = info.at("Runtimes").at("runc").value("path", "");
             f.daemon_runc = runtime == "runc" || runtime == "/usr/bin/runc";
@@ -345,6 +347,7 @@ namespace multiseat::spaces {
         f.driver_libraries_package = thirty_two_bit_driver_package(f.distribution);
       }
     }
+    f.security = describe_security(security_facts);
     return describe_setup(f);
   }
 }

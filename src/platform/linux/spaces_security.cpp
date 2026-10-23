@@ -8,6 +8,7 @@
 namespace multiseat::spaces {
   security_status_t describe_security(const security_facts_t &f) {
     if (!f.seccomp) return {false, "package_missing", "Install the matching native Polaris package. Its required Steam security file is missing or different."};
+    if (f.apparmor) return {false, "apparmor_unsupported", "Docker uses AppArmor, and Polaris does not yet provide verified AppArmor support for Steam Spaces. Steam may report that user namespaces are unavailable when its sandbox mounts are blocked. Keep AppArmor enabled and review the Spaces security guide; do not run the Space privileged or unconfined."};
     if (!f.selinux) return {true, "ready", "The packaged Steam security file is verified. This host does not require SELinux setup."};
     if (!f.kernel_probe) return {false, "probe_failed", "Polaris could not check the host security policy. Open Doctor & Support before continuing."};
     if (!f.enforcing) return {false, "not_enforcing", "Spaces requires SELinux enforcing on this host. Review your system security settings; setup will not change them."};
