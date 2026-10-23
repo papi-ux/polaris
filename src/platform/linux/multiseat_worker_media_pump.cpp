@@ -5,7 +5,6 @@
 #ifdef __linux__
 
   #include "multiseat_worker_media_pump.h"
-  #include "src/logging.h"
 
   #include <algorithm>
   #include <atomic>
@@ -195,6 +194,11 @@ namespace multiseat::media {
            status == pump_status_e::ended_on_end_of_stream;
   }
 
+  std::string bitrate_clamp_message(std::uint32_t requested, std::uint32_t selected, std::uint32_t ceiling) {
+    return "Spaces video bitrate clamped by worker contract: requested " + std::to_string(requested) +
+           " kbps; selected " + std::to_string(selected) + " kbps; ceiling " + std::to_string(ceiling) + " kbps";
+  }
+
   pump_report_t run(
     const worker_ipc::controller_connection_t &connection,
     const expected_media_t &expected,
@@ -260,14 +264,6 @@ namespace multiseat::media {
     report.selected_bitrate_kbps = bitrate;
     if (connection.acknowledge_media_config() != transport_status_e::applied) {
       return finish(stopping() ? pump_status_e::ended_on_shutdown : pump_status_e::acknowledgement_refused);
-    }
-    // Report the effective selection only after the worker accepted the
-    // contract, while the stream is starting rather than only at teardown.
-    // Clamping is normal negotiation, not a stream-health warning.
-    if (expected.bitrate_kbps > bitrate) {
-      BOOST_LOG(info) << "Spaces video bitrate clamped by worker contract: requested "
-                      << expected.bitrate_kbps << " kbps; selected " << bitrate
-                      << " kbps; ceiling " << contract->bitrate_ceiling_kbps << " kbps";
     }
     request_side.enable_media_controls();
 

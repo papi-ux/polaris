@@ -5,7 +5,6 @@
 #include "multiseat_fake_worker.h"
 
 #include "src/platform/linux/multiseat_worker_media_pump.h"
-#include "../../tests_log_capture.h"
 
 #include <gtest/gtest.h>
 
@@ -163,7 +162,7 @@ TEST(MultiseatWorkerMediaPump, SelectsTheNegotiatedVideoBudgetBeforeAcknowledgem
 TEST(MultiseatWorkerMediaPump, ExplainsWorkerBitrateClampingWithoutChangingSelection) {
   for (const auto requested : {4000U, 20000U}) {
     temporary_root_t root;
-    const test_log_capture_t log;
+    std::vector<std::string> notes;
     authority_store_t store {root.path(), deterministic_capability(0x42)};
     auto authority = create_authority(store, identity_for(), "generation-pump-clamp");
     fake_worker_t worker {authority, fake_behavior_e::media_contract};
@@ -172,19 +171,27 @@ TEST(MultiseatWorkerMediaPump, ExplainsWorkerBitrateClampingWithoutChangingSelec
     delivered_t delivered;
     auto expected = matching_expectation();
     expected.bitrate_kbps = requested;
-    const auto report = run(client.lease_connection(), expected, delivered.sinks(), quiet_host());
+    auto sinks = delivered.sinks();
+    sinks.bitrate_clamped = [&](std::uint32_t request, std::uint32_t selected, std::uint32_t ceiling) {
+      EXPECT_EQ(request, requested);
+      EXPECT_EQ(selected, 15000U);
+      EXPECT_EQ(ceiling, 15000U);
+      notes.push_back(bitrate_clamp_message(request, selected, ceiling));
+    };
+    const auto report = run(client.lease_connection(), expected, sinks, quiet_host());
     EXPECT_EQ(report.selected_bitrate_kbps, std::min(requested, 15000U));
     EXPECT_EQ(worker.selected_bitrate(), report.selected_bitrate_kbps);
     EXPECT_EQ(worker.contract_messages(),
       (std::vector<message_e> {message_e::select_media_bitrate, message_e::media_config_ack}));
-    const auto text = log.text();
     if (requested > 15000U) {
+      ASSERT_EQ(notes.size(), 1U);
+      const auto &text = notes.front();
       EXPECT_NE(text.find("Spaces video bitrate clamped by worker contract"), std::string::npos);
       EXPECT_NE(text.find("requested 20000 kbps"), std::string::npos);
       EXPECT_NE(text.find("selected 15000 kbps"), std::string::npos);
       EXPECT_NE(text.find("ceiling 15000 kbps"), std::string::npos);
     } else {
-      EXPECT_EQ(text.find("clamped by worker contract"), std::string::npos);
+      EXPECT_TRUE(notes.empty());
     }
   }
 }
