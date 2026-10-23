@@ -31,6 +31,11 @@ build without CUDA, use:
 services.polaris.package = pkgs.polaris-stream.override { cudaSupport = false; };
 ```
 
+Nixpkgs defaults CUDA support off. NVIDIA hosts importing the overlay that
+previously relied on its always-enabled CUDA build should set
+`nixpkgs.config.cudaSupport = true`, or choose it for this package with
+`services.polaris.package = pkgs.polaris-stream.override { cudaSupport = true; };`.
+
 Both variants keep Vulkan headers and the runtime loader. This makes Vulkan
 available to the non-CUDA build; it does not install a GPU driver or establish
 AMD/Intel streaming support on a particular host.
@@ -41,6 +46,10 @@ The `streamMode = "labwc"` option seeds Polaris's `headless_stream` mode;
 left alone, so check an older explicit `encoder = nvenc` setting in the web UI
 when moving a configuration to another GPU. The configured Gamescope helper
 also takes priority over the package's copy in Home Manager/hjem profiles.
+
+The package version follows Polaris's CMake project version. Git-backed flake
+inputs report their source revision; a path-only input reports an unknown
+commit rather than a fixed historical commit.
 
 ## CI coverage
 
