@@ -265,15 +265,20 @@ TEST(MultiseatWorkerMediaPump, RefusesAContractTheClientDidNotNegotiate) {
 
   auto expectation = matching_expectation();
   expectation.height = 1080;  // the worker announced 720
+  expectation.bitrate_kbps = 20000;
   delivered_t delivered;
+  auto sinks = delivered.sinks();
+  bool reported_clamp = false;
+  sinks.bitrate_clamped = [&](std::uint32_t, std::uint32_t, std::uint32_t) { reported_clamp = true; };
   const auto report = run(
-    client.lease_connection(), expectation, delivered.sinks(), quiet_host()
+    client.lease_connection(), expectation, sinks, quiet_host()
   );
 
   EXPECT_EQ(report.status, pump_status_e::mismatched_contract);
   EXPECT_EQ(report.video_frames, 0U);
   EXPECT_EQ(report.audio_frames, 0U);
   EXPECT_FALSE(report.detail.empty());
+  EXPECT_FALSE(reported_clamp) << "an unaccepted contract has no effective bitrate to report";
   EXPECT_TRUE(worker.contract_messages().empty())
     << "a contract the client did not negotiate must never be acknowledged";
 

@@ -265,6 +265,9 @@ namespace multiseat::media {
     if (connection.acknowledge_media_config() != transport_status_e::applied) {
       return finish(stopping() ? pump_status_e::ended_on_shutdown : pump_status_e::acknowledgement_refused);
     }
+    if (expected.bitrate_kbps > bitrate && sinks.bitrate_clamped) {
+      sinks.bitrate_clamped(expected.bitrate_kbps, bitrate, contract->bitrate_ceiling_kbps);
+    }
     request_side.enable_media_controls();
 
     std::vector<std::uint8_t> bytes;
