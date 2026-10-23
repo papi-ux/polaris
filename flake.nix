@@ -83,6 +83,10 @@
         inherit self nixpkgs;
       };
 
+      checks.x86_64-linux.gpu-defaults = import ./nix/tests/gpu-defaults.nix {
+        inherit self nixpkgs;
+      };
+
       hjemModules.polaris = import ./nix/modules/hjem.nix;
       hjemModules.default = self.hjemModules.polaris;
 
