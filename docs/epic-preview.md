@@ -58,4 +58,3 @@ process-group, launcher, prefix, wineserver or forced-kill fallback.
   unmanaged; the warning is not evidence of software encoding, a broken save or a stopped game.
 - Keep using your existing Heroic entry if the official provider is unavailable. Its own setup,
   library, save locations and account data remain separate.
-
