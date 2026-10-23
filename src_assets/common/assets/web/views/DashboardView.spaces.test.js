@@ -54,6 +54,24 @@ async function render(streaming = true, { attach = false, dialogs = false, stats
 const spaceReads = () => fetch.mock.calls.filter(([url]) => url === './api/multiseat/profiles')
 
 describe('Mission Control with Space sessions', () => {
+  it('does not load or poll Epic controls for idle or other-provider sessions', async () => {
+    appPayload = { apps: [{ uuid: 'game', name: 'Control', source: 'steam', cmd: 'game' }], current_app: 'game' }
+    await render()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(fetch.mock.calls.filter(([url]) => url === './api/epic/session')).toHaveLength(0)
+    appPayload.current_app = ''
+    await wrapper.vm.refreshApps(); await flushPromises()
+    expect(fetch.mock.calls.filter(([url]) => url === './api/epic/session')).toHaveLength(0)
+  })
+
+  it('loads Epic controls when the current app belongs to the official launcher', async () => {
+    appPayload = { apps: [{ uuid: 'game', name: 'Epic game', source: 'epic_launcher' }], current_app: 'game' }
+    await render()
+    await vi.waitFor(() => {
+      expect(fetch.mock.calls.some(([url]) => url === './api/epic/session')).toBe(true)
+    }, { timeout: 2000, interval: 20 })
+  })
+
   it('puts idle launches before collapsible vitals, preserving zero and unknown readings', async () => {
     shared.gpu.value = { name: 'Fixture GPU', temperature_c: 0, utilization_pct: 0 }
     appPayload = { apps: [{ uuid: 'game', name: 'Control', cmd: 'game' }], current_app: '' }
