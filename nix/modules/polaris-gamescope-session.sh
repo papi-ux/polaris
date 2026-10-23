@@ -753,6 +753,9 @@ retire_marked_nested_gamescope_under_fence() (
   if [ "${POLARIS_GAMESCOPE_LOCK_HELD:-0}" != 1 ]; then
     exec 9>>"$rt/polaris-gamescope.lock" || return 1
     "$lock_bin" -x 9 || return 1
+    # FD9 belongs to this teardown subshell. Its helpers inherit the held flag;
+    # the caller must not keep that flag after this subshell releases the lock.
+    # shellcheck disable=SC2030
     export POLARIS_GAMESCOPE_LOCK_HELD=1
   fi
   polaris_validate_marker "$marker" nested || return 1
@@ -1500,6 +1503,9 @@ case "${1:-}" in
         fi
         exec 8>>"$rt/polaris-gamescope.lock" || exit 1
         "${POLARIS_FLOCK_BIN:-flock}" -x 8 || exit 1
+        # This is a fresh parent-owned FD8 lock, independent of teardown's FD9.
+        # Set its flag anew rather than relying on that subshell's local export.
+        # shellcheck disable=SC2031
         export POLARIS_GAMESCOPE_LOCK_HELD=1
         if ! {
           [ -f "$nested_claim" ] \
