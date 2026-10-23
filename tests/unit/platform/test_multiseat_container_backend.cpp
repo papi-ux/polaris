@@ -2969,6 +2969,29 @@ TEST(MultiseatDockerBackend, SteamLaunchRequiresTheInstalledExactSeccompPolicy) 
   for (const auto &call : host.calls) EXPECT_FALSE(has_argument(call, "run"));
 }
 
+TEST(MultiseatDockerBackend, SteamLaunchRefusesAppArmorBeforeCreatingAWorker) {
+  for (const auto *option : {"name=apparmor", "name=apparmor,profile=docker-default"}) {
+    SCOPED_TRACE(option);
+    auto options = docker_options_for_tests(); options.media_enabled = true;
+    options.profiles.front().profile_key = "profile-alpha";
+    options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
+    auto spec = valid_spec(); spec.workload = options.workloads.front();
+    spec.profile_key = options.profiles.front().profile_key; spec.display_mode.hdr = false;
+    fake_host_t host; fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options};
+    auto info = docker_info_for_tests();
+    info["SecurityOptions"].push_back(option);
+    host.push({.exit_status = 0, .output = info.dump()});
+    host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+    host.push({.exit_status = 0, .output = steam_network(spec.profile_key).dump()});
+    host.push({.exit_status = 0, .output = steam_network(spec.profile_key).dump()});
+    host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    ASSERT_EQ(host.calls.size(), 1U) << "Refuse before volume, network or container creation";
+    for (const auto &call : host.calls) EXPECT_FALSE(has_argument(call, "run"));
+  }
+}
+
 TEST(MultiseatDockerBackend, SteamRecoveryChecksExactNetworkAndDeniesPublishedPorts) {
   for (unsigned kind = 0; kind != 9; ++kind) {
     auto options = docker_options_for_tests(); options.media_enabled = true;

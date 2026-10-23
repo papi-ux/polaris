@@ -267,6 +267,33 @@ TEST(SpacesSetup, RefusesFailedTimedOutAndTruncatedProbes) {
     EXPECT_EQ(spaces::inspect_setup(host, false, false, spaces::security_facts_t {.seccomp = true})["host_prerequisites_ready"], false);
   }
 }
+
+TEST(SpacesSetup, AppArmorDockerDoesNotReportSpacesSecurityReady) {
+  for (const auto *option : {"name=apparmor", "name=apparmor,profile=docker-default"}) {
+    SCOPED_TRACE(option);
+    setup_host_t host;
+    auto info = json::parse(host.result.output);
+    info["SecurityOptions"] = {option, "name=seccomp,profile=builtin"};
+    host.result.output = info.dump();
+    const auto value = spaces::inspect_setup(host, false, false, spaces::security_facts_t {.seccomp = true});
+    EXPECT_FALSE(value.at("host_prerequisites_ready").get<bool>());
+    const auto &security = check(value, "security");
+    EXPECT_EQ(security.at("state"), "required");
+    EXPECT_NE(security.at("detail").get<std::string>().find("AppArmor"), std::string::npos);
+    EXPECT_FALSE(security.contains("host_action"));
+    EXPECT_EQ(security.at("doc_anchor"), "#prepare-spaces-security-support");
+  }
+}
+
+TEST(SpacesSetup, SimilarSecurityOptionNamesDoNotClaimAppArmor) {
+  setup_host_t host;
+  auto info = json::parse(host.result.output);
+  info["SecurityOptions"] = {"name=apparmor-other", "name=seccomp,profile=builtin"};
+  host.result.output = info.dump();
+  const auto value = spaces::inspect_setup(host, false, false, spaces::security_facts_t {.seccomp = true});
+  EXPECT_TRUE(value.at("host_prerequisites_ready").get<bool>());
+  EXPECT_EQ(check(value, "security").at("state"), "ready");
+}
 TEST(SpacesSetup, RuntimeCheckFollowsSecurityAndIsNotAHostPrerequisite) {
   auto f = prepared();
   const auto value = spaces::describe_setup(f);
