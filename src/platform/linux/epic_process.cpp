@@ -272,11 +272,15 @@ namespace platf::epic {
       };
       std::vector<uninspected_t> uninspected;
 
-      std::string read(const fs::path &path, std::size_t limit = small_limit) {
-        auto value = needed(backend.read(path, limit), "incomplete_process_observation");
+      std::string counted(std::optional<std::string> text) {
+        auto value = needed(std::move(text), "incomplete_process_observation");
         bytes += value.size();
         require(bytes <= snapshot_limit, "process_snapshot_too_large");
         return value;
+      }
+
+      std::string read(const fs::path &path, std::size_t limit = small_limit) {
+        return counted(backend.read(path, limit));
       }
 
       fs::path link(const fs::path &path) {
@@ -406,7 +410,11 @@ namespace platf::epic {
           const auto path = fs::path("/proc") / name;
           // A same-UID non-dumpable process can have a root-owned proc directory.
           // Read non-secret status first, so it cannot silently disappear from an owned scan.
-          if (!check_uid(read(path / "status"), owner)) {
+          auto status = backend.initial_status(path, small_limit);
+          if (!status.text && status.absence == testing::process_absence_t::vanished) {
+            continue;
+          }
+          if (!check_uid(counted(std::move(status.text)), owner)) {
             continue;
           }
           require(stat(path).uid == owner, "unreadable_owner_process");
@@ -665,12 +673,15 @@ namespace platf::epic {
              a.pid == b.pid && a.start_ticks == b.start_ticks && a.runtime == b.runtime;
     }
 
-    std::optional<std::string> read_file(const fs::path &path, std::size_t limit, bool prefix) {
+    std::optional<std::string> read_file(const fs::path &path, std::size_t limit, bool prefix, int *open_error = nullptr) {
       if (limit == 0 || limit > maps_limit) {
         return std::nullopt;
       }
       const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
       if (fd < 0) {
+        if (open_error) {
+          *open_error = errno;
+        }
         return std::nullopt;
       }
       struct fd_guard_t {
@@ -706,6 +717,32 @@ namespace platf::epic {
 
       std::optional<std::string> read(const fs::path &path, std::size_t limit) override {
         return read_file(path, limit, false);
+      }
+
+      testing::status_result_t initial_status(const fs::path &process, std::size_t limit) override {
+        int open_error = 0;
+        auto text = read_file(process / "status", limit, false, &open_error);
+        if (text) {
+          return {std::move(text)};
+        }
+        struct stat info {};
+        if (open_error != ENOENT || ::lstat(process.c_str(), &info) == 0 || errno != ENOENT) {
+          return {};
+        }
+#ifdef SYS_pidfd_open
+        // Procfs may hide a live process as ENOENT. Require kernel absence too.
+        // A reused/live PID supplies no census identity or close authority: close
+        // the probe immediately and refuse. No retry follows either result.
+        const int probe = open_pidfd(number(process.filename().string()));
+        if (probe >= 0) {
+          ::close(probe);
+          return {};
+        }
+        if (errno == ESRCH) {
+          return {std::nullopt, testing::process_absence_t::vanished};
+        }
+#endif
+        return {};
       }
 
       std::optional<std::string> prefix(const fs::path &path, std::size_t length) override {

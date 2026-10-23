@@ -83,10 +83,19 @@ namespace platf::epic {
       bool permission_denied {false};
     };
 
+    enum class process_absence_t { unproven, vanished };
+
+    struct status_result_t {
+      std::optional<std::string> text;
+      process_absence_t absence {process_absence_t::unproven};
+    };
+
     struct backend_t {
       virtual ~backend_t() = default;
       virtual std::uint64_t owner_uid() const = 0;
       virtual std::optional<std::string> read(const std::filesystem::path &, std::size_t limit) = 0;
+      // Only initial census status may prove absence; ordinary read failures never do.
+      virtual status_result_t initial_status(const std::filesystem::path &process, std::size_t limit) { return {read(process / "status", limit)}; }
       virtual std::optional<std::string> prefix(const std::filesystem::path &, std::size_t length) = 0;
       virtual std::optional<std::filesystem::path> link(const std::filesystem::path &) = 0;
       // Missing/raced links are not permission denials. Fixture backends opt in explicitly.

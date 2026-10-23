@@ -9,6 +9,7 @@
 #include <src/platform/linux/epic_process.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
@@ -24,6 +25,7 @@ namespace {
   namespace ep = platf::epic;
   namespace fs = std::filesystem;
   using namespace std::chrono_literals;
+  using ep::testing::backend_t;
   using ep::testing::exit_state_t;
   using ep::testing::file_t;
 
@@ -67,7 +69,11 @@ namespace {
     std::map<fs::path, file_t> identities;
     std::map<fs::path, std::vector<std::string>> listings;
     std::set<fs::path> denied_links;
+    std::map<fs::path, int> status_errors, directory_errors, absence_probe_errors;
+    std::set<fs::path> live_absence_probes;
+    std::vector<fs::path> closed_absence_probes;
     std::function<void(const fs::path &)> after_read;
+    std::function<void(const fs::path &)> after_missing_status;
     std::vector<std::string> pids;
     std::vector<fs::path> reads;
     std::vector<std::uint64_t> opened;
@@ -161,6 +167,32 @@ namespace {
         after_read(path);
       }
       return value;
+    }
+
+    ep::testing::status_result_t initial_status(const fs::path &process, std::size_t limit) override {
+      auto text = read(process / "status", limit);
+      if (text) {
+        return {std::move(text)};
+      }
+      // Missing fixture entries model ENOENT; other failures require explicit injection.
+      const auto error = status_errors.find(process);
+      if (error != status_errors.end() && error->second != ENOENT) {
+        return {};
+      }
+      if (after_missing_status) {
+        after_missing_status(process);
+      }
+      const auto directory_error = directory_errors.find(process);
+      if (identities.count(process) || (directory_error != directory_errors.end() && directory_error->second != ENOENT)) {
+        return {};
+      }
+      if (live_absence_probes.count(process)) {
+        closed_absence_probes.push_back(process);
+        return {};
+      }
+      const auto probe_error = absence_probe_errors.find(process);
+      return probe_error == absence_probe_errors.end() || probe_error->second == ESRCH ?
+        ep::testing::status_result_t {std::nullopt, ep::testing::process_absence_t::vanished} : ep::testing::status_result_t {};
     }
 
     std::optional<std::string> prefix(const fs::path &path, std::size_t length) override {
@@ -288,6 +320,111 @@ TEST_F(EpicProcess, MapsParseTheWholeEscapedOrUnescapedPathAndRejectBadPermissio
   EXPECT_TRUE(observe().available);
   host->files["/proc/41/maps"] = "1000-2000 zzzz 00000000 00:22 236793710 " + escaped(image) + "\n";
   EXPECT_EQ(observe().reason, "malformed_map_permissions");
+}
+
+TEST_F(EpicProcess, CensusRowVanishedBeforeInitialStatusDoesNotInvalidateVerifiedGame) {
+  const auto before = observe();
+  ASSERT_TRUE(before.available) << before.reason;
+  // The census contains a row that vanished before its first owner-status read.
+  host->pids.push_back("43");
+  const auto seen = observe();
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.pid, 41);
+  EXPECT_EQ(seen.start_ticks, 10001);
+  EXPECT_EQ(seen.revision, before.revision);
+  EXPECT_EQ(seen.uninspected_process_count, 0);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, InitialStatusAbsenceIsUnprovenByDefaultAndOnAccessOrLookupFailure) {
+  host->pids.push_back("43");
+  const auto default_result = host->backend_t::initial_status("/proc/43", 65536);
+  EXPECT_FALSE(default_result.text);
+  EXPECT_EQ(default_result.absence, ep::testing::process_absence_t::unproven);
+  for (const int error : {EACCES, EPERM, EIO}) {
+    host->status_errors["/proc/43"] = error;
+    EXPECT_EQ(observe().reason, "incomplete_process_observation");
+  }
+  host->status_errors["/proc/43"] = ENOENT;
+  for (const int error : {EACCES, EPERM, EIO}) {
+    host->directory_errors["/proc/43"] = error;
+    EXPECT_EQ(observe().reason, "incomplete_process_observation");
+  }
+  host->directory_errors["/proc/43"] = ENOENT;
+  for (const int error : {EACCES, EPERM, EIO, ENOSYS, EMFILE, EINVAL}) {
+    host->absence_probe_errors["/proc/43"] = error;
+    EXPECT_EQ(observe().reason, "incomplete_process_observation");
+  }
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, MissingInitialStatusCannotHideALiveOrReusedPid) {
+  host->add_process(43, runtime / "files/bin/wine64-preloader", install, 10003);
+  host->files.erase("/proc/43/status");
+  EXPECT_EQ(observe().reason, "incomplete_process_observation");
+  host->identities.erase("/proc/43");
+  host->after_missing_status = [&](const fs::path &process) {
+    if (process == "/proc/43") {
+      // Replacement arrives between status ENOENT and the directory absence check.
+      host->identities[process] = directory(543);
+      host->files[process / "stat"] = stat_line(43, 20003);
+    }
+  };
+  EXPECT_EQ(observe().reason, "incomplete_process_observation");
+  host->after_missing_status = {};
+  host->identities.erase("/proc/43");
+  // A live PID hidden from procfs, or reused after lstat, fails the kernel probe.
+  host->live_absence_probes.insert("/proc/43");
+  EXPECT_EQ(observe().reason, "incomplete_process_observation");
+  EXPECT_EQ(host->closed_absence_probes, (std::vector<fs::path> {"/proc/43"}));
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, VanishedCensusRowDoesNotChangeRetainedPidfdAuthority) {
+  auto game = adopt();
+  ASSERT_NE(game, nullptr) << error;
+  host->pids.push_back("43");
+  EXPECT_TRUE(ep::inspect(*game).available);
+  EXPECT_EQ(host->opened, (std::vector<std::uint64_t> {41}));
+  EXPECT_TRUE(host->signals.empty());
+  EXPECT_TRUE(ep::ask_to_close(*game, 10ms).closed);
+  EXPECT_EQ(host->opened, (std::vector<std::uint64_t> {41}));
+  EXPECT_EQ(host->signals, (std::vector<int> {77}));
+}
+
+TEST_F(EpicProcess, DisappearanceAfterInitialStatusAndMalformedStatusStillRefuse) {
+  host->add_process(43, "/fixture/owner/OtherProgram", "/fixture/owner", 10003);
+  host->files["/proc/43/status"] = "Name:\tmalformed\n";
+  EXPECT_EQ(observe().reason, "missing_process_uid");
+  host->files["/proc/43/status"] = "Uid:\t1000\t1000\t1000\t1000\n";
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/43/status") host->identities.erase("/proc/43");
+  };
+  EXPECT_EQ(observe().reason, "unreadable_file_identity");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, VanishedGameAndChangedProtectedSetCannotAuthorizeAdoptionOrClose) {
+  host->add_protected_process();
+  const auto seen = observe();
+  ASSERT_TRUE(seen.available) << seen.reason;
+  host->files.erase("/proc/43/status");
+  host->identities.erase("/proc/43");
+  EXPECT_EQ(ep::testing::adopt(host->title(), seen, error, host), nullptr);
+  EXPECT_EQ(error, "stale_observation");
+  EXPECT_TRUE(host->opened.empty());
+  auto game = adopt();
+  ASSERT_NE(game, nullptr) << error;
+  host->files.erase("/proc/41/status");
+  host->identities.erase("/proc/41");
+  EXPECT_EQ(observe().reason, "game_not_observed");
+  EXPECT_FALSE(ep::ask_to_close(*game, 10ms).signalled);
+  EXPECT_EQ(host->opened, (std::vector<std::uint64_t> {41}));
+  EXPECT_TRUE(host->signals.empty());
 }
 
 TEST_F(EpicProcess, MissingUnreadableOrMalformedRowsCannotHideAnAmbiguousGame) {
