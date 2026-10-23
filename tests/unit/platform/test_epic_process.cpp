@@ -2,7 +2,7 @@
  * @file tests/unit/platform/test_epic_process.cpp
  * @brief Fixture-only Epic observation and retained pidfd authority regressions.
  */
-#include "../../tests_common.h"
+#include <gtest/gtest.h>
 
 #ifdef __linux__
 

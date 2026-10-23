@@ -59,5 +59,3 @@ process-group, launcher, prefix, wineserver or forced-kill fallback.
 - Keep using your existing Heroic entry if the official provider is unavailable. Its own setup,
   library, save locations and account data remain separate.
 
-Source tests, package checks and a real desktop-launch/Disconnect/Resume/End test are separate
-qualification steps. This document does not declare an installed build or a game accepted.
