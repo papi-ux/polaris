@@ -17,6 +17,7 @@ namespace epic_library {
     using json = nlohmann::json;
     constexpr std::size_t max_bytes = 16 * 1024 * 1024;
     constexpr std::size_t max_line = 64 * 1024;
+    constexpr std::size_t max_catalog = 1024 * 1024;
     bool text(const std::string &s, std::size_t limit = 4096) {
       return !s.empty() && s.size() <= limit &&
         std::none_of(s.begin(), s.end(), [](unsigned char c) { return c < 32 || c == 127; });
@@ -99,6 +100,23 @@ namespace epic_library {
 
   bool valid_identity(const identity_t &i) { return id(i.namespace_id) && id(i.item_id) && id(i.artifact_id); }
 
+  std::optional<control_request_t> parse_control_request(std::string_view bytes) {
+    try {
+      if (bytes.empty() || bytes.size() > 2048) return {};
+      const auto j = strict_json(bytes);
+      if (!j.is_object()) return {};
+      control_request_t request {value(j, "action"), value(j, "session_id"), value(j, "revision"), false};
+      if (!text(request.session_id, 256) || !text(request.revision, 512) ||
+          (request.action != "adopt" && request.action != "release")) return {};
+      for (auto it = j.begin(); it != j.end(); ++it)
+        if (it.key() != "action" && it.key() != "session_id" && it.key() != "revision" &&
+            !(request.action == "adopt" && it.key() == "confirm")) return {};
+      request.confirmed = j.contains("confirm") && j["confirm"].is_boolean() && j["confirm"].get<bool>();
+      if (request.action == "adopt" && !request.confirmed) return {};
+      return request;
+    } catch (const std::exception &) { return {}; }
+  }
+
   snapshot_t parse_installations(std::string_view raw, const std::filesystem::path &root) {
     snapshot_t result;
     try {
@@ -137,7 +155,7 @@ namespace epic_library {
         const auto i = identity(row);
         const std::filesystem::path directory = value(row, "dir");
         const std::filesystem::path executable = value(row, "launchExecutable");
-        const bool safe_exe = text(executable.string()) && !executable.is_absolute() &&
+        const bool safe_exe = text(executable.string()) && executable.string().find('\\') == std::string::npos && !executable.is_absolute() &&
           std::none_of(executable.begin(), executable.end(), [](const auto &c) { return c == ".." || c == "."; });
         const auto platform = value(row, "platform");
         if (!valid_identity(i) || !valid_absolute_path(directory) || !safe_exe ||
@@ -165,11 +183,12 @@ namespace epic_library {
 
   bool matches_heroic_catalog(const identity_t &i, std::string_view bytes, std::string *name) {
     try {
-      if (!valid_identity(i) || bytes.empty() || bytes.size() > max_line) return false;
+      if (!valid_identity(i) || bytes.empty() || bytes.size() > max_catalog) return false;
       const auto j = strict_json(bytes);
-      if (!j.is_object() || value(j, "namespace") != i.namespace_id || value(j, "id") != i.item_id ||
-          value(j, "assetAppName") != i.artifact_id) return false;
-      if (name && text(value(j, "title"))) *name = value(j, "title");
+      if (!j.is_object() || value(j, "app_name") != i.artifact_id || !j.contains("metadata") || !j["metadata"].is_object()) return false;
+      const auto &metadata = j["metadata"];
+      if (value(metadata, "namespace") != i.namespace_id || value(metadata, "id") != i.item_id) return false;
+      if (name && text(value(metadata, "title"))) *name = value(metadata, "title");
       return true;
     } catch (const std::exception &) { return false; }
   }
@@ -179,11 +198,12 @@ namespace epic_library {
     std::optional<identity_t> found;
     std::string found_name;
     for (const auto &home : homes) for (const auto &config : {home / ".config/heroic", home / ".var/app/com.heroicgameslauncher.hgl/config/heroic"}) {
-      const auto raw = bounded_read(config / "legendaryConfig/legendary/metadata" / (artifact + ".json"), max_line);
+      const auto raw = bounded_read(config / "legendaryConfig/legendary/metadata" / (artifact + ".json"), max_catalog);
       if (!raw) continue;
       try {
         const auto j = strict_json(*raw);
-        const identity_t i {value(j, "namespace"), value(j, "id"), value(j, "assetAppName")};
+        if (!j.is_object() || !j.contains("metadata") || !j["metadata"].is_object()) continue;
+        const identity_t i {value(j["metadata"], "namespace"), value(j["metadata"], "id"), value(j, "app_name")};
         std::string title;
         if (i.artifact_id != artifact || !matches_heroic_catalog(i, *raw, &title)) continue;
         if (found && *found != i) return {};

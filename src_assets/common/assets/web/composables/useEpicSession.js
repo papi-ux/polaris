@@ -42,7 +42,7 @@ export function useEpicSession(options = {}) {
   function emptyState() {
     return {
       available: false, app_uuid: '', app_name: '', session_id: '', revision: '',
-      state: '', runtime: 'unknown', can_adopt: false, message: '',
+      state: '', runtime: 'unknown', can_adopt: false, can_release: false, message: '',
     }
   }
 
@@ -89,6 +89,7 @@ export function useEpicSession(options = {}) {
           state: VALID_STATES.has(data.state) ? data.state : 'unavailable',
           runtime: data.runtime || 'unknown',
           can_adopt: Boolean(data.can_adopt),
+          can_release: data.can_release === true,
           message: data.message || '',
         })
       }

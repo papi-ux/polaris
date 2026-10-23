@@ -265,6 +265,8 @@
         <Button variant="outline" size="sm" :disabled="gameScanning" @click="scanGames">Retry scan</Button>
       </div>
 
+      <p v-for="warning in epicWarnings" :key="warning" class="mt-3 text-xs text-warning-bright" role="status">{{ warning }}</p>
+
       <div v-if="!hasImportSources && !gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
         <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-storm/20 bg-void/60 text-storm">
           <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 1 1-14 0 7 7 0 0 1 14 0z"/></svg>
@@ -1395,7 +1397,7 @@ import {
 const { toast: showToast } = useToast()
 const {
   scanning: gameScanning, importing: gameImporting, switching: gameSwitching,
-  steamGames, lutrisGames, heroicGames, emulatorGames, epicGames, librarySources,
+  steamGames, lutrisGames, heroicGames, emulatorGames, epicGames, epicWarnings, librarySources,
   error: gameScanError, importedGames,
   scan: scanGames, importSelected, switchEpicProvider, toggleAll: gameToggleAll
 } = useGameScanner()

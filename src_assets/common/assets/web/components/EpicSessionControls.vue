@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import Button from './Button.vue'
 import { useEpicSession } from '../composables/useEpicSession.js'
 
@@ -11,6 +11,9 @@ import { useEpicSession } from '../composables/useEpicSession.js'
 // process itself — End stays the existing session action.
 const { state, loading, loadError, actionError, acting, load, adopt, release, start } = useEpicSession()
 const confirming = ref(false)
+let consentFor = ''
+const currentIdentity = () => state.session_id + ':' + state.revision
+watch(currentIdentity, () => { confirming.value = false; consentFor = '' }, { flush: 'sync' })
 
 onMounted(() => { start() })
 
@@ -19,9 +22,13 @@ const isManaged = computed(() => state.available && state.state === 'managed')
 const runtimeLabel = computed(() =>
   state.runtime === 'proton' ? 'Proton' : state.runtime === 'native' ? 'Native Linux' : 'Runtime unknown')
 
-function startConfirm() { confirming.value = true }
-function cancelConfirm() { confirming.value = false } // no request, no signal
+function startConfirm() { consentFor = currentIdentity(); confirming.value = true }
+function cancelConfirm() { confirming.value = false; consentFor = '' } // no request, no signal
 async function confirmAdopt() {
+  if (!confirming.value || consentFor !== currentIdentity() || !canAdopt.value || acting.value) {
+    cancelConfirm()
+    return
+  }
   const ok = await adopt()
   if (ok) confirming.value = false
 }
@@ -46,7 +53,7 @@ async function leaveRunning() { await release() }
           </div>
         </div>
         <span class="meta-pill" data-epic-state>{{
-          isManaged ? 'Polaris will close on End'
+          isManaged ? 'Close permission granted'
           : state.state === 'closing' ? 'Closing…'
           : state.state === 'unavailable' ? 'State unavailable'
           : 'Unmanaged'
@@ -55,7 +62,7 @@ async function leaveRunning() { await release() }
 
       <!-- Honest state when the backend has an active game it cannot read. -->
       <p v-if="state.state === 'unavailable'" class="mt-3 text-xs text-warning-bright" data-epic-unavailable>
-        Polaris can't read this game's state right now. It is still running; nothing has been stopped.
+        Polaris can't verify this game's current state. It will not switch your permission to another process.
       </p>
 
       <p v-else-if="state.state === 'closing'" class="mt-3 text-xs text-storm" data-epic-closing>
@@ -65,8 +72,9 @@ async function leaveRunning() { await release() }
       <!-- Managed: Polaris holds the owner's grant; offer to hand it back. -->
       <template v-else-if="isManaged">
         <p class="mt-3 text-xs text-support">
-          You asked Polaris to close this game. Ending the session will close only this game, never the Epic
-          launcher, your sign-in or other games. If it restarts you'll confirm again.
+          You gave Polaris permission to ask this exact game to close on End. If it cannot verify or close
+          the game, it will tell you to close it on the host. The launcher and other games stay untouched.
+          Disconnect leaves it running. A restarted game needs a new confirmation.
         </p>
         <div class="mt-3">
           <Button variant="outline" size="sm" :loading="acting" :disabled="acting" data-epic-release @click="leaveRunning">
@@ -78,7 +86,7 @@ async function leaveRunning() { await release() }
       <!-- Default unmanaged: explain manual close, and offer the two-step grant when adoptable. -->
       <template v-else>
         <p class="mt-3 text-xs text-support" data-epic-unmanaged>
-          This game is running unmanaged. Ending the session leaves it running — close it yourself in the Epic
+          Polaris is not managing this game's lifetime. Ending the session leaves it running — close it yourself in the Epic
           launcher. Disconnecting and resuming keep it running.
         </p>
 
@@ -108,6 +116,11 @@ async function leaveRunning() { await release() }
           </div>
         </template>
       </template>
+
+      <Button v-if="state.state === 'unavailable' && state.can_release" class="mt-3" variant="outline" size="sm"
+        :loading="acting" :disabled="acting" data-epic-release @click="leaveRunning">
+        Clear close permission
+      </Button>
 
       <!-- An adopt/release that was refused or went stale: surfaced once, never auto-retried. -->
       <p v-if="actionError" class="mt-3 text-xs text-danger-bright" role="alert" data-epic-action-error>

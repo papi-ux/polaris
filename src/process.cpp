@@ -6229,7 +6229,9 @@ namespace proc {
     request.entry = entry;
     request.client_uuid = client_uuid;
     request.lifecycle_generation = lifecycle_generation;
-    request.policy_enabled = app.leave_game_mode_before_launch;
+    // Epic Preview never performs a Game Mode transition: its supported admission is
+    // the already-running desktop launcher in Mirror Desktop, checked before launch.
+    request.policy_enabled = app.leave_game_mode_before_launch && app.source != "epic_launcher";
     if (!request.policy_enabled) {
       // Off: no scan, no probe, nothing recorded. The launch is the one it always was.
       prelaunch::outcome_t outcome;
@@ -11541,11 +11543,13 @@ namespace proc {
     }
     const bool managed = static_cast<bool>(_epic_grant);
     const bool available = observed.available;
+    const char *state = managed ? (available ? "managed" : "unavailable") :
+      (available ? "confirmable" : (observed.reason == "game_not_observed" ? "unmanaged" : "unavailable"));
     nlohmann::json result {{"status", true}, {"version", 1}, {"available", true},
       {"app_uuid", _app.uuid}, {"app_name", _app.name}, {"session_id", _session_instance_id},
       {"revision", current_revision}, {"runtime", observed.runtime.empty() ? "unknown" : observed.runtime},
-      {"state", managed ? (available ? "managed" : "unavailable") : (available ? "confirmable" : "unmanaged")},
-      {"can_adopt", !managed && available},
+      {"state", state},
+      {"can_adopt", !managed && available}, {"can_release", managed},
       {"message", managed ? (available ? "End Session may close this exact game. Disconnect leaves it running." :
         "The retained game cannot currently be verified. Polaris will not switch to a replacement process.") :
         (available ? "This observed game may have been started outside Polaris. You decide whether End Session may close it." :
@@ -12417,6 +12421,13 @@ namespace proc {
   }
 
   void proc_t::terminate_isolated_session_generation() {
+    if (_app.source == "epic_launcher") {
+      // URI forwarding is not game ownership. Epic's only closing authority is the
+      // explicitly adopted pidfd; never enter generic generation/group escalation.
+      _session_instance_id.clear();
+      _exact_generation_cleanup_complete = true;
+      return;
+    }
     // Whether this teardown's private app phase ran, read once so no later cleanup reuses it.
     const bool apps_stopped_first = _private_apps_stopped_before_compositor;
     _private_apps_stopped_before_compositor = false;

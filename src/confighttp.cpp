@@ -3895,7 +3895,7 @@ namespace confighttp {
         if (epic_string(next, "source") == "heroic") {
           // Restore the exact former launch/provider fields when the owner switches back.
           auto restore = nlohmann::json::object();
-          for (const char *field : {"source", "cmd", "detached", "launch-as", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"})
+          for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"})
             if (next.contains(field)) restore[field] = next[field];
           next["epic-previous-provider"] = std::move(restore);
         }
@@ -3905,7 +3905,7 @@ namespace confighttp {
         if (!heroic) { fail("An installed Heroic provider for this exact Epic title was not found."); return; }
         if (next.contains("epic-previous-provider") && next["epic-previous-provider"].is_object()) {
           const auto restore = next["epic-previous-provider"];
-          for (const char *field : {"source", "cmd", "detached", "launch-as", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"}) {
+          for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"}) {
             next.erase(field);
             if (restore.contains(field)) next[field] = restore[field];
           }
@@ -3936,22 +3936,13 @@ namespace confighttp {
     }
     if (!validateContentType(response, request, "application/json")) return;
     const auto raw = request->content.string();
-    const auto body = raw.size() <= 2048 ? nlohmann::json::parse(raw, nullptr, false) : nlohmann::json();
-    const auto action = epic_string(body, "action");
-    const auto session = epic_string(body, "session_id"), revision = epic_string(body, "revision");
-    bool valid = body.is_object() && !session.empty() && session.size() <= 256 && !revision.empty() && revision.size() <= 512 &&
-      (action == "adopt" || action == "release");
-    if (valid) for (auto it = body.begin(); it != body.end(); ++it) {
-      if (it.key() != "action" && it.key() != "session_id" && it.key() != "revision" &&
-          !(action == "adopt" && it.key() == "confirm")) valid = false;
-    }
-    const bool confirmed = body.is_object() && body.contains("confirm") && body["confirm"].is_boolean() && body["confirm"].get<bool>();
-    if (!valid || (action == "adopt" && !confirmed)) {
+    const auto control = epic_library::parse_control_request(raw);
+    if (!control) {
       send_response(response, SimpleWeb::StatusCode::client_error_bad_request,
         {{"status", false}, {"code", "invalid_request"}, {"error", "Use the current session and revision; adoption requires explicit confirmation. Process IDs and paths are not accepted."}});
       return;
     }
-    const auto [status, result] = proc::proc.epic_session_control(action, session, revision, confirmed);
+    const auto [status, result] = proc::proc.epic_session_control(control->action, control->session_id, control->revision, control->confirmed);
     send_response(response, static_cast<SimpleWeb::StatusCode>(status), result);
   }
 

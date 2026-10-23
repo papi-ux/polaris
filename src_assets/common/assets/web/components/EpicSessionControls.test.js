@@ -64,6 +64,25 @@ describe('EpicSessionControls', () => {
     expect(wrapper.find('[data-epic-adopt-start]').exists()).toBe(false)
   })
 
+  it('requires a fresh two-step confirmation when the observed game changes', async () => {
+    h.api = makeApi()
+    wrapper = mount(EpicSessionControls)
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    const previousConfirm = wrapper.get('[data-epic-adopt-confirm]')
+    h.api.state.revision = 'new-game'
+    await previousConfirm.trigger('click')
+    expect(h.api.adopt).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(false)
+  })
+
+  it('can clear retained permission when the current game cannot be verified', async () => {
+    h.api = makeApi({ state: 'unavailable', can_adopt: false, can_release: true })
+    wrapper = mount(EpicSessionControls)
+    expect(wrapper.text()).not.toContain('It is still running')
+    await wrapper.get('[data-epic-release]').trigger('click')
+    expect(h.api.release).toHaveBeenCalledOnce()
+  })
+
   it('shows a managed game with a leave-running (release) action', async () => {
     h.api = makeApi({ state: 'managed' })
     wrapper = mount(EpicSessionControls)

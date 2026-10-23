@@ -43,6 +43,24 @@ TEST(EpicLibraryTests, CompletedInstallUsesExactTripleAndDirectoryNameWithoutAcc
   EXPECT_EQ(s.games[0].name, "Alan Wake 2");
   EXPECT_EQ(s.games[0].platform, "Windows");
 }
+TEST(EpicLibraryTests, OwnerControlRequiresExactConfirmationAndSessionRevision) {
+  const auto request = epic_library::parse_control_request(R"({"action":"adopt","session_id":"session","revision":"revision","confirm":true})");
+  ASSERT_TRUE(request); EXPECT_TRUE(request->confirmed); EXPECT_EQ(request->session_id, "session");
+  EXPECT_TRUE(epic_library::parse_control_request(R"({"action":"release","session_id":"session","revision":"revision"})"));
+  for (const auto &raw : {R"({"action":"adopt","session_id":"session","revision":"revision","confirm":"true"})",
+      R"({"action":"adopt","session_id":"session","revision":"revision","confirm":false})",
+      R"({"action":"adopt","session_id":"session","revision":"revision"})",
+      R"({"action":"adopt","session_id":"session","revision":"revision","confirm":false,"confirm":true})",
+      R"({"action":"release","session_id":"session","revision":""})"})
+    EXPECT_FALSE(epic_library::parse_control_request(raw));
+}
+TEST(EpicLibraryTests, OwnerControlNeverAcceptsBrowserProcessOrPathTargets) {
+  const json baseline {{"action", "adopt"}, {"session_id", "session"}, {"revision", "revision"}, {"confirm", true}};
+  for (auto key : {"pid", "process", "path", "prefix", "runtime", "signal", "command"}) {
+    auto j = baseline; j[key] = "arbitrary target";
+    EXPECT_FALSE(epic_library::parse_control_request(j.dump())) << key;
+  }
+}
 TEST(EpicLibraryTests, NewIncompleteRowNeverRevivesEarlierCompletedInstall) {
   auto newer = row(); newer["complete"] = false;
   auto s = parse({row(), newer});
@@ -95,11 +113,14 @@ TEST(EpicLibraryTests, UriEncodesSeparatorsAndRejectsInjectedIdentifiers) {
     "'/home/player/Epic'\\''s App.AppImage' 'com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true'");
 }
 TEST(EpicLibraryTests, CatalogMatchesAllThreeIdentifiersNeverNameAlone) {
-  json catalog {{"namespace", "sandbox"}, {"id", "catalog"}, {"assetAppName", "artifact"}, {"title", "Actual title"}};
+  // Legendary's actual file wraps the catalog record in metadata; app_name is its artifact.
+  json catalog {{"app_name", "artifact"}, {"metadata", {{"namespace", "sandbox"}, {"id", "catalog"}, {"title", "Actual title"}}}};
   std::string name;
   EXPECT_TRUE(epic_library::matches_heroic_catalog(title, catalog.dump(), &name)); EXPECT_EQ(name, "Actual title");
-  for (auto key : {"namespace", "id", "assetAppName"}) {
-    auto j = catalog; j[key] = "different";
+  for (auto key : {"namespace", "id", "app_name"}) {
+    auto j = catalog;
+    if (std::string(key) == "app_name") j[key] = "different";
+    else j["metadata"][key] = "different";
     EXPECT_FALSE(epic_library::matches_heroic_catalog(title, j.dump()));
   }
 }

@@ -24,6 +24,11 @@ namespace epic_library {
     std::vector<std::string> warnings;
   };
   bool valid_identity(const identity_t &identity);
+  struct control_request_t {
+    std::string action, session_id, revision;
+    bool confirmed = false;
+  };
+  std::optional<control_request_t> parse_control_request(std::string_view bytes);
   snapshot_t parse_installations(std::string_view bytes, const std::filesystem::path &data_root);
   snapshot_t read_installations(const std::filesystem::path &data_root);
   snapshot_t scan(const std::vector<std::filesystem::path> &homes);

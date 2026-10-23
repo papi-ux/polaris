@@ -23,6 +23,7 @@ export function useGameScanner() {
   const emulatorGames = ref([])
   // Official Epic Games Launcher titles, keyed by their exact Epic triple by the host.
   const epicGames = ref([])
+  const epicWarnings = ref([])
   const switching = ref(false)
   // The ROM folders as the scan saw them: emulator install state and how many games each holds.
   const librarySources = ref([])
@@ -42,6 +43,7 @@ export function useGameScanner() {
         heroicGames.value = staged(data.heroic_games)
         emulatorGames.value = staged(data.emulator_games)
         epicGames.value = staged(data.epic_games)
+        epicWarnings.value = Array.isArray(data.epic_warnings) ? data.epic_warnings.filter(w => typeof w === 'string') : []
         librarySources.value = data.library_sources || []
       } else {
         error.value = 'Failed to scan for games'
@@ -161,7 +163,7 @@ export function useGameScanner() {
   }
 
   return {
-    scanning, importing, switching, steamGames, lutrisGames, heroicGames, emulatorGames, epicGames, librarySources,
+    scanning, importing, switching, steamGames, lutrisGames, heroicGames, emulatorGames, epicGames, epicWarnings, librarySources,
     error, importedGames, scan, importSelected, switchEpicProvider, toggleAll
   }
 }

@@ -28,6 +28,16 @@ describe('useGameScanner Epic support', () => {
     expect(scanner.epicGames.value[0].selected).toBe(false)
   })
 
+  it('keeps unavailable Epic metadata visible without blocking other library sources', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply({ steam_games: [{ name: 'Existing Steam game' }],
+      epic_games: [], epic_warnings: ['Epic installation is updating.'] })))
+    const scanner = useGameScanner()
+    await scanner.scan()
+    expect(scanner.epicWarnings.value).toEqual(['Epic installation is updating.'])
+    expect(scanner.epicGames.value).toEqual([])
+    expect(scanner.steamGames.value).toHaveLength(1)
+  })
+
   it('imports a selected official entry carrying source and the exact triple, never a browser command', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(reply({ epic_games: [epicEntry()] })) // scan
