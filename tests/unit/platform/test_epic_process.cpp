@@ -26,8 +26,8 @@ namespace {
   using ep::testing::exit_state_t;
   using ep::testing::file_t;
 
-  const fs::path install = "/home/owner/Games/A Game";
-  const fs::path data = "/home/owner/.local/share/com.epicgames.eglv2";
+  const fs::path install = "/fixture/owner/Games/A Game";
+  const fs::path data = "/fixture/owner/.local/share/com.epicgames.eglv2";
   const fs::path image = install / "Game.exe";
   const fs::path runtime = data / "compat/runtime/GE-Proton10-34";
   const fs::path prefix_path = data / "compat/compatdata/artifact/pfx";
@@ -230,7 +230,7 @@ TEST_F(EpicProcess, BtrfsMapsUseMountDeviceWhilePrefixUsesStatDevice) {
 }
 
 TEST_F(EpicProcess, ExactMapFilesAndProcessRootAreRequired) {
-  host->links["/proc/41/map_files/1000-2000"] = "/home/owner/Games/Other/Game.exe";
+  host->links["/proc/41/map_files/1000-2000"] = "/fixture/owner/Games/Other/Game.exe";
   EXPECT_EQ(observe().reason, "mapped_game_link_mismatch");
   host->links["/proc/41/map_files/1000-2000"] = image;
   host->identities[fs::path("/proc/41/root") / image.relative_path()] = regular(999);
@@ -474,7 +474,7 @@ TEST_F(EpicProcess, UnavailablePidfdPollRevokesWithoutSignal) {
 TEST_F(EpicProcess, ALauncherMustBeUniqueOwnedAndOutsideTheService) {
   EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
   EXPECT_EQ(error, "open_epic_on_host_desktop");
-  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/home/owner", 10003);
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
   auto found = ep::testing::desktop_launcher_executable(error, host);
   ASSERT_TRUE(found) << error;
   EXPECT_EQ(*found, "/usr/bin/EpicGamesLauncher");
@@ -482,7 +482,7 @@ TEST_F(EpicProcess, ALauncherMustBeUniqueOwnedAndOutsideTheService) {
   EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
   EXPECT_EQ(error, "launcher_in_polaris_cgroup");
   host->files["/proc/43/cgroup"] = "0::/user.slice/app.slice/epic.scope\n";
-  host->add_process(44, "/usr/bin/EpicGamesLauncher", "/home/owner", 10004);
+  host->add_process(44, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10004);
   EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
   EXPECT_EQ(error, "ambiguous_desktop_launcher");
   EXPECT_TRUE(host->opened.empty());
@@ -491,13 +491,13 @@ TEST_F(EpicProcess, ALauncherMustBeUniqueOwnedAndOutsideTheService) {
 
 TEST_F(EpicProcess, MountedLauncherElfCannotBeUsedAsAnUnprovenAppImage) {
   const fs::path exe = "/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher";
-  host->add_process(43, exe, "/home/owner", 10003);
+  host->add_process(43, exe, "/fixture/owner", 10003);
   const std::string mounts = "21 1 0:1 / / rw - tmpfs tmpfs rw\n60 21 0:90 / /tmp/.mount_EpicXXX ro - fuse.AppImage ";
   host->files["/proc/43/mountinfo"] = mounts + "EpicGamesLauncher.appimage ro\n";
   EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
   EXPECT_EQ(error, "launcher_appimage_path_unproven");
 
-  const fs::path appimage = "/home/owner/My Desktop/EpicGamesLauncher.appimage";
+  const fs::path appimage = "/fixture/owner/My Desktop/EpicGamesLauncher.appimage";
   host->identities[appimage] = regular(9900);
   host->headers[appimage] = std::string("\177ELF\0\0\0\0AI\002", 11);
   host->files["/proc/43/mountinfo"] = mounts + escaped(appimage) + " ro\n";
@@ -511,16 +511,16 @@ TEST_F(EpicProcess, MountedLauncherElfCannotBeUsedAsAnUnprovenAppImage) {
 
 TEST_F(EpicProcess, KnownOwnerAppImageProcessDoesNotProveTheMountedLauncherSource) {
   const fs::path exe = "/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher";
-  const fs::path appimage = "/home/owner/My Desktop/EpicGamesLauncher.appimage";
-  host->add_process(43, exe, "/home/owner", 10003);
-  host->add_process(44, appimage, "/home/owner", 10004);
+  const fs::path appimage = "/fixture/owner/My Desktop/EpicGamesLauncher.appimage";
+  host->add_process(43, exe, "/fixture/owner", 10003);
+  host->add_process(44, appimage, "/fixture/owner", 10004);
   host->headers[appimage] = std::string("\177ELF\0\0\0\0AI\002", 11);
   // A matching live executable and its open original file still do not identify which FUSE
   // mount it serves. Without that relationship, the basename is not a backing-file proof.
   host->links["/proc/44/fd/3"] = appimage;
   host->identities["/proc/44/fd/3"] = host->identities[appimage];
   const std::string mounts = "21 1 0:1 / / rw - tmpfs tmpfs rw\n60 21 0:90 / /tmp/.mount_EpicXXX ro - fuse.AppImage ";
-  for (const std::string source : {"EpicGamesLauncher.appimage", "../EpicGamesLauncher.appimage", "/home/owner/../owner/My\\040Desktop/EpicGamesLauncher.appimage"}) {
+  for (const std::string source : {"EpicGamesLauncher.appimage", "../EpicGamesLauncher.appimage", "/fixture/owner/../owner/My\\040Desktop/EpicGamesLauncher.appimage"}) {
     host->files["/proc/43/mountinfo"] = mounts + source + " ro\n";
     EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
     EXPECT_EQ(error, "launcher_appimage_path_unproven");

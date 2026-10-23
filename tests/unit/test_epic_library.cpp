@@ -21,7 +21,7 @@ namespace {
     return raw;
   }
   epic_library::snapshot_t parse(const std::vector<json> &rows) {
-    return epic_library::parse_installations(installed_log(rows), "/home/player/.local/share/com.epicgames.eglv2");
+    return epic_library::parse_installations(installed_log(rows), "/fixture/player/.local/share/com.epicgames.eglv2");
   }
   const epic_library::identity_t title {"sandbox", "catalog", "artifact"};
   std::filesystem::path root(const char *suffix) {
@@ -109,8 +109,8 @@ TEST(EpicLibraryTests, PlatformOrPendingUpdateDoesNotGuessRuntime) {
 TEST(EpicLibraryTests, UriEncodesSeparatorsAndRejectsInjectedIdentifiers) {
   EXPECT_EQ(epic_library::launch_uri(title), "com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true");
   EXPECT_THROW(epic_library::launch_uri({"sandbox", "catalog", "artifact&action=uninstall"}), std::invalid_argument);
-  EXPECT_EQ(epic_library::launch_command("/home/player/Epic's App.AppImage", title),
-    "'/home/player/Epic'\\''s App.AppImage' 'com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true'");
+  EXPECT_EQ(epic_library::launch_command("/fixture/player/Epic's App.AppImage", title),
+    "'/fixture/player/Epic'\\''s App.AppImage' 'com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true'");
 }
 TEST(EpicLibraryTests, CatalogMatchesAllThreeIdentifiersNeverNameAlone) {
   // Legendary's actual file wraps the catalog record in metadata; app_name is its artifact.

@@ -18,7 +18,7 @@ class EpicOwnershipTest(unittest.TestCase):
     def setUp(self):
         self.title = epic.Title("sandbox", "catalog", "artifact",
                                PurePosixPath("/games/AlanWake2"), "AlanWake2.exe",
-                               PurePosixPath("/home/player/.local/share/com.epicgames.eglv2"))
+                               PurePosixPath("/fixture/player/.local/share/com.epicgames.eglv2"))
         self.image = epic.Image(self.title.image, 0, 34, 236793710)
         self.prefix = epic.Prefix(52, 237637907)
         self.runtime = self.title.runtime_base / "GE-Proton10-34"

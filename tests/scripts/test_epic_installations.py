@@ -34,7 +34,7 @@ def log(*rows, header=None):
 
 class EpicInstallationsTest(unittest.TestCase):
     def parse(self, raw):
-        return installed.parse_installations(raw, "/home/player/.local/share/com.epicgames.eglv2")
+        return installed.parse_installations(raw, "/fixture/player/.local/share/com.epicgames.eglv2")
 
     def test_incomplete_then_complete_resolves_current_record(self):
         current, = self.parse(log(row(complete=False), row()))
@@ -179,7 +179,7 @@ class EpicInstallationsTest(unittest.TestCase):
         self.assertEqual(current.status, "candidate")
 
     def test_invalid_data_root_never_constructs_a_title(self):
-        for root in ("relative", "/", "/home/../tmp", "/home/player\x00/data"):
+        for root in ("relative", "/", "/fixture/../tmp", "/fixture/player\x00/data"):
             with self.subTest(root=root), self.assertRaises(installed.ManifestError):
                 installed.parse_installations(log(row()), root)
 
