@@ -57,6 +57,20 @@ describe('EpicSessionControls', () => {
     expect(h.api.adopt).toHaveBeenCalledTimes(1)
   })
 
+  it('discloses partial inspection before consent and resets confirmation with its revision', async () => {
+    h.api = makeApi({ uninspected_process_count: 3 })
+    wrapper = mount(EpicSessionControls)
+    expect(wrapper.get('[data-epic-inspection-limit]').text()).toContain('3 processes could not be inspected')
+    expect(wrapper.get('[data-epic-inspection-limit]').text()).toContain('only to this verified game')
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(true)
+    h.api.state.uninspected_process_count = 4
+    h.api.state.revision = 'changed-inspection-context'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(false)
+    expect(h.api.adopt).not.toHaveBeenCalled()
+  })
+
   it('does not offer adoption when the game is not confirmable/adoptable', () => {
     h.api = makeApi({ state: 'unmanaged', can_adopt: false })
     wrapper = mount(EpicSessionControls)

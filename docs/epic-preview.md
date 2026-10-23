@@ -48,6 +48,11 @@ replacement, restart or a changed process cannot silently inherit it. If identit
 verified or exit is not confirmed, close the game on the host. Polaris does not escalate to a
 process-group, launcher, prefix, wineserver or forced-kill fallback.
 
+Some desktop processes restrict inspection. When this happens, the console shows how many
+could not be inspected before you confirm. Permission still concerns only the verified game
+instance, not every game on the desktop. A change in that inspection context invalidates the
+permission; Polaris will not guess a replacement or close an uninspected process.
+
 ## When launch or observation is unavailable
 
 - Open Epic on the host desktop and finish any install or update before trying again.

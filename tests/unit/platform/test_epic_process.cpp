@@ -13,6 +13,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <sys/stat.h>
@@ -65,6 +66,7 @@ namespace {
     std::map<fs::path, fs::path> links, resolved;
     std::map<fs::path, file_t> identities;
     std::map<fs::path, std::vector<std::string>> listings;
+    std::set<fs::path> denied_links;
     std::function<void(const fs::path &)> after_read;
     std::vector<std::string> pids;
     std::vector<fs::path> reads;
@@ -172,6 +174,18 @@ namespace {
     std::optional<fs::path> link(const fs::path &path) override {
       const auto found = links.find(path);
       return found == links.end() ? std::nullopt : std::make_optional(found->second);
+    }
+
+    ep::testing::link_result_t inspect_link(const fs::path &path) override {
+      return denied_links.count(path) ? ep::testing::link_result_t {std::nullopt, true} :
+        ep::testing::link_result_t {link(path), false};
+    }
+
+    void add_protected_process(std::uint64_t pid = 43, std::uint64_t start = 10003) {
+      add_process(pid, "/usr/lib/systemd/systemd", "/fixture/owner", start);
+      const auto exe = fs::path("/proc") / std::to_string(pid) / "exe";
+      links.erase(exe);
+      denied_links.insert(exe);
     }
 
     std::optional<fs::path> canonical(const fs::path &path) override {
@@ -286,6 +300,130 @@ TEST_F(EpicProcess, MissingUnreadableOrMalformedRowsCannotHideAnAmbiguousGame) {
   EXPECT_EQ(observe().reason, "incomplete_process_stat");
 }
 
+TEST_F(EpicProcess, UnmappedUnrelatedProgramNeedsNoRetainedImageIdentity) {
+  const fs::path unrelated = "/fixture/owner/OldProgram";
+  host->add_process(43, unrelated, "/fixture/owner/old-working-directory", 10003);
+  host->identities.erase(unrelated);
+  const auto seen = observe();
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.pid, 41);
+  EXPECT_EQ(seen.uninspected_process_count, 0);
+  // If this same process maps the game it needs all positive identity proofs again.
+  host->files["/proc/43/maps"] = host->maps();
+  EXPECT_FALSE(observe().available);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, UnmappedProgramsStillNeedReadableMapsAndStablePidIdentity) {
+  host->add_process(43, "/fixture/owner/OtherProgram", "/fixture/owner", 10003);
+  host->files.erase("/proc/43/maps");
+  EXPECT_FALSE(observe().available);
+  host->files["/proc/43/maps"] = "9000-a000 rw-p 00000000 00:00 0\n";
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/43/maps") host->files["/proc/43/stat"] = stat_line(43, 20003);
+  };
+  EXPECT_FALSE(observe().available);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, ProtectedDesktopProcessIsDisclosedButCannotSupplyCloseAuthority) {
+  host->add_protected_process();
+  const auto seen = observe();
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.pid, 41);
+  EXPECT_EQ(seen.uninspected_process_count, 1);
+  EXPECT_TRUE(host->opened.empty());
+  auto game = ep::testing::adopt(host->title(), seen, error, host);
+  ASSERT_NE(game, nullptr) << error;
+  EXPECT_EQ(host->opened, (std::vector<std::uint64_t> {41}));
+  EXPECT_TRUE(ep::ask_to_close(*game, 10ms).closed);
+  EXPECT_EQ(host->signals, (std::vector<int> {77}));
+}
+
+TEST_F(EpicProcess, MissingLinksAndIncompleteInspectableCandidatesStillRefuseBesideProtectedProcesses) {
+  host->add_protected_process();
+  host->add_process(44, runtime / "files/bin/wine64-preloader", install, 10004);
+  host->links.erase("/proc/44/exe");
+  EXPECT_EQ(observe().reason, "unreadable_process_link");
+  host->links["/proc/44/exe"] = runtime / "files/bin/wine64-preloader";
+  host->files.erase("/proc/44/maps");
+  EXPECT_EQ(observe().reason, "incomplete_process_observation");
+  host->files["/proc/44/maps"] = host->maps();
+  EXPECT_EQ(observe().reason, "ambiguous_game_process");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, ProtectedGameItselfCanNeverBeOfferedForConsent) {
+  host->denied_links.insert("/proc/41/exe");
+  EXPECT_EQ(observe().reason, "game_not_observed");
+  EXPECT_EQ(ep::testing::adopt(host->title(), observe(), error, host), nullptr);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, ProtectedOwnerStatusAndProcessDirectoryMustStillBeTrusted) {
+  host->add_protected_process();
+  host->identities["/proc/43"].uid = 0;
+  EXPECT_EQ(observe().reason, "unreadable_owner_process");
+  host->identities["/proc/43"].uid = 1000;
+  host->files["/proc/43/status"] = "Uid:\t1000\t0\t1000\t1000\n";
+  EXPECT_EQ(observe().reason, "foreign_process_uid");
+  host->files["/proc/43/status"] = "Uid:\t1000\t1000\t1000\t1000\n";
+  host->files["/proc/43/stat"] = "43 (incomplete) S 1\n";
+  EXPECT_EQ(observe().reason, "incomplete_process_stat");
+}
+
+TEST_F(EpicProcess, ProtectedSetIdentityAndCountAreBoundToConsentRevision) {
+  const auto complete = observe();
+  ASSERT_TRUE(complete.available);
+  host->add_protected_process();
+  const auto partial = observe();
+  ASSERT_TRUE(partial.available) << partial.reason;
+  EXPECT_NE(complete.revision, partial.revision);
+  host->files["/proc/43/stat"] = stat_line(43, 20003);
+  const auto restarted = observe();
+  ASSERT_TRUE(restarted.available) << restarted.reason;
+  EXPECT_NE(partial.revision, restarted.revision);
+  host->add_protected_process(44, 20004);
+  const auto two = observe();
+  ASSERT_TRUE(two.available) << two.reason;
+  EXPECT_EQ(two.uninspected_process_count, 2);
+  EXPECT_NE(restarted.revision, two.revision);
+  std::reverse(host->pids.begin(), host->pids.end());
+  EXPECT_EQ(two.revision, observe().revision);
+  EXPECT_EQ(ep::testing::adopt(host->title(), partial, error, host), nullptr);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, ProtectedProcessChangingDuringObservationIsUnavailable) {
+  host->add_protected_process();
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/41/mountinfo") host->files["/proc/43/stat"] = stat_line(43, 20003);
+  };
+  EXPECT_EQ(observe().reason, "protected_process_changed");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, ProtectedProcessChangeAtPidfdOpenOrBeforeEndNeverSignals) {
+  host->add_protected_process();
+  const auto seen = observe();
+  ASSERT_TRUE(seen.available) << seen.reason;
+  host->after_open = [&] { host->files["/proc/43/stat"] = stat_line(43, 20003); };
+  EXPECT_EQ(ep::testing::adopt(host->title(), seen, error, host), nullptr);
+  EXPECT_TRUE(host->signals.empty());
+  host->after_open = {};
+  auto game = adopt();
+  ASSERT_NE(game, nullptr) << error;
+  host->denied_links.erase("/proc/43/exe");
+  EXPECT_FALSE(ep::ask_to_close(*game, 10ms).signalled);
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, ForeignUidAndServiceLifetimeNeverSupplyACandidate) {
   host->files["/proc/41/status"] = "Uid:\t1000\t1001\t1000\t1000\n";
   EXPECT_EQ(observe().reason, "foreign_process_uid");
@@ -296,6 +434,40 @@ TEST_F(EpicProcess, ForeignUidAndServiceLifetimeNeverSupplyACandidate) {
   host->identities["/proc/41"].uid = 1001;
   host->files["/proc/41/status"] = "Uid:\t1001\t1001\t1001\t1001\n";
   EXPECT_EQ(observe().reason, "game_not_observed");
+}
+
+TEST_F(EpicProcess, PrivilegedMountHelperIsOutsideOwnerAuthorityAndNotAnUninspectedOwnerProcess) {
+  host->add_process(43, "/usr/bin/fusermount3", "/fixture/owner", 10003);
+  host->files["/proc/43/status"] = "Uid:\t1000\t0\t0\t0\n";
+  host->identities["/proc/43"].uid = 0;
+  host->links.erase("/proc/43/exe");
+  const auto seen = observe();
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.pid, 41);
+  EXPECT_EQ(seen.uninspected_process_count, 0);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivilegedGameOrPrefixServerCannotSupplyOwnerConsent) {
+  for (const auto pid : {41, 42}) {
+    const auto fixture = std::make_shared<fixture_t>();
+    fixture->files[fs::path("/proc") / std::to_string(pid) / "status"] = "Uid:\t1000\t0\t0\t0\n";
+    const auto seen = ep::testing::observe(fixture->title(), fixture);
+    EXPECT_FALSE(seen.available);
+    EXPECT_EQ(ep::testing::adopt(fixture->title(), seen, error, fixture), nullptr);
+    EXPECT_TRUE(fixture->opened.empty());
+    EXPECT_TRUE(fixture->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, OtherMixedUidPatternsAreStillRefused) {
+  for (const auto *uids : {"1000\t0\t1000\t1000", "1000\t1001\t1000\t1000", "0\t1000\t0\t0", "1000\t1000\t0\t1000"}) {
+    host->files["/proc/41/status"] = std::string("Uid:\t") + uids + "\n";
+    EXPECT_EQ(observe().reason, "foreign_process_uid");
+    EXPECT_TRUE(host->opened.empty());
+    EXPECT_TRUE(host->signals.empty());
+  }
 }
 
 TEST_F(EpicProcess, PrefixMustHaveOneServerFromTheSameExactRuntime) {

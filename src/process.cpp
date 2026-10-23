@@ -11548,6 +11548,7 @@ namespace proc {
     nlohmann::json result {{"status", true}, {"version", 1}, {"available", true},
       {"app_uuid", _app.uuid}, {"app_name", _app.name}, {"session_id", _session_instance_id},
       {"revision", current_revision}, {"runtime", observed.runtime.empty() ? "unknown" : observed.runtime},
+      {"uninspected_process_count", observed.uninspected_process_count},
       {"state", state},
       {"can_adopt", !managed && available}, {"can_release", managed},
       {"message", managed ? (available ? "End Session may close this exact game. Disconnect leaves it running." :

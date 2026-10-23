@@ -26,6 +26,7 @@ namespace platf::epic {
     bool available {false};
     std::string reason, revision, runtime;
     std::uint64_t pid {0}, start_ticks {0};
+    std::size_t uninspected_process_count {0};
   };
 
   struct close_result_t {
@@ -77,12 +78,19 @@ namespace platf::epic {
 
     enum class exit_state_t { alive, exited, unavailable };
 
+    struct link_result_t {
+      std::optional<std::filesystem::path> target;
+      bool permission_denied {false};
+    };
+
     struct backend_t {
       virtual ~backend_t() = default;
       virtual std::uint64_t owner_uid() const = 0;
       virtual std::optional<std::string> read(const std::filesystem::path &, std::size_t limit) = 0;
       virtual std::optional<std::string> prefix(const std::filesystem::path &, std::size_t length) = 0;
       virtual std::optional<std::filesystem::path> link(const std::filesystem::path &) = 0;
+      // Missing/raced links are not permission denials. Fixture backends opt in explicitly.
+      virtual link_result_t inspect_link(const std::filesystem::path &path) { return {link(path), false}; }
       virtual std::optional<std::filesystem::path> canonical(const std::filesystem::path &) = 0;
       virtual std::optional<file_t> stat(const std::filesystem::path &) = 0;
       virtual std::optional<std::vector<std::string>> list(const std::filesystem::path &, std::size_t limit) = 0;

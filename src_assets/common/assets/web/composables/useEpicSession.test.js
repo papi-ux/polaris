@@ -29,6 +29,28 @@ const posts = m => m.mock.calls.filter(c => c[1]?.method === 'POST')
 const lastPost = m => { const p = posts(m); return p.length ? JSON.parse(p[p.length - 1][1].body) : null }
 
 describe('useEpicSession', () => {
+  it('retains the disclosed inspection count and clears it when the session ends', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(active({ uninspected_process_count: 3 })))
+      .mockResolvedValueOnce(reply({ available: false }))
+    vi.stubGlobal('fetch', fetchMock)
+    host()
+    await wrapper.vm.load()
+    expect(wrapper.vm.state.uninspected_process_count).toBe(3)
+    await wrapper.vm.load()
+    expect(wrapper.vm.state.uninspected_process_count).toBe(0)
+  })
+
+  it.each([-1, 1.5, '3', 8193, true, null])('refuses consent with an invalid inspection count %s', async count => {
+    const fetchMock = vi.fn(async () => reply(active({ uninspected_process_count: count })))
+    vi.stubGlobal('fetch', fetchMock)
+    host()
+    await wrapper.vm.load()
+    expect(wrapper.vm.state.state).toBe('unavailable')
+    expect(await wrapper.vm.adopt()).toBe(false)
+    expect(posts(fetchMock)).toHaveLength(0)
+  })
+
   it('adopt sends confirm:true with the exact current session and revision', async () => {
     const fetchMock = vi.fn(async (_url, opt) => (opt?.method === 'POST' ? reply({ status: true }) : reply(active())))
     vi.stubGlobal('fetch', fetchMock)

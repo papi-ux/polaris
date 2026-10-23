@@ -43,6 +43,7 @@ export function useEpicSession(options = {}) {
     return {
       available: false, app_uuid: '', app_name: '', session_id: '', revision: '',
       state: '', runtime: 'unknown', can_adopt: false, can_release: false, message: '',
+      uninspected_process_count: 0,
     }
   }
 
@@ -79,6 +80,8 @@ export function useEpicSession(options = {}) {
       if (!data || data.available !== true) {
         Object.assign(state, emptyState())
       } else {
+        const count = data.uninspected_process_count === undefined ? 0 : data.uninspected_process_count
+        const validCount = Number.isSafeInteger(count) && count >= 0 && count <= 8192
         Object.assign(state, emptyState(), {
           available: true,
           app_uuid: data.app_uuid || '',
@@ -86,9 +89,10 @@ export function useEpicSession(options = {}) {
           session_id: data.session_id || '',
           revision: data.revision || '',
           // An unrecognized state is shown as unavailable, never guessed as managed.
-          state: VALID_STATES.has(data.state) ? data.state : 'unavailable',
+          state: validCount && VALID_STATES.has(data.state) ? data.state : 'unavailable',
           runtime: data.runtime || 'unknown',
-          can_adopt: Boolean(data.can_adopt),
+          uninspected_process_count: validCount ? count : 0,
+          can_adopt: validCount && Boolean(data.can_adopt),
           can_release: data.can_release === true,
           message: data.message || '',
         })

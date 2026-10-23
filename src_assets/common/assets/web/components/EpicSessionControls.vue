@@ -60,6 +60,12 @@ async function leaveRunning() { await release() }
         }}</span>
       </div>
 
+      <p v-if="state.uninspected_process_count > 0 && (canAdopt || isManaged)" class="mt-3 text-xs text-support" data-epic-inspection-limit>
+        Some background programs could not be inspected. Permission applies only to this verified
+        game; your other apps and the Epic launcher stay untouched.
+        <span class="mt-1 block text-storm">{{ state.uninspected_process_count }} processes could not be inspected.</span>
+      </p>
+
       <!-- Honest state when the backend has an active game it cannot read. -->
       <p v-if="state.state === 'unavailable'" class="mt-3 text-xs text-warning-bright" data-epic-unavailable>
         Polaris can't verify this game's current state. It will not switch your permission to another process.

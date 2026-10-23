@@ -170,6 +170,12 @@ namespace platf::epic {
           const auto ids = words(line.substr(4));
           require(ids.size() == 4, "incomplete_process_uid");
           const auto matching = std::count_if(ids.begin(), ids.end(), [owner](const auto &id) { return number(id) == owner; });
+          // A setuid-root helper may retain the owner's real UID, while its effective,
+          // saved and filesystem credentials are all root. Like a wholly-root process,
+          // it is outside owner game-control authority, never a candidate to adopt.
+          if (number(ids[0]) == owner && number(ids[1]) == 0 && number(ids[2]) == 0 && number(ids[3]) == 0) {
+            continue;
+          }
           require(matching == 0 || matching == 4, "foreign_process_uid");
           owned = matching == 4;
         }
@@ -260,6 +266,11 @@ namespace platf::epic {
       backend_t &backend;
       std::size_t bytes {0};
       fs::path group_namespace;
+      struct uninspected_t {
+        stat_t identity;
+        file_t directory;
+      };
+      std::vector<uninspected_t> uninspected;
 
       std::string read(const fs::path &path, std::size_t limit = small_limit) {
         auto value = needed(backend.read(path, limit), "incomplete_process_observation");
@@ -307,6 +318,17 @@ namespace platf::epic {
                cgroup(read(path / "cgroup")) == process.group && backend.link(path / "ns/cgroup") == group_namespace &&
                same_image(process.image, stat(path / "exe")) && same_image(process.image, stat(process.exe)) &&
                same_image(process.image, stat(path / "root" / process.exe.relative_path()));
+      }
+
+      bool still_uninspected(const uninspected_t &process) {
+        const auto path = fs::path("/proc") / std::to_string(process.identity.pid);
+        const auto current = parse_stat(read(path / "stat"));
+        const auto exe = backend.inspect_link(path / "exe");
+        return current.pid == process.identity.pid && current.start == process.identity.start &&
+               current.state != 'Z' && current.state != 'X' && current.state != 'x' &&
+               check_uid(read(path / "status"), backend.owner_uid()) &&
+               process.directory.uid == backend.owner_uid() &&
+               same_file(process.directory, stat(path)) && !exe.target && exe.permission_denied;
       }
 
       std::vector<process_t> launchers() {
@@ -393,12 +415,33 @@ namespace platf::epic {
           if (first.state == 'Z' || first.state == 'X' || first.state == 'x') {
             continue;
           }
-          process_t row {first, link(path / "exe"), link(path / "cwd"), stat(path / "exe"), cgroup(read(path / "cgroup")), {}};
+          const auto exe = backend.inspect_link(path / "exe");
+          if (!exe.target && exe.permission_denied) {
+            // Explicit consent selects one verified instance; it does not claim a complete
+            // desktop census. Only an actual access denial may be disclosed as uninspected.
+            // A missing/raced link, readable candidate or incomplete maps still fails closed.
+            uninspected_t denied {first, stat(path)};
+            require(still_uninspected(denied), "protected_process_changed");
+            uninspected.push_back(denied);
+            continue;
+          }
+          const auto executable = needed(exe.target, "unreadable_process_link");
+          require(safe_absolute_path(executable), "unresolved_process_link");
+          auto maps = game_image.empty() ? std::vector<map_t> {} : image_maps(read(path / "maps", maps_limit), game_image);
+          if (!game_image.empty() && maps.empty() && executable != game_image && executable.filename() != "wineserver") {
+            // This readable process does not map the game and cannot supply its prefix
+            // server. It needs a stable negative observation, not close-target authority.
+            // In particular, an unrelated app's stale /proc/root view must not block a game.
+            const auto last = parse_stat(read(path / "stat"));
+            require(last.pid == first.pid && last.start == first.start &&
+                      last.state != 'Z' && last.state != 'X' && last.state != 'x' &&
+                      check_uid(read(path / "status"), owner) && stat(path).uid == owner &&
+                      link(path / "exe") == executable, "unmapped_process_changed");
+            continue;
+          }
+          process_t row {first, executable, link(path / "cwd"), stat(path / "exe"), cgroup(read(path / "cgroup")), std::move(maps)};
           require(backend.link(path / "ns/cgroup") == group_namespace, "foreign_cgroup_namespace");
           require(same_image(row.image, stat(row.exe)) && same_image(row.image, stat(path / "root" / row.exe.relative_path())), "process_executable_view_changed");
-          if (!game_image.empty()) {
-            row.maps = image_maps(read(path / "maps", maps_limit), game_image);
-          }
           require(unchanged(row), "process_changed_during_read");
           result.push_back(std::move(row));
         }
@@ -516,6 +559,17 @@ namespace platf::epic {
       digest.add(title.platform);
       digest.add(backend.owner_uid());
       digest.add(boot);
+      // The confirmation describes this exact observation, including its inspection limits.
+      // A changed protected set invalidates consent; none of these rows can supply a target.
+      std::sort(read.uninspected.begin(), read.uninspected.end(), [](const auto &a, const auto &b) {
+        return a.identity.pid < b.identity.pid;
+      });
+      digest.add(read.uninspected.size());
+      for (const auto &process : read.uninspected) {
+        digest.add(process.identity.pid);
+        digest.add(process.identity.start);
+        digest.file(process.directory, true);
+      }
       digest.process(*game);
       digest.file(image_file);
       digest.file(install_file, true);
@@ -588,7 +642,10 @@ namespace platf::epic {
                 image_mount(read.read(process_path / "mountinfo", mount_limit), image).identity == mount.identity &&
                 read.canonical(title.install_dir) == install && read.canonical(title.data_root) == data &&
                 same_file(install_file, read.stat(install)) && same_file(data_file, read.stat(data)) && boot == read.boot(), "game_changed_during_observation");
-      return {true, "owner_confirmation_required", digest.finish(), native ? "native" : "proton", game->stat.pid, game->stat.start};
+      for (const auto &process : read.uninspected) {
+        require(read.still_uninspected(process), "protected_process_changed");
+      }
+      return {true, "owner_confirmation_required", digest.finish(), native ? "native" : "proton", game->stat.pid, game->stat.start, read.uninspected.size()};
     }
 
     observation_t safe_snapshot(const title_t &title, backend_t &backend) {
@@ -656,12 +713,19 @@ namespace platf::epic {
       }
 
       std::optional<fs::path> link(const fs::path &path) override {
+        return inspect_link(path).target;
+      }
+
+      testing::link_result_t inspect_link(const fs::path &path) override {
         std::array<char, 4097> buffer;
         const auto count = ::readlink(path.c_str(), buffer.data(), buffer.size());
-        if (count <= 0 || static_cast<std::size_t>(count) == buffer.size()) {
-          return std::nullopt;
+        if (count < 0) {
+          return {std::nullopt, errno == EACCES || errno == EPERM};
         }
-        return fs::path(std::string(buffer.data(), static_cast<std::size_t>(count)));
+        if (count <= 0 || static_cast<std::size_t>(count) == buffer.size()) {
+          return {std::nullopt, false};
+        }
+        return {fs::path(std::string(buffer.data(), static_cast<std::size_t>(count))), false};
       }
 
       std::optional<fs::path> canonical(const fs::path &path) override {
