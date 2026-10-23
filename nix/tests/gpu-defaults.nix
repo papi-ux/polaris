@@ -29,7 +29,18 @@ let
     (package: lib.getName package == "polaris-gamescope-session")
     (throw "Missing configured Gamescope session helper")
     (session "gamescope_stream").packages;
+  projectLine = lib.findFirst (lib.hasPrefix "project(Polaris VERSION ")
+    (throw "Missing Polaris project version")
+    (lib.splitString "\n" (builtins.readFile (self + "/CMakeLists.txt")));
+  projectVersion = builtins.head
+    (builtins.match ".*VERSION ([0-9]+[.][0-9]+[.][0-9]+).*" projectLine);
+  sourceRevision = self.rev or self.dirtyRev or "unknown";
   facts = {
+    packageVersionMatchesProject = noCuda.version == projectVersion && withCuda.version == projectVersion;
+    revisionTracksSource = noCuda.env.COMMIT == sourceRevision && withCuda.env.COMMIT == sourceRevision;
+    noHistoricalVersionOverride = !(noCuda.env ? BUILD_VERSION) && !(noCuda.env ? BRANCH);
+    publisherMatchesProject = builtins.elem
+      (lib.cmakeFeature "POLARIS_PUBLISHER_WEBSITE" noCuda.meta.homepage) noCuda.cmakeFlags;
     configuredHelperWinsProfile = (configuredHelper.meta.priority or 5)
       < (noCuda.meta.priority or 5);
     overlayHonorsCudaChoice = builtins.elem (lib.cmakeBool "POLARIS_ENABLE_CUDA" false) pkgs.polaris-stream.cmakeFlags;
