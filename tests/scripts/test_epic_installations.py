@@ -132,6 +132,20 @@ class EpicInstallationsTest(unittest.TestCase):
                 self.assertEqual(current.status, "invalid")
                 self.assertIsNone(current.title)
 
+    def test_unicode_controls_separators_and_surrogates_cannot_be_paths(self):
+        for control in ("\x85", "\x9b", "\u2028", "\u2029", "\u202e", "\ud800"):
+            for change in ({"dir": "/games/a" + control + "b"},
+                           {"launchExecutable": "game" + control + ".exe"}):
+                with self.subTest(change=change):
+                    current, = self.parse(log(row(**change)))
+                    self.assertEqual(current.status, "invalid")
+                    self.assertIsNone(current.title)
+
+    def test_printable_unicode_title_paths_are_preserved(self):
+        current, = self.parse(log(row(dir="/games/勇者の冒険", launchExecutable="勇者.exe")))
+        self.assertEqual(current.status, "candidate")
+        self.assertEqual(str(current.title.image), "/games/勇者の冒険/勇者.exe")
+
     def test_same_app_id_in_two_installations_is_not_merged(self):
         current = self.parse(log(row(), row(installationId="installation-2", dir="/games/another")))
         self.assertEqual([r.status for r in current], ["conflict", "conflict"])

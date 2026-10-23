@@ -52,7 +52,7 @@ def _nonfinite(_value):
 
 def _text(value, max_length=MAX_TEXT):
     return (isinstance(value, str) and 0 < len(value) <= max_length
-            and all(ord(char) >= 32 and ord(char) != 127 for char in value))
+            and value.isprintable())
 
 
 def _absolute(value):
