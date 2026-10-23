@@ -17,7 +17,7 @@ No hybrid “nvidia pin” rewrite of conf.
 
 ## Packages
 
-- `polaris-stream` — builds from this repo (CUDA/NVENC default)
+- `polaris-stream` — builds from this repo (standalone CUDA/NVENC default; overlay follows host `cudaSupport`)
 - `gamescope-polaris` — Valve gamescope + HDR PW patches (`gamescope-hdr` alias)
 - `xdg-desktop-portal-gamescope` — private ScreenCast backend
 
@@ -83,11 +83,16 @@ not start portal units itself.
 
 ```nix
 # inputs
-polaris.url = "github:luxus/polaris"; # or path:./polaris with submodules
+# submodules=1 fetches the third-party sources (incl. PyroWave's Granite/pyrowave);
+# the github: shorthand does NOT fetch submodules. Pin a published release with
+# ?ref=refs/tags/<release>&submodules=1.
+polaris.url = "git+https://github.com/papi-ux/polaris?submodules=1";
 polaris.inputs.nixpkgs.follows = "nixpkgs";
 
 # system: overlay + optional nixosModules.polaris (udev / firewall / packages)
 nixpkgs.overlays = [ inputs.polaris.overlays.default ];
+# NVIDIA/NVENC is opt-in: the overlay follows nixpkgs.config.cudaSupport (default off).
+# nixpkgs.config.cudaSupport = true; # needs allowUnfree; omit for a non-CUDA build
 
 # per-user (hjem or home-manager)
 imports = [ inputs.polaris.hjemModules.polaris ];
