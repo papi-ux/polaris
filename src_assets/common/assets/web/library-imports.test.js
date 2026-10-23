@@ -29,6 +29,16 @@ describe('Library import filtering', () => {
     expect(filterImportGames(games, { query: 'fast action', status: 'all' }).map((game) => game.name)).toEqual(['ARC Raiders'])
   })
 
+  it('searches official Epic metadata (provider, platform, runtime and exact triple)', () => {
+    const epicGames = [
+      { name: 'Alan Wake 2', source: 'epic_launcher', provider: 'official', installed_platform: 'Windows', runtime: 'proton', namespace: 'ns-aw2', item_id: 'it-aw2', artifact_id: 'af-aw2', already_imported: false },
+      { name: 'Rocket League', source: 'epic_launcher', provider: 'heroic', installed_platform: 'Windows', runtime: 'proton', namespace: 'ns-rl', item_id: 'it-rl', artifact_id: 'af-rl', already_imported: false },
+    ]
+    expect(filterImportGames(epicGames, { query: 'ns-aw2', status: 'all' }).map((game) => game.name)).toEqual(['Alan Wake 2'])
+    expect(filterImportGames(epicGames, { query: 'official', status: 'all' }).map((game) => game.name)).toEqual(['Alan Wake 2'])
+    expect(filterImportGames(epicGames, { query: 'proton', status: 'all' }).map((game) => game.name)).toEqual(['Alan Wake 2', 'Rocket League'])
+  })
+
   it('searches ROM folder metadata too', () => {
     const emulatorGames = [
       { name: 'Hades', source: 'emulator', emulator: 'eden', emulator_label: 'Eden', platform: 'Nintendo Switch', rom_path: '/roms/switch/Hades.nsp', already_imported: false },
