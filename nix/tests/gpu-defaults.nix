@@ -37,8 +37,8 @@ let
   sourceRevision = self.rev or self.dirtyRev or "unknown";
   facts = {
     packageVersionMatchesProject = noCuda.version == projectVersion && withCuda.version == projectVersion;
-    revisionTracksSource = noCuda.env.COMMIT == sourceRevision && withCuda.env.COMMIT == sourceRevision;
-    noHistoricalVersionOverride = !(noCuda.env ? BUILD_VERSION) && !(noCuda.env ? BRANCH);
+    revisionTracksSource = noCuda.COMMIT == sourceRevision && withCuda.COMMIT == sourceRevision;
+    noHistoricalVersionOverride = !(noCuda ? BUILD_VERSION) && !(noCuda ? BRANCH);
     publisherMatchesProject = builtins.elem
       (lib.cmakeFeature "POLARIS_PUBLISHER_WEBSITE" noCuda.meta.homepage) noCuda.cmakeFlags;
     configuredHelperWinsProfile = (configuredHelper.meta.priority or 5)
