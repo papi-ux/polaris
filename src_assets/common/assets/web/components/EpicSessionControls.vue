@@ -67,10 +67,10 @@ async function leaveRunning() { await release() }
           </div>
         </div>
         <span class="meta-pill" data-epic-state>{{
-          isManaged ? 'Close on End allowed'
+          isManaged ? 'Close on End: allowed'
           : state.state === 'closing' ? 'Closing…'
           : state.state === 'unavailable' ? 'State unavailable'
-          : 'Unmanaged'
+          : 'Close on End: off'
         }}</span>
       </div>
 
@@ -91,15 +91,24 @@ async function leaveRunning() { await release() }
 
       <!-- Managed: Polaris holds the owner's grant; offer to hand it back. -->
       <template v-else-if="isManaged">
-        <p class="mt-3 text-xs text-support">
-          Polaris will ask this exact game to close when the session ends: End Session in your streaming client,
-          or Disconnect Client here in Mission Control. Disconnect and Resume in your streaming client keep it
-          running. If Polaris cannot verify or close the game, it will tell you to close it on the host. The
-          launcher and other games stay untouched. A restarted game needs a new confirmation.
+        <p class="mt-3 text-sm font-semibold text-silver">
+          Close on End is enabled. No further setup is needed.
         </p>
+        <p class="mt-1 text-xs text-support">
+          End Session asks this game to close. Disconnect and Resume in your streaming client keep it running.
+        </p>
+        <details class="mt-3 text-xs text-support">
+          <summary class="cursor-pointer text-silver">How close permission works</summary>
+          <p class="mt-2">
+            Polaris will ask this exact game to close when the session ends: End Session in your streaming client,
+            or Disconnect Client here in Mission Control. Disconnect and Resume in your streaming client keep it
+            running. If Polaris cannot verify or close the game, it will tell you to close it on the host. The
+            launcher and other games stay untouched. A restarted game needs a new confirmation.
+          </p>
+        </details>
         <div class="mt-3">
-          <Button variant="outline" size="sm" :loading="acting" :disabled="acting" data-epic-release @click="leaveRunning">
-            Leave it running
+          <Button variant="ghost" size="sm" :loading="acting" :disabled="acting" data-epic-release @click="leaveRunning">
+            Turn off close on End
           </Button>
         </div>
       </template>
@@ -149,7 +158,7 @@ async function leaveRunning() { await release() }
 
       <Button v-if="state.state === 'unavailable' && state.can_release" class="mt-3" variant="outline" size="sm"
         :loading="acting" :disabled="acting" data-epic-release @click="leaveRunning">
-        Clear close permission
+        Turn off close on End
       </Button>
 
       <!-- An adopt/release that was refused or went stale: surfaced once, never auto-retried. -->

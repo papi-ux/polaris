@@ -45,7 +45,7 @@ launch permission does not grant this access.
 
 Granting permission does not close the game immediately. With permission granted, **End Session**
 in the streaming client, or **Disconnect Client** in Mission Control, can ask that exact instance
-to close. **Leave it running** clears permission without sending a signal. Disconnect/Resume in
+to close. **Turn off close on End** revokes permission without sending a signal. Disconnect/Resume in
 the streaming client keep the grant for the same instance;
 replacement, restart or a changed process cannot silently inherit it. If identity cannot be
 verified or exit is not confirmed, close the game on the host. Polaris does not escalate to a
