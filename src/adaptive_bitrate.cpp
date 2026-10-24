@@ -171,6 +171,7 @@ namespace adaptive_bitrate {
     history.scoped = false;
     history.session_generation = 0;
     history.app_session_id.clear();
+    history.trace_scope.reset();
     history_started_at = std::chrono::steady_clock::now();
     last_history_decision.reset();
   }
@@ -818,8 +819,14 @@ namespace adaptive_bitrate {
   }
 
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
-                                  const std::function<bool()> &apply) {
+                                  const std::function<bool()> &apply,
+                                  vrr_trace::bitrate_observation_t *trace_observation) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    if (trace_observation) {
+      *trace_observation = {scope_generation, history.trace_scope ? history.trace_scope->id : 0,
+        target_bitrate_kbps.load(std::memory_order_relaxed),
+        operator_revision, encoder_applied_bitrate_kbps, encoder_applied_revision};
+    }
     if (request.revision != operator_revision ||
         request.target_bitrate_kbps != target_bitrate_kbps.load(std::memory_order_relaxed) ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
@@ -872,6 +879,23 @@ namespace adaptive_bitrate {
     const auto status = effective_status_locked();
     last_history_decision = decision_key_t {target_bitrate_kbps.load(std::memory_order_relaxed), status.state, status.reason};
     record_history_locked("scope_started", "initial_scope_snapshot");
+    if (vrr_trace::enabled()) {
+      auto &proof = history.trace_scope.emplace();
+      proof.id = vrr_trace::next_id();
+      proof.origin_steady_ns = vrr_trace::ns(history_started_at);
+      if (!history.entries.empty() && history.entries.front().kind == "scope_started") {
+        proof.first_sequence = history.entries.front().sequence;
+      }
+      auto row = vrr_trace::event_t("live_tuning_scope").u("session_generation", generation)
+        .u("trace_scope", proof.id).u("exclusive_at_scope_start", exclusive).o("origin_steady_ns", proof.origin_steady_ns);
+      if (proof.first_sequence) row.u("first_sequence", *proof.first_sequence);
+      else row.n("first_sequence");
+      vrr_trace::record(row);
+      if (!proof.id || !proof.origin_steady_ns || !proof.first_sequence) {
+        vrr_trace::record(vrr_trace::event_t("instrumentation_refused").s("reason", "live_tuning_scope_unavailable")
+          .u("session_generation", generation));
+      }
+    }
   }
 
   bool begin_live_bitrate_session_recreation(

@@ -4135,16 +4135,23 @@ namespace video {
   }
 
   static void trace_encoder_open(encode_session_t &session, const config_t &config, std::optional<std::uint64_t> generation, bool synchronized) {
-    if (!vrr_trace::enabled()) return;
+    if (!vrr_trace::enabled() || config.session_generation == 0 || encoder_probe_active()) return;
     session.trace_encoder = vrr_trace::next_id();
     session.trace_session_generation = config.session_generation;
     session.trace_generation_present = generation.has_value();
     session.trace_generation = generation.value_or(0);
     session.trace_synchronized = synchronized;
     const auto rate = encoding_framerate_to_rational(config);
-    vrr_trace::record(trace_encoder_event("encoder_open", session).u("capture_generation", config.capture_generation.generation_id)
+    auto row = trace_encoder_event("encoder_open", session).u("capture_generation", config.capture_generation.generation_id)
       .i("codec", config.videoFormat).i("dynamic_range", config.dynamicRange).i("rate_num", rate.num).i("rate_den", rate.den)
-      .u("vrr_eligible", config.vrr_pacing.eligible()));
+      .i("bitrate_kbps", config.bitrate)
+      .s("bitrate_authority", "successful_open_config").u("vrr_eligible", config.vrr_pacing.eligible());
+    if (const auto *av = dynamic_cast<const avcodec_encode_session_t *>(&session); av && av->avcodec_ctx)
+      row.i("avcodec_bit_rate_bps", av->avcodec_ctx->bit_rate);
+    else row.n("avcodec_bit_rate_bps");
+    vrr_trace::record(row);
+    vrr_trace::record_session_policy(trace_encoder_event("session_policy", session)
+      .u("capture_generation", config.capture_generation.generation_id), config.trace_display_policy);
   }
 
   static void trace_surface(encode_session_t &session, const platf::image_provenance_t *provenance, const char *branch) {
@@ -5145,7 +5152,13 @@ namespace video {
     receipt.event = event;
     if (event == vrr_pacing::event_e::accepted_source) receipt.emitted_source_ns = emitted_source_ns;
     receipt.observed_steady_ns = steady_ns_of(std::chrono::steady_clock::now()).value_or(-1);
-    (void) stream_stats::record_vrr_pacing_event(receipt);
+    if (vrr_trace::enabled()) {
+      vrr_trace::pacing_observation_t observation;
+      const bool accepted = stream_stats::record_vrr_pacing_event(receipt, &observation);
+      vrr_trace::record_pacing_receipt(receipt, accepted, observation);
+    } else {
+      (void) stream_stats::record_vrr_pacing_event(receipt);
+    }
   }
 
   static vrr_pacing::source_frame_t source_frame_of(const platf::image_provenance_t &provenance) {
@@ -5801,12 +5814,21 @@ namespace video {
           if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
             if (request->target_bitrate_kbps != applied_adaptive_bitrate) {
               auto update = encode_session_t::bitrate_update_e::rejected;
+              const bool trace = vrr_trace::enabled();
+              std::optional<vrr_trace::bitrate_observation_t> before;
+              if (trace) before.emplace();
+              auto record_update = [&](const char *result, std::optional<int> backend) {
+                if (trace) vrr_trace::record_bitrate_update(trace_encoder_event("bitrate_update", *session), *before,
+                  request->target_bitrate_kbps, request->revision, applied_adaptive_bitrate, result, backend);
+              };
               const bool current = adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
                 update = session->update_bitrate(request->target_bitrate_kbps);
                 return update == encode_session_t::bitrate_update_e::applied;
-              });
+              }, trace ? &*before : nullptr);
+              if (!current) record_update("superseded", std::nullopt);
               if (current) switch (update) {
                 case encode_session_t::bitrate_update_e::applied:
+                  record_update("applied", static_cast<int>(update));
                   applied_adaptive_bitrate = request->target_bitrate_kbps;
                   effective_bitrate = applied_adaptive_bitrate;
                   break;
@@ -5815,11 +5837,13 @@ namespace video {
                         request->revision,
                         request->target_bitrate_kbps
                       )) {
+                    record_update("superseded", static_cast<int>(update));
                     // A newer owner/controller decision won before the old
                     // session was retired. Poll that target without
                     // recreating for this stale request.
                     break;
                   }
+                  record_update("recreate", static_cast<int>(update));
                   BOOST_LOG(info)
                     << "Recreating the encoder session to apply bitrate "sv
                     << request->target_bitrate_kbps << " kbps"sv;
@@ -5827,6 +5851,7 @@ namespace video {
                   bitrate_session_recreation_pending = true;
                   return;
                 case encode_session_t::bitrate_update_e::rejected:
+                  record_update("rejected", static_cast<int>(update));
                   BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
                   adaptive_bitrate::set_runtime_update_supported(false, "runtime_bitrate_update_failed");
                   break;

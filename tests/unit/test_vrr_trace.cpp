@@ -297,4 +297,63 @@ TEST(VrrTraceTests, PacketRetirementRecordsQueueLossWithoutInventingASendReason)
   EXPECT_EQ(retired[0]["reason"], "not_dequeued_reason_unavailable");
   EXPECT_EQ(retired[1]["packet"], 301); EXPECT_EQ(retired[1]["dequeued"], 1);
 }
+
+TEST(VrrTraceTests, H2PolicyCopiesExactFieldCodesAndKeepsHistorySafeUnknown) {
+  collection_t c;
+  {
+    vrr_trace::test_recorder_scope_t active(c.recorder.get());
+    vrr_trace::session_policy_t policy;
+    policy.available = true; policy.requested_fps_milli = 119880; policy.resolved_fps_milli = 59940;
+    {
+      // Runtime strings expire before the writer reads the queued value-only observations.
+      std::string display = "composed_display_components", fps = "runtime_policy";
+      policy.display_mode_source = vrr_trace::policy_source(display);
+      policy.target_fps_source = vrr_trace::policy_source(fps);
+    }
+    vrr_trace::record_session_policy(vrr_trace::event_t("session_policy").u("encoder",31).u("session_generation",41),policy);
+    auto doctor = policy;
+    doctor.resolved_fps_milli = 90000;
+    doctor.display_mode_source = vrr_trace::policy_source("explicit_doctor_trial");
+    doctor.target_fps_source = doctor.display_mode_source;
+    vrr_trace::record_session_policy(vrr_trace::event_t("session_policy").u("encoder",35).u("session_generation",45),doctor);
+    policy.display_mode_source = vrr_trace::policy_source("history_safe,explicit_doctor_trial,runtime_policy");
+    policy.target_fps_source = vrr_trace::policy_source("future_unknown_source");
+    vrr_trace::record_session_policy(vrr_trace::event_t("session_policy").u("encoder",32).u("session_generation",42),policy);
+    vrr_trace::record_session_policy(vrr_trace::event_t("session_policy").u("encoder",33).u("session_generation",43),{});
+    vrr_trace::test_recorder_scope_t off(nullptr);
+    vrr_trace::record_session_policy(vrr_trace::event_t("session_policy").u("encoder",34),policy);
+    vrr_trace::record_pacing_receipt({},false,{});
+    vrr_trace::record_bitrate_update(vrr_trace::event_t("bitrate_update"),{},1000,1,2000,"rejected",0);
+  }
+  c.stop(); const auto rows = select(c.rows(),"session_policy"); ASSERT_EQ(rows.size(),4u);
+  EXPECT_EQ(rows[0]["requested_client_fps_milli"],119880); EXPECT_EQ(rows[0]["session_target_fps_milli"],59940);
+  EXPECT_EQ(rows[0]["display_mode_source_code"],static_cast<unsigned>(vrr_trace::policy_source_e::composed_display_components));
+  EXPECT_EQ(rows[0]["target_fps_source_code"],static_cast<unsigned>(vrr_trace::policy_source_e::runtime_policy));
+  EXPECT_TRUE(rows[0]["history_safe_target_fps_milli"].is_null()); EXPECT_TRUE(rows[0]["history_safe_source_code"].is_null());
+  EXPECT_EQ(rows[0]["history_safe_at_resolver"],"not_consumed_by_deterministic_resolver");
+  EXPECT_EQ(rows[1]["target_fps_source_code"],static_cast<unsigned>(vrr_trace::policy_source_e::explicit_doctor_trial));
+  EXPECT_EQ(rows[1]["session_target_fps_milli"],90000); EXPECT_TRUE(rows[1]["history_safe_target_fps_milli"].is_null());
+  EXPECT_EQ(rows[2]["display_mode_source_code"],0u); EXPECT_EQ(rows[2]["target_fps_source_code"],0u);
+  EXPECT_EQ(rows[3]["policy_available"],0u); EXPECT_TRUE(rows[3]["session_target_fps_milli"].is_null());
+  EXPECT_TRUE(rows[3]["history_safe_at_resolver"].is_null());
+  EXPECT_TRUE(select(c.rows(),"pacing_receipt").empty()); EXPECT_TRUE(select(c.rows(),"bitrate_update").empty());
+  EXPECT_EQ(c.rows().front()["minor"],vrr_trace::k_schema_minor);
+  EXPECT_TRUE(c.rows().back()["producer_complete"].get<bool>());
+}
+
+TEST(VrrTraceTests, H2AcceptedReceiptWithoutSequenceRefusesCaptureCompleteness) {
+  collection_t c;
+  {
+    vrr_trace::test_recorder_scope_t active(c.recorder.get());
+    vrr_pacing::receipt_t receipt;
+    receipt.session_generation = 41; receipt.event = vrr_pacing::event_e::readiness;
+    vrr_trace::record_pacing_receipt(receipt,true,{});
+  }
+  c.stop(); const auto rows = c.rows(); const auto receipts = select(rows,"pacing_receipt");
+  ASSERT_EQ(receipts.size(),1u); EXPECT_EQ(receipts[0]["accepted"],1u);
+  EXPECT_TRUE(receipts[0]["accepted_sequence"].is_null());
+  EXPECT_FALSE(receipts[0].contains("reason"));
+  EXPECT_EQ(rows.back()["instrumentation_refusals"],1u);
+  EXPECT_FALSE(rows.back()["producer_complete"].get<bool>());
+}
 #endif

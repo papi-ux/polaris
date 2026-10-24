@@ -8825,6 +8825,9 @@ namespace proc {
     std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
     bool no_active_sessions_at_launch
   ) {
+    // Existing process-wide opt-in setup, before the first launch policy and history scope.
+    // Later capture/encoder setup calls reuse the same recorder and its original budgets.
+    vrr_trace::start_from_environment();
     auto &sync = session_lifecycle_sync();
     std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex);
 #ifdef __linux__
@@ -9315,6 +9318,16 @@ namespace proc {
       preset_resolution.fps,
     };
     resolved_optimization.display_mode_source = resolved_field_source("display_mode");
+    if (vrr_trace::enabled()) {
+      auto &policy = launch_session->trace_display_policy;
+      policy.available = true;
+      policy.requested_fps_milli = launch_session->requested_fps;
+      policy.resolved_fps_milli = preset_resolution.fps;
+      policy.display_mode_source = vrr_trace::policy_source(resolved_optimization.display_mode_source);
+      policy.target_fps_source = vrr_trace::policy_source(resolved_field_source("target_fps"));
+      policy.width_source = vrr_trace::policy_source(resolved_field_source("display_width"));
+      policy.height_source = vrr_trace::policy_source(resolved_field_source("display_height"));
+    }
     resolved_optimization.target_bitrate_kbps = preset_resolution.target_bitrate_kbps;
     resolved_optimization.bitrate_source = resolved_field_source("target_bitrate_kbps");
     resolved_optimization.bitrate_reason = resolved_field_reason("target_bitrate_kbps");
@@ -9351,6 +9364,16 @@ namespace proc {
                         << format_display_mode(*resolved_optimization.display_mode)
                         << " to "sv << format_display_mode(normalized_display_mode)
                         << " to respect explicit client request "sv << format_display_mode(requested_display_mode);
+        if (vrr_trace::enabled()) {
+          auto &policy = launch_session->trace_display_policy;
+          policy.display_mode_source = vrr_trace::policy_source_e::runtime_policy;
+          if (normalized_display_mode.fps != resolved_optimization.display_mode->fps)
+            policy.target_fps_source = vrr_trace::policy_source_e::runtime_policy;
+          if (normalized_display_mode.width != resolved_optimization.display_mode->width)
+            policy.width_source = vrr_trace::policy_source_e::runtime_policy;
+          if (normalized_display_mode.height != resolved_optimization.display_mode->height)
+            policy.height_source = vrr_trace::policy_source_e::runtime_policy;
+        }
         resolved_optimization.display_mode = normalized_display_mode;
         resolved_optimization.display_mode_source = "runtime_policy";
         note_layer(resolved_optimization, "runtime_policy");
@@ -9379,6 +9402,10 @@ namespace proc {
         // nothing else. It never injects a game-process limiter or topology.
         resolved_optimization.display_mode->fps = trial->target_fps * 1000;
         resolved_optimization.display_mode_source = "explicit_doctor_trial";
+        if (vrr_trace::enabled()) {
+          launch_session->trace_display_policy.display_mode_source = vrr_trace::policy_source_e::explicit_doctor_trial;
+          launch_session->trace_display_policy.target_fps_source = vrr_trace::policy_source_e::explicit_doctor_trial;
+        }
         note_layer(resolved_optimization, "explicit_doctor_trial");
         note_reasoning(
           resolved_optimization,
@@ -9393,6 +9420,7 @@ namespace proc {
       launch_session->width = resolved_optimization.display_mode->width;
       launch_session->height = resolved_optimization.display_mode->height;
       launch_session->fps = resolved_optimization.display_mode->fps;
+      if (vrr_trace::enabled()) launch_session->trace_display_policy.resolved_fps_milli = launch_session->fps;
     }
 
     if (resolved_optimization.color_range) {

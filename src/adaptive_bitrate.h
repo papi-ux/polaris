@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "vrr_trace.h"
 
 namespace adaptive_bitrate {
 
@@ -89,6 +90,12 @@ namespace adaptive_bitrate {
 
   /** A bounded, oldest-first copy of one stream scope's history. */
   struct history_t {
+    struct trace_scope_t {
+      // Opaque host observation identity, independent of the private app/session bearer.
+      std::uint64_t id = 0;
+      std::optional<std::int64_t> origin_steady_ns;
+      std::optional<std::uint64_t> first_sequence;
+    };
     /// The stream scope these entries belong to. A history that never had one, or whose stream ended,
     /// is unscoped and must not be attributed to any stream.
     bool scoped = false;
@@ -101,6 +108,7 @@ namespace adaptive_bitrate {
     /// Host steady-clock milliseconds since the scope began, when this copy was taken.
     std::int64_t host_elapsed_ms_at_copy = 0;
     std::vector<history_entry_t> entries;
+    std::optional<trace_scope_t> trace_scope;
   };
 
   struct state_t {
@@ -303,7 +311,8 @@ namespace adaptive_bitrate {
   // The callback may only update the encoder; it must not call this controller.
   // Validate, apply and acknowledge under one boundary with operator changes.
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
-                                  const std::function<bool()> &apply);
+                                  const std::function<bool()> &apply,
+                                  vrr_trace::bitrate_observation_t *trace_observation = nullptr);
   void set_session_scope(std::uint64_t generation, const std::string &app_session_id,
                          bool exclusive);
 

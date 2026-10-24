@@ -16,6 +16,7 @@
 #include <src/utility.h>
 #include <src/vrr_clock_proof.h>
 #include <src/vrr_source_time.h>
+#include <src/launch_profile.h>
 #include "../tests_events.h"
 
 #include <gtest/gtest.h>
@@ -13281,6 +13282,131 @@ TEST_F(StreamStatsCaptureTimingTests, SourcePacingRuntimeNeedsItsOwnAcceptedMapp
   EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt));
   EXPECT_EQ(current_stats_json()["last_session"]["vrr"], ended);
 }
+
+#ifdef __linux__
+namespace {
+  struct H2StatsTrace {
+    std::filesystem::path directory;
+    std::unique_ptr<vrr_trace::recorder_t> recorder;
+    H2StatsTrace() {
+      char scratch[] = "/tmp/polaris-h2-stats-XXXXXX";
+      const auto *created = ::mkdtemp(scratch);
+      if (!created) throw std::runtime_error("mkdtemp failed");
+      directory = created;
+      recorder = vrr_trace::recorder_t::open((directory / "trace.jsonl").string());
+    }
+    ~H2StatsTrace() { if (recorder) recorder->stop(); std::filesystem::remove_all(directory); }
+    std::vector<nlohmann::json> receipts() {
+      recorder->stop();
+      std::ifstream in(directory / "trace.jsonl");
+      std::vector<nlohmann::json> rows;
+      for (std::string line; std::getline(in, line);) {
+        auto row = nlohmann::json::parse(line);
+        if (row["type"] == "pacing_receipt") rows.push_back(std::move(row));
+      }
+      return rows;
+    }
+  };
+}
+
+TEST_F(StreamStatsCaptureTimingTests, H2SnapshotWatermarkPrecedesDeferredReceiptEmission) {
+  H2StatsTrace trace;
+  ASSERT_TRUE(trace.recorder);
+  ASSERT_EQ(trace.recorder->status(), vrr_trace::status_e::running);
+  vrr_trace::test_recorder_scope_t active(trace.recorder.get());
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on);
+  request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  vrr_pacing::receipt_t first {501,0,0,0,vrr_pacing::mode_e::waiting,
+    vrr_pacing::event_e::readiness,std::nullopt,pacing_now_ns()};
+  vrr_trace::pacing_observation_t one;
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(first, &one));
+  ASSERT_EQ(one.accepted_sequence, 1u);
+  // Deterministic race schedule: the real snapshot is between mutation and the real trace emit.
+  const auto snapshot = stream_stats::get_current();
+  auto second = first; second.event = vrr_pacing::event_e::routine_repeat_suppressed;
+  second.observed_steady_ns = pacing_now_ns();
+  vrr_trace::pacing_observation_t two;
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(second, &two));
+  ASSERT_EQ(two.accepted_sequence, 2u);
+  // A rejected generation retains its original identity, and receives no accepted sequence.
+  auto refused = first; refused.session_generation = 999;
+  vrr_trace::pacing_observation_t rejected = one;
+  const bool accepted = stream_stats::record_vrr_pacing_event(refused, &rejected);
+  EXPECT_FALSE(accepted); EXPECT_FALSE(rejected.accepted_sequence); EXPECT_FALSE(rejected.event_count_after);
+  vrr_trace::record_pacing_receipt(second, true, two); // queue order intentionally differs
+  vrr_trace::record_pacing_receipt(refused, accepted, rejected);
+  vrr_trace::record_pacing_receipt(first, true, one);
+  const auto frozen = stream_stats::vrr_json(snapshot,501)["host_pacing"];
+  EXPECT_EQ(frozen["trace_receipts"]["accepted_watermark"], 1u);
+  EXPECT_EQ(frozen["event_counts"]["readiness"], 1u);
+  EXPECT_EQ(frozen["event_counts"]["routine_repeat_suppressed"], 0u);
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(),501)["host_pacing"]["trace_receipts"]["accepted_watermark"], 2u);
+  const auto rows = trace.receipts(); ASSERT_EQ(rows.size(),3u);
+  EXPECT_EQ(rows[0]["accepted_sequence"],2u);
+  EXPECT_EQ(rows[1]["accepted"],0u); EXPECT_TRUE(rows[1]["accepted_sequence"].is_null());
+  EXPECT_EQ(rows[1]["session_generation"],999u);
+  EXPECT_EQ(rows[2]["accepted_sequence"],1u); EXPECT_EQ(rows[2]["event_count_after"],1u);
+  EXPECT_EQ(rows[2]["receipt_observed_steady_ns"],first.observed_steady_ns);
+  // Reconcile using the snapshot's authority prefix, independent of deferred file timestamps.
+  std::uint64_t readiness = 0, suppressed = 0;
+  const auto watermark = frozen["trace_receipts"]["accepted_watermark"].get<std::uint64_t>();
+  for (const auto &row : rows) if (row["accepted"] == 1 && row["accepted_sequence"].get<std::uint64_t>() <= watermark) {
+    if (row["event"] == static_cast<int>(vrr_pacing::event_e::readiness)) ++readiness;
+    if (row["event"] == static_cast<int>(vrr_pacing::event_e::routine_repeat_suppressed)) ++suppressed;
+  }
+  EXPECT_EQ(readiness,1u); EXPECT_EQ(suppressed,0u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, H2UnobservedAdmissionPermanentlyWithholdsTheWatermark) {
+  H2StatsTrace trace;
+  ASSERT_TRUE(trace.recorder);
+  ASSERT_EQ(trace.recorder->status(), vrr_trace::status_e::running);
+  vrr_trace::test_recorder_scope_t active(trace.recorder.get());
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on); request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  vrr_pacing::receipt_t receipt {501,0,0,0,vrr_pacing::mode_e::waiting,
+    vrr_pacing::event_e::readiness,std::nullopt,pacing_now_ns()};
+  vrr_trace::pacing_observation_t observation;
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt,&observation));
+  EXPECT_EQ(observation.accepted_sequence,1u);
+  // This existing API caller omitted the trace descriptor. A later observer cannot repair its gap.
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt));
+  EXPECT_FALSE(stream_stats::vrr_json(stream_stats::get_current(),501)["host_pacing"].contains("trace_receipts"));
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt,&observation));
+  EXPECT_EQ(observation.accepted_sequence,3u); // honest identity survives; complete-prefix proof does not
+  EXPECT_FALSE(stream_stats::vrr_json(stream_stats::get_current(),501)["host_pacing"].contains("trace_receipts"));
+  {
+    vrr_trace::test_recorder_scope_t off(nullptr);
+    EXPECT_TRUE(stream_stats::record_vrr_pacing_event(receipt));
+  }
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(),501)["host_pacing"]["event_counts"]["readiness"],4u);
+  // A genuine replacement generation has its own counter lifetime and starts at sequence 1.
+  stream_stats::remove_client("10.0.0.5",501);
+  stream_stats::add_client("10.0.0.5", "Replacement", 502);
+  request.session_generation = 502; ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  receipt.session_generation = 502; receipt.observed_steady_ns = pacing_now_ns();
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt,&observation));
+  EXPECT_EQ(observation.accepted_sequence,1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, H2ActualResolverKeepsExactFieldSourcesAndUnknownUnavailable) {
+  launch_profile::request_t request;
+  request.requested_width = 1920; request.requested_height = 1080; request.requested_fps = 119880;
+  request.host_max_fps = 59940; request.preset = "high_fps";
+  const auto resolved = launch_profile::resolve(request);
+  EXPECT_EQ(resolved.fps,59940);
+  EXPECT_EQ(resolved.fields["target_fps"]["source"],"capability_validation");
+  EXPECT_EQ(resolved.fields["display_mode"]["source"],"composed_display_components");
+  // Feed actual resolver outputs through the same bounded production mapping; never a layer list.
+  const auto mode_source = resolved.fields["display_mode"]["source"].get<std::string>();
+  const auto fps_source = resolved.fields["target_fps"]["source"].get<std::string>();
+  EXPECT_NE(vrr_trace::policy_source(mode_source),vrr_trace::policy_source(fps_source));
+  EXPECT_EQ(vrr_trace::policy_source("unrecognized_future_source"),vrr_trace::policy_source_e::unavailable);
+}
+#endif
 
 TEST_F(StreamStatsCaptureTimingTests, UnsupportedPacingKeepsItsTerminalReasonWhenItsObservationAges) {
   stream_stats::add_client("10.0.0.5", "Owner", 501);

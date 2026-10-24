@@ -19,6 +19,7 @@
 #include "stream_bitrate.h"
 #include "thread_safe.h"
 #include "vrr_session_policy.h"
+#include "vrr_trace.h"
 
 #ifdef _WIN32
   #include <windows.h>
@@ -256,6 +257,9 @@ namespace rtsp_stream {
   #ifdef _WIN32
     GUID display_guid{};
   #endif
+
+    // Passive launch field provenance; no pointers to resolution JSON or the optimization layer list.
+    vrr_trace::session_policy_t trace_display_policy;
 
   private:
     const std::shared_ptr<std::atomic_bool> worker_connection_required_ =

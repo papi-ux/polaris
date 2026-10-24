@@ -11,9 +11,11 @@
 #include <memory>
 #include <optional>
 #include <string_view>
+#include "vrr_pacing_receipt.h"
 
 namespace vrr_trace {
   inline constexpr unsigned k_schema_major = 2;
+  inline constexpr unsigned k_schema_minor = 1;
   inline constexpr std::size_t k_fields = 40;
   inline constexpr std::size_t k_queue_capacity = 512;
   inline constexpr std::uint64_t k_event_budget = 2'000'000;
@@ -97,6 +99,43 @@ namespace vrr_trace {
   void record(event_t event) noexcept;
   std::uint64_t next_id() noexcept;  // process-wide, never reused; 0 when off/exhausted
   std::optional<std::int64_t> ns(std::optional<std::chrono::steady_clock::time_point> at) noexcept;
+
+  // Copied under stats_mutex with the event counter mutation. No trace queue lock is involved.
+  struct pacing_observation_t {
+    std::optional<std::uint64_t> accepted_sequence;
+    std::optional<std::uint64_t> event_count_after;
+  };
+  void record_pacing_receipt(const vrr_pacing::receipt_t &receipt, bool accepted,
+                            const pacing_observation_t &observation) noexcept;
+
+  struct bitrate_observation_t {
+    std::uint64_t scope_generation = 0;
+    std::uint64_t trace_scope = 0;
+    int requested_before_kbps = 0;
+    std::uint64_t requested_before_revision = 0;
+    int applied_before_kbps = 0;
+    std::uint64_t applied_before_revision = 0;
+  };
+  void record_bitrate_update(event_t encoder_identity, const bitrate_observation_t &before,
+                            int requested_kbps, std::uint64_t request_revision, int encoder_before_kbps,
+                            const char *static_result, std::optional<int> backend_result) noexcept;
+
+  enum class policy_source_e : unsigned {
+    unavailable = 0, explicit_launch_request = 1, paired_client = 2, client_launch_request = 3,
+    device_profile_v1 = 4, capability_validation = 5, composed_display_components = 6,
+    runtime_policy = 7, explicit_doctor_trial = 8,
+  };
+  policy_source_e policy_source(std::string_view source) noexcept;
+  struct session_policy_t {
+    bool available = false;
+    int requested_fps_milli = 0;
+    int resolved_fps_milli = 0;
+    policy_source_e display_mode_source = policy_source_e::unavailable;
+    policy_source_e target_fps_source = policy_source_e::unavailable;
+    policy_source_e width_source = policy_source_e::unavailable;
+    policy_source_e height_source = policy_source_e::unavailable;
+  };
+  void record_session_policy(event_t encoder_identity, const session_policy_t &policy) noexcept;
 
   // One socket API invocation, not physical delivery. Failure/exception exposes unknown partial
   // progress; whole-range fallback is explicitly related by retry_of. Never owns packet buffers.

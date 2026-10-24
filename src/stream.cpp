@@ -3535,6 +3535,7 @@ namespace stream {
 
       session->config = config;
       session->config.monitor.session_generation = session->session_generation;
+      if (vrr_trace::enabled()) session->config.monitor.trace_display_policy = launch_session.trace_display_policy;
       session->vrr.host_source_pacing = config::video.vrr_source_pacing;
       session->config.monitor.vrr_pacing = {
         session->vrr.host_source_pacing, session->vrr.requested, session->vrr.watch_or_input_only

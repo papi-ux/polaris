@@ -220,7 +220,7 @@ namespace vrr_trace {
       };
       try {
         json header {{"type", "header"}, {"schema", "polaris.vrr-host-trace"}, {"major", k_schema_major},
-                     {"minor", 0}, {"identity", start_identity}, {"queue_capacity", k_queue_capacity},
+                     {"minor", k_schema_minor}, {"identity", start_identity}, {"queue_capacity", k_queue_capacity},
                      {"event_budget", limits.events}, {"byte_budget", limits.bytes},
                      {"writer_lifetime_ns", std::chrono::duration_cast<std::chrono::nanoseconds>(k_writer_lifetime).count()},
                      {"delivery_semantics", "socket_api_observations_only"}, {"clock_route", "unqualified_requires_G1_G5_and_owner_topology"},
@@ -474,6 +474,74 @@ namespace vrr_trace {
   }
   std::optional<std::int64_t> ns(std::optional<std::chrono::steady_clock::time_point> at) noexcept {
     return at ? vrr_clock::exact_ns(at->time_since_epoch()) : std::nullopt;
+  }
+
+  void record_pacing_receipt(const vrr_pacing::receipt_t &receipt, bool accepted,
+                            const pacing_observation_t &observation) noexcept {
+    if (!enabled()) return;
+    auto row = event_t("pacing_receipt").u("session_generation", receipt.session_generation)
+      .u("capture_generation", receipt.capture_generation).u("capture_epoch", receipt.capture_epoch)
+      .u("source_sequence", receipt.source_sequence).i("mode", static_cast<int>(receipt.mode))
+      .i("event", static_cast<int>(receipt.event)).i("receipt_observed_steady_ns", receipt.observed_steady_ns)
+      .o("emitted_source_ns", receipt.emitted_source_ns).u("accepted", accepted);
+    if (accepted && observation.accepted_sequence) row.u("accepted_sequence", *observation.accepted_sequence);
+    else row.n("accepted_sequence");
+    if (accepted && observation.event_count_after) row.u("event_count_after", *observation.event_count_after);
+    else row.n("event_count_after");
+    record(row);
+    if (accepted && !observation.accepted_sequence) {
+      record(event_t("instrumentation_refused").s("reason", "accepted_receipt_sequence_unavailable")
+        .u("session_generation", receipt.session_generation));
+    }
+  }
+
+  void record_bitrate_update(event_t row, const bitrate_observation_t &before,
+                            int requested_kbps, std::uint64_t request_revision, int encoder_before_kbps,
+                            const char *static_result, std::optional<int> backend_result) noexcept {
+    if (!enabled()) return;
+    row.kind = "bitrate_update";
+    row.u("scope_generation", before.scope_generation).u("trace_scope", before.trace_scope).i("requested_kbps", requested_kbps)
+      .u("request_revision", request_revision).i("encoder_before_kbps", encoder_before_kbps)
+      .i("requested_before_kbps", before.requested_before_kbps).u("requested_before_revision", before.requested_before_revision)
+      .i("applied_before_kbps", before.applied_before_kbps).u("applied_before_revision", before.applied_before_revision)
+      .u("applied_before_known", before.applied_before_kbps > 0)
+      .s("result", static_result);
+    if (backend_result) row.i("backend_result", *backend_result); else row.n("backend_result");
+    record(row);
+  }
+
+  policy_source_e policy_source(std::string_view source) noexcept {
+    if (source == "explicit_launch_request") return policy_source_e::explicit_launch_request;
+    if (source == "paired_client") return policy_source_e::paired_client;
+    if (source == "client_launch_request") return policy_source_e::client_launch_request;
+    if (source == "device_profile_v1") return policy_source_e::device_profile_v1;
+    if (source == "capability_validation") return policy_source_e::capability_validation;
+    if (source == "composed_display_components") return policy_source_e::composed_display_components;
+    if (source == "runtime_policy") return policy_source_e::runtime_policy;
+    if (source == "explicit_doctor_trial") return policy_source_e::explicit_doctor_trial;
+    return policy_source_e::unavailable;
+  }
+
+  void record_session_policy(event_t row, const session_policy_t &policy) noexcept {
+    if (!enabled()) return;
+    row.kind = "session_policy";
+    row.u("policy_available", policy.available);
+    if (policy.available) {
+      row.i("requested_client_fps_milli", policy.requested_fps_milli).i("session_target_fps_milli", policy.resolved_fps_milli)
+        .u("display_mode_source_code", static_cast<unsigned>(policy.display_mode_source))
+        .u("target_fps_source_code", static_cast<unsigned>(policy.target_fps_source))
+        .u("width_source_code", static_cast<unsigned>(policy.width_source))
+        .u("height_source_code", static_cast<unsigned>(policy.height_source));
+    } else {
+      row.n("requested_client_fps_milli").n("session_target_fps_milli").n("display_mode_source_code")
+        .n("target_fps_source_code").n("width_source_code").n("height_source_code");
+    }
+    // There is no applied history-safe provenance on the current launch path. Do not infer it
+    // from the joined optimizer layers, or treat a selected deterministic cap as learned history.
+    row.n("history_safe_target_fps_milli").n("history_safe_source_code");
+    if (policy.available) row.s("history_safe_at_resolver", "not_consumed_by_deterministic_resolver");
+    else row.n("history_safe_at_resolver");
+    record(row);
   }
 
   send_attempt_t::send_attempt_t(std::uint64_t packet, int block, std::int64_t first, std::uint64_t count,

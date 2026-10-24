@@ -789,6 +789,11 @@ namespace stream_stats {
         {"fresh", fresh && !runtime->ended}, {"event_counts", std::move(counts)},
         {"receiver_presentation_verified", false}, {"physical_acceptance", false},
         {"receiver_source_cadence_available", false}};
+      if (runtime->trace_accepted_watermark) {
+        j["host_pacing"]["trace_receipts"] = {{"schema_major", vrr_trace::k_schema_major},
+          {"schema_minor", vrr_trace::k_schema_minor}, {"session_generation", sample.session_generation},
+          {"accepted_watermark", *runtime->trace_accepted_watermark}};
+      }
       return j;
     }
 
@@ -4401,7 +4406,9 @@ namespace stream_stats {
     return true;
   }
 
-  bool record_vrr_pacing_event(const vrr_pacing::receipt_t &receipt) {
+  bool record_vrr_pacing_event(const vrr_pacing::receipt_t &receipt,
+                             vrr_trace::pacing_observation_t *trace_observation) {
+    if (trace_observation) *trace_observation = {};
     using mode = vrr_pacing::mode_e;
     using event = vrr_pacing::event_e;
     if (receipt.session_generation == 0 || vrr_pacing::name(receipt.mode) == "invalid_mode" ||
@@ -4439,6 +4446,7 @@ namespace stream_stats {
                (!client->vrr_pacing || client->vrr_pacing->event_counts[static_cast<std::size_t>(event::accepted_source)] == 0)) {
       return false;
     }
+    const bool first_admission = !client->vrr_pacing;
     if (!client->vrr_pacing) client->vrr_pacing.emplace();
     auto &runtime = *client->vrr_pacing;
     if (receipt.event == event::accepted_source) {
@@ -4457,7 +4465,26 @@ namespace stream_stats {
     runtime.last = observation;
     runtime.authority_lost = runtime.authority_lost || receipt.event == event::authority_lost;
     auto &count = runtime.event_counts[static_cast<std::size_t>(receipt.event)];
-    if (count < UINT64_MAX) ++count;
+    const bool count_saturated = count == UINT64_MAX;
+    if (!count_saturated) ++count;
+    // This watermark and event_counts are copied together by the existing locked stats snapshot.
+    // Queue admission happens later: its timestamp/order cannot place a receipt in that snapshot.
+    if (vrr_trace::enabled()) {
+      if (first_admission && trace_observation) runtime.trace_accepted_watermark = 0;
+      if (runtime.trace_accepted_sequence == UINT64_MAX) {
+        runtime.trace_accepted_watermark.reset();
+      } else {
+        ++runtime.trace_accepted_sequence;
+        if (trace_observation) {
+          trace_observation->accepted_sequence = runtime.trace_accepted_sequence;
+          trace_observation->event_count_after = count;
+        }
+        if (!trace_observation || count_saturated) runtime.trace_accepted_watermark.reset();
+        if (runtime.trace_accepted_watermark) *runtime.trace_accepted_watermark = runtime.trace_accepted_sequence;
+      }
+    } else if (runtime.trace_accepted_watermark) {
+      runtime.trace_accepted_watermark.reset();
+    }
     return true;
   }
 
@@ -5171,6 +5198,12 @@ namespace stream_stats {
       {"entries", nlohmann::json::array()},
     };
     if (!available) return out;
+    if (history.trace_scope && vrr_trace::enabled()) {
+      const auto &proof = *history.trace_scope;
+      out["trace_scope"] = {{"id", proof.id},
+        {"origin_steady_ns", proof.origin_steady_ns ? nlohmann::json(*proof.origin_steady_ns) : nlohmann::json(nullptr)},
+        {"first_sequence", proof.first_sequence ? nlohmann::json(*proof.first_sequence) : nlohmann::json(nullptr)}};
+    }
     for (const auto &entry : history.entries) {
       nlohmann::json e = {
         {"sequence", entry.sequence},

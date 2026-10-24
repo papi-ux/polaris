@@ -32,6 +32,7 @@
 #include "stream_fec.h"
 #include "vrr_session_policy.h"
 #include "vrr_pacing_receipt.h"
+#include "vrr_trace.h"
 
 namespace stream_stats {
 
@@ -43,10 +44,15 @@ namespace stream_stats {
     std::uint64_t last_source_epoch = 0;
     std::uint64_t last_source_sequence = 0;
     std::optional<std::int64_t> last_source_ns;
+    // Present only for a fully observed prefix starting at this runtime's first admission.
+    // A missing observer, saturation or trace interruption permanently invalidates the prefix.
+    std::optional<std::uint64_t> trace_accepted_watermark;
+    std::uint64_t trace_accepted_sequence = 0;
   };
 
   // Encode-loop observations only; never authorizes future source-time use.
-  bool record_vrr_pacing_event(const vrr_pacing::receipt_t &receipt);
+  bool record_vrr_pacing_event(const vrr_pacing::receipt_t &receipt,
+                             vrr_trace::pacing_observation_t *trace_observation = nullptr);
 
   inline constexpr std::uint64_t DOCTOR_PACING_WARMUP_SAMPLES = 6;
   inline constexpr std::uint64_t DOCTOR_PACING_CONFIRMATION_SAMPLES = 2;

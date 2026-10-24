@@ -18,6 +18,13 @@
 #include <future>
 #include <limits>
 #include <vector>
+#ifdef __linux__
+  #include <filesystem>
+  #include <fstream>
+  #include <cstdlib>
+  #include <stdexcept>
+  #include <nlohmann/json.hpp>
+#endif
 
 using namespace std::chrono_literals;
 
@@ -1486,3 +1493,131 @@ TEST(AdaptiveBitrateHistory, ANewScopeWithoutAResetKeepsNothingRecordedBeforeIt)
   EXPECT_EQ(history_now().entries[1].requested_bitrate_kbps, 17000);
   leave_history_clean();
 }
+
+#ifdef __linux__
+namespace {
+  struct H2ControllerTrace {
+    std::filesystem::path directory;
+    std::unique_ptr<vrr_trace::recorder_t> recorder;
+    H2ControllerTrace() {
+      char scratch[] = "/tmp/polaris-h2-controller-XXXXXX";
+      const auto *created = ::mkdtemp(scratch);
+      if (!created) throw std::runtime_error("mkdtemp failed");
+      directory = created;
+      recorder = vrr_trace::recorder_t::open((directory / "trace.jsonl").string());
+    }
+    ~H2ControllerTrace() {
+      leave_history_clean();
+      if (recorder) recorder->stop();
+      std::filesystem::remove_all(directory);
+    }
+    std::vector<nlohmann::json> rows(std::string_view type) {
+      recorder->stop();
+      std::ifstream in(directory / "trace.jsonl");
+      std::vector<nlohmann::json> result;
+      for (std::string line; std::getline(in,line);) {
+        auto row = nlohmann::json::parse(line);
+        if (row["type"] == type) result.push_back(std::move(row));
+      }
+      return result;
+    }
+  };
+}
+
+TEST(AdaptiveBitrateHistory, H2ScopeUsesExactOriginAndDistinguishesAnotherOwnerOfTheSameGeneration) {
+  H2ControllerTrace trace;
+  ASSERT_TRUE(trace.recorder);
+  ASSERT_EQ(trace.recorder->status(),vrr_trace::status_e::running);
+  vrr_trace::test_recorder_scope_t active(trace.recorder.get());
+  const auto before = vrr_trace::ns(std::chrono::steady_clock::now());
+  start_history_scope();
+  const auto after = vrr_trace::ns(std::chrono::steady_clock::now());
+  const auto first = history_now();
+  ASSERT_TRUE(first.trace_scope); ASSERT_TRUE(first.trace_scope->origin_steady_ns);
+  ASSERT_TRUE(first.trace_scope->first_sequence); ASSERT_FALSE(first.entries.empty());
+  EXPECT_GE(first.trace_scope->origin_steady_ns,before); EXPECT_LE(first.trace_scope->origin_steady_ns,after);
+  EXPECT_EQ(first.trace_scope->first_sequence,first.entries.front().sequence);
+  adaptive_bitrate::set_session_scope(k_history_generation,"history-owner-a",false);
+  EXPECT_EQ(history_now().trace_scope->id,first.trace_scope->id);
+  EXPECT_EQ(history_now().trace_scope->origin_steady_ns,first.trace_scope->origin_steady_ns);
+  adaptive_bitrate::set_session_scope(k_history_generation,"private-bearer-never-export",true);
+  const auto other = history_now(); ASSERT_TRUE(other.trace_scope);
+  EXPECT_GT(other.trace_scope->id,first.trace_scope->id);
+  EXPECT_GT(other.trace_scope->first_sequence,first.trace_scope->first_sequence);
+  adaptive_bitrate::set_session_scope(k_history_generation+1,"private-bearer-never-export",true);
+  const auto replacement = history_now(); ASSERT_TRUE(replacement.trace_scope);
+  EXPECT_GT(replacement.trace_scope->id,other.trace_scope->id);
+  adaptive_bitrate::set_session_scope(0,{},false); EXPECT_FALSE(history_now().trace_scope);
+  {
+    vrr_trace::test_recorder_scope_t off(nullptr);
+    adaptive_bitrate::set_session_scope(k_history_generation+2,"off-owner",true);
+    EXPECT_FALSE(history_now().trace_scope);
+    EXPECT_EQ(history_now().entries.front().kind,"scope_started");
+  }
+  const auto rows = trace.rows("live_tuning_scope"); ASSERT_EQ(rows.size(),3u);
+  EXPECT_EQ(rows[0]["origin_steady_ns"],*first.trace_scope->origin_steady_ns);
+  EXPECT_EQ(rows[0]["first_sequence"],*first.trace_scope->first_sequence);
+  EXPECT_EQ(rows[1]["session_generation"],rows[0]["session_generation"]);
+  EXPECT_NE(rows[1]["trace_scope"],rows[0]["trace_scope"]);
+  EXPECT_EQ(rows[2]["session_generation"],k_history_generation+1);
+  for (const auto &row : rows) {
+    EXPECT_EQ(row.dump().find("private-bearer-never-export"),std::string::npos);
+    EXPECT_FALSE(row.contains("app_session_id"));
+  }
+}
+
+TEST(AdaptiveBitrateHistory, H2RealApplyRecreationAndSupersedeKeepObservedValuesAndOrder) {
+  H2ControllerTrace trace;
+  ASSERT_TRUE(trace.recorder);
+  ASSERT_EQ(trace.recorder->status(),vrr_trace::status_e::running);
+  vrr_trace::test_recorder_scope_t active(trace.recorder.get());
+  start_history_scope();
+  adaptive_bitrate::set_runtime_update_supported(true,"supported",20000);
+  const auto initial = adaptive_bitrate::get_doctor_state();
+  adaptive_bitrate::set_live_bitrate(15000);
+  const auto apply = adaptive_bitrate::get_live_bitrate_request(); ASSERT_TRUE(apply);
+  vrr_trace::bitrate_observation_t observation;
+  int calls = 0;
+  ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*apply,[&] { ++calls; return true; },&observation));
+  EXPECT_EQ(calls,1); EXPECT_EQ(observation.applied_before_kbps,20000);
+  EXPECT_EQ(observation.applied_before_revision,initial.revision);
+  EXPECT_EQ(observation.requested_before_kbps,15000); EXPECT_EQ(observation.requested_before_revision,apply->revision);
+  vrr_trace::record_bitrate_update(vrr_trace::event_t("bitrate_update").u("encoder",71),observation,
+    apply->target_bitrate_kbps,apply->revision,20000,"applied",1);
+  for (int i=0;i<3;++i) adaptive_bitrate::acknowledge_live_bitrate_applied(apply->revision,15000);
+  adaptive_bitrate::set_live_bitrate(12000);
+  const auto recreate = adaptive_bitrate::get_live_bitrate_request(); ASSERT_TRUE(recreate);
+  ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*recreate,[&] { ++calls; return false; },&observation));
+  EXPECT_EQ(observation.applied_before_kbps,15000); EXPECT_EQ(observation.applied_before_revision,apply->revision);
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(recreate->revision,12000));
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps,0);
+  vrr_trace::record_bitrate_update(vrr_trace::event_t("bitrate_update").u("encoder",71),observation,
+    12000,recreate->revision,15000,"recreate",2);
+  // Controller work may supersede that target before the replacement opens. No guessed rate.
+  adaptive_bitrate::set_live_bitrate(11000);
+  EXPECT_FALSE(adaptive_bitrate::apply_live_bitrate_request(*recreate,[&] { ++calls; return true; },&observation));
+  EXPECT_EQ(calls,2); EXPECT_EQ(observation.requested_before_kbps,11000);
+  EXPECT_EQ(observation.applied_before_kbps,0);
+  vrr_trace::record_bitrate_update(vrr_trace::event_t("bitrate_update").u("encoder",71),observation,
+    12000,recreate->revision,15000,"superseded",std::nullopt);
+  EXPECT_FALSE(adaptive_bitrate::begin_live_bitrate_session_recreation(recreate->revision,12000));
+  const auto rejected = adaptive_bitrate::get_live_bitrate_request(); ASSERT_TRUE(rejected);
+  ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*rejected,[&] { ++calls; return false; },&observation));
+  vrr_trace::record_bitrate_update(vrr_trace::event_t("bitrate_update").u("encoder",71),observation,
+    11000,rejected->revision,15000,"rejected",0);
+  {
+    vrr_trace::test_recorder_scope_t off(nullptr);
+    const auto plain_before = adaptive_bitrate::get_doctor_state();
+    ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*rejected,[&] { ++calls; return true; }));
+    EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps,11000);
+    EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision,plain_before.revision);
+  }
+  EXPECT_EQ(calls,4);
+  const auto rows = trace.rows("bitrate_update"); ASSERT_EQ(rows.size(),4u);
+  EXPECT_EQ(rows[0]["result"],"applied"); EXPECT_EQ(rows[0]["applied_before_revision"],initial.revision);
+  EXPECT_EQ(rows[1]["result"],"recreate"); EXPECT_EQ(rows[1]["applied_before_kbps"],15000);
+  EXPECT_EQ(rows[2]["result"],"superseded"); EXPECT_TRUE(rows[2]["backend_result"].is_null());
+  EXPECT_EQ(rows[3]["result"],"rejected");
+  for (std::size_t i=1;i<rows.size();++i) EXPECT_LT(rows[i-1]["order"],rows[i]["order"]);
+}
+#endif

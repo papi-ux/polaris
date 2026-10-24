@@ -81,6 +81,7 @@ namespace video {
     // Source-time pacing intent, frozen for this session generation at authenticated admission:
     // the host's private opt-in and the client's request. Default: ineligible, so pacing is unchanged.
     vrr_policy::pacing_intent_t vrr_pacing;
+    vrr_trace::session_policy_t trace_display_policy;
   };
 
   inline AVRational framerate_to_rational(const config_t &config) {
