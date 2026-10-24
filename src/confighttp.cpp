@@ -9487,12 +9487,15 @@ namespace confighttp {
     output_tree["backend_preference"] = preference;
     output_tree["backend_detected"] = backend_detected;
     output_tree["configuration_ready"] = available;
-    output_tree["unavailable_reason"] = available ? "" : virtual_display::unavailable_reason();
+    const auto unavailable = available ? std::string {} : virtual_display::unavailable_reason();
+    output_tree["unavailable_reason"] = unavailable;
     // On Plasma, why the screen is not Polaris's own KWin one: a game opens on the
-    // primary monitor with any other backend there.
+    // primary monitor with any other backend there. An unavailable reason that
+    // already leads with KWin's says it once.
     const auto notes = virtual_display::doctor_notes();
+    const bool kwin_reason_shown = !notes.kwin_reason.empty() && unavailable.find(notes.kwin_reason) != std::string::npos;
     output_tree["kwin_reason"] =
-      notes.plasma && cached_backend != virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT ? notes.kwin_reason : "";
+      notes.plasma && cached_backend != virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT && !kwin_reason_shown ? notes.kwin_reason : "";
     output_tree["configured_adapter"] = config::video.adapter_name;
     output_tree["policy_mode"] = display_policy.selection;
     output_tree["policy_label"] = display_policy.label;

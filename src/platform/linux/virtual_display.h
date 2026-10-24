@@ -541,9 +541,16 @@ namespace virtual_display {
    * @param backend The backend detection result.
    * @param evdi_blocked True when the EVDI module and library are usable but no device can be obtained.
    * @param streaming_output_configured True when linux_streaming_output is set.
+   * @param kwin_reason Why KWin could not create a screen, passed only on a KWin desktop; it then
+   *        leads the reason instead of the fallback's own configuration.
    * @return Empty string when the combination is usable; otherwise the reason.
    */
-  std::string unavailable_reason_for(backend_e backend, bool evdi_blocked, bool streaming_output_configured);
+  std::string unavailable_reason_for(
+    backend_e backend,
+    bool evdi_blocked,
+    bool streaming_output_configured,
+    std::string_view kwin_reason = {}
+  );
 
   /**
    * @brief Why the backend linux_virtual_display_backend forces cannot be used.

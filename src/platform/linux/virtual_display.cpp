@@ -3051,7 +3051,18 @@ namespace virtual_display {
     std::string host_provider_refusal(capture_provider_state_e provider) {
       switch (provider) {
         case capture_provider_state_e::no_wayland:
-          return "Host Virtual Display streaming needs a supported Wayland capture provider. Use Mirror Desktop or Private Stream on this host.";
+#ifdef POLARIS_BUILD_WAYLAND
+          // A headless-boot host with nobody logged in lands here, and so does an
+          // X11 session. Mirror Desktop needs the same session, so it is no way out.
+          return "Host Virtual Display adds a screen to a running Wayland desktop, and Polaris is not connected to "
+                 "one: WAYLAND_DISPLAY is not set. That happens when Polaris starts before anyone logs in, such as "
+                 "with headless boot, or under an X11 session. Log in to a KDE Plasma or Hyprland Wayland session "
+                 "(automatic login works on a host with no monitor), then restart Polaris. Private Stream needs no "
+                 "desktop session.";
+#else
+          // host_provider_snapshot() has no registry to read in this build.
+          return "This Polaris was built without Wayland support, which Host Virtual Display needs to capture its screen.";
+#endif
         case capture_provider_state_e::unknown:
           return "Polaris could not verify the Host Virtual Display capture provider. Check that its Wayland connection is available, or use Mirror Desktop or Private Stream.";
         case capture_provider_state_e::recoverable_withheld:
@@ -3059,6 +3070,35 @@ namespace virtual_display {
         default:
           return "Host Virtual Display streaming needs output-pinned KWin capture for this backend, or native Hyprland capture with the Hyprland backend. A generic desktop portal cannot capture this display safely. Use Mirror Desktop or Private Stream.";
       }
+    }
+
+    /**
+     * Why no backend can add a screen, for a backend that is not ready. A missing
+     * session comes first, since no backend can work without one. KWin's own
+     * reason is passed on only when the registry says the desktop is KWin, so a
+     * GNOME host never reads "not a KDE Plasma Wayland session" as its cause.
+     */
+    std::string creator_unavailable_reason(
+      capture_provider_state_e provider,
+      backend_e backend,
+      backend_preference_e preference,
+      bool evdi_blocked,
+      const std::string &kwin_reason
+    ) {
+      if (provider == capture_provider_state_e::no_wayland) {
+        return host_provider_refusal(provider);
+      }
+      if (backend == backend_e::NONE && preference != backend_preference_e::AUTO) {
+        return forced_backend_unavailable_reason(preference, preference == backend_preference_e::KWIN ? kwin_reason : std::string {});
+      }
+      const bool kwin_desktop =
+        provider == capture_provider_state_e::kwin || provider == capture_provider_state_e::recoverable_withheld;
+      return unavailable_reason_for(
+        backend,
+        evdi_blocked,
+        !host_virtual_display_connector().empty(),
+        kwin_desktop ? std::string_view {kwin_reason} : std::string_view {}
+      );
     }
   }
 
@@ -3095,9 +3135,7 @@ namespace virtual_display {
     }
     const bool creator_ready = backend_has_required_configuration(result.backend, host_virtual_display_connector());
     if (!creator_ready) {
-      result.reason = result.backend == backend_e::NONE && preference != backend_preference_e::AUTO ?
-        forced_backend_unavailable_reason(preference, preference == backend_preference_e::KWIN ? kwin_reason : std::string {}) :
-        unavailable_reason_for(result.backend, evdi_blocked, !host_virtual_display_connector().empty());
+      result.reason = creator_unavailable_reason(provider, result.backend, preference, evdi_blocked, kwin_reason);
       return result;
     }
     const bool capture_ready = result.backend == backend_e::WAYLAND_WLR ?
@@ -3158,7 +3196,18 @@ namespace virtual_display {
     return backend_has_required_configuration(backend, host_virtual_display_connector());
   }
 
-  std::string unavailable_reason_for(backend_e backend, bool evdi_blocked, bool streaming_output_configured) {
+  namespace {
+    /** A probe reason as a full sentence; KWin's reasons do not all end in one. */
+    std::string as_sentence(std::string_view reason) {
+      std::string sentence {reason};
+      if (!sentence.empty() && sentence.back() != '.') {
+        sentence += '.';
+      }
+      return sentence;
+    }
+  }  // namespace
+
+  std::string unavailable_reason_for(backend_e backend, bool evdi_blocked, bool streaming_output_configured, std::string_view kwin_reason) {
     switch (backend) {
       case backend_e::EVDI:
       case backend_e::WAYLAND_WLR:
@@ -3168,9 +3217,20 @@ namespace virtual_display {
         if (streaming_output_configured) {
           return {};
         }
+        // On Plasma the automatic order only gets here when KWin refused, and
+        // asking for a connector would send the owner after a dummy plug they
+        // do not need.
+        if (!kwin_reason.empty()) {
+          return as_sentence(kwin_reason) +
+                 " The fallback, kscreen-doctor, cannot add a screen: it only borrows the connector saved as "
+                 "linux_streaming_output, such as a dummy plug.";
+        }
         return "kscreen-doctor backend needs linux_streaming_output set to the output it may reconfigure.";
       case backend_e::NONE:
       default:
+        if (!kwin_reason.empty()) {
+          return as_sentence(kwin_reason) + " No other backend can add a screen on this host.";
+        }
         if (evdi_blocked) {
           return "EVDI module is loaded but no device can be created: no evdi card exists and "
                  "/sys/devices/evdi/add is not writable by Polaris. Load evdi with "
@@ -3189,7 +3249,7 @@ namespace virtual_display {
         break;
       case backend_preference_e::KWIN:
         reason += "KWin cannot create a screen here";
-        reason += detail.empty() ? "."s : ": "s + std::string {detail};
+        reason += detail.empty() ? "."s : ": "s + as_sentence(detail);
         break;
       case backend_preference_e::WLR:
         reason += "no compositor that can create a named output (Hyprland) is running.";
@@ -3212,10 +3272,18 @@ namespace virtual_display {
     std::string kwin_reason;
     backend_preference_e preference = backend_preference_e::AUTO;
     const auto backend = detect_backend_with_cache_policy(false, &evdi_blocked, &kwin_reason, &preference);
-    if (backend == backend_e::NONE && preference != backend_preference_e::AUTO) {
-      return forced_backend_unavailable_reason(preference, preference == backend_preference_e::KWIN ? kwin_reason : std::string {});
+    if (backend_has_required_configuration(backend, host_virtual_display_connector())) {
+      return {};
     }
-    return unavailable_reason_for(backend, evdi_blocked, !host_virtual_display_connector().empty());
+    // The registry read is bounded and cached, and only a backend that is not
+    // ready pays for it: it tells a missing session and a KWin desktop apart.
+    return creator_unavailable_reason(
+      classify_capture_provider(host_provider_snapshot(false)),
+      backend,
+      preference,
+      evdi_blocked,
+      kwin_reason
+    );
   }
 
   static bool destroy_unlocked(vdisplay_t &display);
