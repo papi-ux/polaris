@@ -17,6 +17,7 @@
 #include "stream_packet_owner.h"
 #include "video_colorspace.h"
 #include "video_rate.h"
+#include "vrr_trace.h"
 
 #include <array>
 #include <atomic>
@@ -544,10 +545,41 @@ namespace video {
       recreate_session
     };
 
-    virtual ~encode_session_t() = default;
+    encode_session_t() = default;
+    encode_session_t(encode_session_t &&other) noexcept:
+        capture_display_owner {std::move(other.capture_display_owner)},
+        trace_encoder {std::exchange(other.trace_encoder, 0)},
+        trace_session_generation {other.trace_session_generation},
+        trace_generation_present {other.trace_generation_present},
+        trace_generation {other.trace_generation},
+        trace_synchronized {other.trace_synchronized},
+        trace_surface {other.trace_surface},
+        trace_submission {other.trace_submission},
+        trace_submissions {std::move(other.trace_submissions)},
+        trace_timing_submissions {std::move(other.trace_timing_submissions)} {
+    }
+
+    virtual ~encode_session_t() {
+      if (trace_encoder) {
+        trace_submissions.clear(trace_encoder, "encoder_retirement");
+        trace_timing_submissions.clear(trace_encoder, "encoder_retirement");
+        vrr_trace::record(vrr_trace::event_t("encoder_retired").u("encoder", trace_encoder));
+      }
+    }
 
     // Base members are destroyed after derived codec and converter resources.
     std::shared_ptr<platf::display_t> capture_display_owner;
+
+    // Private passive trace identities; never read by codec, pacing, capture or transport policy.
+    std::uint64_t trace_encoder = 0;
+    std::uint64_t trace_session_generation = 0;
+    bool trace_generation_present = false;
+    std::uint64_t trace_generation = 0;
+    bool trace_synchronized = false;
+    std::uint64_t trace_surface = 0;
+    std::uint64_t trace_submission = 0;
+    vrr_trace::submissions_t trace_submissions;
+    vrr_trace::submissions_t trace_timing_submissions {"source_timing"};
 
     /**
      * @return 0 when the frame was converted, convert_session_is_over when this session can never
@@ -604,7 +636,11 @@ namespace video {
 #endif
 
   struct packet_raw_t {
-    virtual ~packet_raw_t() = default;
+    virtual ~packet_raw_t() {
+      if (trace_packet) vrr_trace::record(vrr_trace::event_t("packet_retired").u("packet", trace_packet)
+        .u("encoder", trace_encoder).u("submission", trace_submission).u("enqueue_attempted", trace_enqueue_attempted)
+        .u("dequeued", trace_dequeued).s("reason", trace_dequeued ? "after_dequeue" : "not_dequeued_reason_unavailable"));
+    }
 
     virtual bool is_idr() = 0;
 
@@ -648,6 +684,12 @@ namespace video {
     // in that record's emitted-time coordinates. A timestamp-coordinate fact only: never proof,
     // authority or receiver VRR. Sessions that never record source submissions keep it false.
     bool source_clock_timestamp = false;
+    // Local observation metadata only. These fields never enter a network packet.
+    std::uint64_t trace_encoder = 0;
+    std::uint64_t trace_submission = 0;
+    std::uint64_t trace_packet = 0;
+    bool trace_enqueue_attempted = false;
+    bool trace_dequeued = false;
   };
 
   struct packet_raw_avcodec: packet_raw_t {

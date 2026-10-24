@@ -58,6 +58,7 @@ extern "C" {
 #include "vrr_pacing_receipt.h"
 #include "vrr_source_pacing.h"
 #include "vrr_source_time.h"
+#include "vrr_trace_clock.h"
 #include <iomanip>
 
 #ifdef __linux__
@@ -1746,8 +1747,16 @@ namespace video {
         packet_raw_avcodec pkt;
         while ((drain_status = avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet)) == 0) {
           drained_packets++;
+          if (vrr_trace::enabled() && trace_encoder) {
+            const auto match = trace_submissions.take(pkt.frame_index(), trace_encoder, false);
+            auto e = vrr_trace::event_t("drain_output_discarded").u("encoder", trace_encoder).i("output_pts", pkt.frame_index())
+              .u("submission", match ? match->id : 0).i("packet_flags", pkt.av_packet->flags).u("drain_order", drained_packets);
+            vrr_trace::record(e);
+          }
         }
       }
+      if (vrr_trace::enabled() && trace_encoder) vrr_trace::record(vrr_trace::event_t("encoder_drain_result").u("encoder", trace_encoder)
+        .i("flush_status", flush_status).i("drain_status", drain_status).u("discarded_outputs", drained_packets));
 
       if (vulkan_codec) {
         BOOST_LOG(info) << "Vulkan encoder teardown: codec drain complete packets="sv
@@ -1787,6 +1796,7 @@ namespace video {
     }
 
     void request_idr_frame() override {
+      if (vrr_trace::enabled() && trace_encoder) vrr_trace::record(vrr_trace::event_t("idr_api_request").u("encoder", trace_encoder).s("backend", "avcodec"));
       if (auto *encode_device = device(); encode_device && encode_device->frame) {
         auto &frame = encode_device->frame;
         frame->pict_type = AV_PICTURE_TYPE_I;
@@ -1803,6 +1813,8 @@ namespace video {
     }
 
     void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+      if (vrr_trace::enabled() && trace_encoder) vrr_trace::record(vrr_trace::event_t("ref_invalidation_api_request").u("encoder", trace_encoder)
+        .i("first_frame", first_frame).i("last_frame", last_frame).s("backend", "avcodec").s("outcome", "unsupported_requests_idr"));
       BOOST_LOG(error) << "Encoder doesn't support reference frame invalidation";
       request_idr_frame();
     }
@@ -2157,6 +2169,7 @@ namespace video {
 
     void request_idr_frame() override {
       force_idr = true;
+      if (vrr_trace::enabled() && trace_encoder) vrr_trace::record(vrr_trace::event_t("idr_api_request").u("encoder", trace_encoder).s("backend", "nvenc"));
     }
 
     void request_normal_frame() override {
@@ -2169,7 +2182,10 @@ namespace video {
         return;
       }
 
-      if (!encode_device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
+      const bool invalidated = encode_device->nvenc->invalidate_ref_frames(first_frame, last_frame);
+      if (vrr_trace::enabled() && trace_encoder) vrr_trace::record(vrr_trace::event_t("ref_invalidation_api_request").u("encoder", trace_encoder)
+        .i("first_frame", first_frame).i("last_frame", last_frame).s("backend", "nvenc").u("api_result", invalidated));
+      if (!invalidated) {
         force_idr = true;
       }
     }
@@ -2180,6 +2196,8 @@ namespace video {
         return {};
       }
 
+      if (vrr_trace::enabled() && trace_encoder) vrr_trace::record(vrr_trace::event_t("codec_input_flags").u("encoder", trace_encoder)
+        .u("submission", trace_submission).u("force_idr", force_idr));
       auto result = encode_device->nvenc->encode_frame(frame_index, force_idr);
       force_idr = false;
       return result;
@@ -3465,6 +3483,36 @@ namespace video {
    * successive displays never share an identity. A probe's display mints none and its images stay
    * unstamped. Diagnostic only: nothing here changes how frames are stamped, paced or encoded.
    */
+  struct trace_epoch_retirement_t {
+    std::uint64_t epoch = 0;
+    std::int64_t lease_pid = 0;
+    ~trace_epoch_retirement_t() {
+      vrr_trace::record(vrr_trace::event_t("epoch_retire_begin").u("epoch", epoch).i("lease_pid", lease_pid)
+        .s("seam", "retirement_tracker_release").s("authority_withdraw_order", "unavailable_at_this_seam"));
+    }
+  };
+
+  static void trace_image_fields(vrr_trace::event_t &e, const platf::image_provenance_t &p) {
+    e.u("capture_generation", p.capture_generation_id).u("epoch", p.capture_epoch_id).u("source_sequence", p.source_sequence)
+      .i("route_pacing", static_cast<int>(p.route.pacing)).i("route_presentation", static_cast<int>(p.route.presentation))
+      .o("ready_steady_ns", vrr_trace::ns(p.ready_at)).o("raw_source_mono_ns", p.presentation.ns)
+      .i("presentation_status", static_cast<int>(p.presentation.status)).u("presentation_baseline", p.presentation.baseline)
+      .u("prefetched_init", p.prefetched_init).s("receipt", vrr_clock::name(p.source_time.result))
+      .u("receipt_baseline", p.source_time.presentation_baseline).o("mapped_source_steady_ns", p.source_time.source_steady_ns)
+      .u("mapping_uncertainty_ns", p.source_time.uncertainty_ns).i("receipt_observed_steady_ns", p.source_time.observed_steady_ns);
+    e.s("raw_protocol_sec_nsec", "unavailable_from_existing_provenance");
+  }
+
+  static void start_vrr_trace() noexcept {
+    vrr_trace::start_from_environment();
+    static std::atomic<bool> refusal_reported {false};
+    if (vrr_trace::status() == vrr_trace::status_e::refused && !refusal_reported.exchange(true)) {
+      try {
+        BOOST_LOG(warning) << "Private VRR trace v2 refused local collection (errno=" << vrr_trace::refusal_errno() << ")";
+      } catch (...) { /* A diagnostics refusal cannot change stream control flow. */ }
+    }
+  }
+
   struct capture_epoch_t {
     std::uint64_t capture_generation_id = 0;
     std::uint64_t epoch_id = 0;
@@ -3480,6 +3528,7 @@ namespace video {
     std::shared_ptr<const vrr_clock::compositor_lease_t> lease;
     /// Clocks for the per-frame bracket; set only where a presentation clock can be mapped.
     vrr_clock::system_t *clocks = nullptr;
+    std::unique_ptr<vrr_trace::clock_system_t> trace_clocks;
     vrr_clock::epoch_source_state_t source_state;
     /**
      * This epoch's live authority (its exact lease and proof), published for encode threads to check
@@ -3487,6 +3536,7 @@ namespace video {
      * their provenance never hold it.
      */
     vrr_clock::authority_publication_t authority;
+    std::unique_ptr<trace_epoch_retirement_t> trace_retirement;
 
     /**
      * Stamp a new source frame's producer identity before any consumer can see the image. An
@@ -3501,7 +3551,17 @@ namespace video {
       img.provenance.source_sequence = sequence;
       img.provenance.route = route;
       img.provenance.clock_proof = proof;
+      if (trace_clocks) trace_clocks->sequence = sequence;
       img.provenance.source_time = map_source_time(img.provenance);
+      if (vrr_trace::enabled()) {
+        auto e = vrr_trace::event_t("source_image");
+        trace_image_fields(e, img.provenance);
+        e.i("width", img.width).i("height", img.height).o("image_frame_timestamp_ns", vrr_trace::ns(img.frame_timestamp))
+          .i("transport", static_cast<int>(img.frame_metadata.transport)).i("residency", static_cast<int>(img.frame_metadata.residency))
+          .i("format", static_cast<int>(img.frame_metadata.format)).i("ram_pixel_layout", static_cast<int>(img.frame_metadata.ram_pixel_layout))
+          .i("native_device_type", static_cast<int>(img.native_device_type));
+        vrr_trace::record(e);
+      }
     }
 
     /**
@@ -3567,10 +3627,24 @@ namespace video {
                                             [[maybe_unused]] vrr_clock::system_t *clocks) {
     capture_epoch_t epoch;
     if (encoder_probe_active()) return epoch;
+    start_vrr_trace();
     epoch.capture_generation_id = capture_generation_id;
     epoch.epoch_id = allocate_capture_identity(next_capture_epoch_id);
     if (epoch.epoch_id == 0) return epoch;  // exhausted: unstamped, unrecordable, never a reused identity
     epoch.route = disp.capture_timing;
+    if (vrr_trace::enabled()) {
+      // Trace setup allocation failure must leave the original clock route in place.
+      try {
+        epoch.trace_retirement = std::make_unique<trace_epoch_retirement_t>();
+        epoch.trace_retirement->epoch = epoch.epoch_id;
+        if (clocks) {
+          epoch.trace_clocks = std::make_unique<vrr_trace::clock_system_t>(*clocks, epoch.epoch_id);
+          clocks = epoch.trace_clocks.get();
+        }
+      } catch (...) {
+        vrr_trace::record(vrr_trace::event_t("instrumentation_refused").u("epoch", epoch.epoch_id).s("seam", "clock_proxy_allocation"));
+      }
+    }
 #ifdef __linux__
     if (epoch.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic && clocks) {
       // The expectation is the lease this display retained when it connected to its frozen private
@@ -3597,6 +3671,26 @@ namespace video {
       }
     }
 #endif
+    if (vrr_trace::enabled()) {
+      auto e = vrr_trace::event_t("epoch_open").u("epoch", epoch.epoch_id).u("capture_generation", capture_generation_id)
+        .i("route_pacing", static_cast<int>(epoch.route.pacing)).i("route_presentation", static_cast<int>(epoch.route.presentation))
+        .u("authority_published", epoch.authority.published()).u("lease_present", !!epoch.lease);
+      e.s("lease_current_raw_checks", "unavailable_from_existing_API");
+      if (epoch.lease) {
+        e.i("lease_pid", epoch.lease->process.pid).u("lease_uid", epoch.lease->process.uid).u("lease_starttime", epoch.lease->process.starttime);
+        if (epoch.trace_retirement) epoch.trace_retirement->lease_pid = epoch.lease->process.pid;
+      }
+      if (epoch.proof) {
+        const auto &p = *epoch.proof;
+        e.u("proof_epoch", p.capture_epoch_id).s("time_namespace", vrr_clock::name(p.time_namespace)).s("namespace_reason", p.namespace_reason)
+          .u("producer_identity_verified", p.producer_identity_verified).s("producer_identity_reason", p.producer_identity_reason)
+          .i("epoch_start_mono_ns", p.epoch_start_mono_ns).u("clock_domain_verified", p.clock_domain_verified)
+          .u("mapping_valid", p.mapping.valid).s("mapping_reason", p.mapping.reason).u("mapping_samples", p.mapping.samples)
+          .u("mapping_max_delta_ns", p.mapping.max_delta_ns).u("mapping_max_bracket_ns", p.mapping.max_bracket_ns)
+          .u("mapping_uncertainty_ns", p.mapping.uncertainty_ns).i("steady_to_mono_offset_ns", p.mapping.steady_to_mono_offset_ns);
+      } else e.n("proof_epoch");
+      vrr_trace::record(e);
+    }
     return epoch;
   }
 
@@ -4021,11 +4115,62 @@ namespace video {
   /// Record a source-paced submission's emitted time under its index. False when it has none.
   static bool record_source_submission(std::optional<vrr_pacing::submission_times_t> &submissions,
                                        std::int64_t index,
-                                       const std::optional<std::chrono::steady_clock::time_point> &frame_timestamp) {
+                                       const std::optional<std::chrono::steady_clock::time_point> &frame_timestamp,
+                                       encode_session_t &session) {
     const auto ns = frame_timestamp ? steady_ns_of(*frame_timestamp) : std::nullopt;
     if (!ns) return false;
     submissions->put(index, *ns);
+    if (vrr_trace::enabled() && session.trace_encoder) {
+      session.trace_timing_submissions.put(index, session.trace_submission, session.trace_encoder);
+      vrr_trace::record(vrr_trace::event_t("source_submission_time_put").u("encoder", session.trace_encoder).u("submission", session.trace_submission)
+        .i("pts", index).i("emit_ns", *ns).u("source_time_paced", submissions->next_source_time_paced));
+    }
     return true;
+  }
+
+  static vrr_trace::event_t trace_encoder_event(const char *kind, const encode_session_t &session) {
+    return vrr_trace::event_t(kind).u("encoder", session.trace_encoder).u("session_generation", session.trace_session_generation)
+      .u("generation_present", session.trace_generation_present).u("generation", session.trace_generation)
+      .u("synchronized", session.trace_synchronized).u("surface", session.trace_surface);
+  }
+
+  static void trace_encoder_open(encode_session_t &session, const config_t &config, std::optional<std::uint64_t> generation, bool synchronized) {
+    if (!vrr_trace::enabled()) return;
+    session.trace_encoder = vrr_trace::next_id();
+    session.trace_session_generation = config.session_generation;
+    session.trace_generation_present = generation.has_value();
+    session.trace_generation = generation.value_or(0);
+    session.trace_synchronized = synchronized;
+    const auto rate = encoding_framerate_to_rational(config);
+    vrr_trace::record(trace_encoder_event("encoder_open", session).u("capture_generation", config.capture_generation.generation_id)
+      .i("codec", config.videoFormat).i("dynamic_range", config.dynamicRange).i("rate_num", rate.num).i("rate_den", rate.den)
+      .u("vrr_eligible", config.vrr_pacing.eligible()));
+  }
+
+  static void trace_surface(encode_session_t &session, const platf::image_provenance_t *provenance, const char *branch) {
+    if (!vrr_trace::enabled()) return;
+    const auto previous = session.trace_surface;
+    session.trace_surface = vrr_trace::next_id();
+    auto e = trace_encoder_event("surface_converted", session).u("previous_surface", previous).s("branch", branch);
+    if (provenance) trace_image_fields(e, *provenance);
+    else e.n("epoch").n("source_sequence");
+    vrr_trace::record(e);
+  }
+
+  static void trace_packet_output(encode_session_t &session, packet_raw_t &packet, std::int64_t current_pts, bool ordered_erase) {
+    if (!vrr_trace::enabled()) return;
+    packet.trace_encoder = session.trace_encoder;
+    packet.trace_packet = vrr_trace::next_id();
+    const auto match = session.trace_submissions.take(packet.frame_index(), session.trace_encoder, ordered_erase);
+    if (match) packet.trace_submission = match->id;
+    auto e = trace_encoder_event("encoder_output", session).u("packet", packet.trace_packet).u("submission", packet.trace_submission)
+      .i("output_pts", packet.frame_index()).i("current_call_pts", current_pts).u("delayed", packet.frame_index() != current_pts)
+      .u("actual_idr", packet.is_idr()).u("actual_after_ref_invalidation", packet.after_ref_frame_invalidation)
+      .u("bytes", packet.data_size()).s("join", match ? "pts" : "unavailable")
+      .o("frame_timestamp_ns", vrr_trace::ns(packet.frame_timestamp)).o("encode_done_ns", vrr_trace::ns(packet.encode_done_timestamp))
+      .u("source_clock_timestamp", packet.source_clock_timestamp).u("source_time_paced", packet.source_time_paced);
+    // The output's surface comes ONLY through its submission join, not the current surface field.
+    vrr_trace::record(e);
   }
 
   int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
@@ -4037,7 +4182,7 @@ namespace video {
     auto &frame = encode_device->frame;
     frame->pts = frame_nr;
     // A source-paced session gives every submission an explicit time. Fail closed without one.
-    if (session.source_submissions && !record_source_submission(session.source_submissions, frame_nr, frame_timestamp)) {
+    if (session.source_submissions && !record_source_submission(session.source_submissions, frame_nr, frame_timestamp, session)) {
       BOOST_LOG(error) << "Source-paced frame "sv << frame_nr << " has no emitted time; refusing to encode it"sv;
       return -1;
     }
@@ -4048,7 +4193,11 @@ namespace video {
     auto &vps = session.vps;
 
     // send the frame to the encoder
+    if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("codec_input_flags", session)
+      .u("submission", session.trace_submission).i("pict_type", frame->pict_type).i("frame_flags", frame->flags));
     auto ret = avcodec_send_frame(ctx.get(), frame);
+    if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("codec_submit_result", session)
+      .u("submission", session.trace_submission).i("result", ret));
     if (ret < 0) {
       char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
       BOOST_LOG(error) << "Could not send a frame for encoding: "sv << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, ret);
@@ -4065,6 +4214,7 @@ namespace video {
       if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         return 0;
       } else if (ret < 0) {
+        if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("codec_receive_error", session).i("code", ret).i("current_call_pts", frame_nr));
         return ret;
       }
 
@@ -4109,7 +4259,13 @@ namespace video {
       if (session.source_submissions) {
         // Delayed output keeps the time of the frame it encodes, never the one just submitted.
         const auto emitted = session.source_submissions->take(av_packet->pts);
+        if (vrr_trace::enabled() && session.trace_encoder) {
+          (void) session.trace_timing_submissions.take(av_packet->pts, session.trace_encoder, true);
+          vrr_trace::record(trace_encoder_event("source_submission_time_take", session).i("pts", av_packet->pts).u("available", !!emitted));
+        }
         if (!emitted) {
+          trace_packet_output(session, *packet, frame_nr, true);
+          if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "source_submission_time_unavailable"));
           BOOST_LOG(error) << "Encoder returned frame "sv << av_packet->pts
                            << " with no recorded source-paced submission; refusing to send it"sv;
           return -1;
@@ -4123,10 +4279,15 @@ namespace video {
         packet->encode_done_timestamp = std::chrono::steady_clock::now();
       }
 
+      trace_packet_output(session, *packet, frame_nr, !!session.source_submissions);
+
       packet->replacements = session.replacements;
       // Hardware packet buffers may depend on thread-affine conversion
       // resources. Detach them here so teardown stays on the encoder thread.
-      if (!packet->detach_encoder_buffer()) return AVERROR(ENOMEM);
+      if (!packet->detach_encoder_buffer()) {
+        if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "detach_encoder_buffer_failed"));
+        return AVERROR(ENOMEM);
+      }
       // The detached copy is ours to shrink. On a still screen in CBR, filler
       // is nearly all of an AMD frame.
       auto *detached = packet->av_packet;
@@ -4139,6 +4300,8 @@ namespace video {
         av_shrink_packet(detached, static_cast<int>(stripped_size));
       }
       packet->channel_data = channel_data;
+      packet->trace_enqueue_attempted = packet->trace_packet != 0;
+      if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
       packets->raise(std::move(packet));
     }
 
@@ -4179,6 +4342,9 @@ namespace video {
     packet->channel_data = channel_data;
     packet->frame_timestamp = frame_timestamp;
     packet->encode_done_timestamp = std::chrono::steady_clock::now();
+    trace_packet_output(session, *packet, frame_nr, false);
+    packet->trace_enqueue_attempted = packet->trace_packet != 0;
+    if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
     packets->raise(std::move(packet));
 
     return 0;
@@ -4186,7 +4352,7 @@ namespace video {
 #endif
 
   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
-    if (session.source_submissions && !record_source_submission(session.source_submissions, frame_nr, frame_timestamp)) {
+    if (session.source_submissions && !record_source_submission(session.source_submissions, frame_nr, frame_timestamp, session)) {
       BOOST_LOG(error) << "Source-paced frame "sv << frame_nr << " has no emitted time; refusing to encode it"sv;
       return -1;
     }
@@ -4207,7 +4373,13 @@ namespace video {
     if (session.source_submissions) {
       // The packet keeps the time recorded for ITS index; a mismatch never borrows the current one.
       const auto emitted = session.source_submissions->take(static_cast<std::int64_t>(encoded_frame.frame_index));
+      if (vrr_trace::enabled() && session.trace_encoder) {
+        (void) session.trace_timing_submissions.take(static_cast<std::int64_t>(encoded_frame.frame_index), session.trace_encoder, true);
+        vrr_trace::record(trace_encoder_event("source_submission_time_take", session).i("pts", encoded_frame.frame_index).u("available", !!emitted));
+      }
       if (!emitted) {
+        trace_packet_output(session, *packet, frame_nr, true);
+        if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "source_submission_time_unavailable"));
         BOOST_LOG(error) << "NvENC returned frame "sv << encoded_frame.frame_index
                          << " with no recorded source-paced submission; refusing to send it"sv;
         return -1;
@@ -4218,6 +4390,9 @@ namespace video {
     }
     packet->frame_timestamp = frame_timestamp;
     packet->encode_done_timestamp = encode_done_timestamp;
+    trace_packet_output(session, *packet, frame_nr, !!session.source_submissions);
+    packet->trace_enqueue_attempted = packet->trace_packet != 0;
+    if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
     packets->raise(std::move(packet));
 
     return 0;
@@ -4225,12 +4400,27 @@ namespace video {
 
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     int result = -1;
+    if (vrr_trace::enabled() && session.trace_encoder) {
+      session.trace_submission = vrr_trace::next_id();
+      session.trace_submissions.put(frame_nr, session.trace_submission, session.trace_encoder);
+      vrr_trace::record(trace_encoder_event("encode_call", session).u("submission", session.trace_submission).i("pts", frame_nr)
+        .o("frame_timestamp_ns", vrr_trace::ns(frame_timestamp)));
+    }
+    // Covers early returns and exceptions as well as packets emitted before a later receive error.
+    bool trace_returned = false;
+    auto trace_call_end = util::fail_guard([&] {
+      if (vrr_trace::enabled() && session.trace_encoder) {
+        vrr_trace::record(trace_encoder_event("encode_result", session).u("submission", session.trace_submission).i("pts", frame_nr)
+          .u("returned", trace_returned).i("result", result));
+      }
+    });
 #ifdef POLARIS_BUILD_PYROWAVE
     if (auto pyrowave_session = dynamic_cast<pyrowave_encode_session_t *>(&session)) {
       result = encode_pyrowave(frame_nr, *pyrowave_session, packets, channel_data, frame_timestamp);
       if (result != 0) {
         invalidate_live_probe_reuse();
       }
+      trace_returned = true;
       return result;
     }
 #endif
@@ -4240,6 +4430,7 @@ namespace video {
       result = encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp);
     }
     if (result != 0) invalidate_live_probe_reuse();
+    trace_returned = true;
     return result;
   }
 
@@ -4853,7 +5044,17 @@ namespace video {
   struct source_pacing_session_t {
     explicit source_pacing_session_t(const config_t &config):
         generation {rate_of(config)} {
+      if (vrr_trace::enabled()) {
+        trace_id = vrr_trace::next_id();
+        vrr_trace::record(vrr_trace::event_t("generation_open").u("generation", trace_id).u("session_generation", config.session_generation));
+      }
     }
+
+    ~source_pacing_session_t() {
+      if (trace_id) vrr_trace::record(vrr_trace::event_t("generation_end").u("generation", trace_id).s("mode", vrr_pacing::name(generation.mode()))
+        .o("last_emitted_ns", generation.last_emitted_ns()));
+    }
+    std::uint64_t trace_id = 0;
 
     static vrr_pacing::rate_t rate_of(const config_t &config) {
       const auto rate = encoding_framerate_to_rational(config);
@@ -4892,6 +5093,10 @@ namespace video {
 
   /// Turn on per-submission time keeping for a paced encoder session.
   static void enable_source_submissions(encode_session_t &session) {
+    if (vrr_trace::enabled() && session.trace_encoder) {
+      session.trace_timing_submissions.clear(session.trace_encoder, "source_timing_enabled_reset");
+      vrr_trace::record(trace_encoder_event("source_timing_enabled", session));
+    }
     if (auto *av = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       av->source_submissions.emplace();
     } else if (auto *nv = dynamic_cast<nvenc_encode_session_t *>(&session)) {
@@ -4901,6 +5106,10 @@ namespace video {
 
   /// Back to the encoder's own timestamp handling, for a session that is not source paced after all.
   static void disable_source_submissions(encode_session_t &session) {
+    if (vrr_trace::enabled() && session.trace_encoder) {
+      session.trace_timing_submissions.clear(session.trace_encoder, "source_timing_disabled");
+      vrr_trace::record(trace_encoder_event("source_timing_disabled", session));
+    }
     if (auto *av = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       av->source_submissions.reset();
     } else if (auto *nv = dynamic_cast<nvenc_encode_session_t *>(&session)) {
@@ -4994,19 +5203,39 @@ namespace video {
       return;
     }
 
+    trace_encoder_open(*session, config, pacing_state ? std::optional {pacing_state->trace_id} : std::nullopt, false);
+
+    // Own observations at the detecting branch, including branches the existing stats omit.
+    auto observe = [&](const char *seam, const char *branch, vrr_pacing::mode_e before,
+                       const source_pacing_session_t *attached, const platf::image_provenance_t *image = nullptr,
+                       std::string_view reason = "observed", std::optional<int> authority = std::nullopt) {
+      if (!vrr_trace::enabled()) return;
+      auto e = trace_encoder_event("pacing_decision", *session).s("seam", seam).s("branch", branch)
+        .u("generation_object_present", pacing_state != nullptr).s("mode_before", vrr_pacing::name(before))
+        .u("attached_after", attached != nullptr).s("reason", reason);
+      if (pacing_state) e.s("mode_after", vrr_pacing::name(pacing_state->generation.mode())).o("last_emitted_ns", pacing_state->generation.last_emitted_ns());
+      else e.n("mode_after").n("last_emitted_ns");
+      if (authority) e.i("authority", *authority); else e.n("authority");
+      if (image) trace_image_fields(e, *image);
+      vrr_trace::record(e);
+    };
+
     // Source-time pacing applies to this encoder session only when the generation is eligible and the
     // display, codec and encoder can carry it. Otherwise this session paces exactly as before.
     source_pacing_session_t *pacing = nullptr;
     if (pacing_state) {
       if (const auto unsupported = source_pacing_unsupported(config, *disp, *session, pacing_state->generation)) {
+        const auto mode_before = pacing_state->generation.mode();
         record_source_pacing_event(config, vrr_pacing::mode_e::unsupported, *unsupported);
         // A route that stops being pace-able after emissions keeps their order, as a latched fallback.
         if (pacing_state->generation.last_emitted_ns()) {
           pacing_state->generation.latch();
           pacing = pacing_state;
         }
+        observe("encoder_open", "unsupported", mode_before, pacing, nullptr, vrr_pacing::name(*unsupported));
       } else {
         pacing = pacing_state;
+        observe("encoder_open", "source_eligible", pacing->generation.mode(), pacing);
       }
       if (pacing) enable_source_submissions(*session);
     }
@@ -5045,6 +5274,9 @@ namespace video {
     auto max_frametime = std::chrono::nanoseconds(1000ms) * 1000 / minimum_fps_target;
     auto encode_frame_threshold = encoding_frame_interval(config);
     auto frame_variation_threshold = encode_frame_threshold / 4;
+    if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("loop_constants", *session)
+      .d("wait_timeout_ns", max_frametime.count()).o("legacy_encode_interval_ns", vrr_clock::exact_ns(encode_frame_threshold))
+      .o("legacy_frame_variation_ns", vrr_clock::exact_ns(frame_variation_threshold)).i("idr_backoff_ns", std::chrono::duration_cast<std::chrono::nanoseconds>(1ms).count()));
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << (minimum_fps_target / 2000) << "fps ("sv << max_frametime * 2 << ")"sv;
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
     frame_timestamp_pacer_t frame_timestamp_pacer {encode_frame_threshold, frame_variation_threshold};
@@ -5082,6 +5314,7 @@ namespace video {
         invalidate_live_probe_reuse();
         return;
       }
+      trace_surface(*session, nullptr, "dummy_initialization");
     }
 
     if (config.input_only) {
@@ -5090,6 +5323,8 @@ namespace video {
       // Recheck after dummy-frame conversion, which can block in a driver.
       if (shutdown_event->peek() || !images->running() || reinit_event.peek()) return;
       // Encode the dummy img only once
+      if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("submission_intent", *session).i("pts", frame_nr)
+        .u("reused_surface", 0).s("loop_branch", "input_only_dummy"));
       if (encode(frame_nr++, *session, packets, channel_data, std::chrono::steady_clock::now())) {
         BOOST_LOG(error) << "Could not encode dummy video packet"sv;
         return;
@@ -5151,6 +5386,8 @@ namespace video {
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
+          if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("ref_invalidation_request", *session)
+            .i("first_frame", frames->first).i("last_frame", frames->second).s("origin", "mail"));
           session->invalidate_ref_frames(frames->first, frames->second);
         }
       }
@@ -5158,6 +5395,7 @@ namespace video {
       if (idr_events->peek()) {
         requested_idr_frame = true;
         idr_events->pop();
+        if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("idr_request", *session).s("origin", "mail_observed"));
       }
 
       if (requested_idr_frame) {
@@ -5193,7 +5431,9 @@ namespace video {
             // Never the fixed grid: the frame's own mapped source time, or a named refusal.
             const auto result = frame.provenance.source_time.result;
             if (result == vrr_clock::source_time_e::lease_not_current) {
+              const auto before = pacing->generation.mode();
               pacing->generation.latch();
+              observe("image_receipt", "lease_loss_latch", before, pacing, &frame.provenance, vrr_clock::name(result));
               record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::authority_lost, &frame.provenance);
               continue;
             }
@@ -5201,13 +5441,16 @@ namespace video {
               // No source frame was paced and this epoch can never map: this encoder session paces
               // exactly as before, starting with this frame. A later display open is judged afresh.
               record_source_pacing_event(config, vrr_pacing::mode_e::unsupported, vrr_pacing::event_e::unsupported_route, &frame.provenance);
+              observe("image_receipt", "detach_without_latch", pacing->generation.mode(), nullptr, &frame.provenance, vrr_clock::name(result));
               disable_source_submissions(*session);
               pacing = nullptr;
               source_mode = false;
             } else if (receipt_route_unproven(result)) {
               // Source frames were already paced and this epoch can never map: keep their order,
               // as a latched fallback, rather than dropping every frame to the liveness floor.
+              const auto before = pacing->generation.mode();
               pacing->generation.latch();
+              observe("image_receipt", "route_loss_latch", before, pacing, &frame.provenance, vrr_clock::name(result));
               record_source_pacing_event(config, vrr_pacing::mode_e::unsupported, vrr_pacing::event_e::unsupported_route, &frame.provenance);
               continue;
             }
@@ -5217,6 +5460,7 @@ namespace video {
             const auto precheck = now_ns ? pacing->generation.precheck_source(source_frame_of(frame.provenance), *now_ns) :
                                            vrr_pacing::decision_t {std::nullopt, vrr_pacing::event_e::source_stale};
             if (!precheck.candidate) {
+              observe("pre_conversion", "refused", pacing->generation.mode(), pacing, &frame.provenance, vrr_pacing::name(precheck.event));
               record_source_pacing_event(config, pacing->generation.mode(), precheck.event, &frame.provenance);
               continue;
             }
@@ -5226,6 +5470,7 @@ namespace video {
           const auto pacing_decision = source_mode ? frame_timestamp_decision_t {true, current_timestamp} :
                                                      frame_timestamp_pacer.evaluate(current_timestamp);
           if (!pacing_decision.should_encode) {
+            observe("legacy_timestamp_pacer", "refused", pacing_state ? pacing_state->generation.mode() : vrr_pacing::mode_e::unsupported, pacing, &frame.provenance);
             dropped_frames++;
             continue;
           }
@@ -5257,6 +5502,10 @@ namespace video {
           const auto convert_started = std::chrono::steady_clock::now();
 #endif
           if (const auto converted = session->convert(frame); converted) {
+            if (vrr_trace::enabled()) {
+              auto e = trace_encoder_event("conversion_failed", *session).i("result", converted);
+              trace_image_fields(e, frame.provenance); vrr_trace::record(e);
+            }
             invalidate_live_probe_reuse();
             BOOST_LOG(error) << "Could not convert image"sv;
 #ifdef __linux__
@@ -5274,6 +5523,7 @@ namespace video {
             }
             break;
           }
+          trace_surface(*session, &frame.provenance, source_mode ? "source" : "legacy_or_fallback");
 
 #ifdef POLARIS_BUILD_PYROWAVE
           // PyroWave encodes inside convert(), where it is handed the frame, so that time is the codec's
@@ -5312,6 +5562,7 @@ namespace video {
       if (pacing) {
         const auto now_ns = steady_ns_of(std::chrono::steady_clock::now());
         if (!now_ns) {
+          observe("post_conversion_clock", "refused", pacing->generation.mode(), pacing, nullptr, "steady_unrepresentable");
           record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::source_stale);
           continue;
         }
@@ -5325,13 +5576,17 @@ namespace video {
           );
           if (authority != vrr_clock::authority_e::current ||
               source_provenance->capture_generation_id != config.capture_generation.generation_id) {
+            const auto before = pacing->generation.mode();
             pacing->generation.latch();
+            observe("post_conversion_authority", "refused_latch_surface_retained", before, pacing, &*source_provenance, "authority_lost", static_cast<int>(authority));
             record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::authority_lost, &*source_provenance);
             continue;
           }
+          observe("post_conversion_authority", "passed", pacing->generation.mode(), pacing, &*source_provenance, "authority_current", static_cast<int>(authority));
           // Conversion can block: judge freshness, order and the ceiling again, now.
           const auto recheck = pacing->generation.precheck_source(source_frame_of(*source_provenance), *now_ns);
           if (!recheck.candidate) {
+            observe("post_conversion_recheck", "refused_surface_retained", pacing->generation.mode(), pacing, &*source_provenance, vrr_pacing::name(recheck.event));
             record_source_pacing_event(config, pacing->generation.mode(), recheck.event, &*source_provenance);
             continue;
           }
@@ -5341,6 +5596,7 @@ namespace video {
           // the bounded liveness floor are labelled emissions at the current time.
           const auto wait = pacing->generation.on_wait(*now_ns, pacing->idr_pending);
           if (!wait.candidate) {
+            observe("on_wait", "refused", pacing->generation.mode(), pacing, nullptr, vrr_pacing::name(wait.event));
             record_source_pacing_event(config, pacing->generation.mode(), wait.event);
             // A held IDR skips the blocking pop: back off briefly while the rate budget refills.
             if (pacing->idr_pending) std::this_thread::sleep_for(1ms);
@@ -5356,10 +5612,13 @@ namespace video {
             );
             if (authority != vrr_clock::authority_e::current ||
                 surface_provenance->capture_generation_id != config.capture_generation.generation_id) {
+              const auto before = pacing->generation.mode();
               pacing->generation.latch();
+              observe("repeat_authority", "refused_latch", before, pacing, &*surface_provenance, "authority_lost", static_cast<int>(authority));
               record_source_pacing_event(config, pacing->generation.mode(), vrr_pacing::event_e::authority_lost);
               continue;
             }
+            observe("repeat_authority", "passed", pacing->generation.mode(), pacing, &*surface_provenance, "authority_current", static_cast<int>(authority));
             submission_proven = true;
           }
           pacing_candidate = wait.candidate;
@@ -5367,7 +5626,10 @@ namespace video {
           // Latched fallback: the legacy frame or repeat, kept in emission order and bounded.
           const auto legacy_ns = frame_timestamp ? steady_ns_of(*frame_timestamp) : std::nullopt;
           const auto ordered = pacing->generation.fallback_emission(legacy_ns, *now_ns);
-          if (!ordered.candidate) continue;
+          if (!ordered.candidate) {
+            observe("fallback_emission", reused_previous_frame ? "reused_surface_refused" : "new_surface_refused", pacing->generation.mode(), pacing, nullptr, vrr_pacing::name(ordered.event));
+            continue;
+          }
           pacing_candidate = ordered.candidate;
         }
         frame_timestamp = steady_at_ns(pacing_candidate->emit_ns);
@@ -5379,6 +5641,14 @@ namespace video {
 
       {
         auto encode_start = std::chrono::steady_clock::now();
+        if (vrr_trace::enabled()) {
+          auto e = trace_encoder_event("submission_intent", *session).i("pts", frame_nr).u("reused_surface", reused_previous_frame)
+            .u("source_mode", source_mode).u("submission_proven", submission_proven).u("idr_mail_this_iteration", requested_idr_frame)
+            .u("idr_pending", pacing && pacing->idr_pending).s("loop_branch", pacing ? (source_mode ? "source_pacing" : "latched_fallback") : "legacy");
+          if (pacing_candidate) e.i("candidate_kind", static_cast<int>(pacing_candidate->kind)).i("candidate_emit_ns", pacing_candidate->emit_ns);
+          else e.n("candidate_kind").n("candidate_emit_ns");
+          vrr_trace::record(e);
+        }
         if (frame_timestamp) {
           accumulated_frame_age_ms += std::chrono::duration<double, std::milli>(
             encode_start - *frame_timestamp
@@ -5392,7 +5662,12 @@ namespace video {
         if (pacing && pacing_candidate) {
           // Spent only now that the encoder took the frame.
           const auto handoff_ns = steady_ns_of(encode_start).value_or(pacing_candidate->emit_ns);
+          const auto before = pacing->generation.mode();
           pacing->generation.commit(*pacing_candidate, handoff_ns);
+          if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("generation_commit", *session).u("submission", session->trace_submission)
+            .i("candidate_kind", static_cast<int>(pacing_candidate->kind)).i("emit_ns", pacing_candidate->emit_ns)
+            .i("handoff_ns", handoff_ns).s("mode_before", vrr_pacing::name(before)).s("mode_after", vrr_pacing::name(pacing->generation.mode()))
+            .u("reused_surface", reused_previous_frame).u("idr_pending_cleared", pacing->idr_pending));
           pacing->idr_pending = false;
           if (source_mode && pacing_candidate->kind == vrr_pacing::kind_e::source) {
             // Source-relative cadence: how far the encode handoff interval strayed from the source's.
@@ -5834,6 +6109,7 @@ namespace video {
     if (!session) {
       return std::nullopt;
     }
+    trace_encoder_open(*session, ctx.config, std::nullopt, true);
 
     // Load the initial image to prepare for encoding
     if (session->convert(frame)) {
@@ -5850,6 +6126,7 @@ namespace video {
       return std::nullopt;
     }
 
+    trace_surface(*session, &frame.provenance, "synchronized_initial_conversion");
     encode_session.session = std::move(session);
     encode_session.capture_backend = capture_backend_publication(ctx.config, disp->capture_route);
     publish_capture_backend(encode_session.capture_backend, encode_session.reported_source);
@@ -6045,6 +6322,7 @@ namespace video {
           }
 
           if (ctx->idr_events->peek()) {
+            if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("idr_request", *pos->session).s("origin", "mail_observed"));
             pos->session->request_idr_frame();
             ctx->idr_events->pop();
           }
@@ -6062,6 +6340,7 @@ namespace video {
 
             continue;
           }
+          if (frame_captured && frame.valid()) trace_surface(*pos->session, &frame.provenance, "synchronized_legacy");
 
           std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
           if (frame.valid()) {
@@ -6084,6 +6363,8 @@ namespace video {
             // A repeat: retry only an accepted observation refused before registration.
             pos->accepted_capture.retry(ctx->config);
           }
+          if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("submission_intent", *pos->session)
+            .i("pts", ctx->frame_nr).u("reused_surface", !(frame_captured && frame.valid())).s("loop_branch", "synchronized_unsupported_loop"));
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             ctx->shutdown_event->raise(true);
@@ -6185,6 +6466,7 @@ namespace video {
     const stream_packets::destination_t &channel_data,
     const packet_queue_t &packets
   ) {
+    start_vrr_trace();
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
