@@ -51,7 +51,9 @@
 #include "steam_lifetime.h"
 #ifdef __linux__
 #include "platform/linux/steam_title_process.h"
+#include "platform/linux/epic_process.h"
 #endif
+#include "epic_library.h"
 #include "emulator_library.h"
 #include "game_library_scanner.h"
 #include "audio.h"
@@ -849,6 +851,7 @@ namespace proc {
     std::string heroic_store;
     std::string heroic_runner;
     std::string heroic_install;
+    epic_library::identity_t epic_identity;
     std::string lutris_slug;      // Lutris imports: the game's slug, or "" on the entry that opens Lutris
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
@@ -1116,6 +1119,9 @@ namespace proc {
 
   class proc_t {
   public:
+    // Called only by the authenticated host web console. No paired-client mutation route.
+    std::pair<int, nlohmann::json> epic_session_control(const std::string &action = {},
+      const std::string &session_id = {}, const std::string &revision = {}, bool confirmed = false);
     std::pair<int, nlohmann::json> desktop_steam_control(const std::string &unique_id, bool can_launch,
       const std::string &action = {}, const std::string &revision = {}, bool confirm_game_quit = false);
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
@@ -1409,6 +1415,9 @@ namespace proc {
 #ifdef __linux__
     std::shared_ptr<steam_big_picture_guard_runtime_t> _steam_big_picture_guard;
     std::string _session_instance_id;
+    std::optional<epic_library::installation_t> _epic_title;
+    std::unique_ptr<platf::epic::adopted_game_t> _epic_grant;
+    std::string _epic_grant_revision;
     std::vector<pidfd_handle_t> _detached_child_pidfds;
     bool _detached_child_authority_complete = true;
     bool _session_used_cage_compositor = false;

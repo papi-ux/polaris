@@ -5571,12 +5571,13 @@ namespace proc {
   }
 
   bool uses_bundled_utility_artwork(const ctx_t &app) {
-    return app.uuid == VIRTUAL_DISPLAY_UUID ||
+    if (app.uuid == VIRTUAL_DISPLAY_UUID ||
       app.uuid == FALLBACK_DESKTOP_UUID ||
       app.uuid == REMOTE_INPUT_UUID ||
-      app.uuid == TERMINATE_APP_UUID ||
-      app.desktop_mirror ||
-      launches_nothing(app);
+      app.uuid == TERMINATE_APP_UUID) return true;
+    // Official Epic games use the desktop display but still have game artwork.
+    if (app.source == "epic_launcher" && epic_library::valid_identity(app.epic_identity)) return false;
+    return app.desktop_mirror || launches_nothing(app);
   }
 
   bool is_stock_low_res_desktop(const ctx_t &app) {
@@ -5594,6 +5595,7 @@ namespace proc {
     if (present(app.steam_appid)) {
       return true;
     }
+    if (app.source == "epic_launcher") return epic_library::valid_identity(app.epic_identity);
     if (app.desktop_mirror || launches_nothing(app) || is_steam_big_picture_launcher(app)) {
       return false;
     }
@@ -6228,7 +6230,9 @@ namespace proc {
     request.entry = entry;
     request.client_uuid = client_uuid;
     request.lifecycle_generation = lifecycle_generation;
-    request.policy_enabled = app.leave_game_mode_before_launch;
+    // Epic Preview never performs a Game Mode transition: its supported admission is
+    // the already-running desktop launcher in Mirror Desktop, checked before launch.
+    request.policy_enabled = app.leave_game_mode_before_launch && app.source != "epic_launcher";
     if (!request.policy_enabled) {
       // Off: no scan, no probe, nothing recorded. The launch is the one it always was.
       prelaunch::outcome_t outcome;
@@ -8823,6 +8827,29 @@ namespace proc {
   ) {
     auto &sync = session_lifecycle_sync();
     std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex);
+#ifdef __linux__
+    std::optional<epic_library::installation_t> epic_title;
+    std::optional<std::string> epic_command;
+    if (app.source == "epic_launcher") {
+      const auto selection = resolve_launch_selection_for_app(app, launch_selection_request_from_session(*launch_session));
+      if (selection.refusal) return selection.refusal;
+      if (selection.selection != "desktop_display" || platf::game_mode_host::session_live() ||
+          (launch_session->client_selected_topology && launch_session->stream_mode != "desktop_display") ||
+          (launch_session->resolved_profile_from_client && launch_session->expected_stream_mode != "desktop_display")) {
+        return launch_failure::refuse(409, "epic_preview_mirror_only", "Epic Preview currently supports Mirror Desktop only.",
+          "Select Mirror Desktop and open Epic on the host desktop. Private Stream, Host Virtual Display and Spaces are not available for this Preview.");
+      }
+      epic_title = epic_library::find(epic_library::scan(game_library::library_home_roots()), app.epic_identity);
+      if (!epic_title) return launch_failure::refuse(503, "epic_installation_unavailable", "This Epic installation is incomplete, changed or unavailable.", "Open Epic on the desktop, finish any update, then scan the library again.");
+      std::string reason;
+      const auto launcher = platf::epic::desktop_launcher_executable(reason);
+      if (!launcher || !platf::epic::desktop_launcher_running(reason))
+        return launch_failure::refuse(503, "epic_desktop_launcher_required", "Epic must already be running on the host desktop.", "Open the official Epic Linux Preview on the desktop, then launch this game again.");
+      epic_command = epic_library::launch_command(*launcher, epic_title->identity);
+    }
+#else
+    if (app.source == "epic_launcher") return launch_failure::refuse(501, "epic_linux_only", "Epic Preview requires a Linux host.", "Use the official Linux Preview on a Linux desktop.");
+#endif
     if (_app_id == input_only_app_id) {
       terminate_impl(false, false);
       std::this_thread::sleep_for(1s);
@@ -9098,6 +9125,16 @@ namespace proc {
 #endif
     _app = app;
 #ifdef __linux__
+    _epic_grant.reset(); // Replacement never carries an earlier consent forward.
+    _epic_grant_revision.clear();
+    _epic_title = epic_title;
+    if (epic_command) {
+      _app.cmd.clear();
+      _app.detached = {*epic_command};
+      _app.working_dir = epic_title->install_dir.string();
+      _app.elevated = false;
+      _app.terminate_on_pause = false;
+    }
     _keep_desktop_steam = keep_desktop_steam(app.desktop_steam_lifetime,
       config::sunshine.keep_desktop_steam_running, session_mode, platf::game_mode_host::session_live());
     _desktop_steam_preexisting = (session_mode == "host_virtual_display" || session_mode == "desktop_display") &&
@@ -11116,11 +11153,16 @@ namespace proc {
         bool desktop_steam_command = false;
 #ifdef __linux__
         desktop_steam_command = _keep_desktop_steam && standalone_desktop_steam_launch(cmd);
-        if (desktop_steam_command) {
+        const bool unmanaged_epic_launcher = _app.source == "epic_launcher";
+        if (desktop_steam_command || unmanaged_epic_launcher) {
           // Desktop Steam outlives the stream. Its bootstrap and children must not
           // carry the exact-generation credential that owns transient app cleanup.
           detached_env = desktop_steam_environment(std::move(detached_env));
         }
+        // An Epic URI forwarder is not game ownership. In particular it must never enter
+        // generic detached-child teardown (which can escalate). Only an explicit pidfd grant
+        // below can close the observed title, and only with SIGTERM.
+        desktop_steam_command = desktop_steam_command || unmanaged_epic_launcher;
 #endif
         auto child = platf::run_command(_app.elevated, true, cmd, working_dir, detached_env, _pipe.get(), ec, nullptr);
         if (ec) {
@@ -11457,6 +11499,66 @@ namespace proc {
     return false; // No force kill: keep the output and owner for an End retry.
   }
 #endif
+
+  std::pair<int, nlohmann::json> proc_t::epic_session_control(const std::string &action,
+      const std::string &session_id, const std::string &revision, bool confirmed) {
+    const auto refused = [](int status, const char *code, const char *error) -> std::pair<int, nlohmann::json> {
+      return {status, {{"status", false}, {"code", code}, {"error", error}}};
+    };
+#ifndef __linux__
+    return refused(501, "unsupported_platform", "Epic Preview requires a Linux host.");
+#else
+    auto guard = session_snapshot_guard_t::try_acquire(*_session_lifecycle_gate);
+    if (!guard.owns_snapshot()) return refused(409, "session_busy", "A stream is starting or ending. Refresh before confirming.");
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+    if (!_epic_title || !_launch_session || _app.source != "epic_launcher" || _app_id <= 0) {
+      if (!action.empty()) return refused(409, "session_ended", "This Epic session has ended. No permission was changed.");
+      return {200, {{"status", true}, {"version", 1}, {"available", false}}};
+    }
+    if (_launch_session->expected_stream_mode != "desktop_display" || _session_instance_id.empty())
+      return refused(409, "unsupported_mode", "Epic controls are available only for this Mirror Desktop session.");
+    const auto &t = *_epic_title;
+    const platf::epic::title_t target {t.identity.namespace_id, t.identity.item_id, t.identity.artifact_id,
+      t.install_dir, t.launch_executable, t.data_root, t.platform};
+    auto observed = _epic_grant ? platf::epic::inspect(*_epic_grant) : platf::epic::observe(target);
+    const auto current_revision = _epic_grant ? _epic_grant_revision : _session_instance_id + ":" + observed.revision;
+    if (!action.empty()) {
+      if (session_id != _session_instance_id || revision != current_revision || (!_epic_grant && observed.revision.empty()))
+        return refused(409, "stale_observation", "The session or observed game changed. Refresh and confirm again.");
+      if (action == "release") {
+        _epic_grant.reset(); // Closing a pidfd is not a signal.
+        _epic_grant_revision.clear();
+      } else if (action == "adopt") {
+        if (!confirmed) return refused(400, "confirmation_required", "Confirm that Polaris may close this currently observed game.");
+        if (_epic_grant) return refused(409, "already_managed", "This game already has your permission.");
+        const auto current = epic_library::find(epic_library::scan(game_library::library_home_roots()), t.identity);
+        if (!current || current->install_dir != t.install_dir || current->launch_executable != t.launch_executable ||
+            current->data_root != t.data_root || !observed.available)
+          return refused(409, "game_unavailable", "The installation or game observation changed. No permission was granted.");
+        std::string error;
+        _epic_grant = platf::epic::adopt(target, observed, error);
+        if (!_epic_grant) return refused(409, "adoption_refused", "The exact game could not be retained safely. No permission was granted.");
+        _epic_grant_revision = current_revision;
+      } else return refused(400, "invalid_action", "Unknown Epic session action.");
+    }
+    const bool managed = static_cast<bool>(_epic_grant);
+    const bool available = observed.available;
+    const char *state = managed ? (available ? "managed" : "unavailable") :
+      (available ? "confirmable" : (observed.reason == "game_not_observed" ? "unmanaged" : "unavailable"));
+    nlohmann::json result {{"status", true}, {"version", 1}, {"available", true},
+      {"app_uuid", _app.uuid}, {"app_name", _app.name}, {"session_id", _session_instance_id},
+      {"revision", current_revision}, {"runtime", observed.runtime.empty() ? "unknown" : observed.runtime},
+      {"uninspected_process_count", observed.uninspected_process_count},
+      {"state", state},
+      {"can_adopt", !managed && available}, {"can_release", managed},
+      {"message", managed ? (available ? "End Session or Mission Control Disconnect Client may close this exact game. Disconnect in the streaming client leaves it running." :
+        "The retained game cannot currently be verified. Polaris will not switch to a replacement process.") :
+        (available ? "This observed game may have been started outside Polaris. You decide whether End Session may close it." :
+        "Games are left running by default. Open the game on the host; permission is offered only when its exact instance can be verified.")}};
+    return {200, std::move(result)};
+#endif
+  }
 
   std::pair<int, nlohmann::json> proc_t::desktop_steam_control(const std::string &unique_id, bool can_launch,
     const std::string &action, const std::string &revision, bool confirm_game_quit) {
@@ -12321,6 +12423,13 @@ namespace proc {
   }
 
   void proc_t::terminate_isolated_session_generation() {
+    if (_app.source == "epic_launcher") {
+      // URI forwarding is not game ownership. Epic's only closing authority is the
+      // explicitly adopted pidfd; never enter generic generation/group escalation.
+      _session_instance_id.clear();
+      _exact_generation_cleanup_complete = true;
+      return;
+    }
     // Whether this teardown's private app phase ran, read once so no later cleanup reuses it.
     const bool apps_stopped_first = _private_apps_stopped_before_compositor;
     _private_apps_stopped_before_compositor = false;
@@ -12510,6 +12619,21 @@ namespace proc {
     // terminal ownership fence. Nested kill only after every owned cleanup exits.
     media_stop.fence = session_media::prepare_for_stop();
     stop_steam_big_picture_input_guard();
+
+    if (_epic_grant) {
+      // Replacement, daemon shutdown and incidental cleanup only release consent. A purposeful
+      // End may request SIGTERM through the retained exact pidfd, with no escalation or retarget.
+      if (sync.stop_ends_session.load() && !daemon_shutdown_requested()) {
+        const auto result = platf::epic::ask_to_close(*_epic_grant, 5s);
+        if (!result.closed) {
+          BOOST_LOG(warning) << "Epic Preview: game exit was not confirmed; close it on the host. No broader termination was attempted."sv;
+          confighttp::emit_session_event("warning", "Epic game exit was not confirmed. The stream ended; close the game on the host.");
+        }
+      }
+      _epic_grant.reset();
+    }
+    _epic_grant_revision.clear();
+    _epic_title.reset();
 
     // Gamescope Steam/pressure-vessel may strip POLARIS_SESSION_INSTANCE_ID.
     // Freeze and capture the full ancestry closure while its exact credentialed
@@ -14874,6 +14998,8 @@ namespace proc {
           ctx.heroic_store = json_string_member_or(app_node, "heroic-store");
           ctx.heroic_runner = json_string_member_or(app_node, "heroic-runner");
           ctx.heroic_install = json_string_member_or(app_node, "heroic-install");
+          ctx.epic_identity = {json_string_member_or(app_node, "epic-namespace"),
+            json_string_member_or(app_node, "epic-item-id"), json_string_member_or(app_node, "epic-artifact-id")};
           ctx.lutris_slug = app_node.value("lutris-slug", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {

@@ -6,7 +6,8 @@ import AppsView from './views/AppsView.vue'
 vi.mock('./composables/useGameScanner', () => ({
   useGameScanner: () => ({
     scanning: ref(false), importing: ref(false), steamGames: ref([]), lutrisGames: ref([]),
-    heroicGames: ref([]), emulatorGames: ref([]), librarySources: ref([]),
+    heroicGames: ref([]), emulatorGames: ref([]), epicGames: ref([]), epicWarnings: ref([]),
+    switching: ref(false), switchEpicProvider: vi.fn(), librarySources: ref([]),
     error: ref(null), scan: vi.fn(), importSelected: vi.fn(), toggleAll: vi.fn(),
   }),
 }))

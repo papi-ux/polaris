@@ -427,6 +427,43 @@ TEST(AppValidationTests, AcceptsAnEmulatorSourceWithItsRomKeys) {
   EXPECT_NE(error.find("emulator"), std::string::npos) << error;
 }
 
+TEST(AppValidationTests, AcceptsAnUnchangedImportedEpicApp) {
+  // The editor posts the imported app back even when no field was changed.
+  const nlohmann::json payload {
+    {"name", "Alan Wake 2"},
+    {"uuid", "12345678-1234-1234-1234-1234567890ab"},
+    {"source", "epic_launcher"},
+    {"epic-namespace", "sandbox"},
+    {"epic-item-id", "catalog"},
+    {"epic-artifact-id", "artifact"},
+    {"cmd", ""},
+    {"detached", nlohmann::json::array()},
+    {"auto-detach", true},
+    {"wait-all", true},
+    {"exit-timeout", 5},
+    {"exclude-global-prep-cmd", true},
+    {"launch-as", "desktop_display"},
+    {"launch-as-basis", "desktop-mirror"},
+    {"desktop-mirror", true},
+    {"virtual-display", false}
+  };
+
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_app_payload(payload, error)) << error;
+}
+
+TEST(AppValidationTests, RejectsUnknownUnsafeAndNonStringSources) {
+  for (const auto &source : std::vector<nlohmann::json> {
+         "unknown", "epic", "epic-launcher", "Epic_Launcher", "epic_launcher ",
+         "epic_launcher\n", "epic_launcher\r", std::string("epic_launcher\0suffix", 20),
+         nullptr, true, 1, nlohmann::json::array({"epic_launcher"}),
+         nlohmann::json::object({{"provider", "epic_launcher"}})}) {
+    std::string error;
+    EXPECT_FALSE(confighttp::validation::validate_app_payload({{"name", "Alan Wake 2"}, {"source", source}}, error)) << source.dump();
+    EXPECT_NE(error.find("source"), std::string::npos) << source.dump() << ": " << error;
+  }
+}
+
 TEST(ConfigLiveApplyTests, ChangedKeysTreatAMissingKeyAsEmpty) {
   const std::unordered_map<std::string, std::string> before {
     {"port", "47989"}, {"steamgriddb_api_key", "old"}, {"ai_model", "gpt-5.6-luna"}, {"capture", "kms"}, {"ai_codex_home", ""}};

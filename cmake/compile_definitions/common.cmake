@@ -130,6 +130,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/beat_times.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_library_scanner.h"
         "${CMAKE_SOURCE_DIR}/src/game_library_scanner.cpp"
+        "${CMAKE_SOURCE_DIR}/src/epic_library.h"
+        "${CMAKE_SOURCE_DIR}/src/epic_library.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_artwork.h"
         "${CMAKE_SOURCE_DIR}/src/game_artwork.cpp"
         "${CMAKE_SOURCE_DIR}/src/game_artwork_override.h"

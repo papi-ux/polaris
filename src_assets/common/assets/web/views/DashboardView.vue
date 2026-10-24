@@ -15,6 +15,9 @@
 
     <DashboardSpaces v-if="hostPlatform === 'linux' && dashboardSpaces.visible" :model="dashboardSpaces" :loading="spacesLoading" @refresh="refreshSpaces" />
 
+    <!-- Owner-confirmed control for an active Epic Preview game; renders itself only while such a session exists. -->
+    <EpicSessionControls v-if="hostPlatform === 'linux' && currentApp?.source === 'epic_launcher'" class="mb-4" />
+
     <div class="mc-shell" :class="{ 'dashboard-live-shell': stageMode === 'live', 'is-preview-expanded': stageMode === 'live' && showPreview && previewExpanded }">
       <!-- The stage: what is playing (or next up), its main action, the route, then the readings.
            Space sessions keep their own section above and no stage. -->
@@ -484,7 +487,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
 import { useLiveTuning } from '../composables/useLiveTuning'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
@@ -600,6 +603,7 @@ async function refreshApps() {
 
 // Hero context: what is being played and for how long. current_app arrives
 // with the /api/apps payload; duration ticks against the SSE stats clock.
+const EpicSessionControls = defineAsyncComponent(() => import('../components/EpicSessionControls.vue'))
 const currentAppUuid = ref('')
 const currentAppAvailable = ref(false)
 const allAppsById = ref({})

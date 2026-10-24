@@ -22,6 +22,13 @@ function importSearchText(game) {
     game.rom_path,
     game.cmd,
     game.game_category,
+    // Official Epic entries: searchable by provider, platform, runtime and exact triple.
+    game.provider,
+    game.installed_platform,
+    game.runtime,
+    game.namespace,
+    game.item_id,
+    game.artifact_id,
     ...(Array.isArray(game.genres) ? game.genres : []),
   ].map(normalize).join(' ')
 }

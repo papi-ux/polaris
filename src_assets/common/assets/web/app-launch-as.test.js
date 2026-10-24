@@ -7,7 +7,8 @@ import { appPayloadForSave, LAUNCH_AS_ORDER, launchAsOptions, sentence } from '.
 
 vi.mock('./composables/useGameScanner', () => ({
   useGameScanner: () => ({ scanning: ref(false), importing: ref(false), steamGames: ref([]),
-    lutrisGames: ref([]), heroicGames: ref([]), emulatorGames: ref([]), librarySources: ref([]),
+    lutrisGames: ref([]), heroicGames: ref([]), emulatorGames: ref([]), epicGames: ref([]), epicWarnings: ref([]),
+    switching: ref(false), switchEpicProvider: vi.fn(), librarySources: ref([]),
     importedGames: ref([]), error: ref(null), scan: vi.fn(), importSelected: vi.fn(), toggleAll: vi.fn() }),
 }))
 

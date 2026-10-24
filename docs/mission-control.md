@@ -60,8 +60,9 @@ mean is in [Fix a bad stream with Doctor](doctor.md).
 Expand it to inspect a frame; hide it to save host work. The preview is diagnostic only and does
 not change the stream.
 
-**Disconnect Client** ends the owner's session after a confirmation; the app stays paused for the
-resume window so the client can come back.
+**Disconnect Client** ends the active session after a confirmation. This can close a game Polaris
+manages, including an Epic game whose owner granted close permission. To keep a game running for
+Resume, use **Disconnect** in Nova or Moonlight instead.
 
 ## While the host is idle
 

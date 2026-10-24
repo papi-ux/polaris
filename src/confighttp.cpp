@@ -3810,6 +3810,142 @@ namespace confighttp {
     send_response(response, output);
   }
 
+  namespace {
+    std::string epic_string(const nlohmann::json &j, const char *key) {
+      const auto it = j.find(key);
+      return it != j.end() && it->is_string() ? it->get<std::string>() : std::string {};
+    }
+    epic_library::identity_t epic_request_identity(const nlohmann::json &j) {
+      return {epic_string(j, "namespace"), epic_string(j, "item_id"), epic_string(j, "artifact_id")};
+    }
+    std::optional<epic_library::identity_t> epic_app_identity(const nlohmann::json &app) {
+      const epic_library::identity_t i {epic_string(app, "epic-namespace"),
+        epic_string(app, "epic-item-id"), epic_string(app, "epic-artifact-id")};
+      if (epic_library::valid_identity(i)) return i;
+      if (epic_string(app, "source") == "heroic" && epic_string(app, "heroic-store") == "epic")
+        return epic_library::heroic_identity(epic_string(app, "heroic-app-name"), game_library::library_home_roots());
+      return {};
+    }
+    void write_epic_identity(nlohmann::json &app, const epic_library::identity_t &i) {
+      app["epic-namespace"] = i.namespace_id;
+      app["epic-item-id"] = i.item_id;
+      app["epic-artifact-id"] = i.artifact_id;
+    }
+    void select_official_epic(nlohmann::json &app, const epic_library::installation_t &game) {
+      // Launch is derived afresh at admission. An empty saved command cannot be redirected to
+      // an arbitrary browser-supplied executable or accidentally acquire generic child ownership.
+      app["source"] = "epic_launcher";
+      app["cmd"] = "";
+      app["detached"] = nlohmann::json::array();
+      write_epic_identity(app, game.identity);
+      proc::write_launch_as(app, "desktop_display");
+    }
+    std::optional<game_library::heroic_game_t> epic_heroic_provider(const epic_library::identity_t &i) {
+      const auto homes = game_library::library_home_roots();
+      const auto catalog = epic_library::heroic_identity(i.artifact_id, homes);
+      if (!catalog || *catalog != i) return {};
+      for (const auto &file : game_library::heroic_installed_files(homes)) {
+        if (file.store != "epic") continue;
+        std::error_code ec;
+        const auto size = fs::file_size(file.path, ec);
+        if (ec || size > 16 * 1024 * 1024) continue;
+        std::ifstream stream(file.path);
+        const std::string raw {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+        for (const auto &game : game_library::parse_heroic_installed_json(raw, "epic", file.install))
+          if (game.app_name == i.artifact_id) return game;
+      }
+      for (auto install : {game_library::launcher_install_t::native, game_library::launcher_install_t::flatpak})
+        if (auto g = game_library::find_heroic_cached_game(homes, i.artifact_id, "epic", install)) return g;
+      return {};
+    }
+  }
+
+  void setEpicProvider(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+    const auto fail = [&](const char *message) {
+      send_response(response, SimpleWeb::StatusCode::client_error_conflict,
+        {{"status", false}, {"code", "provider_unavailable"}, {"error", message}});
+    };
+    try {
+      const auto raw = request->content.string();
+      const auto body = raw.size() <= 2048 ? nlohmann::json::parse(raw, nullptr, false) : nlohmann::json();
+      const auto i = epic_request_identity(body);
+      const auto provider = epic_string(body, "provider");
+      if (!body.is_object() || !epic_library::valid_identity(i) || (provider != "official" && provider != "heroic")) {
+        bad_request(response, request, "Choose a provider for an exact Epic title identity.");
+        return;
+      }
+      auto guard = proc::proc.try_session_status_guard();
+      if (!guard.owns_snapshot()) { fail("A session is changing. Try the provider change when it is idle."); return; }
+      const auto uuid = request->path_match[1].str();
+      if (uuid.empty() || proc::proc.get_running_app_uuid() == uuid) { fail("End this game's session before changing its provider."); return; }
+      std::scoped_lock apps_lock(apps_file_mutex());
+      auto tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+      auto &apps = tree.at("apps");
+      auto it = std::find_if(apps.begin(), apps.end(), [&](const auto &app) { return epic_string(app, "uuid") == uuid; });
+      if (it == apps.end()) { fail("That library entry no longer exists."); return; }
+      const auto known = epic_app_identity(*it);
+      if (!known || *known != i || (epic_string(*it, "source") != "heroic" && epic_string(*it, "source") != "epic_launcher")) {
+        fail("The library entry's Epic identity cannot be verified. It was left unchanged."); return;
+      }
+      auto next = *it; // UUID, artwork, history, pad/stream settings and all unrelated fields survive.
+      if (provider == "official") {
+        const auto title = epic_library::find(epic_library::scan(game_library::library_home_roots()), i);
+        if (!title) { fail("This official Epic installation is unavailable. Finish its update and scan again."); return; }
+        if (epic_string(next, "source") == "heroic") {
+          // Restore the exact former launch/provider fields when the owner switches back.
+          auto restore = nlohmann::json::object();
+          for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"})
+            if (next.contains(field)) restore[field] = next[field];
+          next["epic-previous-provider"] = std::move(restore);
+        }
+        select_official_epic(next, *title);
+      } else {
+        const auto heroic = epic_heroic_provider(i);
+        if (!heroic) { fail("An installed Heroic provider for this exact Epic title was not found."); return; }
+        if (next.contains("epic-previous-provider") && next["epic-previous-provider"].is_object()) {
+          const auto restore = next["epic-previous-provider"];
+          for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"}) {
+            next.erase(field);
+            if (restore.contains(field)) next[field] = restore[field];
+          }
+          next.erase("epic-previous-provider");
+        }
+        next["source"] = "heroic";
+        next["cmd"] = "";
+        next["detached"] = nlohmann::json::array({heroic->command});
+        next["heroic-app-name"] = heroic->app_name;
+        next["heroic-store"] = "epic";
+        next["heroic-runner"] = heroic->runner;
+        next["heroic-install"] = game_library::heroic_install_name(heroic->install);
+        write_epic_identity(next, i);
+      }
+      *it = std::move(next);
+      if (file_handler::write_file(config::stream.file_apps.c_str(), tree.dump(4)) != 0) throw std::runtime_error("save failed");
+      proc::refresh(config::stream.file_apps);
+      send_response(response, {{"status", true}, {"uuid", uuid}, {"provider", provider}});
+    } catch (const std::exception &) { fail("The provider could not be changed. Refresh the library before trying again."); }
+  }
+
+  void epicSession(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    if (request->method == "GET") {
+      const auto [status, body] = proc::proc.epic_session_control();
+      send_response(response, static_cast<SimpleWeb::StatusCode>(status), body);
+      return;
+    }
+    if (!validateContentType(response, request, "application/json")) return;
+    const auto raw = request->content.string();
+    const auto control = epic_library::parse_control_request(raw);
+    if (!control) {
+      send_response(response, SimpleWeb::StatusCode::client_error_bad_request,
+        {{"status", false}, {"code", "invalid_request"}, {"error", "Use the current session and revision; adoption requires explicit confirmation. Process IDs and paths are not accepted."}});
+      return;
+    }
+    const auto [status, result] = proc::proc.epic_session_control(control->action, control->session_id, control->revision, control->confirmed);
+    send_response(response, static_cast<SimpleWeb::StatusCode>(status), result);
+  }
+
   void scanGames(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
@@ -3822,10 +3958,12 @@ namespace confighttp {
     std::set<std::string> existing_lutris_slugs;
     std::set<std::string> existing_heroic_keys;
     std::set<std::string> existing_rom_paths;
+    nlohmann::json existing_epic_apps = nlohmann::json::array();
     try {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       auto apps_tree = nlohmann::json::parse(content);
       if (apps_tree.contains("apps") && apps_tree["apps"].is_array()) {
+        existing_epic_apps = apps_tree["apps"];
         for (const auto &app : apps_tree["apps"]) {
           if (app.contains("detached") && app["detached"].is_array()) {
             for (const auto &cmd : app["detached"]) {
@@ -4171,6 +4309,36 @@ namespace confighttp {
     output["steam_games"] = steam_games;
     output["lutris_games"] = lutris_games;
     output["heroic_games"] = heroic_games;
+    auto epic_games = nlohmann::json::array();
+    const auto epic_snapshot = epic_library::scan(game_library::library_home_roots());
+    for (const auto &title : epic_snapshot.games) {
+      const auto &i = title.identity;
+      nlohmann::json row {{"name", title.name}, {"source", "epic_launcher"},
+        {"namespace", i.namespace_id}, {"item_id", i.item_id}, {"artifact_id", i.artifact_id},
+        {"already_imported", false}, {"existing_uuid", ""}, {"providers", nlohmann::json::array({"official"})},
+        {"provider", "official"}, {"installed_platform", "windows"}, {"runtime", "proton"}, {"lifecycle", "owner_confirmation"}};
+      const auto catalog = epic_library::heroic_identity(i.artifact_id, game_library::library_home_roots());
+      const bool heroic_available = catalog && *catalog == i && std::any_of(heroic_games.begin(), heroic_games.end(), [&](const auto &g) {
+        return epic_string(g, "store") == "epic" && epic_string(g, "app_name") == i.artifact_id;
+      });
+      if (heroic_available) row["providers"].push_back("heroic");
+      for (const auto &existing : existing_epic_apps) {
+        if (auto known = epic_app_identity(existing); known && *known == i) {
+          row["already_imported"] = true;
+          row["existing_uuid"] = epic_string(existing, "uuid");
+          row["provider"] = epic_string(existing, "source") == "epic_launcher" ? "official" : "heroic";
+          break;
+        }
+      }
+      epic_games.push_back(std::move(row));
+      // One exact title row with explicit providers, rather than another import under each launcher.
+      if (heroic_available) heroic_games.erase(std::remove_if(heroic_games.begin(), heroic_games.end(), [&](const auto &g) {
+        return epic_string(g, "store") == "epic" && epic_string(g, "app_name") == i.artifact_id;
+      }), heroic_games.end());
+    }
+    output["heroic_games"] = heroic_games;
+    output["epic_games"] = epic_games;
+    output["epic_warnings"] = epic_snapshot.warnings;
     output["emulator_games"] = rom_folder_scan.games;
     output["library_sources"] = rom_folder_scan.folders;
     output["status"] = true;
@@ -4280,6 +4448,20 @@ namespace confighttp {
             app["image-path"] = image_path;
           }
           imported_lutris_game = true;
+        } else if (source == "epic_launcher") {
+          const auto identity = epic_request_identity(game);
+          const auto title = epic_library::find(epic_library::scan(game_library::library_home_roots()), identity);
+          if (!title) {
+            bad_request(response, request, "The exact Epic installation is unavailable. Scan again after its update finishes.");
+            return;
+          }
+          if (std::any_of(fileTree["apps"].begin(), fileTree["apps"].end(), [&](const auto &existing) {
+                const auto known = epic_app_identity(existing);
+                return known && *known == identity;
+              })) continue;
+          app["name"] = title->name;
+          app["exclude-global-prep-cmd"] = true;
+          select_official_epic(app, *title);
         } else if (source == "heroic") {
           // Heroic launch data crosses an authenticated browser boundary. Treat the
           // browser's free-form cmd as display-only and rebuild from exact scanner metadata.
@@ -11289,6 +11471,9 @@ namespace confighttp {
     registerLibraryArtwork(server, library_artwork_fills);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
+    server.resource["^/api/epic/session$"]["GET"] = epicSession;
+    server.resource["^/api/epic/session$"]["POST"] = withCsrf(epicSession);
+    server.resource["^/api/apps/([^/]+)/epic-provider$"]["POST"] = withCsrf(setEpicProvider);
     server.resource["^/api/library/sources$"]["GET"] = getLibrarySources;
     server.resource["^/api/library/sources$"]["POST"] = withCsrf(addLibrarySource);
     server.resource["^/api/library/sources/([^/]+)$"]["DELETE"] = withCsrf(deleteLibrarySource);

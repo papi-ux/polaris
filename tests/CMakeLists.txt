@@ -87,6 +87,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/beat_times.cpp
     ${CMAKE_SOURCE_DIR}/src/display_planner.cpp
     ${CMAKE_SOURCE_DIR}/src/game_library_scanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/epic_library.cpp
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
     ${CMAKE_SOURCE_DIR}/src/update_status.cpp
@@ -157,6 +158,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_beat_times.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_planner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_epic_library.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kms_capture_metadata.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_availability.cpp
@@ -238,6 +240,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pipewire_producer_graph.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pipewire_producer_remote.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steam_title_process.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_epic_process.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_enable.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_capture_readiness.cpp
