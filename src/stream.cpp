@@ -49,6 +49,7 @@ extern "C" {
 #include "stream_start_outcome.h"
 #include "stream_stats.h"
 #include "vrr_rtp_timestamp.h"
+#include "vrr_trace.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -1867,7 +1868,25 @@ namespace stream {
     std::vector<uint8_t> concat_buf;
 
     while (auto packet = packets->pop()) {
+      packet->trace_dequeued = packet->trace_packet != 0;
+      const char *trace_disposition = "exception_before_send";
+      std::uint64_t trace_send_calls = 0;
+      bool trace_sequence_published = false;
+      std::int64_t trace_initial_lowseq = -1, trace_published_lowseq = -1;
+      const bool trace_missing_timestamp = !packet->frame_timestamp;
+      auto trace_frame_end = util::fail_guard([&] {
+        if (!vrr_trace::enabled()) return;
+        vrr_trace::record(vrr_trace::event_t(trace_send_calls ? "send_frame_end" : "dequeued_not_sent")
+          .u("packet", packet->trace_packet).s("reason", trace_disposition).u("send_api_calls", trace_send_calls)
+          .u("lowseq_published", trace_sequence_published).i("initial_lowseq", trace_initial_lowseq).i("published_lowseq", trace_published_lowseq)
+          .u("sequence_reuse_possible", trace_send_calls && !trace_sequence_published));
+      });
+      if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("packet_dequeue").u("packet", packet->trace_packet)
+        .u("encoder", packet->trace_encoder).u("submission", packet->trace_submission).i("frame_index", packet->frame_index())
+        .o("frame_timestamp_ns", vrr_trace::ns(packet->frame_timestamp)).o("encode_done_ns", vrr_trace::ns(packet->encode_done_timestamp))
+        .u("source_clock_timestamp", packet->source_clock_timestamp).u("source_time_paced", packet->source_time_paced));
       if (shutdown_event->peek()) {
+        trace_disposition = "broadcast_shutdown";
         break;
       }
 
@@ -1875,17 +1894,21 @@ namespace stream {
 
       auto delivery = packet->channel_data.acquire();
       if (!delivery) {
+        trace_disposition = "destination_unavailable";
         continue;
       }
       auto session = static_cast<session_t *>(delivery.get());
       auto lowseq = session->video.lowseq;
+      trace_initial_lowseq = trace_published_lowseq = lowseq;
+      if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_context").u("packet", packet->trace_packet)
+        .u("session_generation", session->session_generation).i("initial_lowseq", lowseq).o("video_epoch_steady_ns", vrr_trace::ns(video_epoch)));
       std::optional<std::uint32_t> source_rtp_timestamp;
       if (packet->source_clock_timestamp) {
-        if (!packet->frame_timestamp) continue;
+        if (!packet->frame_timestamp) { trace_disposition = "source_timestamp_unavailable"; continue; }
         source_rtp_timestamp = vrr_pacing::rtp_timestamp(
           std::chrono::duration_cast<std::chrono::nanoseconds>(packet->frame_timestamp->time_since_epoch()).count(),
           std::chrono::duration_cast<std::chrono::nanoseconds>(video_epoch.time_since_epoch()).count());
-        if (!source_rtp_timestamp) continue;
+        if (!source_rtp_timestamp) { trace_disposition = "source_rtp_unrepresentable"; continue; }
       }
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
@@ -2076,6 +2099,9 @@ namespace stream {
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
+        if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
+          .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
+          .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage));
 
         // Don't ignore the last ratecontrol group of the previous frame
         auto ratecontrol_frame_start = std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
@@ -2085,7 +2111,7 @@ namespace stream {
 
         auto blockIndex = 0;
         std::for_each(fec_blocks_begin, fec_blocks_end, [&](std::string_view &current_payload) {
-          if (delivery.cancelled()) return;
+          if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
           auto packets = (current_payload.size() + (blocksize - 1)) / blocksize;
 
           for (int x = 0; x < packets; ++x) {
@@ -2139,10 +2165,15 @@ namespace stream {
           using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
           uint32_t timestamp = source_rtp_timestamp ? *source_rtp_timestamp :
             std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
+          if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("rtp_block").u("packet", packet->trace_packet)
+            .i("frame_index", packet->frame_index()).i("block", blockIndex).u("rtp_timestamp", timestamp)
+            .u("timestamp_substituted", trace_missing_timestamp).o("effective_frame_timestamp_ns", vrr_trace::ns(packet->frame_timestamp))
+            .o("video_epoch_steady_ns", vrr_trace::ns(video_epoch)).i("first_lowseq", lowseq).u("shards", shards.size())
+            .u("data_shards", shards.data_shards).u("source_rtp_mapping", !!source_rtp_timestamp));
 
           // set FEC info now that we know for sure what our percentage will be for this frame
           for (auto x = 0; x < shards.size(); ++x) {
-            if (delivery.cancelled()) return;
+            if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
             auto *inspect = (video_packet_raw_t *) shards.data(x);
 
             inspect->packet.fecInfo =
@@ -2191,7 +2222,7 @@ namespace stream {
 
                 auto now = std::chrono::steady_clock::now();
                 while (now < due) {
-                  if (delivery.cancelled()) return;
+                  if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
                   timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
                     std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
                   now = std::chrono::steady_clock::now();
@@ -2206,12 +2237,20 @@ namespace stream {
 
               frame_send_batch_latency_logger.first_point_now();
               // Use a batched send if it's supported on this platform
-              if (!platf::send_batch(batch_info)) {
-                if (delivery.cancelled()) return;
+              vrr_trace::send_attempt_t trace_batch {packet->trace_packet, blockIndex,
+                static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send), current_batch_size, "send_batch"};
+              ++trace_send_calls;
+              const bool batch_result = platf::send_batch(batch_info);
+              trace_batch.finish(batch_result);
+              if (!batch_result) {
+                if (delivery.cancelled()) { trace_disposition = "cancelled_after_batch"; return; }
+                if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("whole_range_fallback").u("packet", packet->trace_packet)
+                  .u("retry_of", trace_batch.id()).i("first_lowseq", static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send))
+                  .u("count", current_batch_size).u("duplicate_possible", 1).n("batch_accepted_count"));
                 // Batched send is not available, so send each packet individually
                 BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
                 for (auto y = 0; y < current_batch_size; y++) {
-                  if (delivery.cancelled()) return;
+                  if (delivery.cancelled()) { trace_disposition = "cancelled_during_fallback"; return; }
                   auto send_info = platf::send_info_t {
                     shards.prefix(next_shard_to_send + y),
                     shards.prefixsize,
@@ -2224,7 +2263,11 @@ namespace stream {
                     delivery.cancellation(),
                   };
 
-                  platf::send(send_info);
+                  vrr_trace::send_attempt_t trace_single {packet->trace_packet, blockIndex,
+                    static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send) + y, 1, "send", trace_batch.id()};
+                  ++trace_send_calls;
+                  const bool single_result = platf::send(send_info);
+                  trace_single.finish(single_result);
                 }
               }
               frame_send_batch_latency_logger.second_point_now_and_log();
@@ -2253,7 +2296,11 @@ namespace stream {
         });
 
         session->video.lowseq = lowseq;
+        trace_sequence_published = true;
+        trace_published_lowseq = lowseq;
+        if (!delivery.cancelled()) trace_disposition = "send_loop_returned_lowseq_published";
       } catch (const std::exception &e) {
+        trace_disposition = "exception_before_lowseq_publication";
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);
       }

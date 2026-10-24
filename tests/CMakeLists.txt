@@ -69,6 +69,7 @@ set(TEST_MAIN_SOURCE
 
 set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/bounded_log_file.cpp
+    ${CMAKE_SOURCE_DIR}/src/vrr_trace.cpp
     ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/confighttp_benchmark_auth.cpp
     ${CMAKE_SOURCE_DIR}/src/browser_stream_protocol.cpp
@@ -188,6 +189,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_compositor_identity.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_time.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_pacing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_trace.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_epoch_authority.cpp
 )
 
