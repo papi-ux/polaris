@@ -9,8 +9,13 @@ const plan = () => ({ route: 'helper', review_id: '12345678-1234-4234-8234-12345
     { package: 'polaris', id: 10, name: 'Polaris-fedora44-x86_64.rpm', digest: `sha256:${'a'.repeat(64)}`, url: 'https://github.com/papi-ux/polaris/releases/download/v1.5.1/Polaris-fedora44-x86_64.rpm' },
     { package: 'polaris-kms', id: 11, name: 'Polaris-kms-fedora44-x86_64.rpm', digest: `sha256:${'b'.repeat(64)}`, url: 'https://github.com/papi-ux/polaris/releases/download/v1.5.1/Polaris-kms-fedora44-x86_64.rpm' },
   ] })
-const snapshot = (job = null, current = installed()) => ({ available: true, finish_available: true, busy: { blocked: false, reasons: [] },
+const snapshot = (job = null, current = installed()) => ({ qualified: true, available: true, finish_available: true, busy: { blocked: false, reasons: [] },
   running_version: '1.5.0', installed: current, job })
+// The host's own qualification: guided hosts carry no RPM readback and no native update job.
+const guided = (extra = {}) => ({ qualified: false, available: false, finish_available: false, busy: { blocked: false, reasons: [] },
+  running_version: '1.5.0', job: null, ...extra })
+const guidedPlan = (code, message) => ({ route: 'guided', available: false, refusal: { code, message } })
+const unqualified = guidedPlan('family_unqualified', 'Polaris can install updates on Fedora 44 x86_64 only. Use the guided steps for this system.')
 
 describe('Host update journey', () => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
@@ -150,6 +155,73 @@ describe('Host update journey', () => {
     const mixed = installed('1.5.1')
     mixed['polaris-kms'].version = '1.5.0'
     expect(describeHostUpdate(snapshot(null, mixed), plan(), { reviewing: true }).canInstall).toBe(true)
+  })
+
+  it('keeps guided, image-based, missing-helper and non-RPM hosts on their honest guided headline', () => {
+    const unknown = { polaris: { state: 'unknown' }, 'polaris-kms': { state: 'unknown' } }
+    const unavailableJob = { state: 'failed', version: '', message: 'Host update information is unavailable. Recheck this PC.',
+      check: { state: 'failed', code: 'update_unavailable', message: 'Host update information is unavailable. Recheck this PC.' } }
+    const cases = [
+      ['Arch/Ubuntu/SteamOS without rpm', guided(), unqualified],
+      ['e29 shape: no rpm reads unknown', guided({ installed: unknown }), unqualified],
+      ['image based', guided(), guidedPlan('image_based_host', 'This PC runs an image based system, where Polaris does not change host setup. Follow the guide for your system instead.')],
+      ['missing helper', guided(), guidedPlan('helper_missing', 'The Polaris update helper is missing. Install the matching native package, then review again.')],
+      ['e29 shape: missing helper read became a job', guided({ installed: {}, job: unavailableJob }), unqualified],
+      ['non-RPM Fedora', guided({ installed: { polaris: { state: 'absent' }, 'polaris-kms': { state: 'absent' } } }),
+        guidedPlan('native_package_absent', 'This Polaris was not installed from the Fedora RPM.')],
+    ]
+    for (const [name, value, host] of cases) {
+      const view = describeHostUpdate(value, host)
+      expect(view.needsAttention, name).toBe(false)
+      expect(view.hasJob, name).toBe(false)
+      expect(view.title, name).not.toContain('needs attention')
+      expect(view.title, name).not.toBe('Update stopped')
+      expect(`${view.message} ${view.recovery}`, name).not.toContain('Fedora software management')
+      const legacy = buildUpdateCenterState({ currentVersion: '1.5.0', hostPlan: host, host: { platform: 'linux' } })
+      const headline = buildUpdateCenterState({ currentVersion: '1.5.0', hostPlan: host, hostJourney: view, host: { platform: 'linux' } })
+      expect(headline.statusLabel, name).toBe(legacy.statusLabel)
+      expect(headline.statusTone, name).toBe(legacy.statusTone)
+    }
+    // A real update job stays visible even where the host is not otherwise qualified.
+    expect(describeHostUpdate(guided({ job: { state: 'running', version: '1.5.1', check: { stage: 'installing' } } }), unqualified).active).toBe(true)
+  })
+
+  it('keeps a qualified Fedora read failure and genuine partial or unknown packages visible, never up to date', () => {
+    const cached = { ...plan(), update_needed: false }
+    const unreadable = { ...snapshot(null, {}), readback: 'unavailable' }
+    const view = describeHostUpdate(unreadable, cached)
+    expect(view.needsAttention).toBe(true)
+    expect(view.hasJob).toBe(true)
+    expect(view.title).toBe('Installed package state needs attention')
+    expect(view.message).toContain('could not read')
+    expect(view.message).not.toContain('Fedora software management')
+    expect(describeHostUpdate(unreadable, plan(), { reviewing: true }).canInstall).toBe(false)
+    const headline = buildUpdateCenterState({ currentVersion: '1.5.0', hostPlan: cached, hostJourney: view })
+    expect(headline.statusTone).toBe('warning')
+    expect(headline.statusLabel).not.toBe('Up to date')
+    for (const kms of [{ state: 'partial', versions: ['1.5.0', '1.5.1'] }, { state: 'unknown' }]) {
+      const genuine = describeHostUpdate(snapshot(null, { polaris: { state: 'installed', version: '1.5.0' }, 'polaris-kms': kms }), cached)
+      expect(genuine.needsAttention).toBe(true)
+      expect(genuine.title).toBe('Installed package state needs attention')
+      expect(genuine.recovery).toContain('Fedora software management')
+    }
+  })
+
+  it('mounts a guided host with only its guided note and no repeated status reads', async () => {
+    vi.useFakeTimers()
+    const fetcher = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('/plan?') ? unqualified
+      : guided({ installed: { polaris: { state: 'unknown' }, 'polaris-kms': { state: 'unknown' } } }) }))
+    vi.stubGlobal('fetch', fetcher)
+    const wrapper = mount(HostUpdateFlow)
+    await flushPromises()
+    expect(wrapper.find('[data-host-update-flow]').exists()).toBe(false)
+    expect(wrapper.find('[data-update-guided]').text()).toContain('Fedora 44 x86_64 only')
+    expect(wrapper.text()).not.toContain('needs attention')
+    expect(wrapper.text()).not.toContain('Fedora software management')
+    const reads = fetcher.mock.calls.length
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(fetcher.mock.calls.length).toBe(reads)
+    wrapper.unmount()
   })
 
   it('mounts the review/approval journey, sends only the nonce and closed fields, and never requests /api/restart', async () => {

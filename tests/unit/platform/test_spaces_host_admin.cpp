@@ -713,4 +713,57 @@ TEST(HostUpdates, FinishRetainsAdmissionAcrossTheAsynchronousRestartRequest) {
   EXPECT_FALSE(spaces::try_begin_host_activity());
   EXPECT_EQ(service->update_snapshot()["job"]["state"], "restarting");
 }
+
+TEST(HostUpdates, GuidedHostsSkipStatusAndUnreadableStatusIsNeverAJob) {
+  unsigned status_reads = 0, plan_reads = 0;
+  json status {{"state", "failed"}, {"code", "update_unavailable"}, {"message", "Host update information is unavailable. Recheck this PC."}};
+  auto facts = ready_facts();
+  auto service = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+    .facts = [&] { return facts; },
+    .update_plan = [&](std::string_view) {
+      ++plan_reads;
+      return json {{"version", "9.9.9"}, {"review_guard", std::string(64, 'a')}, {"update_needed", true}};
+    },
+    .update_status = [&] { ++status_reads; return status; },
+    .running_binary = [] { return json {{"matches_package", true}}; },
+  });
+  const auto guided = [&](std::string_view code) {
+    const auto snapshot = service->update_snapshot();
+    EXPECT_FALSE(snapshot.at("qualified").get<bool>()) << code;
+    EXPECT_FALSE(snapshot.contains("installed")) << code;
+    EXPECT_TRUE(snapshot.at("job").is_null()) << code;
+    EXPECT_EQ(snapshot.at("refusal").at("code"), code);
+    const auto plan = service->review_update("stable");
+    EXPECT_EQ(plan.at("route"), "guided") << code;
+    EXPECT_FALSE(plan.contains("review_id")) << code;
+  };
+  guided("family_unqualified");  // Arch, Ubuntu and SteamOS hosts
+  facts.update_family = true;
+  guided("helper_missing");
+  facts.update_helper = facts.image_based = true;
+  guided("image_based_host");
+  EXPECT_EQ(status_reads, 0U);  // guided hosts never run the helper status read
+  EXPECT_EQ(plan_reads, 0U);
+  facts.image_based = false;
+  // A qualified status read that could not run is unreadable, never a persisted job.
+  auto snapshot = service->update_snapshot();
+  EXPECT_TRUE(snapshot.at("qualified").get<bool>());
+  EXPECT_EQ(snapshot.at("readback"), "unavailable");
+  EXPECT_EQ(snapshot.at("installed"), json::object());
+  EXPECT_TRUE(snapshot.at("job").is_null());
+  // No RPM-installed Polaris is a guided first installation, not an RPM repair.
+  status = json {{"state", "idle"}, {"installed", {{"polaris", {{"state", "absent"}}}, {"polaris-kms", {{"state", "absent"}}}}}};
+  guided("native_package_absent");
+  EXPECT_EQ(plan_reads, 0U);
+  // Genuine qualified partial readback and a real journal stay visible.
+  status = json {{"state", "failed"}, {"code", "rpm_failed"}, {"version", "9.9.9"}, {"message", "RPM stopped."},
+    {"installed", {{"polaris", {{"state", "installed"}, {"version", "9.9.8"}}},
+      {"polaris-kms", {{"state", "partial"}, {"versions", {"9.9.8", "9.9.9"}}}}}}};
+  snapshot = service->update_snapshot();
+  EXPECT_TRUE(snapshot.at("qualified").get<bool>());
+  EXPECT_FALSE(snapshot.contains("readback"));
+  EXPECT_EQ(snapshot.at("installed").at("polaris-kms").at("state"), "partial");
+  EXPECT_EQ(snapshot.at("job").at("state"), "failed");
+  service->shutdown();
+}
 #endif

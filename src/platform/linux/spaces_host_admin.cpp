@@ -652,25 +652,45 @@ namespace multiseat::spaces {
     }
     std::optional<host_action_refusal_t> refusal, finish_refusal;
     json current = json::object();
+    // Only a qualified native RPM host has package state or a journal worth reading. Guided hosts
+    // (other families, image based, no helper) never run the helper's status read.
+    bool qualified = false;
     try {
       const auto facts = options_.facts ? options_.facts() : host_admin_facts_t {};
       refusal = update_action_refusal(facts);
       finish_refusal = update_action_refusal(facts, true);
-      current = options_.update_status ? options_.update_status() : json::object();
+      qualified = facts.update_family && facts.update_helper && !facts.image_based;
+      if (qualified && options_.update_status) current = options_.update_status();
     } catch (...) {
       refusal = finish_refusal = host_action_refusal_t {"host_unknown", "Polaris could not read this PC's update state."};
     }
-    if (closing || busy || activity) {
+    // A status read that could not run (no installed map, update_unavailable) is transport, not a
+    // transaction result: it is reported as unreadable and never becomes a journal job.
+    const bool read_failed = qualified && (!current.is_object() || !current.contains("installed") ||
+      !current.at("installed").is_object() || current.value("code", "") == "update_unavailable");
+    if (qualified && !read_failed) {
+      const auto base = current.at("installed").value("polaris", json::object());
+      if (base.is_object() && base.value("state", "") == "absent") {
+        // No RPM-installed Polaris here: that is a guided first installation, not an RPM repair.
+        qualified = false;
+        refusal = host_action_refusal_t {"native_package_absent",
+          "This Polaris was not installed from the Fedora RPM package, so it cannot update itself here. "
+          "Use the guided steps to install the RPM; later updates can then be installed here."};
+      }
+    }
+    // A guided host keeps its qualification reason; busy state only matters on the native path.
+    if (qualified && (closing || busy || activity)) {
       refusal = finish_refusal = host_action_refusal_t {closing ? "closing" : busy ? "host_admin_running" : "activity_pending",
         closing ? std::string(closing_message) : busy ? "Wait for the current host change to finish." :
         "A stream or Space is starting or changing on this PC. Wait for it to finish."};
     }
-    json result {{"schema", 1}, {"available", !refusal}, {"finish_available", !finish_refusal},
-      {"busy", {{"blocked", false}, {"reasons", json::array()}}}, {"job", nullptr},
-      {"installed", current.value("installed", json::object())}, {"running_version", PROJECT_VERSION}};
+    json result {{"schema", 1}, {"qualified", qualified}, {"available", !refusal}, {"finish_available", !finish_refusal},
+      {"busy", {{"blocked", false}, {"reasons", json::array()}}}, {"job", nullptr}, {"running_version", PROJECT_VERSION}};
+    if (qualified) result["installed"] = read_failed ? json::object() : current.at("installed");
+    if (read_failed) result["readback"] = "unavailable";
     if (refusal) result["refusal"] = {{"code", refusal->code}, {"message", refusal->message}};
     if (finish_refusal) result["finish_refusal"] = {{"code", finish_refusal->code}, {"message", finish_refusal->message}};
-    const auto packages = result.at("installed");
+    const auto packages = result.value("installed", json::object());
     const auto base = packages.value("polaris", json::object());
     const auto kms = packages.value("polaris-kms", json::object());
     const auto binary = options_.running_binary ? options_.running_binary() : json::object();
@@ -690,7 +710,7 @@ namespace multiseat::spaces {
         {"state", job->state}, {"message", job->message}, {"detail", job->detail},
         {"version", job->request.version}, {"channel", job->request.channel}};
       if (job->check) result["job"]["check"] = *job->check;
-    } else if (current.value("state", "idle") != "idle") {
+    } else if (qualified && !read_failed && current.value("state", "idle") != "idle") {
       // A new Polaris process reads the root journal and real package database.
       // A stale running journal is uncertainty, never success or an old-version promise.
       if (current.value("state", "") == "running" && !update_status::privileged_update_active()) {
@@ -707,8 +727,10 @@ namespace multiseat::spaces {
   json host_admin_service_t::review_update(std::string_view channel, bool refresh) {
     if (channel != "stable" && channel != "beta") return {{"state", "failed"}, {"message", "Unknown release channel."}};
     auto availability = update_snapshot();
-    // Busy hosts can still review; capability failures stay guided and never invoke a mutation.
-    if (!availability.value("available", false) && !availability.at("busy").value("blocked", false)) {
+    // Guided hosts never read a release plan through the helper. Busy qualified hosts can still
+    // review; capability failures stay guided and never invoke a mutation.
+    if (!availability.value("qualified", false) ||
+        (!availability.value("available", false) && !availability.at("busy").value("blocked", false))) {
       availability["route"] = "guided";
       return availability;
     }

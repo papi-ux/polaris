@@ -581,7 +581,12 @@ export function hostUpdatePollDelay({ visible = true, active = false, reviewing 
 }
 
 export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
-  const raw = snapshot.job || {}
+  // RPM readback means something only where the host says its native path is qualified. A status
+  // read that could not run is never a transaction job, and guided hosts get no Fedora repair advice.
+  const qualified = snapshot.qualified === true
+  const unreadable = snapshot.job?.check?.code === 'update_unavailable'
+  const readFailed = snapshot.readback === 'unavailable' || unreadable
+  const raw = unreadable ? {} : snapshot.job || {}
   const rawCheck = raw.check || {}
   // A journal describes an earlier transaction, never a fresh package/process readback.
   const installed = snapshot.installed || {}
@@ -605,7 +610,7 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
     (local.finishTarget ? installedVersion === local.finishTarget : job.state === 'installed'))
   const active = rawActive || Boolean(local.restarting && !finishConfirmed && !finished)
   const needsFinish = Boolean(installedVersion && running && installedVersion !== running && !rawActive)
-  const needsAttention = Object.prototype.hasOwnProperty.call(snapshot, 'installed') && !consistent
+  const needsAttention = qualified && (readFailed || (Object.prototype.hasOwnProperty.call(snapshot, 'installed') && !consistent))
   const packagesKnown = Boolean(installedVersion && (installed['polaris-kms']?.state === 'absent' ||
     (installed['polaris-kms']?.state === 'installed' && installed['polaris-kms'].version)))
   const busyReason = snapshot.busy?.reasons?.join(' ') || ''
@@ -632,10 +637,11 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
     title = `Polaris ${installedVersion} is installed`
     message = `You are still running ${running}. Finish restarts Polaris and briefly disconnects this page. Start streams again from your devices afterwards.`
   }
-  const recovery = needsAttention ? 'Read the package versions below. Polaris will not force a reinstall or remove package entries. Use Fedora software management or ask your system administrator to repair partial or unreadable entries, then review again.' : ''
+  const recovery = needsAttention && !readFailed ? 'Read the package versions below. Polaris will not force a reinstall or remove package entries. Use Fedora software management or ask your system administrator to repair partial or unreadable entries, then review again.' : ''
   if (needsAttention && !active) {
     title = 'Installed package state needs attention'
-    message = plan?.route === 'helper' && plan.update_needed ? 'Review an update of the older packages to match the selected release.' : recovery
+    message = readFailed ? 'Polaris could not read this PC’s installed packages just now. Nothing was changed; this page checks again shortly.'
+      : plan?.route === 'helper' && plan.update_needed ? 'Review an update of the older packages to match the selected release.' : recovery
   }
   if (finished) {
     title = `Polaris ${installedVersion} is running`
