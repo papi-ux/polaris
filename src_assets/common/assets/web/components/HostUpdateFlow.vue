@@ -118,7 +118,7 @@ async function poll() {
     snapshot.value = value
     if (disconnected.value) error.value = ''
     disconnected.value = false
-    if (view.value.finished) restarting.value = 0
+    if (view.value.finishConfirmed || view.value.finished) restarting.value = 0
   } catch {
     if (!disposed && epoch === snapshotEpoch && (supported.value || snapshot.value.job || restarting.value)) disconnected.value = true
   } finally {

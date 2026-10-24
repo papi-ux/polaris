@@ -119,6 +119,24 @@ describe('Host update journey', () => {
     expect(hostUpdatePollDelay({ capable: false })).toBeNull()
   })
 
+  it('separates a confirmed restart from a later offer or active update in another tab', () => {
+    const fresh = { ...snapshot(null, installed('1.5.1')), running_version: '1.5.1' }
+    const local = { restarting: true, finishTarget: '1.5.1' }
+    const next = { ...plan(), version: '1.5.2' }
+    const offer = describeHostUpdate(fresh, next, local)
+    expect(offer.finishConfirmed).toBe(true)
+    expect(offer.active).toBe(false)
+    expect(offer.finished).toBe(false)
+    expect(offer.hasJob).toBe(false)
+    expect(offer.title).toBe('Update available')
+    const updating = describeHostUpdate({ ...fresh, job: { state: 'running', version: '1.5.2', check: { stage: 'installing' } } }, plan(), local)
+    expect(updating.finishConfirmed).toBe(true)
+    expect(updating.active).toBe(true)
+    expect(updating.finished).toBe(false)
+    expect(updating.title).toBe('Updating this PC')
+    expect(updating.message).not.toContain('You can start streams')
+  })
+
   it('mounts the review/approval journey, sends only the nonce and closed fields, and never requests /api/restart', async () => {
     vi.useFakeTimers()
     document.head.innerHTML = '<meta name="csrf-token" content="test-csrf">'

@@ -597,11 +597,13 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
   const currentTerminal = !local.reviewing && !recovered && (!plan?.version || jobVersion === plan.version)
   const job = rawActive || currentTerminal ? raw : {}
   const check = job.check || {}
-  // Finish is confirmed by fresh package/process readback, independently of any journal.
-  const finished = Boolean(!local.disconnected && consistent && installedVersion === running &&
+  // Confirm this restart independently of a newer offer/operation from another tab.
+  const finishConfirmed = Boolean(local.finishTarget && !local.disconnected && consistent &&
+    installedVersion === running && installedVersion === local.finishTarget)
+  const finished = Boolean(!rawActive && !local.disconnected && consistent && installedVersion === running &&
     (!plan?.update_needed || plan.version === installedVersion) &&
     (local.finishTarget ? installedVersion === local.finishTarget : job.state === 'installed'))
-  const active = rawActive || Boolean(local.restarting && !finished)
+  const active = rawActive || Boolean(local.restarting && !finishConfirmed && !finished)
   const needsFinish = Boolean(installedVersion && running && installedVersion !== running && !rawActive)
   const needsAttention = Object.keys(installed).length > 0 && !consistent
   const busyReason = snapshot.busy?.reasons?.join(' ') || ''
@@ -636,7 +638,7 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
   if (finished) {
     title = `Polaris ${installedVersion} is running`
     message = 'The installed version is now running. You can start streams again.'
-  } else if (local.restarting) {
+  } else if (local.restarting && !finishConfirmed) {
     title = 'Restarting Polaris'
     message = local.restartTimedOut ? 'Polaris has not come back yet. Check the PC running it. This page keeps checking in the background.' : 'Restarting Polaris. This page will try to reconnect.'
   } else if (local.disconnected) {
@@ -644,8 +646,8 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
     message = 'The update result is unknown until this page can read the host again. This page keeps checking.'
   }
   return {
-    title, message, stage, active, finished, needsFinish, needsAttention, recovery,
-    hasJob: Boolean(job.state || needsFinish || needsAttention || finished || local.disconnected || local.restarting),
+    title, message, stage, active, finished, finishConfirmed, needsFinish, needsAttention, recovery,
+    hasJob: Boolean(job.state || needsFinish || needsAttention || finished || local.disconnected || (local.restarting && !finishConfirmed)),
     installed: ['polaris', 'polaris-kms'].map((name) => ({ name, state: installed[name]?.state || 'unknown',
       version: installed[name]?.version || '', versions: installed[name]?.versions || [] })), busyReason,
     canInstall: Boolean(local.reviewing && plan?.route === 'helper' && plan.review_id && plan.update_needed && snapshot.available && !active && !local.disconnected),
