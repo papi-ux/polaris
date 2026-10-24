@@ -605,7 +605,9 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
     (local.finishTarget ? installedVersion === local.finishTarget : job.state === 'installed'))
   const active = rawActive || Boolean(local.restarting && !finishConfirmed && !finished)
   const needsFinish = Boolean(installedVersion && running && installedVersion !== running && !rawActive)
-  const needsAttention = Object.keys(installed).length > 0 && !consistent
+  const needsAttention = Object.prototype.hasOwnProperty.call(snapshot, 'installed') && !consistent
+  const packagesKnown = Boolean(installedVersion && (installed['polaris-kms']?.state === 'absent' ||
+    (installed['polaris-kms']?.state === 'installed' && installed['polaris-kms'].version)))
   const busyReason = snapshot.busy?.reasons?.join(' ') || ''
   const stage = check.stage || job.state || ''
   let title = plan?.update_needed ? 'Update available' : plan?.route === 'helper' ? 'Up to date' : 'Update this PC'
@@ -650,7 +652,7 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
     hasJob: Boolean(job.state || needsFinish || needsAttention || finished || local.disconnected || (local.restarting && !finishConfirmed)),
     installed: ['polaris', 'polaris-kms'].map((name) => ({ name, state: installed[name]?.state || 'unknown',
       version: installed[name]?.version || '', versions: installed[name]?.versions || [] })), busyReason,
-    canInstall: Boolean(local.reviewing && plan?.route === 'helper' && plan.review_id && plan.update_needed && snapshot.available && !active && !local.disconnected),
+    canInstall: Boolean(local.reviewing && plan?.route === 'helper' && plan.review_id && plan.update_needed && packagesKnown && snapshot.available && !active && !local.disconnected),
     canCancel: job.state === 'waiting_for_approval' && Boolean(job.request_id) && !local.disconnected,
     canFinish: Boolean(needsFinish && consistent && snapshot.finish_available && !active && !local.disconnected),
     canReview: !active && !local.disconnected,

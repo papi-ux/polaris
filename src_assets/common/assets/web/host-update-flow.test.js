@@ -137,6 +137,21 @@ describe('Host update journey', () => {
     expect(updating.message).not.toContain('You can start streams')
   })
 
+  it('does not call an unavailable helper readback up to date or permit Install', () => {
+    // helper_update_read's unavailable result has no installed map or release version.
+    const value = snapshot({ state: 'failed', version: '', check: { code: 'update_unavailable' } }, {})
+    const view = describeHostUpdate(value, { ...plan(), update_needed: false })
+    expect(view.needsAttention).toBe(true)
+    expect(view.hasJob).toBe(true)
+    expect(view.title).toBe('Installed package state needs attention')
+    expect(view.installed.every((entry) => entry.state === 'unknown')).toBe(true)
+    expect(describeHostUpdate(value, plan(), { reviewing: true }).canInstall).toBe(false)
+    expect(view.canFinish).toBe(false)
+    const mixed = installed('1.5.1')
+    mixed['polaris-kms'].version = '1.5.0'
+    expect(describeHostUpdate(snapshot(null, mixed), plan(), { reviewing: true }).canInstall).toBe(true)
+  })
+
   it('mounts the review/approval journey, sends only the nonce and closed fields, and never requests /api/restart', async () => {
     vi.useFakeTimers()
     document.head.innerHTML = '<meta name="csrf-token" content="test-csrf">'
