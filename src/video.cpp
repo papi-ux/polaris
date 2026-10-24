@@ -4158,7 +4158,7 @@ namespace video {
   }
 
   static void trace_packet_output(encode_session_t &session, packet_raw_t &packet, std::int64_t current_pts, bool ordered_erase) {
-    if (!vrr_trace::enabled()) return;
+    if (!vrr_trace::enabled() || !session.trace_encoder) return;
     packet.trace_encoder = session.trace_encoder;
     packet.trace_packet = vrr_trace::next_id();
     const auto match = session.trace_submissions.take(packet.frame_index(), session.trace_encoder, ordered_erase);
@@ -4214,7 +4214,7 @@ namespace video {
       if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         return 0;
       } else if (ret < 0) {
-        if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("codec_receive_error", session).i("code", ret).i("current_call_pts", frame_nr));
+        if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("codec_receive_error", session).i("code", ret).i("current_call_pts", frame_nr));
         return ret;
       }
 
@@ -4265,7 +4265,7 @@ namespace video {
         }
         if (!emitted) {
           trace_packet_output(session, *packet, frame_nr, true);
-          if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "source_submission_time_unavailable"));
+          if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "source_submission_time_unavailable"));
           BOOST_LOG(error) << "Encoder returned frame "sv << av_packet->pts
                            << " with no recorded source-paced submission; refusing to send it"sv;
           return -1;
@@ -4285,7 +4285,7 @@ namespace video {
       // Hardware packet buffers may depend on thread-affine conversion
       // resources. Detach them here so teardown stays on the encoder thread.
       if (!packet->detach_encoder_buffer()) {
-        if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "detach_encoder_buffer_failed"));
+        if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "detach_encoder_buffer_failed"));
         return AVERROR(ENOMEM);
       }
       // The detached copy is ours to shrink. On a still screen in CBR, filler
@@ -4301,7 +4301,7 @@ namespace video {
       }
       packet->channel_data = channel_data;
       packet->trace_enqueue_attempted = packet->trace_packet != 0;
-      if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
+      if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
       packets->raise(std::move(packet));
     }
 
@@ -4344,7 +4344,7 @@ namespace video {
     packet->encode_done_timestamp = std::chrono::steady_clock::now();
     trace_packet_output(session, *packet, frame_nr, false);
     packet->trace_enqueue_attempted = packet->trace_packet != 0;
-    if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
+    if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
     packets->raise(std::move(packet));
 
     return 0;
@@ -4379,7 +4379,7 @@ namespace video {
       }
       if (!emitted) {
         trace_packet_output(session, *packet, frame_nr, true);
-        if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "source_submission_time_unavailable"));
+        if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("output_refused", session).u("packet", packet->trace_packet).s("reason", "source_submission_time_unavailable"));
         BOOST_LOG(error) << "NvENC returned frame "sv << encoded_frame.frame_index
                          << " with no recorded source-paced submission; refusing to send it"sv;
         return -1;
@@ -4392,7 +4392,7 @@ namespace video {
     packet->encode_done_timestamp = encode_done_timestamp;
     trace_packet_output(session, *packet, frame_nr, !!session.source_submissions);
     packet->trace_enqueue_attempted = packet->trace_packet != 0;
-    if (vrr_trace::enabled()) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
+    if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
     packets->raise(std::move(packet));
 
     return 0;
