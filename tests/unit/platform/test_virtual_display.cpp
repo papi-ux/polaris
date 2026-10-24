@@ -466,6 +466,33 @@ TEST(VirtualDisplayKwinTests, KwinScreenNeedsNoExtraConfiguration) {
   EXPECT_FALSE(virtual_display::wayland_compositor_supports_exact_output_creation("kwin"));
 }
 
+TEST(VirtualDisplayKwinTests, KwinRefusalLeadsInsteadOfTheFallbacksConnector) {
+  using virtual_display::backend_e;
+  using virtual_display::unavailable_reason_for;
+  // On a KWin desktop the automatic order reaches kscreen-doctor only after KWin
+  // refused, so asking for a connector would send the owner after a dummy plug.
+  const auto refused = unavailable_reason_for(
+    backend_e::KSCREEN_DOCTOR, false, false, "KWin does not offer its screencast protocol to Polaris");
+  EXPECT_EQ(refused.rfind("KWin does not offer its screencast protocol to Polaris. ", 0), 0u) << refused;
+  EXPECT_NE(refused.find("cannot add a screen"), std::string::npos);
+  EXPECT_NE(refused.find("linux_streaming_output"), std::string::npos);
+  EXPECT_EQ(refused.find("kscreen-doctor backend needs"), std::string::npos);
+  EXPECT_EQ(unavailable_reason_for(backend_e::KSCREEN_DOCTOR, false, true, "KWin refused"), "")
+    << "a borrowed connector that is configured is usable whatever KWin said";
+
+  const auto nothing = unavailable_reason_for(
+    backend_e::NONE, false, false, "kscreen-doctor is not installed; Polaris needs it to place the new screen.");
+  EXPECT_EQ(nothing.rfind("kscreen-doctor is not installed;", 0), 0u) << nothing;
+  EXPECT_EQ(nothing.find(".."), std::string::npos);
+  EXPECT_EQ(nothing.find("EVDI not usable"), std::string::npos);
+}
+
+TEST(VirtualDisplayKwinTests, ForcedKwinReasonEndsItsSentenceBeforeTheAdvice) {
+  const auto reason = virtual_display::forced_backend_unavailable_reason(
+    virtual_display::backend_preference_e::KWIN, "KWin does not offer its screencast protocol to Polaris");
+  EXPECT_NE(reason.find("to Polaris. Set it to auto"), std::string::npos) << reason;
+}
+
 TEST(VirtualDisplayKwinTests, OutputNamesAreSlotScopedAndRecognisable) {
   EXPECT_EQ(virtual_display::kwin_output_request_name(0), "polaris-0");
   EXPECT_EQ(virtual_display::kwin_output_expected_name("polaris-0"), "Virtual-polaris-0");
@@ -937,6 +964,56 @@ TEST_F(HostVirtualCaptureReadinessTests, NoWaylandAndNativeX11RefuseBeforeAnyCre
   EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::no_wayland);
   EXPECT_NE(r.reason.find("Wayland"), std::string::npos);
   EXPECT_EQ(virtual_display::host_stream_creator_probe_count_for_tests(), 0);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, NoSessionNamesTheMissingDesktopOnEverySurface) {
+  // A headless-boot Plasma host with nobody logged in: kscreen-doctor is installed,
+  // KWin is unreachable, and asking for linux_streaming_output was the wrong lead.
+  probe(virtual_display::backend_e::KSCREEN_DOCTOR, {});
+  const auto r = virtual_display::host_stream_readiness(true);
+  EXPECT_FALSE(r.available);
+  EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::no_wayland);
+#ifdef POLARIS_BUILD_WAYLAND
+  EXPECT_NE(r.reason.find("WAYLAND_DISPLAY is not set"), std::string::npos) << r.reason;
+  EXPECT_NE(r.reason.find("headless boot"), std::string::npos);
+  EXPECT_NE(r.reason.find("restart Polaris"), std::string::npos);
+  EXPECT_EQ(r.reason.find("Mirror Desktop"), std::string::npos) << "Mirror Desktop needs the same session";
+#endif
+  EXPECT_EQ(r.reason.find("linux_streaming_output"), std::string::npos);
+  EXPECT_EQ(virtual_display::unavailable_reason(), r.reason)
+    << "the Virtual Display panel and launch refusals give the same reason as the mode card";
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, AReadyCreatorStillHasNoUnavailableReasonWithoutASession) {
+  probe(virtual_display::backend_e::EVDI, {});
+  EXPECT_EQ(virtual_display::unavailable_reason(), "")
+    << "a failed creation keeps its own warning; only an unready backend gets a reason";
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, KwinRefusalLeadsWhenAutoFallsBackToAnUnsetConnector) {
+  const std::string refused =
+    "KWin does not offer its screencast protocol to Polaris because this Polaris process holds file "
+    "capabilities (the cap_sys_admin that --enable-kms grants for KMS capture), and KWin cannot tell "
+    "which program holds them. Set linux_virtual_display_backend to kwin, leave capture on auto or "
+    "portal, and restart Polaris; it then drops them at start";
+  for (const bool permitted : {false, true}) {
+    probe(virtual_display::backend_e::KSCREEN_DOCTOR, kwin_provider(permitted), std::nullopt, refused);
+    const auto r = virtual_display::host_stream_readiness(true);
+    EXPECT_FALSE(r.available);
+    EXPECT_EQ(r.reason.rfind("KWin does not offer its screencast protocol to Polaris", 0), 0u) << r.reason;
+    EXPECT_NE(r.reason.find("drops them at start. The fallback, kscreen-doctor"), std::string::npos) << r.reason;
+    EXPECT_EQ(r.reason.find("kscreen-doctor backend needs"), std::string::npos);
+    EXPECT_EQ(virtual_display::unavailable_reason(), r.reason);
+  }
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, ANonKwinDesktopKeepsTheConnectorReason) {
+  for (const auto &provider : {complete_provider(), wlr_provider()}) {
+    probe(virtual_display::backend_e::KSCREEN_DOCTOR, provider, std::nullopt, "This is not a KDE Plasma Wayland session.");
+    const auto reason = virtual_display::unavailable_reason();
+    EXPECT_NE(reason.find("linux_streaming_output"), std::string::npos) << reason;
+    EXPECT_EQ(reason.find("KDE Plasma"), std::string::npos) << "KWin's reason belongs only to a KWin desktop";
+  }
 }
 
 TEST_F(HostVirtualCaptureReadinessTests, IncompleteTimeoutOrConnectionErrorDoesNotAssertAGnomeDesktop) {

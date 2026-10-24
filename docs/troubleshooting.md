@@ -627,6 +627,14 @@ on its own: `hvd_kwin_screen_unused` when Plasma got another backend, and why;
 `hvd_screen_scaled` when the stream screen runs at a scale other than 100%; and
 `hvd_input_not_mapped` when touch or pen could not be put on the stream screen.
 
+- **`WAYLAND_DISPLAY is not set`, on a host with no monitor.** KWin adds the screen to a running
+  Plasma session, so one has to exist. A host set up with `--enable-headless-boot` starts Polaris
+  before anyone logs in, and Polaris then has no desktop to add a screen to; Mirror Desktop needs
+  the same session. Turn on automatic login into Plasma (Wayland), reboot, and restart Polaris with
+  `systemctl --user restart polaris`. `systemctl --user show-environment` lists `WAYLAND_DISPLAY`
+  once the session is up. The KWin screen itself needs no dummy plug, but Plasma has to start
+  without a monitor first; if `WAYLAND_DISPLAY` stays missing after automatic login, use a dummy
+  plug with Headless Dongle. Private Stream needs no session at all.
 - **KWin does not offer its screencast protocol to Polaris.** KWin only offers it to a program a
   desktop entry names. Polaris writes one to `~/.local/share/applications` the first time and
   waits a few seconds for KWin to pick it up. If a launch still misses it, Polaris checks again
@@ -640,8 +648,9 @@ on its own: `hvd_kwin_screen_unused` when Plasma got another backend, and why;
   cannot match one that holds file capabilities, such as the `cap_sys_admin` that `--enable-kms`
   grants for KMS capture. On the automatic order such a Polaris skips the KWin screen and falls back
   to EVDI when it can create a display, otherwise to kscreen-doctor. Set Backend to KWin (`linux_virtual_display_backend = kwin`), leave `capture`
-  on `auto` or `portal`, and restart Polaris: it then drops the capability at start. KMS capture
-  and a KWin screen do not go together.
+  on `auto` or `portal`, and restart Polaris: it then drops the capability at start, or remove
+  it with `sudo -H polaris --setup-host --disable-kms`. KMS capture and a KWin screen do not go
+  together.
 - **kscreen-doctor is not installed.** It comes with Plasma. Polaris needs it to place the screen
   beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
 - **A game opened on my monitor instead of the stream.** Check the log for the backend: with
