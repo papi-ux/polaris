@@ -25,7 +25,7 @@
 
 namespace multiseat::spaces {
   /// The only privileged changes Polaris asks for. Each is one helper operation and one polkit action.
-  enum class host_action_e { security_install, docker_access };
+  enum class host_action_e { security_install, docker_access, update_install, update_finish, update_cancel };
   inline constexpr std::array<host_action_e, 2> host_actions {host_action_e::security_install, host_action_e::docker_access};
 
   [[nodiscard]] std::optional<host_action_e> parse_host_action(std::string_view name);
@@ -50,11 +50,17 @@ namespace multiseat::spaces {
     bool setup_active = false;  ///< the first Space setup is downloading, preparing or configuring
     bool spaces_active = false;  ///< a Space is starting, running, stopping or in use, or Spaces are changing
     bool stream_active = false;
+    bool resumable_active = false;
+    bool session_active = false;
+    bool update_helper = false;
+    bool update_family = false;
+    bool external_update_active = false;
   };
   struct host_action_refusal_t {
     std::string code, message;
   };
   [[nodiscard]] std::optional<host_action_refusal_t> host_action_refusal(const host_admin_facts_t &facts);
+  [[nodiscard]] std::optional<host_action_refusal_t> update_action_refusal(host_admin_facts_t facts, bool finish = false);
 
   /// The first line the helper prints when pkexec ran it, which only happens after approval.
   inline constexpr std::string_view host_action_started_line = "Spaces setup started.";
@@ -76,12 +82,18 @@ namespace multiseat::spaces {
   /// Before approval it closes the process at the timeout or on stop; after approval it is never killed.
   [[nodiscard]] host_action_run_t run_host_action_process(const std::vector<std::string> &argv,
     std::chrono::milliseconds approval_timeout, const std::function<void()> &approved, std::stop_token stop);
+  [[nodiscard]] host_action_run_t run_update_action_process(const std::vector<std::string> &argv,
+    std::string_view review_guard, std::chrono::milliseconds approval_timeout, const std::function<void()> &approved,
+    const std::function<void(const nlohmann::json &)> &progress, std::stop_token stop);
 
   struct host_action_request_t {
     host_action_e action = host_action_e::security_install;
     std::string request_id;
+    std::string channel, version, review_id, review_guard;
   };
   [[nodiscard]] std::optional<host_action_request_t> decode_host_action_request(std::string_view payload);
+  [[nodiscard]] std::optional<host_action_request_t> decode_update_request(std::string_view payload, bool finish = false);
+  [[nodiscard]] bool valid_update_version(std::string_view version);
 
   struct host_admin_options_t {
     std::function<host_admin_facts_t()> facts;
@@ -89,6 +101,12 @@ namespace multiseat::spaces {
     /// The setup check an action fixes, read again after it finished. nullopt when it cannot be read.
     std::function<std::optional<nlohmann::json>(host_action_e)> recheck;
     std::chrono::milliseconds approval_timeout = std::chrono::minutes(5);
+    std::function<nlohmann::json(std::string_view)> update_plan;
+    std::function<nlohmann::json()> update_status;
+    std::function<host_action_run_t(const host_action_request_t &, std::chrono::milliseconds,
+      const std::function<void()> &, const std::function<void(const nlohmann::json &)> &, std::stop_token)> run_update;
+    std::function<void()> finish;
+    std::function<nlohmann::json()> running_binary;
   };
 
   class host_activity_guard_t;
@@ -110,6 +128,10 @@ namespace multiseat::spaces {
     /// 503 Polaris is shutting down.
     [[nodiscard]] submit_result_t submit(const host_action_request_t &request);
     [[nodiscard]] nlohmann::json snapshot() const;
+    [[nodiscard]] nlohmann::json review_update(std::string_view channel);
+    [[nodiscard]] nlohmann::json update_snapshot() const;
+    /// Cancels only a matching approval wait. Approved transactions finish on their own.
+    [[nodiscard]] bool cancel_update(std::string_view request_id);
     /// Waiting for approval or changing this PC. Space launches and Spaces changes wait meanwhile.
     [[nodiscard]] bool running() const { return running_.load(); }
     void shutdown();
@@ -130,6 +152,8 @@ namespace multiseat::spaces {
     mutable std::mutex mutex_;
     std::optional<job_t> job_;
     std::optional<host_action_request_t> pending_;  ///< claimed, facts still being read
+    std::optional<nlohmann::json> review_;
+    std::chrono::steady_clock::time_point reviewed_at_;
     std::atomic<bool> running_ {false};
     bool closing_ = false;
     std::size_t activities_ = 0;
@@ -156,6 +180,7 @@ namespace multiseat::spaces {
   struct host_admin_probes_t {
     std::function<bool()> setup_active, spaces_active, stream_active;
     std::function<std::optional<nlohmann::json>()> setup;  ///< the current /api/spaces/setup body
+    std::function<bool()> resumable_active, session_active;
   };
   [[nodiscard]] std::shared_ptr<host_admin_service_t> make_host_admin_service(host_admin_probes_t probes);
   bool install_host_admin_service(const std::shared_ptr<host_admin_service_t> &service);

@@ -6,6 +6,8 @@ install(FILES "${POLARIS_SPACES_INPUT}" "${POLARIS_SPACES_WORKER}" "${POLARIS_SP
 if(NOT POLARIS_BUILD_APPIMAGE)
     install(PROGRAMS "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup"
             DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(PROGRAMS "${CMAKE_SOURCE_DIR}/scripts/update_helper.py"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}" RENAME "polaris-update-helper")
     # The polkit actions the Spaces page asks for; they only name the helper installed above.
     install(FILES "${CMAKE_BINARY_DIR}/generated/${POLARIS_POLKIT_POLICY_NAME}"
             DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polkit-1/actions")

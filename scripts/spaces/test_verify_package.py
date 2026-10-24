@@ -35,6 +35,9 @@ class Package(unittest.TestCase):
         template = template.replace('@POLARIS_SPACES_SECURITY_RELEASE@', self.release)
         template = template.replace('@POLARIS_SPACES_SECURITY_MARKER@', marker)
         self.helper.write_text(template); self.helper.chmod(0o755)
+        self.update_helper = self.root / 'usr/bin/polaris-update-helper'
+        self.update_helper.write_bytes((source / 'scripts/update_helper.py').read_bytes())
+        self.update_helper.chmod(0o755)
         seccomp = (source / 'containers/multiseat/seccomp/steam.json').read_bytes()
         (self.data.parent / ('steam-seccomp-' + hashlib.sha256(seccomp).hexdigest() + '.json')).write_bytes(seccomp)
         policy = (source / 'packaging/linux/dev.polaris-stream.app.Polaris.policy.in').read_text()
@@ -58,8 +61,10 @@ class Package(unittest.TestCase):
             ('<allow_any>no</allow_any>', '<allow_any>auth_admin</allow_any>'),
             ('<allow_inactive>no</allow_inactive>', '<allow_inactive>auth_admin</allow_inactive>'),
             ('>/usr/bin/polaris-spaces-setup<', '>/usr/bin/bash<'),
+            ('>/usr/bin/polaris-update-helper<', '>/usr/bin/bash<'),
             ('>docker-access<', '>remove<'),
             ('.spaces-docker-access"', '.spaces-anything"'),
+            ('.update-install"', '.update-anything"'),
             ('<annotate key="org.freedesktop.policykit.exec.argv1">install</annotate>', ''),
             ('</policyconfig>', '<action id="dev.polaris-stream.app.polaris.extra"><description>x</description><message>x</message>'
              '<defaults><allow_any>no</allow_any><allow_inactive>no</allow_inactive><allow_active>auth_admin</allow_active></defaults>'
@@ -67,9 +72,11 @@ class Package(unittest.TestCase):
              '<annotate key="org.freedesktop.policykit.exec.argv1">remove</annotate></action></policyconfig>'),
         ]
         for old, new in changes:
-            self.assertEqual(original.count(old), 1 if old != '<allow_active>auth_admin</allow_active>' and
-                             old != '<allow_any>no</allow_any>' and old != '<allow_inactive>no</allow_inactive>' and
-                             old != '>/usr/bin/polaris-spaces-setup<' else 2, old)
+            expected = 3 if old in ('<allow_active>auth_admin</allow_active>', '<allow_any>no</allow_any>',
+                                    '<allow_inactive>no</allow_inactive>') else 2 if old in (
+                                        '>/usr/bin/polaris-spaces-setup<',
+                                        '<annotate key="org.freedesktop.policykit.exec.argv1">install</annotate>') else 1
+            self.assertEqual(original.count(old), expected, old)
             self.policy.write_text(original.replace(old, new, 1))
             with self.assertRaises(AssertionError, msg=new):
                 verify(self.root)
@@ -99,10 +106,22 @@ class Package(unittest.TestCase):
         with self.assertRaises(AssertionError):
             verify(self.root)
 
+    def test_update_helper_must_be_executable_non_writable_and_present(self):
+        self.update_helper.chmod(0o777)
+        with self.assertRaises(AssertionError):
+            verify(self.root)
+        self.update_helper.chmod(0o644)
+        with self.assertRaises(AssertionError):
+            verify(self.root)
+        self.update_helper.unlink()
+        with self.assertRaises(AssertionError):
+            verify(self.root)
+
     def test_package_cannot_install_live_input_rule_or_readiness(self):
         for name in ('etc/udev/rules.d/97-polaris-multiseat-input.rules',
                      'usr/lib/udev/rules.d/97-polaris-multiseat-input.rules',
-                     'var/lib/polaris/spaces-security/ready.json'):
+                     'var/lib/polaris/spaces-security/ready.json',
+                     'var/lib/polaris/update/status.json', 'var/lib/polaris/update/lock'):
             path = self.root / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_text('active')
             with self.assertRaises(AssertionError):
                 verify(self.root)

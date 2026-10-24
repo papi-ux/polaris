@@ -20,6 +20,7 @@
 #ifdef __linux__
 namespace confighttp {
   void registerSpacesSetupRoutes(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &);
+  void registerUpdateRoutes(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &);
   void with_web_session_for_tests(const std::filesystem::path &, const std::string &,
     const std::function<void(const std::string &)> &);
 }
@@ -509,6 +510,7 @@ TEST_F(SpacesHostAdminService, RoutesNeedTheConsoleLoginAndCsrfAndSayWhyARequest
     server.config.timeout_request = 5;
     server.config.timeout_content = 5;
     confighttp::registerSpacesSetupRoutes(server);
+    confighttp::registerUpdateRoutes(server);
     std::atomic<unsigned short> port {0};
     std::jthread worker([&] { server.start([&](unsigned short assigned) { port = assigned; }); });
     auto stop = util::fail_guard([&] { server.stop(); worker.join(); });
@@ -530,6 +532,22 @@ TEST_F(SpacesHostAdminService, RoutesNeedTheConsoleLoginAndCsrfAndSayWhyARequest
       service->shutdown();
       spaces::uninstall_host_admin_service(service);
     });
+    // A Bearer key keeps update reads, but never gains install, cancel or Finish authority,
+    // including with a CSRF header or a valid console cookie alongside it.
+    for (const auto &path : {"/api/update/job", "/api/update/plan?channel=stable"}) {
+      const auto reply = client.request("GET", path, "", {{"Authorization", "Bearer isolated-host-admin-test-key"}});
+      EXPECT_EQ(std::stoi(reply->status_code), 200);
+    }
+    for (const auto &path : {"/api/update/job", "/api/update/finish"}) {
+      for (const auto &body : {json {{"action", "cancel"}, {"request_id", first_id}}.dump(),
+             json {{"action", "finish"}, {"request_id", first_id}, {"version", "9.9.9"}}.dump()}) {
+        const auto reply = client.request("POST", path, body, {{"Authorization", "Bearer isolated-host-admin-test-key"},
+          {"Cookie", "auth=" + cookie}, {"X-CSRF-Token", "host-csrf"}, {"Content-Type", "application/json"}});
+        EXPECT_EQ(std::stoi(reply->status_code), 403);
+      }
+      EXPECT_EQ(std::stoi(client.request("POST", path, "{}", {{"Cookie", "auth=" + cookie},
+        {"Content-Type", "application/json"}})->status_code), 403);
+    }
     EXPECT_EQ(call("GET", "", {}).first, 401);
     EXPECT_EQ(call("POST", install, {}).first, 403);
     EXPECT_EQ(call("POST", install, {{"Cookie", "auth=" + cookie}}).first, 403);
@@ -565,5 +583,122 @@ TEST_F(SpacesHostAdminService, RoutesNeedTheConsoleLoginAndCsrfAndSayWhyARequest
     EXPECT_EQ(status, 200);
     EXPECT_EQ(json::parse(body)["job"]["state"], "done");
   });
+}
+
+TEST(HostUpdates, ClosedDecoderRejectsAuthorityFieldsAndDuplicateKeys) {
+  const json body {{"action", "install"}, {"request_id", first_id}, {"channel", "stable"}, {"version", "1.5.1"}, {"review_id", second_id}};
+  ASSERT_TRUE(spaces::decode_update_request(body.dump()));
+  for (const auto &key : {"url", "digest", "path", "command", "filename", "review_guard"}) {
+    auto injected = body;
+    injected[key] = "caller-selected";
+    EXPECT_FALSE(spaces::decode_update_request(injected.dump())) << key;
+  }
+  auto invalid = body;
+  invalid["version"] = "../1.5.1";
+  EXPECT_FALSE(spaces::decode_update_request(invalid.dump()));
+  auto text = body.dump();
+  text.insert(1, "\"channel\":\"beta\",");
+  EXPECT_FALSE(spaces::decode_update_request(text));
+}
+
+TEST(HostUpdates, ActiveResumableAndSpacesFactsBlockInstallAndFinish) {
+  auto ready = ready_facts();
+  ready.update_helper = ready.update_family = true;
+  for (const auto flag : {&spaces::host_admin_facts_t::stream_active, &spaces::host_admin_facts_t::resumable_active,
+         &spaces::host_admin_facts_t::session_active, &spaces::host_admin_facts_t::spaces_active,
+         &spaces::host_admin_facts_t::setup_active, &spaces::host_admin_facts_t::external_update_active}) {
+    auto busy = ready;
+    busy.*flag = true;
+    EXPECT_TRUE(spaces::update_action_refusal(busy));
+    EXPECT_TRUE(spaces::update_action_refusal(busy, true));
+  }
+  EXPECT_FALSE(spaces::update_action_refusal(ready));
+  EXPECT_FALSE(spaces::update_action_refusal(ready, true));
+}
+
+TEST(HostUpdates, ReservationAndApprovedInstallShareOneAdmissionAndConsumeReview) {
+  std::mutex mutex;
+  std::condition_variable_any changed;
+  bool entered = false, release = false;
+  auto facts = ready_facts();
+  facts.update_family = facts.update_helper = true;
+  const json package_state {{"polaris", {{"state", "installed"}, {"version", "9.9.9"}}},
+    {"polaris-kms", {{"state", "installed"}, {"version", "9.9.9"}}}};
+  auto service = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+    .facts = [facts] { return facts; },
+    .update_plan = [](std::string_view channel) {
+      return json {{"channel", channel}, {"version", "9.9.9"}, {"review_guard", std::string(64, 'a')}, {"update_needed", true}};
+    },
+    .update_status = [package_state] { return json {{"installed", package_state}}; },
+    .run_update = [&](const spaces::host_action_request_t &request, std::chrono::milliseconds,
+        const std::function<void()> &approved, const std::function<void(const json &)> &, std::stop_token stop) {
+      EXPECT_EQ(request.review_guard, std::string(64, 'a'));
+      approved();
+      std::unique_lock lock(mutex);
+      entered = true;
+      changed.notify_all();
+      changed.wait(lock, stop, [&] { return release; });
+      const json result {{"state", "failed"}, {"transaction_attempted", true}, {"installed", package_state}, {"message", "Synthetic RPM failure"}};
+      return spaces::host_action_run_t {.exit_status = 1, .approved = true, .output = "Polaris update started.\n" + result.dump() + "\n"};
+    },
+    .running_binary = [] { return json {{"matches_package", true}}; },
+  });
+  ASSERT_TRUE(spaces::install_host_admin_service(service));
+  auto cleanup = util::fail_guard([&] {
+    { std::lock_guard lock(mutex); release = true; }
+    changed.notify_all();
+    service->shutdown();
+    spaces::uninstall_host_admin_service(service);
+  });
+  const auto plan = service->review_update("stable");
+  EXPECT_FALSE(plan.contains("review_guard"));
+  EXPECT_TRUE(spaces::decode_update_request(json {{"action", "install"}, {"request_id", first_id},
+    {"channel", "stable"}, {"version", "9.9.9"}, {"review_id", plan.at("review_id")}}.dump()));
+  auto request = spaces::host_action_request_t {spaces::host_action_e::update_install, std::string(first_id),
+    "stable", "9.9.9", plan.at("review_id").get<std::string>()};
+  auto reservation = spaces::try_begin_host_activity();
+  ASSERT_TRUE(reservation);
+  EXPECT_EQ(service->submit(request).status, 409);
+  reservation.reset();
+  ASSERT_EQ(service->submit(request).status, 202);
+  {
+    std::unique_lock lock(mutex);
+    ASSERT_TRUE(changed.wait_for(lock, 3s, [&] { return entered; }));
+  }
+  EXPECT_FALSE(spaces::try_begin_host_activity());
+  EXPECT_EQ(service->update_snapshot()["job"]["state"], "running");
+  EXPECT_EQ(service->submit({spaces::host_action_e::update_finish, std::string(second_id), {}, "9.9.9"}).status, 409);
+  {
+    std::lock_guard lock(mutex);
+    release = true;
+  }
+  changed.notify_all();
+  for (int count = 0; count < 300 && service->running(); ++count) std::this_thread::sleep_for(10ms);
+  ASSERT_FALSE(service->running());
+  EXPECT_EQ(service->update_snapshot()["job"]["check"]["installed"], package_state);
+  EXPECT_EQ(service->submit(request).status, 200); // idempotent read, no blind repeat
+  request.request_id = std::string(second_id);
+  EXPECT_EQ(service->submit(request).status, 409); // consumed review cannot authorize a retry
+}
+
+TEST(HostUpdates, FinishRetainsAdmissionAcrossTheAsynchronousRestartRequest) {
+  auto facts = ready_facts();
+  facts.update_family = facts.update_helper = true;
+  std::atomic<bool> restarted = false;
+  auto service = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+    .facts = [facts] { return facts; },
+    .update_status = [] { return json {{"installed", {{"polaris", {{"state", "installed"}, {"version", "9.9.9"}}},
+      {"polaris-kms", {{"state", "absent"}}}}}}; },
+    .finish = [&] { restarted = true; },
+    .running_binary = [] { return json {{"matches_package", true}}; },
+  });
+  ASSERT_TRUE(spaces::install_host_admin_service(service));
+  auto cleanup = util::fail_guard([&] { service->shutdown(); spaces::uninstall_host_admin_service(service); });
+  EXPECT_EQ(service->submit({spaces::host_action_e::update_finish, std::string(first_id), {}, "9.9.9"}).status, 202);
+  for (int count = 0; count < 300 && !restarted; ++count) std::this_thread::sleep_for(10ms);
+  EXPECT_TRUE(restarted);
+  EXPECT_TRUE(service->running());
+  EXPECT_FALSE(spaces::try_begin_host_activity());
+  EXPECT_EQ(service->update_snapshot()["job"]["state"], "restarting");
 }
 #endif

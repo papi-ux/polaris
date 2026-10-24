@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +18,12 @@
 
 #ifdef __linux__
   #include "platform/linux/user_unit_override.h"
+  #include "platform/linux/multiseat_container_host.h"
+  #include "spaces_host_admin_data.h"
+  #include <fcntl.h>
+  #include <sys/file.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
 #endif
 
 namespace update_status {
@@ -438,5 +445,42 @@ namespace update_status {
       {"recommended_asset_name", recommended_release_asset(distro)},
     };
   }
+
+#ifdef __linux__
+  bool privileged_update_active() {
+    // No writable ancestors, symlinks or user-owned lock can be mistaken for a root job.
+    const std::filesystem::path path {"/var/lib/polaris/update/lock"};
+    struct stat metadata {};
+    for (const auto &component : {"/var/lib/polaris", "/var/lib/polaris/update"}) {
+      if (lstat(component, &metadata) != 0) return errno != ENOENT;
+      if (!S_ISDIR(metadata.st_mode) || metadata.st_uid != 0 || (metadata.st_mode & 0022)) return true;
+    }
+    const auto fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return errno != ENOENT;
+    const bool safe = fstat(fd, &metadata) == 0 && S_ISREG(metadata.st_mode) && metadata.st_uid == 0 &&
+      !(metadata.st_mode & 0022) && metadata.st_nlink == 1;
+    const bool busy = !safe || flock(fd, LOCK_SH | LOCK_NB) != 0;
+    close(fd);
+    return busy;
+  }
+
+  nlohmann::json helper_update_read(std::string_view action, std::string_view channel) {
+    using namespace std::chrono_literals;
+    const auto unavailable = [] { return nlohmann::json {{"state", "failed"}, {"code", "update_unavailable"},
+      {"message", "Host update information is unavailable. Recheck this PC."}}; };
+    if (action != "status" && (action != "plan" || (channel != "stable" && channel != "beta"))) return unavailable();
+    multiseat::container::local_host_t host;
+    const auto helper = std::filesystem::path(multiseat::spaces::host_admin_data::update_helper_path);
+    if (!host.trusted_system_file(helper)) return unavailable();
+    std::vector<std::string> argv {helper.string(), std::string(action)};
+    if (action == "plan") argv.emplace_back(channel);
+    const auto result = host.run(argv, action == "plan" ? 40s : 5s, 16384);
+    if (result.timed_out || result.output_truncated) return unavailable();
+    try {
+      auto value = nlohmann::json::parse(result.output);
+      return value.is_object() ? value : unavailable();
+    } catch (...) { return unavailable(); }
+  }
+#endif
 
 }  // namespace update_status

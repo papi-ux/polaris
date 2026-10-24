@@ -5761,6 +5761,83 @@ namespace confighttp {
     send_response(response, status);
   }
 
+  // Update mutations deliberately do not inherit authenticate()'s Bearer compatibility.
+  bool authenticateUpdateMutation(resp_https_t response, req_https_t request) {
+    const auto authorization = request->header.find("authorization");
+    if (authorization != request->header.end() && authorization->second.starts_with("Bearer ")) {
+      forbidden(response, request, "Host updates require a web session cookie and CSRF token.");
+      return false;
+    }
+    if (!authenticate(response, request)) return false;
+    if (!validateCsrf(request)) {
+      forbidden(response, request, "CSRF token missing or invalid");
+      return false;
+    }
+    return validateContentType(response, request, "application/json");
+  }
+
+  void getUpdatePlan(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+#ifdef __linux__
+    const auto service = multiseat::spaces::installed_host_admin_service();
+    if (!service) { not_found(response, request); return; }
+    const auto args = request->parse_query_string();
+    const auto found = args.find("channel");
+    const auto channel = found == args.end() ? std::string {"stable"} : found->second;
+    if (channel != "stable" && channel != "beta") { bad_request(response, request, "Invalid update channel"); return; }
+    send_response(response, service->review_update(channel));
+#else
+    send_response(response, nlohmann::json {{"route", "guided"}, {"available", false}});
+#endif
+  }
+
+  void getUpdateJob(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+#ifdef __linux__
+    if (const auto service = multiseat::spaces::installed_host_admin_service()) {
+      send_response(response, service->update_snapshot());
+      return;
+    }
+#endif
+    not_found(response, request);
+  }
+
+  void mutateUpdateJob(resp_https_t response, req_https_t request, bool finish) {
+    if (!authenticateUpdateMutation(response, request)) return;
+#ifdef __linux__
+    const auto service = multiseat::spaces::installed_host_admin_service();
+    if (!service) { not_found(response, request); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Update request is too large"); return; }
+    const auto action = multiseat::spaces::decode_update_request({bytes.data(), static_cast<std::size_t>(count)}, finish);
+    if (!action) { bad_request(response, request, "Invalid update request"); return; }
+    multiseat::spaces::host_admin_service_t::submit_result_t result;
+    if (action->action == multiseat::spaces::host_action_e::update_cancel)
+      result.status = service->cancel_update(action->request_id) ? 202 : 409;
+    else result = service->submit(*action);
+    auto output = service->update_snapshot();
+    output["accepted"] = result.status == 200 || result.status == 202;
+    if (result.refusal) output["refusal"] = {{"code", result.refusal->code}, {"message", result.refusal->message}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
+  }
+
+  void updateJob(resp_https_t response, req_https_t request) { mutateUpdateJob(response, request, false); }
+  void finishUpdate(resp_https_t response, req_https_t request) { mutateUpdateJob(response, request, true); }
+
+  void registerUpdateRoutes(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server) {
+    server.resource["^/api/update/plan$"]["GET"] = getUpdatePlan;
+    server.resource["^/api/update/job$"]["GET"] = getUpdateJob;
+    server.resource["^/api/update/job$"]["POST"] = withCsrf(updateJob);
+    server.resource["^/api/update/finish$"]["POST"] = withCsrf(finishUpdate);
+  }
+
   /**
    * @brief Config keys the web UI may apply without a stream relaunch.
    *
@@ -11491,6 +11568,7 @@ namespace confighttp {
     server.resource["^/api/config$"]["GET"] = getConfig;
     server.resource["^/api/settings/metadata$"]["GET"] = getSettingsMetadata;
     server.resource["^/api/update-status$"]["GET"] = getUpdateStatus;
+    registerUpdateRoutes(server);
     server.resource["^/api/config$"]["POST"] = withCsrf(saveConfig);
     server.resource["^/api/config$"]["PATCH"] = withCsrf(patchConfig);
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
