@@ -5785,7 +5785,9 @@ namespace confighttp {
     const auto found = args.find("channel");
     const auto channel = found == args.end() ? std::string {"stable"} : found->second;
     if (channel != "stable" && channel != "beta") { bad_request(response, request, "Invalid update channel"); return; }
-    send_response(response, service->review_update(channel));
+    const auto refresh = args.find("refresh");
+    if (refresh != args.end() && refresh->second != "1") { bad_request(response, request, "Invalid update refresh"); return; }
+    send_response(response, service->review_update(channel, refresh != args.end()));
 #else
     send_response(response, nlohmann::json {{"route", "guided"}, {"available", false}});
 #endif
@@ -8893,6 +8895,17 @@ namespace confighttp {
     }
 
     print_req(request);
+
+#ifdef __linux__
+    // Reserve before prelaunch, Game Mode reconciliation or any application side effect.
+    // The reservation leaves scope only after execute publishes busy state, or the request fails.
+    const auto host_activity = multiseat::spaces::try_begin_host_activity();
+    if (!host_activity) {
+      conflict_response(response, nlohmann::json {{"status", false}, {"status_code", 409},
+        {"error_code", "host_admin_running"}, {"error", "Polaris is updating or changing this PC. Try again when it finishes."}});
+      return;
+    }
+#endif
 
     try {
       std::stringstream ss;

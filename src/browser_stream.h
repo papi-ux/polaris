@@ -11,7 +11,15 @@
 
 #include <nlohmann/json.hpp>
 
+#if defined(POLARIS_TESTS) && defined(__linux__)
+namespace proc { struct ctx_t; }
+#endif
+
 namespace browser_stream {
+#if defined(POLARIS_TESTS) && defined(__linux__)
+  // Exercise production admission before the existing prelaunch stage seam stops effects.
+  bool launch_isolated_app_for_tests(const proc::ctx_t &app, std::string &error);
+#endif
   constexpr std::uint16_t default_webtransport_port = 47992;
 
   struct session_token_t {

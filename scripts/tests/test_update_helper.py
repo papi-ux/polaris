@@ -67,6 +67,20 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(helper.select_release(data, 'beta', packages())['version'], '1.5.2-beta.1')
         self.assertEqual(len(helper.select_release(data, 'stable', packages(kms=False))['assets']), 1)
 
+    def test_include_beta_selects_newest_stable_rc_or_beta_without_downgrading_stable(self):
+        for values, expected, kind in (([release('1.5.1-rc.2'), release('1.5.1')], '1.5.1', 'stable'),
+                                       ([release('1.5.0'), release('1.5.1-rc.1')], '1.5.1-rc.1', 'rc'),
+                                       ([release('1.5.1'), release('1.5.2-beta.1')], '1.5.2-beta.1', 'beta')):
+            with self.subTest(expected=expected):
+                plan = helper.make_plan('beta', fetch=lambda: values, read_installed=packages, host=lambda: {})
+                self.assertEqual((plan['version'], plan['release_kind']), (expected, kind))
+        current = helper.make_plan('beta', fetch=lambda: [release('1.5.1'), release('1.5.1-rc.2')],
+                                   read_installed=lambda: packages('1.5.1'), host=lambda: {})
+        self.assertFalse(current['update_needed'])
+        stable = helper.make_plan('beta', fetch=lambda: [release('1.5.1'), release('1.5.1-rc.2')],
+                                  read_installed=lambda: packages('1.5.1-rc.2'), host=lambda: {})
+        self.assertTrue(stable['update_needed'])
+
     def test_review_binds_release_id_asset_ids_digests_pair_and_installed_state(self):
         original = release()
         guard = helper.select_release([original], 'stable', packages())['review_guard']
@@ -119,8 +133,8 @@ class HelperTests(unittest.TestCase):
                     else:
                         with self.assertRaises(helper.Refusal): helper.download(asset, Path(directory) / 'asset.rpm')
 
-    def exercise_install(self, *, fail_transaction=False, fail_preview=False, changed=False, crash=False, obsoletes=False):
-        current = packages()
+    def exercise_install(self, *, fail_transaction=False, fail_preview=False, changed=False, crash=False, obsoletes=False, current=None):
+        current = current or packages()
         reviewed = helper.make_plan('stable', fetch=lambda: [release()], read_installed=lambda: current, host=lambda: {})
         calls = []
         reads = []
@@ -176,6 +190,33 @@ class HelperTests(unittest.TestCase):
         crashed, _ = self.exercise_install(crash=True)
         self.assertTrue(crashed['transaction_attempted'])
         self.assertEqual(crashed['installed'], {'polaris': {'state': 'unknown'}, 'polaris-kms': {'state': 'absent'}})
+
+    def test_mixed_pairs_only_download_and_transact_the_older_member(self):
+        for older in helper.PACKAGES:
+            with self.subTest(older=older):
+                current = packages('1.5.1')
+                current[older] = packages()[older]
+                result, calls = self.exercise_install(current=current)
+                self.assertEqual(result['state'], 'installed')
+                self.assertEqual(result['installed'], packages('1.5.1'))
+                operations = [argv for argv in calls if '-U' in argv]
+                self.assertEqual(len(operations), 2)
+                self.assertEqual([arg for arg in operations[0] if arg != '--test'], operations[1])
+                files = operations[1][operations[1].index('--') + 1:]
+                self.assertEqual(len(files), 1)
+                self.assertEqual(Path(files[0]).name, 'Polaris-kms-fedora44-x86_64.rpm' if older == 'polaris-kms' else 'Polaris-fedora44-x86_64.rpm')
+                self.assertEqual(len([argv for argv in calls if '-qp' in argv]), 2)
+                self.assertFalse(any(flag in operations[1] for flag in ('--force', '--replacepkgs', '--nodeps', '--oldpackage')))
+
+    def test_rpm_test_refusal_preserves_details_without_a_false_dependency_diagnosis(self):
+        result, _ = self.exercise_install(fail_preview=True)
+        self.assertIn('package state or dependencies may need manual repair', result['message'])
+        self.assertIn('missing unrelated dependency', result['message'])
+        self.assertIn('will not force a reinstall', result['message'])
+        with self.assertRaises(helper.Refusal) as refused:
+            helper.make_plan('stable', fetch=lambda: [release()], read_installed=lambda: {
+                'polaris': {'state': 'partial', 'versions': ['1.5.0', '1.5.1']}, 'polaris-kms': {'state': 'absent'}}, host=lambda: {})
+        self.assertIn('repair them, then review again', str(refused.exception))
 
     def test_per_package_query_distinguishes_absent_unknown_and_version(self):
         def run(argv):

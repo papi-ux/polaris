@@ -194,7 +194,7 @@ namespace multiseat::spaces {
 
   std::optional<host_action_refusal_t> update_action_refusal(host_admin_facts_t facts, bool finish) {
     if (!facts.update_family)
-      return host_action_refusal_t {"family_unqualified", "Host installation is currently qualified in source for Fedora 44 x86_64 only. Other systems remain guided."};
+      return host_action_refusal_t {"family_unqualified", "Polaris can install updates on Fedora 44 x86_64 only. Use the guided steps for this system."};
     facts.helper = facts.update_helper;
     if (finish) facts.helper = facts.pkexec = facts.policy = true;
     if (const auto refusal = host_action_refusal(facts)) {
@@ -460,12 +460,15 @@ namespace multiseat::spaces {
       if (running_) return {409, host_action_refusal_t {"host_setup_running", std::string(running_message)}};
       if (activities_ != 0) return {409, host_action_refusal_t {"spaces_active", std::string(activity_message)}};
       if (request.action == host_action_e::update_install) {
-        if (!review_ || std::chrono::steady_clock::now() - reviewed_at_ > 10min ||
-            review_->value("review_id", "") != request.review_id || review_->value("channel", "") != request.channel ||
-            review_->value("version", "") != request.version || !review_->value("update_needed", false))
+        const auto review = std::find_if(reviews_.begin(), reviews_.end(), [&](const auto &entry) {
+          return entry.plan.value("review_id", "") == request.review_id && entry.plan.value("channel", "") == request.channel &&
+            entry.plan.value("version", "") == request.version && entry.plan.value("update_needed", false) &&
+            std::chrono::steady_clock::now() - entry.at <= 10min;
+        });
+        if (review == reviews_.end())
           return {409, host_action_refusal_t {"review_required", "Review this update again before asking for approval."}};
-        request.review_guard = review_->value("review_guard", "");
-        review_.reset(); // One admitted attempt consumes this review, even when its subsequent checks refuse.
+        request.review_guard = review->plan.value("review_guard", "");
+        reviews_.erase(review); // Consume only this tab's review, including a later preflight refusal.
       }
       // Reservations and running_ share this mutex: an admitted launch/change cannot be
       // overtaken while it is still doing preflight and invisible to the facts below.
@@ -628,7 +631,8 @@ namespace multiseat::spaces {
       result["reason"] = refusal->code;
       result["message"] = refusal->message;
     }
-    if (job) {
+    // Spaces has a closed action schema. Update jobs share admission, not its response body.
+    if (job && (job->request.action == host_action_e::security_install || job->request.action == host_action_e::docker_access)) {
       result["job"] = {{"request_id", job->request.request_id}, {"action", host_action_name(job->request.action)},
         {"state", job->state}, {"message", job->message}, {"detail", job->detail}};
       if (job->check) result["job"]["check"] = *job->check;
@@ -700,7 +704,7 @@ namespace multiseat::spaces {
     return result;
   }
 
-  json host_admin_service_t::review_update(std::string_view channel) {
+  json host_admin_service_t::review_update(std::string_view channel, bool refresh) {
     if (channel != "stable" && channel != "beta") return {{"state", "failed"}, {"message", "Unknown release channel."}};
     auto availability = update_snapshot();
     // Busy hosts can still review; capability failures stay guided and never invoke a mutation.
@@ -709,7 +713,16 @@ namespace multiseat::spaces {
       return availability;
     }
     json plan = json::object();
-    try { plan = options_.update_plan ? options_.update_plan(channel) : json::object(); } catch (...) {}
+    if (!refresh) {
+      std::lock_guard lock(mutex_);
+      const auto cached = std::find_if(reviews_.rbegin(), reviews_.rend(), [&](const auto &entry) {
+        return entry.plan.value("channel", "") == channel && std::chrono::steady_clock::now() - entry.at < 60s;
+      });
+      if (cached != reviews_.rend()) plan = cached->plan;
+    }
+    if (plan.empty()) {
+      try { plan = options_.update_plan ? options_.update_plan(channel) : json::object(); } catch (...) {}
+    }
     if (!plan.is_object() || !plan.contains("review_guard") || !plan.contains("version")) {
       availability["route"] = "guided";
       availability["refusal"] = {{"code", plan.is_object() ? plan.value("code", "release_unverifiable") : "release_unverifiable"},
@@ -717,19 +730,19 @@ namespace multiseat::spaces {
           "The official release could not be verified. Check again."}};
       return availability;
     }
-    auto review_id = uuid_util::uuid_t::generate().string();
-    // uuid_t::string uses uppercase hex; the API's canonical UUID grammar is lowercase.
-    for (auto &character : review_id) if (character >= 'A' && character <= 'F') character += 'a' - 'A';
-    plan["review_id"] = review_id;
+    if (!plan.contains("review_id")) {
+      auto review_id = uuid_util::uuid_t::generate().string();
+      for (auto &character : review_id) if (character >= 'A' && character <= 'F') character += 'a' - 'A';
+      plan["review_id"] = review_id;
+      std::lock_guard lock(mutex_);
+      std::erase_if(reviews_, [](const auto &entry) { return std::chrono::steady_clock::now() - entry.at > 10min; });
+      if (reviews_.size() >= 8) reviews_.erase(reviews_.begin());
+      reviews_.push_back({plan, std::chrono::steady_clock::now()});
+    }
     plan["route"] = "helper";
     plan["busy"] = availability.at("busy");
     plan["available"] = availability.at("available");
     if (availability.contains("refusal")) plan["refusal"] = availability.at("refusal");
-    {
-      std::lock_guard lock(mutex_);
-      review_ = plan;
-      reviewed_at_ = std::chrono::steady_clock::now();
-    }
     // The fingerprint stays on the server. The browser returns only this opaque review nonce.
     plan.erase("review_guard");
     return plan;

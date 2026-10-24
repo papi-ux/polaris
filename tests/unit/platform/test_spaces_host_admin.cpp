@@ -620,13 +620,15 @@ TEST(HostUpdates, ReservationAndApprovedInstallShareOneAdmissionAndConsumeReview
   std::mutex mutex;
   std::condition_variable_any changed;
   bool entered = false, release = false;
+  unsigned plan_reads = 0;
   auto facts = ready_facts();
   facts.update_family = facts.update_helper = true;
   const json package_state {{"polaris", {{"state", "installed"}, {"version", "9.9.9"}}},
     {"polaris-kms", {{"state", "installed"}, {"version", "9.9.9"}}}};
   auto service = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
     .facts = [facts] { return facts; },
-    .update_plan = [](std::string_view channel) {
+    .update_plan = [&](std::string_view channel) {
+      ++plan_reads;
       return json {{"channel", channel}, {"version", "9.9.9"}, {"review_guard", std::string(64, 'a')}, {"update_needed", true}};
     },
     .update_status = [package_state] { return json {{"installed", package_state}}; },
@@ -651,6 +653,12 @@ TEST(HostUpdates, ReservationAndApprovedInstallShareOneAdmissionAndConsumeReview
     spaces::uninstall_host_admin_service(service);
   });
   const auto plan = service->review_update("stable");
+  const auto initial_other_tab = service->review_update("stable", false);
+  EXPECT_EQ(initial_other_tab.at("review_id"), plan.at("review_id"));
+  EXPECT_EQ(plan_reads, 1U); // mounting another tab reuses a recent unconsumed host read
+  const auto explicit_other_tab = service->review_update("stable");
+  EXPECT_NE(explicit_other_tab.at("review_id"), plan.at("review_id"));
+  EXPECT_EQ(plan_reads, 2U); // explicit Review always reads release metadata again
   EXPECT_FALSE(plan.contains("review_guard"));
   EXPECT_TRUE(spaces::decode_update_request(json {{"action", "install"}, {"request_id", first_id},
     {"channel", "stable"}, {"version", "9.9.9"}, {"review_id", plan.at("review_id")}}.dump()));
@@ -667,6 +675,8 @@ TEST(HostUpdates, ReservationAndApprovedInstallShareOneAdmissionAndConsumeReview
   }
   EXPECT_FALSE(spaces::try_begin_host_activity());
   EXPECT_EQ(service->update_snapshot()["job"]["state"], "running");
+  EXPECT_TRUE(service->snapshot()["job"].is_null()) << "Spaces keeps its own action schema while admission remains shared";
+  EXPECT_EQ(service->snapshot()["reason"], "host_setup_running");
   EXPECT_EQ(service->submit({spaces::host_action_e::update_finish, std::string(second_id), {}, "9.9.9"}).status, 409);
   {
     std::lock_guard lock(mutex);
@@ -679,6 +689,8 @@ TEST(HostUpdates, ReservationAndApprovedInstallShareOneAdmissionAndConsumeReview
   EXPECT_EQ(service->submit(request).status, 200); // idempotent read, no blind repeat
   request.request_id = std::string(second_id);
   EXPECT_EQ(service->submit(request).status, 409); // consumed review cannot authorize a retry
+  request.review_id = explicit_other_tab.at("review_id").get<std::string>();
+  EXPECT_EQ(service->submit(request).status, 202); // another explicit review was not invalidated by the first tab
 }
 
 TEST(HostUpdates, FinishRetainsAdmissionAcrossTheAsynchronousRestartRequest) {

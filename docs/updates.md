@@ -8,15 +8,18 @@ Polaris does not install packages or restart the host automatically.
 
 The first host-update source path supports an existing native Fedora 44 x86_64
 installation. **Review update** asks the host to select the newest official
-Stable release, or the newest official prerelease when Beta is selected. The
-host selection is independent of release data fetched by the browser. If this
-channel would downgrade an installed package, Polaris refuses; choose Stable
-again or wait for a suitable newer release. Guided hosts retain the older
-**Include beta releases** behavior described below.
+Stable release, or the newest official stable, beta or release candidate when
+**Include beta releases** is enabled. The selected release is labeled Stable,
+Beta or Release candidate. Host selection is independent of release data fetched
+by the browser. If this channel would downgrade an installed package, Polaris
+refuses; wait for a suitable newer release. The checkbox has the same meaning on
+guided hosts.
 
 Review lists the exact release and package assets, their asset IDs and SHA-256
-digests. It updates `polaris` and the matching `polaris-kms` only when that helper
-is already installed. No additional KMS capability is enabled. The helper
+digests under **Details**. It updates `polaris` and the matching `polaris-kms` only
+when that helper is already installed. If one member is already at the selected
+version, only the older member is submitted to RPM; the current member is kept.
+No additional KMS capability is enabled. The helper
 independently fetches the official metadata over system-CA HTTPS after approval
 and compares its derived release, assets, digests and installed package state
 against the host's review fingerprint. A changed or missing identity requires a
@@ -40,7 +43,9 @@ let a new Polaris process report an unfinished operation conservatively.
 Updates and Finish wait for active streams, pending RTSP launches, owned apps
 kept running for resume, non-idle session phases, Spaces setup/activity and other
 host-admin work. Ordinary launch and resume reserve the existing Spaces
-host-admin service during preflight; update admission uses that same service.
+host-admin service during preflight; the console app launch and isolated Browser
+Stream paths use it too, until the app/session busy state is published. Update
+admission uses that same service.
 Polaris never ends a session to make an update eligible.
 
 The bounded operation uses RPM directly, without a dependency resolver. It
@@ -50,11 +55,18 @@ and keeps dependency and file-conflict checks enabled in the actual RPM
 transaction. It cannot fetch unrelated dependencies or synchronize/upgrade the
 OS. Its `--test` check helps explain refusals; the closed package set is enforced
 by the non-resolving actual operation, rather than trusting a preview followed by
-a resolver. Missing dependencies require a separate system update by the owner,
-then a new review. Package scripts and triggers are disabled for this existing-
-installation update route, so setup and automatic service restarts do not run.
-RPM's ordinary file ownership, capability and security labeling handling remain
-enabled. This is an update path; it is not a substitute for first-install setup.
+a resolver. A refusal preserves RPM's details: it may concern package state,
+dependencies or conflicts. Polaris will not force a reinstall, remove entries or
+update the OS to resolve it. Repair the reported issue separately, then review
+again. Partial/duplicate or unreadable package entries require manual recovery;
+the console shows known versions without promising an automatic repair.
+Package scripts and triggers are disabled for this existing-installation route,
+so the advisory device-rule reload and desktop-cache updates are skipped and no
+automatic service restart runs. New rules or icons may need a subsequent sign-in
+or reboot; use guided setup after Finish if streaming setup needs attention.
+RPM's ordinary file ownership, capability, sysusers and security labeling
+handling remain enabled. Actual package behavior still needs Fedora qualification.
+This update path is not a substitute for first-install setup.
 
 After any attempted transaction, the helper queries each package again. The
 console shows actual versions, absent, partial or unknown state; a failed run
@@ -62,12 +74,21 @@ does not imply that the old versions survived. RPM database readback is not a
 full payload-health or physical streaming check. A retry always requires
 **Review again** and fresh OS approval. Reopening the page reads the existing job
 or the installed package state; it never blindly repeats an install.
+Terminal results from older releases do not override a newer update offer. An
+explicit Review or Check again fetches official metadata anew; initial tab mounts
+can reuse a host review for 60 seconds. Up to eight independent unconsumed reviews
+are retained for ten minutes, so another tab's explicit review does not replace
+yours. Busy/installed facts and root's identity check still run at admission.
 
 **Finish** is explicit. It confirms a consistent installed package pair and the
 packaged running binary, uses the same admitted busy guard, and asks Polaris to
 restart without terminating an app or using `/api/restart`. The page checks for
-the new running version. If Polaris has not returned within 90 seconds, it says
-to check the PC and continues read-only reconnect attempts in the background.
+the exact installed target running with a consistent package pair, independently
+of any old, failed or missing journal. Each read is bounded; if Polaris has not
+returned within 90 seconds, the page says to check the PC and slows read-only
+reconnect attempts to 15 seconds. Visible idle tabs read status once per minute;
+active operations read every three seconds, reviews every five, and hidden tabs
+pause automatic polling until visible again. No reconnect repeats a mutation.
 
 This source slice does not close #490 or the approved 1.5.0 installer/update
 objective. Arch/CachyOS and Ubuntu adapters, immutable/ostree and SteamOS routes,

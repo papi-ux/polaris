@@ -535,33 +535,32 @@ function buildLegacyUpdateCenterState({ currentVersion = '', latestRelease = nul
 export function buildUpdateCenterState(options = {}) {
   const state = buildLegacyUpdateCenterState(options)
   const plan = options.hostPlan
-  if (plan?.route !== 'helper') return state
-  const assets = plan.assets || []
-  const asAsset = (asset) => asset ? { ...asset, browser_download_url: asset.url } : null
-  const asset = asAsset(assets.find((entry) => entry.package === 'polaris'))
-  const kmsAsset = asAsset(assets.find((entry) => entry.package === 'polaris-kms'))
-  const result = {
-    ...state,
-    status: plan.update_needed ? 'update_available' : 'current',
-    statusLabel: plan.update_needed ? 'Update available' : 'Selected release installed',
-    statusTone: plan.update_needed ? 'update' : 'current',
-    statusLightLabel: plan.update_needed ? 'Update available' : 'Selected release installed',
-    primaryActionKind: 'review_host_update',
-    primaryActionLabel: plan.update_needed ? 'Review update' : 'Update details',
-    primaryActionSummary: plan.update_needed ? 'Review this host’s selected official release before asking for OS approval.' : 'The host checked the selected official release.',
-    latestVersion: plan.version,
-    releaseUrl: plan.release_url,
-    asset, kmsAsset,
-    assetDigest: asset?.digest || '',
-    kmsAssetDigest: kmsAsset?.digest || '',
-    kmsHelperMissingFromRelease: false,
-    installCommand: '', canCopyInstallCommand: false, manualInstallOnly: false,
-    packageLabel: 'Fedora 44 RPM release assets',
+  const result = { ...state }
+  if (plan?.route === 'helper') {
+    const assets = plan.assets || []
+    const asAsset = (asset) => asset ? { ...asset, browser_download_url: asset.url } : null
+    const asset = asAsset(assets.find((entry) => entry.package === 'polaris'))
+    const kmsAsset = asAsset(assets.find((entry) => entry.package === 'polaris-kms'))
+    const restart = state.status === 'restart_required'
+    Object.assign(result, {
+      status: restart ? state.status : plan.update_needed ? 'update_available' : 'current',
+      statusLabel: restart ? state.statusLabel : plan.update_needed ? 'Update available' : 'Up to date',
+      statusTone: restart ? 'restart' : plan.update_needed ? 'update' : 'current',
+      statusLightLabel: restart ? state.statusLightLabel : plan.update_needed ? 'Update available' : 'Up to date',
+      primaryActionKind: restart ? 'scroll_to_update_center' : 'review_host_update',
+      primaryActionLabel: plan.update_needed && !restart ? 'Review update' : 'Update details',
+      primaryActionSummary: restart ? state.primaryActionSummary : plan.update_needed
+        ? 'Review the selected release before asking for approval on this PC.' : 'The selected release is installed.',
+      latestVersion: plan.version, releaseUrl: plan.release_url, asset, kmsAsset,
+      assetDigest: asset?.digest || '', kmsAssetDigest: kmsAsset?.digest || '',
+      kmsHelperMissingFromRelease: false, installCommand: '', canCopyInstallCommand: false, manualInstallOnly: false,
+      packageLabel: 'Fedora 44 RPM release assets',
+    })
   }
   const journey = options.hostJourney
   if (journey?.hasJob) Object.assign(result, {
-    statusLabel: journey.title,
-    primaryActionSummary: journey.message,
+    status: journey.needsFinish ? 'restart_required' : journey.active ? 'updating' : journey.finished ? 'current' : 'unavailable',
+    statusLabel: journey.title, primaryActionSummary: journey.message,
     primaryActionLabel: 'Update details', primaryActionKind: 'scroll_to_update_center',
     statusTone: journey.active ? 'update' : journey.needsFinish ? 'restart' : journey.finished ? 'current' : 'warning',
     statusLightLabel: journey.title,
@@ -569,25 +568,51 @@ export function buildUpdateCenterState(options = {}) {
   return result
 }
 
+export function selectedReleaseLabel(plan = {}) {
+  return plan.release_kind === 'rc' || /-rc\./.test(plan.version || '') ? 'Release candidate'
+    : plan.release_kind === 'beta' || /-beta\./.test(plan.version || '') ? 'Beta' : 'Stable'
+}
+
+export function hostUpdatePollDelay({ visible = true, active = false, reviewing = false, restarting = false,
+  restartTimedOut = false, disconnected = false, capable = true } = {}) {
+  if (!visible || !capable) return null
+  if (restartTimedOut) return 15000
+  return active || restarting || disconnected ? 3000 : reviewing ? 5000 : 60000
+}
+
 export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
-  const currentJob = snapshot.job || {}
-  const job = local.reviewing && !['waiting_for_approval', 'running', 'restarting'].includes(currentJob.state) ? {} : currentJob
-  const check = job.check || {}
-  const installed = Object.keys(snapshot.installed || {}).length ? snapshot.installed : check.installed || {}
+  const raw = snapshot.job || {}
+  const rawCheck = raw.check || {}
+  // A journal describes an earlier transaction, never a fresh package/process readback.
+  const installed = snapshot.installed || {}
   const running = snapshot.running_version || ''
   const installedVersion = installed.polaris?.state === 'installed' ? installed.polaris.version : ''
+  const consistent = Boolean(installedVersion && (installed['polaris-kms']?.state === 'absent' ||
+    (installed['polaris-kms']?.state === 'installed' && installed['polaris-kms'].version === installedVersion)))
+  const restartConfirmed = raw.state === 'restarting' && consistent && installedVersion === running &&
+    installedVersion === (local.finishTarget || raw.version)
+  const rawActive = ['waiting_for_approval', 'running', 'restarting'].includes(raw.state) && !restartConfirmed
+  const jobVersion = raw.version || rawCheck.version || (raw.state === 'installed' ? installedVersion : '')
+  const recovered = consistent && installedVersion === running && installedVersion === plan?.version
+  const currentTerminal = !local.reviewing && !recovered && (!plan?.version || jobVersion === plan.version)
+  const job = rawActive || currentTerminal ? raw : {}
+  const check = job.check || {}
+  // Finish is confirmed by fresh package/process readback, independently of any journal.
+  const finished = Boolean(!local.disconnected && consistent && installedVersion === running &&
+    (!plan?.update_needed || plan.version === installedVersion) &&
+    (local.finishTarget ? installedVersion === local.finishTarget : job.state === 'installed'))
+  const active = rawActive || Boolean(local.restarting && !finished)
+  const needsFinish = Boolean(installedVersion && running && installedVersion !== running && !rawActive)
+  const needsAttention = Object.keys(installed).length > 0 && !consistent
   const busyReason = snapshot.busy?.reasons?.join(' ') || ''
   const stage = check.stage || job.state || ''
-  const active = ['waiting_for_approval', 'running', 'restarting'].includes(job.state)
-  const consistent = installedVersion && (installed['polaris-kms']?.state === 'absent' ||
-    (installed['polaris-kms']?.state === 'installed' && installed['polaris-kms'].version === installedVersion))
-  const finished = consistent && installedVersion === running && job.state === 'installed'
-  const needsFinish = installedVersion && running && installedVersion !== running && job.state !== 'running'
-  let title = plan?.update_needed ? 'Update available' : 'Update this PC'
-  let message = plan?.refusal?.message || 'Choose Review to check the official release on this host.'
+  let title = plan?.update_needed ? 'Update available' : plan?.route === 'helper' ? 'Up to date' : 'Update this PC'
+  let message = plan?.refusal?.message || (plan?.update_needed
+    ? 'Choose Review to check the selected release on this host.' : 'The host checked the selected release.')
   if (local.reviewing && plan?.route === 'helper') {
-    title = `Review Polaris ${plan.version}`
-    message = 'Install only the listed Polaris packages, or stop before changing anything. Polaris will keep running until you choose Finish.'
+    title = plan.update_needed ? `Review Polaris ${plan.version}` : `Polaris ${plan.version} is up to date`
+    message = plan.update_needed ? 'Install only the listed older packages, or stop before changing anything. Polaris keeps running until you choose Finish.'
+      : 'No package changes are needed for this release.'
   }
   if (job.state) {
     title = ({ waiting_for_approval: 'Waiting for host approval', running: 'Updating this PC', installed: 'Installed, not running',
@@ -599,18 +624,19 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
     message = `Polaris stopped before installing, so no packages were changed. ${message}`
   if (job.state === 'running' && stage === 'installing')
     message = 'Installing the listed RPM packages. This cannot be stopped safely now. Streams cannot start until it finishes.'
-  if (needsFinish) {
-    title = job.state === 'failed' ? 'Update stopped; read installed state' : `Polaris ${installedVersion} is installed`
-    message = job.state === 'failed' ? message : `You are still running ${running}. Finish restarts Polaris and briefly disconnects this page. Start streams again from your devices afterwards.`
+  if (needsFinish && job.state !== 'failed') {
+    title = `Polaris ${installedVersion} is installed`
+    message = `You are still running ${running}. Finish restarts Polaris and briefly disconnects this page. Start streams again from your devices afterwards.`
+  }
+  const recovery = needsAttention ? 'Read the package versions below. Polaris will not force a reinstall or remove package entries. Use Fedora software management or ask your system administrator to repair partial or unreadable entries, then review again.' : ''
+  if (needsAttention && !active) {
+    title = 'Installed package state needs attention'
+    message = plan?.route === 'helper' && plan.update_needed ? 'Review an update of the older packages to match the selected release.' : recovery
   }
   if (finished) {
     title = `Polaris ${installedVersion} is running`
     message = 'The installed version is now running. You can start streams again.'
-  } else if (job.state === 'installed' && !consistent) {
-    title = 'Installed package state needs attention'
-    message = 'Polaris could not confirm a matching installed package pair. Read the installed state, then review again.'
-  }
-  if (local.restarting && !finished) {
+  } else if (local.restarting) {
     title = 'Restarting Polaris'
     message = local.restartTimedOut ? 'Polaris has not come back yet. Check the PC running it. This page keeps checking in the background.' : 'Restarting Polaris. This page will try to reconnect.'
   } else if (local.disconnected) {
@@ -618,14 +644,13 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
     message = 'The update result is unknown until this page can read the host again. This page keeps checking.'
   }
   return {
-    title, message, stage, active, finished, needsFinish, hasJob: Boolean(job.state || local.disconnected || local.restarting),
+    title, message, stage, active, finished, needsFinish, needsAttention, recovery,
+    hasJob: Boolean(job.state || needsFinish || needsAttention || finished || local.disconnected || local.restarting),
     installed: ['polaris', 'polaris-kms'].map((name) => ({ name, state: installed[name]?.state || 'unknown',
-      version: installed[name]?.version || '' })),
-    busyReason,
-    canInstall: Boolean(local.reviewing && plan?.route === 'helper' && plan.review_id && plan.update_needed
-      && snapshot.available && !active && !local.disconnected),
+      version: installed[name]?.version || '', versions: installed[name]?.versions || [] })), busyReason,
+    canInstall: Boolean(local.reviewing && plan?.route === 'helper' && plan.review_id && plan.update_needed && snapshot.available && !active && !local.disconnected),
     canCancel: job.state === 'waiting_for_approval' && Boolean(job.request_id) && !local.disconnected,
-    canFinish: Boolean(needsFinish && snapshot.finish_available && !active && !local.disconnected),
+    canFinish: Boolean(needsFinish && consistent && snapshot.finish_available && !active && !local.disconnected),
     canReview: !active && !local.disconnected,
   }
 }

@@ -81,7 +81,7 @@ def qualify_host(os_release=None, machine=None, image_based=None):
     require(not image_based, 'image_based_host', 'Image based and SteamOS updates are still guided.')
     require(values.get('ID') == 'fedora' and values.get('VERSION_ID') == '44'
             and (machine or platform.machine()) == 'x86_64', 'family_unqualified',
-            'Host installation is currently qualified in source for Fedora 44 x86_64 only.')
+            'Polaris can install updates on Fedora 44 x86_64 only. Use the guided steps for this system.')
     return {'id': 'fedora', 'version_id': '44', 'arch': 'x86_64'}
 
 
@@ -124,7 +124,8 @@ def select_release(data, channel, installed):
             continue
         version = tag[1:]
         prerelease = '-' in version
-        if entry.get('prerelease') is not prerelease or prerelease != (channel == 'beta'):
+        # Include beta means stable plus prereleases, preserving the existing console preference.
+        if entry.get('prerelease') is not prerelease or (channel == 'stable' and prerelease):
             continue
         candidates.append((version_key(version), entry))
     require(bool(candidates), 'release_unverifiable', 'No official release is available on this channel.')
@@ -157,7 +158,9 @@ def select_release(data, channel, installed):
                 'host': {'id': 'fedora', 'version_id': '44', 'arch': 'x86_64'},
                 'installed': installed, 'assets': selected}
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    return {'channel': channel, 'version': version, 'release_id': entry['id'], 'assets': selected,
+    # Derive from the selected entry, not the last candidate visited above.
+    kind = 'rc' if '-rc.' in version else 'beta' if '-' in version else 'stable'
+    return {'channel': channel, 'release_kind': kind, 'version': version, 'release_id': entry['id'], 'assets': selected,
             'review_guard': fingerprint, 'trust': 'release_digest',
             'release_url': 'https://github.com/papi-ux/polaris/releases/tag/' + entry['tag_name']}
 
@@ -232,14 +235,20 @@ def make_plan(channel, *, fetch=releases, read_installed=installed_packages, hos
     current = read_installed()
     require(current['polaris']['state'] == 'installed'
             and current['polaris-kms']['state'] in ('installed', 'absent'),
-            'installed_state_unknown', 'Read the installed package state before reviewing an update.')
+            'installed_state_unknown',
+            'Polaris cannot safely update this package state. Read the versions below. '
+            'If there are duplicate entries or an unreadable package database, ask your system administrator '
+            'or Fedora software manager to repair them, then review again. Polaris will not force a reinstall or remove entries.')
     plan = select_release(fetch(), channel, current)
     plan['installed'] = current
     target = version_key(plan['version'])
     require(all(version_key(value['version']) <= target for value in current.values() if value['state'] == 'installed'),
             'downgrade_unsupported', 'This channel would downgrade an installed package. Downgrades are not enabled.')
-    plan['update_needed'] = any(value['state'] == 'installed' and version_key(value['version']) < target
-                                for value in current.values())
+    # A mixed pair can be repaired by upgrading only its older member. Never reinstall
+    # an already-current member to get RPM past its own checks.
+    plan['packages_to_update'] = [name for name, value in current.items()
+                                  if value['state'] == 'installed' and version_key(value['version']) < target]
+    plan['update_needed'] = bool(plan['packages_to_update'])
     return plan
 
 
@@ -290,6 +299,8 @@ def install(channel, version, guard, directory, *, plan=make_plan, fetch_asset=d
         require(reviewed['update_needed'], 'already_installed', 'This version is already installed.')
         paths = []
         for asset in reviewed['assets']:
+            if asset['package'] not in reviewed['packages_to_update']:
+                continue
             stage = 'downloading'
             progress(stage)
             path = directory / asset['name']  # name came from our own exact family table
@@ -306,7 +317,9 @@ def install(channel, version, guard, directory, *, plan=make_plan, fetch_asset=d
         progress(stage)
         code, output = run(transaction_argv(paths, test=True))
         require(code == 0, 'transaction_not_closed',
-                'RPM refused the bounded transaction. Update system dependencies yourself, then review again. ' + output[-2048:])
+                'RPM stopped before installing. Read its details below; package state or dependencies may need '
+                'manual repair. Polaris will not force a reinstall, remove packages or update the system. '
+                'After correcting the reported problem, review again. ' + output[-2048:])
         stage = 'installing'
         progress(stage)
         attempted = True

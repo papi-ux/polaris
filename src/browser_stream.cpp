@@ -57,6 +57,7 @@ extern "C" {
   #include "platform/linux/session_media.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/spaces_host_admin.h"
   #ifdef POLARIS_BUILD_PORTAL
     #include "platform/linux/portal_session.h"
   #endif
@@ -572,6 +573,15 @@ namespace browser_stream {
 
     bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {
       launch_failure::clear();
+      // The same admission as console/GameStream launches, before prelaunch or host effects.
+      // Retain through execute and compositor settle, until app/session busy facts are visible.
+      const auto host_activity = multiseat::spaces::try_begin_host_activity();
+      if (!host_activity) {
+        launch_failure::refuse(409, "host_admin_running", "Polaris is updating or changing this PC.",
+          "Try Browser Stream again when it finishes.");
+        error_out = launch_failure::status_message(*launch_failure::pending);
+        return false;
+      }
       // #204, opt-in only: hold the launch reservation from here to execute, leave Game Mode if
       // this app asks for it, and bring the mode in line before Launch as reads it. An app with
       // the setting off launches exactly as before.
@@ -1692,6 +1702,12 @@ namespace browser_stream {
     }
 #endif
   }  // namespace
+
+#if defined(POLARIS_TESTS) && defined(__linux__)
+  bool launch_isolated_app_for_tests(const proc::ctx_t &app, std::string &error) {
+    return launch_isolated_app(app, error);
+  }
+#endif
 
   bool build_enabled() {
 #ifdef POLARIS_ENABLE_BROWSER_STREAM

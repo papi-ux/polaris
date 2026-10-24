@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import HostUpdateFlow from './components/HostUpdateFlow.vue'
-import { buildUpdateCenterState, describeHostUpdate } from './update-center.js'
+import { buildUpdateCenterState, describeHostUpdate, hostUpdatePollDelay, selectedReleaseLabel } from './update-center.js'
 
 const installed = (version = '1.5.0') => ({ polaris: { state: 'installed', version }, 'polaris-kms': { state: 'installed', version } })
 const plan = () => ({ route: 'helper', review_id: '12345678-1234-4234-8234-123456789abc', channel: 'stable', version: '1.5.1', update_needed: true,
@@ -74,6 +74,51 @@ describe('Host update journey', () => {
     expect(view.busyReason).toContain('paused for resume')
   })
 
+  it('does not let a stale terminal journal hide a newer host-selected release', () => {
+    const next = { ...plan(), version: '1.5.2' }
+    for (const state of ['installed', 'failed', 'cancelled', 'unknown']) {
+      const view = describeHostUpdate({ ...snapshot({ state, version: '1.5.1', message: 'Old result.' }, installed('1.5.1')), running_version: '1.5.1' }, next)
+      expect(view.title).toBe('Update available')
+      expect(view.hasJob).toBe(false)
+      const headline = buildUpdateCenterState({ currentVersion: '1.5.1', hostPlan: next, hostJourney: view })
+      expect(headline.status).toBe('update_available')
+      expect(headline.primaryActionLabel).toBe('Review update')
+      expect(describeHostUpdate({ ...snapshot(null, installed('1.5.1')), running_version: '1.5.1' }, next,
+        { finishTarget: '1.5.1' }).finished).toBe(false)
+    }
+    expect(describeHostUpdate(snapshot({ state: 'running', version: '1.5.1' }), next).active).toBe(true)
+    expect(describeHostUpdate(snapshot({ state: 'failed', version: '1.5.2' }), next).title).toBe('Update stopped')
+  })
+
+  it('keeps restart-required for external package updates and confirms Finish from fresh state without a journal', () => {
+    const current = { ...plan(), update_needed: false }
+    const headline = buildUpdateCenterState({ currentVersion: '1.5.0', hostPlan: current,
+      latestRelease: { tag_name: 'v1.5.1', assets: [] }, host: { installed_package_version: '1.5.1' } })
+    expect(headline.status).toBe('restart_required')
+    expect(headline.statusTone).toBe('restart')
+    for (const job of [null, { state: 'failed', version: '1.5.0' }, { state: 'installed', version: '1.5.0' }, { state: 'restarting', version: '1.5.1' }]) {
+      const fresh = { ...snapshot(job, installed('1.5.1')), running_version: '1.5.1' }
+      const view = describeHostUpdate(fresh, current, { restarting: true, finishTarget: '1.5.1' })
+      expect(view.finished).toBe(true)
+      expect(view.active).toBe(false)
+      expect(view.title).toBe('Polaris 1.5.1 is running')
+      expect(describeHostUpdate({ ...fresh, installed: { polaris: { state: 'unknown' } } }, current, { finishTarget: '1.5.1' }).finished).toBe(false)
+      expect(describeHostUpdate({ ...fresh, installed: undefined, job: { state: 'installed', check: { installed: installed('1.5.1') } } }, current, { finishTarget: '1.5.1' }).finished).toBe(false)
+    }
+  })
+
+  it('labels selected stable, beta and release candidates and slows idle or timed-out polling', () => {
+    expect(selectedReleaseLabel({ channel: 'beta', version: '1.5.1' })).toBe('Stable')
+    expect(selectedReleaseLabel({ version: '1.5.1-beta.2' })).toBe('Beta')
+    expect(selectedReleaseLabel({ version: '1.5.1-rc.2' })).toBe('Release candidate')
+    expect(hostUpdatePollDelay()).toBe(60000)
+    expect(hostUpdatePollDelay({ active: true })).toBe(3000)
+    expect(hostUpdatePollDelay({ reviewing: true })).toBe(5000)
+    expect(hostUpdatePollDelay({ restarting: true, restartTimedOut: true })).toBe(15000)
+    expect(hostUpdatePollDelay({ visible: false, active: true })).toBeNull()
+    expect(hostUpdatePollDelay({ capable: false })).toBeNull()
+  })
+
   it('mounts the review/approval journey, sends only the nonce and closed fields, and never requests /api/restart', async () => {
     vi.useFakeTimers()
     document.head.innerHTML = '<meta name="csrf-token" content="test-csrf">'
@@ -83,16 +128,23 @@ describe('Host update journey', () => {
       calls.push({ url, options })
       if (url.includes('/plan?')) return { ok: true, json: async () => plan() }
       if (options.method === 'POST') {
-        job = { ...snapshot({ state: 'waiting_for_approval', request_id: JSON.parse(options.body).request_id, message: 'Approve on this PC.' }), accepted: true }
+        const body = JSON.parse(options.body)
+        job = { ...snapshot({ state: body.action === 'cancel' ? 'cancelled' : 'waiting_for_approval', version: '1.5.1', request_id: body.request_id,
+          message: body.action === 'cancel' ? 'Approval cancelled.' : 'Approve on this PC.' }), accepted: true }
       }
       return { ok: true, json: async () => job }
     }))
-    const wrapper = mount(HostUpdateFlow)
+    const wrapper = mount(HostUpdateFlow, { attachTo: document.body })
     await flushPromises()
     await wrapper.find('button').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('not an independent publisher signature')
     expect(wrapper.text()).toContain('Updates wait until streams and paused games end.')
+    expect(wrapper.text()).toContain('Package setup scripts and cache triggers are skipped')
+    const details = wrapper.find('[data-update-technical-details]')
+    expect(details.attributes('open')).toBeUndefined()
+    expect(details.text()).toContain(plan().assets[0].digest)
+    expect(details.text()).toContain('Asset 10')
     expect(wrapper.find('input[type=password]').exists()).toBe(false)
     await wrapper.find('[data-update-install]').trigger('click')
     await flushPromises()
@@ -102,6 +154,12 @@ describe('Host update journey', () => {
     expect(body.review_id).toBe(plan().review_id)
     expect(mutation.options.headers['X-CSRF-Token']).toBe('test-csrf')
     expect(wrapper.find('[data-update-cancel]').exists()).toBe(true)
+    expect(document.activeElement).toBe(wrapper.find('h3').element)
+    expect(wrapper.find('[data-update-announcement]').attributes('aria-live')).toBe('polite')
+    await wrapper.find('[data-update-cancel]').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.find('h3').element)
+    expect(wrapper.find('h3').text()).toBe('Approval cancelled')
     expect(calls.some((call) => call.url === './api/restart')).toBe(false)
     wrapper.unmount()
   })
@@ -128,9 +186,88 @@ describe('Host update journey', () => {
     expect(reviews).toBe(2)
     expect(wrapper.find('[data-update-install]').attributes('disabled')).toBeDefined()
     value = { ...snapshot({ state: 'installed' }, installed('1.5.1')), finish_available: false, busy: { blocked: true, reasons: ['A game is paused for resume on this PC.'] } }
-    await vi.advanceTimersByTimeAsync(3000)
+    await vi.advanceTimersByTimeAsync(5000)
     await flushPromises()
     expect(wrapper.find('[data-update-busy]').text()).toContain('paused for resume')
+    wrapper.unmount()
+  })
+
+  it('polls visible idle tabs slowly, pauses hidden tabs and reads immediately on return', async () => {
+    vi.useFakeTimers()
+    let visible = 'visible'
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visible)
+    const fetcher = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('/plan?') ? plan() : snapshot() }))
+    vi.stubGlobal('fetch', fetcher)
+    const wrapper = mount(HostUpdateFlow)
+    await flushPromises()
+    const initial = fetcher.mock.calls.length
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(fetcher.mock.calls.length).toBe(initial)
+    visible = 'hidden'
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(fetcher.mock.calls.length).toBe(initial)
+    visible = 'visible'
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(0)
+    await flushPromises()
+    expect(fetcher.mock.calls.length).toBe(initial + 1)
+    await vi.advanceTimersByTimeAsync(59999)
+    expect(fetcher.mock.calls.length).toBe(initial + 1)
+    await vi.advanceTimersByTimeAsync(1)
+    await flushPromises()
+    expect(fetcher.mock.calls.length).toBe(initial + 2)
+    wrapper.unmount()
+  })
+
+  it('announces current progress and paused-game reasons in the live region', async () => {
+    vi.useFakeTimers()
+    let value = snapshot({ state: 'running', version: '1.5.1', check: { stage: 'downloading' } })
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({ ok: true, json: async () => url.includes('/plan?') ? plan() : value })))
+    const wrapper = mount(HostUpdateFlow)
+    await flushPromises()
+    expect(wrapper.find('[data-update-announcement]').text()).toContain('Downloading official release assets')
+    value = { ...snapshot({ state: 'running', version: '1.5.1', check: { stage: 'installing' } }), busy: { reasons: ['A game is paused for resume.'] } }
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+    expect(wrapper.find('[data-update-announcement]').text()).toContain('Installing RPM packages')
+    expect(wrapper.find('[data-update-announcement]').text()).toContain('paused for resume')
+    wrapper.unmount()
+  })
+
+  it.each([null, { state: 'failed', version: '1.5.0' }])('finishes an external install using readback even with journal %j', async (journal) => {
+    vi.useFakeTimers()
+    let value = snapshot(journal, installed('1.5.1'))
+    let unreachable = false
+    const posts = []
+    vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+      if (url.includes('/plan?')) return { ok: true, json: async () => ({ ...plan(), update_needed: false }) }
+      if (options.method === 'POST') {
+        posts.push({ url, body: JSON.parse(options.body) })
+        unreachable = true
+        return { ok: true, json: async () => ({ ...value, accepted: true }) }
+      }
+      if (unreachable) throw new Error('synthetic reconnect gap')
+      return { ok: true, json: async () => value }
+    }))
+    const wrapper = mount(HostUpdateFlow, { attachTo: document.body })
+    await flushPromises()
+    await wrapper.find('[data-update-finish]').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.find('h3').element)
+    await vi.advanceTimersByTimeAsync(93001)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Check the PC running it')
+    expect(posts).toHaveLength(1)
+    expect(posts[0].url).toBe('./api/update/finish')
+    expect(posts[0].body.version).toBe('1.5.1')
+    unreachable = false
+    value = { ...value, running_version: '1.5.1' }
+    await vi.advanceTimersByTimeAsync(15000)
+    await flushPromises()
+    expect(wrapper.find('h3').text()).toBe('Polaris 1.5.1 is running')
+    expect(wrapper.find('[data-update-finish]').exists()).toBe(false)
+    expect(posts).toHaveLength(1)
     wrapper.unmount()
   })
 })

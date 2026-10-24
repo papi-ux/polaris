@@ -128,7 +128,7 @@ namespace multiseat::spaces {
     /// 503 Polaris is shutting down.
     [[nodiscard]] submit_result_t submit(const host_action_request_t &request);
     [[nodiscard]] nlohmann::json snapshot() const;
-    [[nodiscard]] nlohmann::json review_update(std::string_view channel);
+    [[nodiscard]] nlohmann::json review_update(std::string_view channel, bool refresh = true);
     [[nodiscard]] nlohmann::json update_snapshot() const;
     /// Cancels only a matching approval wait. Approved transactions finish on their own.
     [[nodiscard]] bool cancel_update(std::string_view request_id);
@@ -152,8 +152,11 @@ namespace multiseat::spaces {
     mutable std::mutex mutex_;
     std::optional<job_t> job_;
     std::optional<host_action_request_t> pending_;  ///< claimed, facts still being read
-    std::optional<nlohmann::json> review_;
-    std::chrono::steady_clock::time_point reviewed_at_;
+    struct review_t {
+      nlohmann::json plan;
+      std::chrono::steady_clock::time_point at;
+    };
+    std::vector<review_t> reviews_;  ///< bounded independent tab/device reviews, consumed individually
     std::atomic<bool> running_ {false};
     bool closing_ = false;
     std::size_t activities_ = 0;
