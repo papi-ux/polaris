@@ -544,6 +544,100 @@ namespace vrr_trace {
     record(row);
   }
 
+  namespace {
+    // The returned view is the table's literal, never the caller's string.
+    template<std::size_t N>
+    std::string_view known_text(std::string_view value, const std::array<std::string_view, N> &known) noexcept {
+      for (const auto candidate : known) {
+        if (candidate == value) return candidate;
+      }
+      return {};
+    }
+    // What stream_stats stores: video.cpp's codec labels and encoder_t names, stream_start's outcomes.
+    constexpr std::array<std::string_view, 4> k_codecs {"h264", "hevc", "av1", "pyrowave"};
+    constexpr std::array<std::string_view, 8> k_encoder_backends {
+      "nvenc", "vulkan", "quicksync", "amdvce", "software", "vaapi", "videotoolbox", "pyrowave"};
+    constexpr std::array<std::string_view, 3> k_start_outcomes {"started", "client_left_during_setup", "no_ping"};
+  }
+
+  std::string_view known_codec(std::string_view value) noexcept { return known_text(value, k_codecs); }
+  std::string_view known_encoder_backend(std::string_view value) noexcept { return known_text(value, k_encoder_backends); }
+  std::string_view known_start_outcome(std::string_view value) noexcept { return known_text(value, k_start_outcomes); }
+
+  event_t host_history_run_event(const host_history_run_t &run) noexcept {
+    event_t row("host_history_run");
+    const auto text = [&row](const char *key, std::string_view value) {
+      if (value.empty()) row.n(key); else row.s(key, value);
+    };
+    const auto generation = [&row](const char *key, std::uint64_t value) {
+      if (value) row.u(key, value); else row.n(key);
+    };
+    const bool present = run.snapshot_read && run.ended_session_generation.has_value();
+    const bool matched = present && run.expected_session_generation != 0 &&
+                         *run.ended_session_generation == run.expected_session_generation;
+    generation("expected_session_generation", run.expected_session_generation);
+    text("ended_snapshot", !run.snapshot_read ? "not_read" : present ? "present" : "absent");
+    if (present) row.u("ended_session_generation", *run.ended_session_generation);
+    else row.n("ended_session_generation");
+    if (run.snapshot_read) row.u("ended_generation_match", matched);
+    else row.n("ended_generation_match");
+    generation("capture_generation", run.capture_generation);
+    row.u("client_report_recorded", run.client_report_recorded);
+
+    // A mismatched slot belongs to another session's end: none of its facts describe this run.
+    if (const auto *vrr = matched && run.vrr ? &*run.vrr : nullptr) {
+      row.u("vrr_session_generation", vrr->session_generation).s("vrr_requested", vrr_policy::name(vrr->requested))
+        .s("vrr_admission", vrr_policy::name(vrr->admission)).u("vrr_host_source_pacing", vrr->host_source_pacing)
+        .u("vrr_watch_or_input_only", vrr->watch_or_input_only);
+    } else {
+      row.n("vrr_session_generation").n("vrr_requested").n("vrr_admission").n("vrr_host_source_pacing")
+        .n("vrr_watch_or_input_only");
+    }
+    if (const auto *pacing = matched && run.pacing ? &*run.pacing : nullptr) {
+      row.s("pacing_mode", vrr_pacing::name(pacing->mode)).u("pacing_ended", pacing->ended)
+        .u("pacing_authority_lost", pacing->authority_lost)
+        .u("pacing_receipt_session_generation", pacing->receipt_session_generation)
+        .u("pacing_receipt_capture_generation", pacing->receipt_capture_generation);
+      if (pacing->accepted_watermark) row.u("pacing_accepted_watermark", *pacing->accepted_watermark);
+      else row.n("pacing_accepted_watermark");
+    } else {
+      row.n("pacing_mode").n("pacing_ended").n("pacing_authority_lost").n("pacing_receipt_session_generation")
+        .n("pacing_receipt_capture_generation").n("pacing_accepted_watermark");
+    }
+    text("codec", matched ? run.codec : std::string_view {});
+    text("encoder_backend", matched ? run.encoder_backend : std::string_view {});
+    text("start_outcome", matched ? run.start_outcome : std::string_view {});
+
+    const auto &policy = run.launch_policy;
+    row.u("launch_policy_available", policy.available);
+    if (policy.available) {
+      row.i("launch_requested_client_fps_milli", policy.requested_fps_milli)
+        .i("launch_session_target_fps_milli", policy.resolved_fps_milli)
+        .u("launch_display_mode_source_code", static_cast<unsigned>(policy.display_mode_source))
+        .u("launch_target_fps_source_code", static_cast<unsigned>(policy.target_fps_source))
+        .s("history_safe_at_resolver", "not_consumed_by_deterministic_resolver");
+    } else {
+      row.n("launch_requested_client_fps_milli").n("launch_session_target_fps_milli")
+        .n("launch_display_mode_source_code").n("launch_target_fps_source_code").n("history_safe_at_resolver");
+    }
+    // As in session_policy: the launch path applies no history-safe value, so none is reported.
+    row.n("history_safe_target_fps_milli");
+
+    row.s("history_writer", run.writer_called ? "called" : "not_called");
+    text("history_writer_skip", run.writer_called ? std::string_view {} : run.writer_skip);
+    text("history_feedback", run.writer_called ? run.writer_feedback : std::string_view {});
+    text("history_merge", run.writer_called ? run.writer_merge : std::string_view {});
+    text("history_write", run.writer_called ? run.writer_write : std::string_view {});
+    // The device:game aggregate and pause's process-wide fps/latency/bitrate never prove this run.
+    row.s("aggregate_and_hot_metrics", "not_per_run");
+    return row;
+  }
+
+  void record_host_history_run(const host_history_run_t &run) noexcept {
+    if (!enabled()) return;
+    record(host_history_run_event(run));
+  }
+
   send_attempt_t::send_attempt_t(std::uint64_t packet, int block, std::int64_t first, std::uint64_t count,
                                  const char *api, std::uint64_t retry_of) noexcept:
       packet_(packet), count_(count), retry_of_(retry_of), block_(block), first_(first), api_(api) {

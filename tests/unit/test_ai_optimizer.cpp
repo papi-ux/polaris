@@ -13,8 +13,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
@@ -1160,4 +1162,112 @@ TEST(AiOptimizerBitrateCeiling, PyroWaveRecordsKeepTheCodecsOwnCeiling) {
   EXPECT_EQ(ai_optimizer::bitrate_ceiling_kbps("PyroWave"), 300000);
   EXPECT_EQ(ai_optimizer::bitrate_ceiling_kbps("hevc"), 100000);
   EXPECT_EQ(ai_optimizer::bitrate_ceiling_kbps(""), 100000);
+}
+
+// save_history_at() writes the process's in-memory history, so each test empties it first through
+// clear_history_at() on a file in its own directory: nothing loaded from appdata is copied out.
+TEST(AiOptimizerHistoryWriter, SaveHistoryAtReportsOpenWriteAndCloseAsTheStreamSawThem) {
+  const auto dir = std::filesystem::temp_directory_path() /
+    ("polaris-ai-history-writer-" + std::to_string(::getpid()));
+  std::filesystem::remove_all(dir);
+  ASSERT_TRUE(std::filesystem::create_directory(dir));
+  ai_optimizer::clear_history_at(dir / "cleared.json");
+
+  EXPECT_EQ(ai_optimizer::save_history_at(dir / "missing" / "history.json"), ai_optimizer::history_write_e::open_failed);
+  EXPECT_FALSE(std::filesystem::exists(dir / "missing"));
+
+  const auto written = dir / "history.json";
+  EXPECT_EQ(ai_optimizer::save_history_at(written), ai_optimizer::history_write_e::closed_without_error);
+  {
+    std::ifstream in(written);
+    ASSERT_TRUE(in.is_open());
+    EXPECT_TRUE(nlohmann::json::parse(in).is_null()) << "the emptied history, and nothing else";
+  }
+#ifdef __linux__
+  // A full device fails the bytes at write or at close; either way it is never a completed write.
+  if (std::filesystem::exists("/dev/full")) {
+    const auto full = ai_optimizer::save_history_at("/dev/full");
+    EXPECT_TRUE(full == ai_optimizer::history_write_e::write_failed || full == ai_optimizer::history_write_e::close_failed)
+      << ai_optimizer::name(full);
+  }
+#endif
+  std::filesystem::remove_all(dir);
+}
+
+TEST(AiOptimizerHistoryWriter, ObservationKeepsUnknownRejectedAndFailedDistinct) {
+  const ai_optimizer::history_writer_observation_t untouched;
+  EXPECT_EQ(ai_optimizer::name(untouched.feedback), "unknown");
+  EXPECT_EQ(ai_optimizer::name(untouched.merge), "unknown");
+  EXPECT_EQ(ai_optimizer::name(untouched.write), "unknown");
+
+  using write_e = ai_optimizer::history_write_e;
+  std::vector<std::string_view> writes;
+  for (const auto value : {write_e::unknown, write_e::not_attempted, write_e::open_failed, write_e::write_failed,
+                           write_e::close_failed, write_e::closed_without_error}) {
+    writes.push_back(ai_optimizer::name(value));
+  }
+  std::vector<std::string_view> merges {ai_optimizer::name(ai_optimizer::history_merge_e::unknown),
+    ai_optimizer::name(ai_optimizer::history_merge_e::not_merged), ai_optimizer::name(ai_optimizer::history_merge_e::merged)};
+  std::vector<std::string_view> feedback {ai_optimizer::name(ai_optimizer::history_feedback_e::unknown),
+    ai_optimizer::name(ai_optimizer::history_feedback_e::accepted), ai_optimizer::name(ai_optimizer::history_feedback_e::rejected)};
+  for (auto *names : {&writes, &merges, &feedback}) {
+    std::sort(names->begin(), names->end());
+    EXPECT_EQ(std::adjacent_find(names->begin(), names->end()), names->end());
+  }
+  EXPECT_EQ(ai_optimizer::name(write_e::closed_without_error), "closed_without_error");
+  EXPECT_EQ(ai_optimizer::name(ai_optimizer::history_merge_e::merged), "merged");
+}
+
+// record_session() itself reads device_db.json from appdata, so its observation is pinned by source:
+// each field comes from what that call actually did, in the order it did it.
+TEST(AiOptimizerHistoryWriter, RecordSessionObservesItsOwnClassificationMergeAndWrite) {
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/ai_optimizer.cpp");
+  const std::string source {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  ASSERT_FALSE(source.empty());
+  const auto body_between = [&source](std::string_view begin, std::string_view end) {
+    const auto start = source.find(begin);
+    const auto finish = start == std::string::npos ? std::string::npos : source.find(end, start);
+    return finish == std::string::npos ? std::string {} : source.substr(start, finish - start);
+  };
+  const auto record = body_between("  void record_session(const std::string &device_name,", "  std::optional<session_history_t> get_session_history(");
+  ASSERT_FALSE(record.empty());
+  const auto reset = record.find("if (observation) *observation = {};");
+  const auto classified = record.find("observation->feedback = feedback_policy.accepted ? history_feedback_e::accepted : history_feedback_e::rejected;");
+  const auto rejected = record.find("if (!feedback_policy.accepted) {");
+  const auto not_attempted = record.find("observation->write = history_write_e::not_attempted;");
+  const auto early_return = record.find("return;", rejected);
+  const auto merged_total = record.find("session_count_total = existing.session_count;");
+  const auto merged = record.find("observation->merge = history_merge_e::merged;");
+  const auto saved = record.find("const auto written = save_history();");
+  const auto observed_write = record.find("if (observation) observation->write = written;");
+  for (const auto position : {reset, classified, rejected, not_attempted, early_return, merged_total, merged, saved, observed_write}) {
+    ASSERT_NE(position, std::string::npos);
+  }
+  EXPECT_LT(reset, classified);
+  EXPECT_LT(classified, rejected);
+  EXPECT_LT(not_attempted, early_return) << "a rejected report is never written or merged";
+  EXPECT_LT(early_return, merged_total);
+  EXPECT_LT(merged_total, merged) << "merged is reported only after the aggregate actually changed";
+  EXPECT_LT(merged, saved);
+  EXPECT_LT(saved, observed_write) << "the write result is the one save_history() returned, never the attempt";
+  const auto first_save = record.find("save_history()");
+  EXPECT_EQ(first_save, saved + std::string_view {"const auto written = "}.size());
+  EXPECT_EQ(record.find("save_history()", first_save + 1), std::string::npos) << "no save whose result is dropped";
+  const auto merged_value = record.find("history_merge_e::merged");
+  EXPECT_GT(merged_value, merged) << "nothing reports merged before the aggregate changed";
+  EXPECT_EQ(record.find("history_merge_e::merged", merged_value + 1), std::string::npos);
+
+  const auto writer = body_between("  static history_write_e save_history_to(", "  static history_write_e save_history() {");
+  ASSERT_FALSE(writer.empty());
+  const auto open = writer.find("if (!file.is_open()) return history_write_e::open_failed;");
+  const auto bytes = writer.find("file << root.dump(2);");
+  const auto write_check = writer.find("if (!file) return history_write_e::write_failed;");
+  const auto close = writer.find("file.close();");
+  const auto close_check = writer.find("return file ? history_write_e::closed_without_error : history_write_e::close_failed;");
+  for (const auto position : {open, bytes, write_check, close, close_check}) ASSERT_NE(position, std::string::npos);
+  EXPECT_LT(open, bytes);
+  EXPECT_LT(bytes, write_check);
+  EXPECT_LT(write_check, close);
+  EXPECT_LT(close, close_check);
+  for (const auto *absent : {"fsync", "rename", "retry"}) EXPECT_EQ(writer.find(absent), std::string::npos) << absent;
 }

@@ -110,7 +110,7 @@ namespace ai_optimizer {
   };
 
   static bool load_history();
-  static void save_history();
+  static history_write_e save_history();
 
   struct http_response_t {
     CURLcode curl_code = CURLE_OK;
@@ -4084,7 +4084,9 @@ namespace ai_optimizer {
     return repaired_history;
   }
 
-  static void save_history() {
+  // Reports what the stream saw, open then write then an explicit close. Callers that only save
+  // ignore it; nothing here adds fsync, rename or retry.
+  static history_write_e save_history_to(const std::filesystem::path &history_file) {
     std::lock_guard<std::mutex> lock(history_mutex);
     nlohmann::json root;
     for (const auto &[key, h] : session_history) {
@@ -4137,13 +4139,27 @@ namespace ai_optimizer {
       }
       root[key] = std::move(entry);
     }
-    std::ofstream file(history_path());
-    if (file.is_open()) file << root.dump(2);
+    std::ofstream file(history_file);
+    if (!file.is_open()) return history_write_e::open_failed;
+    file << root.dump(2);
+    if (!file) return history_write_e::write_failed;
+    file.close();
+    return file ? history_write_e::closed_without_error : history_write_e::close_failed;
+  }
+
+  static history_write_e save_history() {
+    return save_history_to(history_path());
+  }
+
+  history_write_e save_history_at(const std::filesystem::path &history_file) {
+    return save_history_to(history_file);
   }
 
   void record_session(const std::string &device_name,
                       const std::string &app_name,
-                      const session_history_t &session) {
+                      const session_history_t &session,
+                      history_writer_observation_t *observation) {
+    if (observation) *observation = {};
     auto normalized_session = session;
     if (normalized_session.last_target_fps <= 0.0 && normalized_session.avg_fps > 0.0) {
       normalized_session.last_target_fps = normalized_session.avg_fps;
@@ -4157,7 +4173,14 @@ namespace ai_optimizer {
     normalized_session = sanitize_session_history(normalized_session);
 
     auto key = history_key(canonical_device, app_name);
+    if (observation) {
+      observation->feedback = feedback_policy.accepted ? history_feedback_e::accepted : history_feedback_e::rejected;
+    }
     if (!feedback_policy.accepted) {
+      if (observation) {
+        observation->merge = history_merge_e::not_merged;
+        observation->write = history_write_e::not_attempted;
+      }
       BOOST_LOG(info) << "ai_optimizer: Ignoring low-signal session report for "sv << key
                       << " end_reason="sv << normalized_session.last_end_reason
                       << " reason="sv << feedback_policy.ignored_reason;
@@ -4283,9 +4306,11 @@ namespace ai_optimizer {
       }
       existing = sanitize_session_history(existing);
       session_count_total = existing.session_count;
+      if (observation) observation->merge = history_merge_e::merged;
     }
 
-    save_history();
+    const auto written = save_history();
+    if (observation) observation->write = written;
     BOOST_LOG(info) << "ai_optimizer: Recorded session for "sv << key
                     << " — grade "sv << normalized_session.quality_grade
                     << " against target "sv << normalized_session.last_target_fps

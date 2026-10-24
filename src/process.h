@@ -1250,7 +1250,11 @@ namespace proc {
     );
     boost::process::v1::environment get_env();
     void resume();
-    void pause();
+    /**
+     * @param expected_ending_session_generation The media session generation whose end led here,
+     *        as stream::join knows it; 0 when the caller names none. Only the private trace reads it.
+     */
+    void pause(std::uint64_t expected_ending_session_generation = 0);
     void terminate(bool immediate = false, bool needs_refresh = true);
     /**
      * @brief terminate() for someone ending the session on purpose: the console's Close App and

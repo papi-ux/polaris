@@ -3184,7 +3184,8 @@ namespace stream {
               "Desktop Takeover client disconnected; restoring the physical desktop immediately"sv);
             proc::proc.terminate();
           } else {
-            proc::proc.pause();
+            // The ending media generation, so pause can tell this session's retained end from another's.
+            proc::proc.pause(session.session_generation);
             paused_for_resume = proc::proc.running() > 0;
             revert_display_config = !paused_for_resume && revert_display_config;
           }

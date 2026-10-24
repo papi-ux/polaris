@@ -12,10 +12,12 @@
 #include <optional>
 #include <string_view>
 #include "vrr_pacing_receipt.h"
+#include "vrr_session_policy.h"
 
 namespace vrr_trace {
   inline constexpr unsigned k_schema_major = 2;
-  inline constexpr unsigned k_schema_minor = 1;
+  // Minor 2 adds host_history_run. A reader that knows only minor 1 keeps refusing the trace.
+  inline constexpr unsigned k_schema_minor = 2;
   inline constexpr std::size_t k_fields = 40;
   inline constexpr std::size_t k_queue_capacity = 512;
   inline constexpr std::uint64_t k_event_budget = 2'000'000;
@@ -136,6 +138,59 @@ namespace vrr_trace {
     policy_source_e height_source = policy_source_e::unavailable;
   };
   void record_session_policy(event_t encoder_identity, const session_policy_t &policy) noexcept;
+
+  // The ended session's frozen variable-refresh request and pacing runtime, as values.
+  struct host_history_vrr_t {
+    std::uint64_t session_generation = 0;
+    vrr_policy::requested_e requested = vrr_policy::requested_e::absent;
+    vrr_policy::admission_e admission = vrr_policy::admission_e::launch;
+    bool host_source_pacing = false;
+    bool watch_or_input_only = false;
+  };
+  struct host_history_pacing_t {
+    vrr_pacing::mode_e mode = vrr_pacing::mode_e::waiting;
+    bool ended = false;
+    bool authority_lost = false;
+    std::uint64_t receipt_session_generation = 0;
+    std::uint64_t receipt_capture_generation = 0;
+    std::optional<std::uint64_t> accepted_watermark;
+  };
+
+  // One host pause: the retained ended session it read and what its history writer returned.
+  // Values only, filled when the trace is on. Text is static: known_* results or literals.
+  // Host process identity is the header's; this row reads no /proc and is not a write time.
+  struct host_history_run_t {
+    // stream::join's ending media session generation; 0 when the caller named none.
+    std::uint64_t expected_session_generation = 0;
+    // proc's capture generation. Resume keeps it, so it never names a media run.
+    std::uint64_t capture_generation = 0;
+    bool client_report_recorded = false;
+    // Whether pause read stats.last_session at all, and the generation it held.
+    bool snapshot_read = false;
+    std::optional<std::uint64_t> ended_session_generation;
+    std::optional<host_history_vrr_t> vrr;
+    std::optional<host_history_pacing_t> pacing;
+    // Empty is unknown.
+    std::string_view codec;
+    std::string_view encoder_backend;
+    std::string_view start_outcome;
+    session_policy_t launch_policy;
+    // Why the history writer was not called; empty when it was.
+    std::string_view writer_skip;
+    bool writer_called = false;
+    // The writer's own observation names, meaningful only when it was called.
+    std::string_view writer_feedback;
+    std::string_view writer_merge;
+    std::string_view writer_write;
+  };
+  // Map a runtime string to the same static text, or empty when it is not a known value.
+  std::string_view known_codec(std::string_view value) noexcept;
+  std::string_view known_encoder_backend(std::string_view value) noexcept;
+  std::string_view known_start_outcome(std::string_view value) noexcept;
+  // Ended facts appear only when the snapshot's generation equals the expected one; a slot that
+  // another session's end replaced, or none, leaves them null instead of guessing.
+  event_t host_history_run_event(const host_history_run_t &run) noexcept;
+  void record_host_history_run(const host_history_run_t &run) noexcept;
 
   // One socket API invocation, not physical delivery. Failure/exception exposes unknown partial
   // progress; whole-range fallback is explicitly related by retry_of. Never owns packet buffers.

@@ -3,6 +3,7 @@
  */
 #include <src/vrr_trace.h>
 #include <src/vrr_trace_clock.h>
+#include <src/stream_start_outcome.h>
 #include <src/video.h>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -13,6 +14,8 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <optional>
+#include <set>
 #include <stdexcept>
 #include <cstdlib>
 #include <string>
@@ -355,5 +358,200 @@ TEST(VrrTraceTests, H2AcceptedReceiptWithoutSequenceRefusesCaptureCompleteness) 
   EXPECT_FALSE(receipts[0].contains("reason"));
   EXPECT_EQ(rows.back()["instrumentation_refusals"],1u);
   EXPECT_FALSE(rows.back()["producer_complete"].get<bool>());
+}
+
+namespace {
+  // One host pause whose retained ended session is the given media generation.
+  vrr_trace::host_history_run_t ended_run(std::uint64_t expected, std::optional<std::uint64_t> ended, std::uint64_t capture) {
+    vrr_trace::host_history_run_t run;
+    run.expected_session_generation = expected; run.capture_generation = capture;
+    run.snapshot_read = true; run.ended_session_generation = ended;
+    run.vrr = vrr_trace::host_history_vrr_t {ended.value_or(0), vrr_policy::requested_e::on, vrr_policy::admission_e::resume, true, false};
+    run.pacing = vrr_trace::host_history_pacing_t {vrr_pacing::mode_e::source_time, true, false, ended.value_or(0), capture, 17};
+    run.codec = vrr_trace::known_codec("hevc"); run.encoder_backend = vrr_trace::known_encoder_backend("nvenc");
+    run.start_outcome = vrr_trace::known_start_outcome(stream_start::k_started);
+    run.writer_called = true; run.writer_feedback = "accepted"; run.writer_merge = "merged"; run.writer_write = "closed_without_error";
+    return run;
+  }
+  std::set<std::string> keys(const json &row) {
+    std::set<std::string> result;
+    for (const auto &item : row.items()) result.insert(item.key());
+    return result;
+  }
+}
+
+TEST(VrrTraceTests, HostHistoryRunBindsEndedFactsOnlyToTheExactEndingMediaGeneration) {
+  collection_t c;
+  {
+    vrr_trace::test_recorder_scope_t active(c.recorder.get());
+    vrr_trace::record_host_history_run(ended_run(41,41,7));
+    // The single slot now holds another session's end, under the same reused capture generation.
+    vrr_trace::record_host_history_run(ended_run(42,41,7));
+    vrr_trace::record_host_history_run(ended_run(43,std::nullopt,7));
+    auto unread = ended_run(44,44,7); unread.snapshot_read = false;
+    vrr_trace::record_host_history_run(unread);
+    // No ending generation from the caller: even an equal-looking zero never matches.
+    vrr_trace::record_host_history_run(ended_run(0,41,7));
+    vrr_trace::record_host_history_run(ended_run(45,45,7));
+  }
+  c.stop(); const auto rows = select(c.rows(),"host_history_run"); ASSERT_EQ(rows.size(),6u);
+  EXPECT_EQ(rows[0]["expected_session_generation"],41); EXPECT_EQ(rows[0]["ended_session_generation"],41);
+  EXPECT_EQ(rows[0]["ended_snapshot"],"present"); EXPECT_EQ(rows[0]["ended_generation_match"],1u);
+  EXPECT_EQ(rows[0]["capture_generation"],7); EXPECT_EQ(rows[0]["vrr_session_generation"],41);
+  EXPECT_EQ(rows[0]["vrr_requested"],"true"); EXPECT_EQ(rows[0]["vrr_admission"],"resume");
+  EXPECT_EQ(rows[0]["vrr_host_source_pacing"],1u); EXPECT_EQ(rows[0]["vrr_watch_or_input_only"],0u);
+  EXPECT_EQ(rows[0]["pacing_mode"],"source_time"); EXPECT_EQ(rows[0]["pacing_ended"],1u);
+  EXPECT_EQ(rows[0]["pacing_authority_lost"],0u); EXPECT_EQ(rows[0]["pacing_receipt_session_generation"],41);
+  EXPECT_EQ(rows[0]["pacing_receipt_capture_generation"],7); EXPECT_EQ(rows[0]["pacing_accepted_watermark"],17);
+  EXPECT_EQ(rows[0]["codec"],"hevc"); EXPECT_EQ(rows[0]["encoder_backend"],"nvenc"); EXPECT_EQ(rows[0]["start_outcome"],"started");
+
+  // Mismatch keeps the actual frozen generation visible and refuses every ended fact.
+  EXPECT_EQ(rows[1]["expected_session_generation"],42); EXPECT_EQ(rows[1]["ended_session_generation"],41);
+  EXPECT_EQ(rows[1]["ended_generation_match"],0u); EXPECT_EQ(rows[1]["capture_generation"],7);
+  for (const auto *key : {"vrr_session_generation","vrr_requested","vrr_admission","vrr_host_source_pacing","vrr_watch_or_input_only",
+                          "pacing_mode","pacing_ended","pacing_authority_lost","pacing_receipt_session_generation",
+                          "pacing_receipt_capture_generation","pacing_accepted_watermark","codec","encoder_backend","start_outcome"}) {
+    EXPECT_TRUE(rows[1][key].is_null()) << key;
+    EXPECT_TRUE(rows[2][key].is_null()) << key;
+    EXPECT_TRUE(rows[3][key].is_null()) << key;
+    EXPECT_TRUE(rows[4][key].is_null()) << key;
+  }
+  EXPECT_EQ(rows[2]["ended_snapshot"],"absent"); EXPECT_TRUE(rows[2]["ended_session_generation"].is_null());
+  EXPECT_EQ(rows[2]["ended_generation_match"],0u);
+  EXPECT_EQ(rows[3]["ended_snapshot"],"not_read"); EXPECT_TRUE(rows[3]["ended_generation_match"].is_null());
+  EXPECT_TRUE(rows[4]["expected_session_generation"].is_null()); EXPECT_EQ(rows[4]["ended_generation_match"],0u);
+  EXPECT_EQ(rows[5]["ended_generation_match"],1u); EXPECT_EQ(rows[5]["vrr_session_generation"],45);
+  for (const auto &row : rows) EXPECT_EQ(keys(row),keys(rows[0])) << "every pause row carries the same fixed fields";
+  EXPECT_TRUE(c.rows().back()["producer_complete"].get<bool>());
+}
+
+TEST(VrrTraceTests, HostHistoryRunKeepsClientReportAndWriterOutcomesDistinct) {
+  collection_t c;
+  {
+    vrr_trace::test_recorder_scope_t active(c.recorder.get());
+    auto reported = ended_run(41,41,7);
+    reported.client_report_recorded = true; reported.writer_called = false; reported.writer_skip = "client_report_recorded";
+    vrr_trace::record_host_history_run(reported);
+    auto unknown = ended_run(42,42,7);
+    unknown.writer_feedback = "unknown"; unknown.writer_merge = "unknown"; unknown.writer_write = "unknown";
+    vrr_trace::record_host_history_run(unknown);
+    auto rejected = ended_run(43,43,7);
+    rejected.writer_feedback = "rejected"; rejected.writer_merge = "not_merged"; rejected.writer_write = "not_attempted";
+    vrr_trace::record_host_history_run(rejected);
+    auto failed = ended_run(44,44,7); failed.writer_write = "close_failed";
+    vrr_trace::record_host_history_run(failed);
+    vrr_trace::record_host_history_run(ended_run(45,45,7));
+    auto disabled = ended_run(46,46,7);
+    disabled.snapshot_read = false; disabled.writer_called = false; disabled.writer_skip = "ai_optimizer_disabled";
+    vrr_trace::record_host_history_run(disabled);
+  }
+  c.stop(); const auto rows = select(c.rows(),"host_history_run"); ASSERT_EQ(rows.size(),6u);
+  EXPECT_EQ(rows[0]["client_report_recorded"],1u); EXPECT_EQ(rows[0]["history_writer"],"not_called");
+  EXPECT_EQ(rows[0]["history_writer_skip"],"client_report_recorded");
+  EXPECT_TRUE(rows[0]["history_feedback"].is_null()); EXPECT_TRUE(rows[0]["history_merge"].is_null());
+  EXPECT_TRUE(rows[0]["history_write"].is_null());
+  EXPECT_EQ(rows[1]["history_writer"],"called"); EXPECT_TRUE(rows[1]["history_writer_skip"].is_null());
+  EXPECT_EQ(rows[1]["history_feedback"],"unknown"); EXPECT_EQ(rows[1]["history_merge"],"unknown"); EXPECT_EQ(rows[1]["history_write"],"unknown");
+  EXPECT_EQ(rows[2]["history_feedback"],"rejected"); EXPECT_EQ(rows[2]["history_merge"],"not_merged");
+  EXPECT_EQ(rows[2]["history_write"],"not_attempted");
+  EXPECT_EQ(rows[3]["history_merge"],"merged"); EXPECT_EQ(rows[3]["history_write"],"close_failed");
+  EXPECT_EQ(rows[4]["history_feedback"],"accepted"); EXPECT_EQ(rows[4]["history_write"],"closed_without_error");
+  EXPECT_EQ(rows[4]["client_report_recorded"],0u);
+  EXPECT_EQ(rows[5]["history_writer"],"not_called"); EXPECT_EQ(rows[5]["history_writer_skip"],"ai_optimizer_disabled");
+  EXPECT_EQ(rows[5]["ended_snapshot"],"not_read");
+  for (const auto &row : rows) {
+    EXPECT_EQ(row["aggregate_and_hot_metrics"],"not_per_run");
+    for (const auto *legacy : {"avg_fps","last_fps","latency_ms","bitrate_kbps","packet_loss_pct","quality_grade","session_count",
+                               "device_name","app_name","unique_id","session_token","app_session_id","session_instance_id"}) {
+      EXPECT_FALSE(row.contains(legacy)) << legacy;
+    }
+  }
+}
+
+TEST(VrrTraceTests, HostHistoryRunIsBoundedStaticVersionedAndOffWhenTraceIsOff) {
+  EXPECT_EQ(vrr_trace::k_schema_minor,2u);
+  const auto full = vrr_trace::host_history_run_event(ended_run(41,41,7));
+  const auto empty = vrr_trace::host_history_run_event({});
+  EXPECT_FALSE(full.overflow); EXPECT_FALSE(empty.overflow);
+  EXPECT_EQ(full.size,33u); EXPECT_EQ(empty.size,full.size);
+  EXPECT_LE(full.size,vrr_trace::k_fields);
+  EXPECT_STREQ(full.kind,"host_history_run");
+
+  EXPECT_TRUE(vrr_trace::known_codec("HEVC").empty()); EXPECT_TRUE(vrr_trace::known_codec("h265").empty());
+  EXPECT_TRUE(vrr_trace::known_encoder_backend("").empty()); EXPECT_TRUE(vrr_trace::known_start_outcome("unknown").empty());
+  EXPECT_EQ(vrr_trace::known_start_outcome(stream_start::k_client_left_during_setup),stream_start::k_client_left_during_setup);
+  EXPECT_EQ(vrr_trace::known_start_outcome(stream_start::k_no_ping),stream_start::k_no_ping);
+
+  collection_t c;
+  {
+    vrr_trace::test_recorder_scope_t active(c.recorder.get());
+    auto run = ended_run(41,41,7);
+    run.launch_policy.available = true; run.launch_policy.requested_fps_milli = 119880; run.launch_policy.resolved_fps_milli = 59940;
+    run.launch_policy.display_mode_source = vrr_trace::policy_source_e::runtime_policy;
+    run.launch_policy.target_fps_source = vrr_trace::policy_source_e::explicit_doctor_trial;
+    {
+      // Runtime strings expire before the writer reads the queued value-only row.
+      std::string codec = "av1", backend = "vaapi", outcome = "no_ping";
+      run.codec = vrr_trace::known_codec(codec); run.encoder_backend = vrr_trace::known_encoder_backend(backend);
+      run.start_outcome = vrr_trace::known_start_outcome(outcome);
+      EXPECT_NE(run.codec.data(),codec.data()); EXPECT_NE(run.encoder_backend.data(),backend.data());
+      EXPECT_NE(run.start_outcome.data(),outcome.data());
+    }
+    vrr_trace::record_host_history_run(run);
+    vrr_trace::record_host_history_run(ended_run(42,42,7));
+    vrr_trace::test_recorder_scope_t off(nullptr);
+    vrr_trace::record_host_history_run(ended_run(43,43,7));
+  }
+  c.stop(); const auto all = c.rows(); const auto rows = select(all,"host_history_run"); ASSERT_EQ(rows.size(),2u);
+  EXPECT_EQ(all.front()["minor"],2u);
+  EXPECT_EQ(rows[0]["codec"],"av1"); EXPECT_EQ(rows[0]["encoder_backend"],"vaapi"); EXPECT_EQ(rows[0]["start_outcome"],"no_ping");
+  EXPECT_EQ(rows[0]["launch_policy_available"],1u); EXPECT_EQ(rows[0]["launch_requested_client_fps_milli"],119880);
+  EXPECT_EQ(rows[0]["launch_session_target_fps_milli"],59940);
+  EXPECT_EQ(rows[0]["launch_display_mode_source_code"],static_cast<unsigned>(vrr_trace::policy_source_e::runtime_policy));
+  EXPECT_EQ(rows[0]["launch_target_fps_source_code"],static_cast<unsigned>(vrr_trace::policy_source_e::explicit_doctor_trial));
+  EXPECT_EQ(rows[0]["history_safe_at_resolver"],"not_consumed_by_deterministic_resolver");
+  EXPECT_TRUE(rows[0]["history_safe_target_fps_milli"].is_null());
+  EXPECT_EQ(rows[1]["launch_policy_available"],0u); EXPECT_TRUE(rows[1]["launch_session_target_fps_milli"].is_null());
+  EXPECT_TRUE(rows[1]["history_safe_at_resolver"].is_null()); EXPECT_TRUE(rows[1]["history_safe_target_fps_milli"].is_null());
+  EXPECT_EQ(rows[1]["expected_session_generation"],42) << "trace-off pause 43 recorded nothing";
+  EXPECT_EQ(all.back()["attempts"],2u) << "the trace-off pause never reached the recorder";
+  EXPECT_TRUE(all.back()["producer_complete"].get<bool>());
+}
+
+TEST(VrrTraceTests, HostPauseRowUsesTheJoinGenerationAndTheSnapshotItsWriterUsed) {
+  const auto read = [](const char *relative) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / relative);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  };
+  const auto stream = read("src/stream.cpp"); const auto process = read("src/process.cpp");
+  ASSERT_FALSE(stream.empty()); ASSERT_FALSE(process.empty());
+  EXPECT_NE(stream.find("proc::proc.pause(session.session_generation);"),std::string::npos);
+  EXPECT_EQ(stream.find("proc::proc.pause();"),std::string::npos) << "join names the ending media generation";
+  const auto begin = process.find("void proc_t::pause(std::uint64_t expected_ending_session_generation)");
+  ASSERT_NE(begin,std::string::npos);
+  const auto end = process.find("void proc_t::terminate(",begin); ASSERT_NE(end,std::string::npos);
+  const auto body = process.substr(begin,end - begin);
+  const auto at = [&body](std::string_view text) { return body.find(text); };
+  EXPECT_NE(at("trace_run->expected_session_generation = expected_ending_session_generation;"),std::string::npos);
+  EXPECT_NE(at("trace_run->capture_generation = _session_generation;"),std::string::npos)
+    << "the capture generation is recorded as itself, never as the media run";
+  EXPECT_NE(at("trace_run->client_report_recorded = _client_session_report_recorded;"),std::string::npos);
+  const auto snapshot = at("auto stats = stream_stats::get_current();");
+  const auto copy = at("copy_ended_session_for_trace(*trace_run, stats.last_session);");
+  const auto writer = at("record_session(_launch_session->device_name, _app.name, session, trace_run ? &writer : nullptr);");
+  const auto observed = at("trace_run->writer_write = ai_optimizer::name(writer.write);");
+  const auto row = at("vrr_trace::record_host_history_run(*trace_run);");
+  for (const auto position : {snapshot,copy,writer,observed,row}) ASSERT_NE(position,std::string::npos);
+  EXPECT_LT(snapshot,copy); EXPECT_LT(copy,writer); EXPECT_LT(writer,observed); EXPECT_LT(observed,row);
+  EXPECT_LT(row,at("if (!_app.state_cmds.empty())"));
+  const auto first_read = body.find("stream_stats::get_current()");
+  EXPECT_EQ(first_read,snapshot + std::string_view {"auto stats = "}.size());
+  EXPECT_EQ(body.find("stream_stats::get_current()",first_read + 1),std::string::npos)
+    << "the row and the writer share the one snapshot pause already took";
+  EXPECT_NE(at("std::optional<vrr_trace::host_history_run_t> trace_run;\n    ai_optimizer::history_writer_observation_t writer;\n    if (vrr_trace::enabled()) {"),
+            std::string::npos) << "nothing is read or passed to the writer when the trace is off";
+  for (const auto *forbidden : {"_session_instance_id","session_token","app_session_id","/proc/"}) {
+    EXPECT_EQ(at(forbidden),std::string::npos) << forbidden;
+  }
 }
 #endif

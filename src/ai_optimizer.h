@@ -296,12 +296,58 @@ namespace ai_optimizer {
    */
   std::string get_models_json_with_config(const config_t &config);
 
+  enum class history_feedback_e { unknown, accepted, rejected };
+  enum class history_merge_e { unknown, not_merged, merged };
+  /// closed_without_error is a completed filesystem write: no fsync, rename or retry, so never durability.
+  enum class history_write_e { unknown, not_attempted, open_failed, write_failed, close_failed, closed_without_error };
+
+  inline std::string_view name(history_feedback_e value) {
+    switch (value) {
+      case history_feedback_e::accepted: return "accepted";
+      case history_feedback_e::rejected: return "rejected";
+      case history_feedback_e::unknown: break;
+    }
+    return "unknown";
+  }
+  inline std::string_view name(history_merge_e value) {
+    switch (value) {
+      case history_merge_e::not_merged: return "not_merged";
+      case history_merge_e::merged: return "merged";
+      case history_merge_e::unknown: break;
+    }
+    return "unknown";
+  }
+  inline std::string_view name(history_write_e value) {
+    switch (value) {
+      case history_write_e::not_attempted: return "not_attempted";
+      case history_write_e::open_failed: return "open_failed";
+      case history_write_e::write_failed: return "write_failed";
+      case history_write_e::close_failed: return "close_failed";
+      case history_write_e::closed_without_error: return "closed_without_error";
+      case history_write_e::unknown: break;
+    }
+    return "unknown";
+  }
+
+  /**
+   * @brief What one record_session() call did: its feedback classification, whether it merged into
+   *        the device:game aggregate, and what the history file write returned.
+   */
+  struct history_writer_observation_t {
+    history_feedback_e feedback = history_feedback_e::unknown;
+    history_merge_e merge = history_merge_e::unknown;
+    history_write_e write = history_write_e::unknown;
+  };
+
   /**
    * @brief Record session quality for feedback loop.
+   *
+   * A caller that passes an observation gets what this call actually did; the recording is the same.
    */
   void record_session(const std::string &device_name,
                       const std::string &app_name,
-                      const session_history_t &session);
+                      const session_history_t &session,
+                      history_writer_observation_t *observation = nullptr);
 
   /**
    * @brief Get session history for a device+game pair.
@@ -399,6 +445,13 @@ namespace ai_optimizer {
    * history file.
    */
   void clear_history_at(const std::filesystem::path &history_file);
+
+  /**
+   * @brief Write the in-memory history to an explicit file and report what the stream saw.
+   *
+   * Tests use this with a temporary file, for the same reason as clear_history_at().
+   */
+  history_write_e save_history_at(const std::filesystem::path &history_file);
 
   /**
    * @brief Get merged cached optimization + session history profiles for one

@@ -5032,6 +5032,33 @@ namespace proc {
       return stats.fps > 0.0 ? stats.fps : 0.0;
     }
 
+    // Values from the retained ended session, as pause read it. Text goes through the trace's
+    // known values, so the row never borrows this snapshot's strings.
+    void copy_ended_session_for_trace(vrr_trace::host_history_run_t &run,
+                                      const std::optional<stream_stats::ended_session_t> &ended) {
+      run.snapshot_read = true;
+      if (!ended) {
+        return;
+      }
+      run.ended_session_generation = ended->session_generation;
+      if (ended->vrr) {
+        run.vrr = vrr_trace::host_history_vrr_t {
+          ended->vrr->session_generation, ended->vrr->requested, ended->vrr->admission,
+          ended->vrr->host_source_pacing, ended->vrr->watch_or_input_only
+        };
+      }
+      if (ended->vrr_pacing) {
+        const auto &pacing = *ended->vrr_pacing;
+        run.pacing = vrr_trace::host_history_pacing_t {
+          pacing.last.mode, pacing.ended, pacing.authority_lost, pacing.last.session_generation,
+          pacing.last.capture_generation, pacing.trace_accepted_watermark
+        };
+      }
+      run.codec = vrr_trace::known_codec(ended->codec);
+      run.encoder_backend = vrr_trace::known_encoder_backend(ended->encoder_backend);
+      run.start_outcome = vrr_trace::known_start_outcome(ended->start_outcome);
+    }
+
     std::string grade_session_quality(const stream_stats::stats_t &stats, double target_fps) {
       if (stats.fps <= 0.0) {
         return "F";
@@ -11839,7 +11866,7 @@ namespace proc {
     }
   }
 
-  void proc_t::pause() {
+  void proc_t::pause(std::uint64_t expected_ending_session_generation) {
     auto &sync = session_lifecycle_sync();
     std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex);
     if (_app_id <= 0) {
@@ -11857,10 +11884,30 @@ namespace proc {
 
     BOOST_LOG(info) << "Session pausing for app [" << _app_name << "].";
 
+    // The private trace's one row for this pause: the ended session and history writer result it
+    // used. With the trace off nothing is read, copied or passed to the writer.
+    std::optional<vrr_trace::host_history_run_t> trace_run;
+    ai_optimizer::history_writer_observation_t writer;
+    if (vrr_trace::enabled()) {
+      trace_run.emplace();
+      trace_run->expected_session_generation = expected_ending_session_generation;
+      trace_run->capture_generation = _session_generation;
+      trace_run->client_report_recorded = _client_session_report_recorded;
+      if (_launch_session) {
+        trace_run->launch_policy = _launch_session->trace_display_policy;
+      }
+    }
+
     // Record session quality for AI feedback loop
     if (ai_optimizer::is_enabled() && _launch_session) {
       auto stats = stream_stats::get_current();
+      if (trace_run) {
+        copy_ended_session_for_trace(*trace_run, stats.last_session);
+      }
       if (_client_session_report_recorded) {
+        if (trace_run) {
+          trace_run->writer_skip = "client_report_recorded";
+        }
         BOOST_LOG(info) << "AI session feedback already recorded from the client report; skipping host-side duplicate for ["
                         << _launch_session->device_name << ":" << _app.name << "]";
       } else if (stats.streaming || stats.fps > 0) {
@@ -11957,8 +12004,21 @@ namespace proc {
             session.last_safe_target_fps < session.last_target_fps
           );
 
-        ai_optimizer::record_session(_launch_session->device_name, _app.name, session);
+        ai_optimizer::record_session(_launch_session->device_name, _app.name, session, trace_run ? &writer : nullptr);
+        if (trace_run) {
+          trace_run->writer_called = true;
+          trace_run->writer_feedback = ai_optimizer::name(writer.feedback);
+          trace_run->writer_merge = ai_optimizer::name(writer.merge);
+          trace_run->writer_write = ai_optimizer::name(writer.write);
+        }
+      } else if (trace_run) {
+        trace_run->writer_skip = "legacy_hot_sample_gate";
       }
+    } else if (trace_run) {
+      trace_run->writer_skip = _launch_session ? "ai_optimizer_disabled" : "no_launch_session";
+    }
+    if (trace_run) {
+      vrr_trace::record_host_history_run(*trace_run);
     }
 
     if (!_app.state_cmds.empty()) {

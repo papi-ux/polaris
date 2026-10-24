@@ -794,8 +794,8 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   ASSERT_NE(snapshot_wait, std::string::npos);
   ASSERT_NE(stop_publish, std::string::npos);
   EXPECT_LT(snapshot_wait, stop_publish);
-  const auto resume_body = function_source_between(source, "void proc_t::resume()", "void proc_t::pause()");
-  const auto pause_body = function_source_between(source, "void proc_t::pause()", "void proc_t::terminate(");
+  const auto resume_body = function_source_between(source, "void proc_t::resume()", "void proc_t::pause(std::uint64_t expected_ending_session_generation)");
+  const auto pause_body = function_source_between(source, "void proc_t::pause(std::uint64_t expected_ending_session_generation)", "void proc_t::terminate(");
   const auto report_writer = function_source_between(source, "void proc_t::mark_client_session_report_recorded", "bool proc_t::client_session_report_recorded");
   const auto report_reader = function_source_between(source, "bool proc_t::client_session_report_recorded", "bool proc_t::session_display_mode_is_explicit");
   const auto display_reader = function_source_between(source, "bool proc_t::session_display_mode_is_explicit", "bool proc_t::current_app_has_mangohud");
@@ -815,7 +815,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     ASSERT_NE(lock, std::string::npos);
     EXPECT_LT(sync, lock);
   };
-  guarded_reader("void proc_t::resume()", "void proc_t::pause()");
+  guarded_reader("void proc_t::resume()", "void proc_t::pause(std::uint64_t expected_ending_session_generation)");
   guarded_reader("void proc_t::mark_client_session_report_recorded", "bool proc_t::client_session_report_recorded");
   guarded_reader("bool proc_t::client_session_report_recorded", "bool proc_t::session_display_mode_is_explicit");
   guarded_reader("bool proc_t::session_display_mode_is_explicit", "bool proc_t::current_app_has_mangohud");
