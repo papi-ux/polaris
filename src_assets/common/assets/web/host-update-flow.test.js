@@ -207,6 +207,36 @@ describe('Host update journey', () => {
     }
   })
 
+  it('keeps a real failed transaction and its unknown readback without claiming nothing changed', () => {
+    // On a failed status read the host serializes only its real in-memory job, never a journal.
+    const failed = (attempted) => ({ request_id: 'one', action: 'install', state: 'failed', version: '1.5.1',
+      message: 'RPM stopped. Read the installed state below, then review again.',
+      check: { state: 'failed', code: 'rpm_failed', version: '1.5.1', ...(attempted === undefined ? {} : { transaction_attempted: attempted }) } })
+    const unreadable = (job) => ({ ...snapshot(job, {}), readback: 'unavailable', finish_available: false })
+    for (const attempted of [true, undefined]) {
+      const view = describeHostUpdate(unreadable(failed(attempted)), plan())
+      expect(view.needsAttention).toBe(true)
+      expect(view.title).toBe('Update stopped')
+      expect(view.message).toContain('RPM stopped.')
+      expect(view.message).toContain('could not read')
+      expect(view.message).not.toMatch(/nothing was changed|no packages were changed/i)
+      expect(describeHostUpdate(unreadable(failed(attempted)), plan(), { reviewing: true }).canInstall).toBe(false)
+      expect(view.canFinish).toBe(false)
+      const headline = buildUpdateCenterState({ currentVersion: '1.5.0', hostPlan: plan(), hostJourney: view })
+      expect(headline.statusLabel).toBe('Update stopped')
+      expect(headline.statusTone).toBe('warning')
+    }
+    // The job's own record that RPM never ran still justifies its separate no-change sentence.
+    const early = describeHostUpdate(unreadable(failed(false)), plan())
+    expect(early.message).toContain('Polaris stopped before installing, so no packages were changed.')
+    expect(early.message).toContain('could not read')
+    // With no job, a read failure is only an observation failure.
+    const none = describeHostUpdate(unreadable(null), plan())
+    expect(none.title).toBe('Installed package state needs attention')
+    expect(none.message).toContain('could not read')
+    expect(none.message).not.toMatch(/nothing was changed|no packages were changed|checks again shortly/i)
+  })
+
   it('mounts a guided host with only its guided note and no repeated status reads', async () => {
     vi.useFakeTimers()
     const fetcher = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('/plan?') ? unqualified

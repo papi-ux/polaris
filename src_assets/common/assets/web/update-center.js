@@ -639,9 +639,15 @@ export function describeHostUpdate(snapshot = {}, plan = null, local = {}) {
   }
   const recovery = needsAttention && !readFailed ? 'Read the package versions below. Polaris will not force a reinstall or remove package entries. Use Fedora software management or ask your system administrator to repair partial or unreadable entries, then review again.' : ''
   if (needsAttention && !active) {
-    title = 'Installed package state needs attention'
-    message = readFailed ? 'Polaris could not read this PC’s installed packages just now. Nothing was changed; this page checks again shortly.'
-      : plan?.route === 'helper' && plan.update_needed ? 'Review an update of the older packages to match the selected release.' : recovery
+    // A failed package read cannot establish an earlier transaction's outcome: keep a current
+    // real job's own title and message, add the uncertainty, and never claim nothing changed.
+    const unread = 'Polaris could not read this PC’s installed packages just now, so their current state is unknown. Reload this page to check again.'
+    if (readFailed && job.state) message = `${message} ${unread}`
+    else {
+      title = 'Installed package state needs attention'
+      message = readFailed ? unread
+        : plan?.route === 'helper' && plan.update_needed ? 'Review an update of the older packages to match the selected release.' : recovery
+    }
   }
   if (finished) {
     title = `Polaris ${installedVersion} is running`
