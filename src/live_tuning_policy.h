@@ -14,10 +14,11 @@
  *
  * Loss
  * - Decisions count reports, never wall time, so a report pause freezes them. A report after a gap of more
- *   than 2.5 s, or the first after a cut, is not judged; the first after a raise counts at half weight.
+ *   than 2.5 s, or the first after any rate change, is not judged because it covers the previous rate.
  * - A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss, and a probe
  *   also needs two of the last three reports to lose 3% of their frames or more. Loss under 3% never starts
- *   one, and neither does one burst.
+ *   one, and neither does one burst. Reports meeting that lossy-report gate while the change detector is
+ *   above zero do not update the background baseline or its burstiness.
  * - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
  *   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link
  *   is in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend

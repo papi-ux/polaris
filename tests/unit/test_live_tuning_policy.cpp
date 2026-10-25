@@ -160,7 +160,139 @@ namespace {
     };
   }
 
+  // RP6-S2-COMPLETED/DENSE-TRACE.jsonl, SHA256 ef95864bce0c62e29c7fdf5d9d8d8b7ab3774c546e47ce718aea3a9f96a08824.
+  // Times are milliseconds from cap start. Report receipts are snapshot time minus host_receipt_age_ms,
+  // rounded to milliseconds; repeated interval sequences are omitted. These are the retained 1 Hz RTT
+  // observations, not a reconstruction of every ENet poll or encoder acknowledgement.
+  live_tuning_policy::policy_t rp6_s2_prefix(int through_ms) {
+    constexpr int origin = 700000;
+    live_tuning_policy::policy_t policy {25987, FLOOR};
+    // The recorded 692 s clean condition: zero loss and a 3 ms RTT floor. Counts within the clean
+    // interval vary; 120 is the observed nominal report size, with the actual congested counts below.
+    for (int i = -692; i < 0; ++i) {
+      policy.report(origin + i * 1000, 120, 0);
+      policy.rtt(origin + i * 1000, 3.0);
+    }
+    struct report_t {
+      int at;
+      int expected;
+      int lost;
+    };
+    const std::vector<report_t> reports {
+      {-25, 121, 0},
+      {1136, 163, 132},
+      {4209, 542, 541},
+      {8566, 753, 752},
+      {10699, 375, 374},
+      {14204, 620, 618},
+      {15963, 303, 297},
+      {17088, 201, 197},
+      {18103, 158, 144},
+      {19418, 232, 224},
+      {20414, 144, 29},
+      {21411, 120, 0},
+      {22423, 118, 0},
+      {23438, 129, 91},
+    };
+    const std::vector<std::pair<int, double>> rtts {
+      {630, 58.0},
+      {1636, 68.0},
+      {2639, 72.0},
+      {3645, 78.0},
+      {4647, 82.0},
+      {5654, 83.0},
+      {6656, 88.0},
+      {7663, 91.0},
+      {8666, 89.0},
+      {9674, 90.0},
+      {10678, 91.0},
+      {11687, 94.0},
+      {12690, 93.0},
+      {13697, 96.0},
+      {14700, 94.0},
+      {15708, 95.0},
+      {16711, 95.0},
+      {17717, 96.0},
+      {18721, 96.0},
+      {19728, 96.0},
+      {20732, 73.0},
+      {21739, 56.0},
+      {22743, 38.0},
+      {23749, 57.0},
+    };
+    std::size_t report = 0;
+    std::size_t rtt = 0;
+    while (report < reports.size() || rtt < rtts.size()) {
+      if (report < reports.size() && (rtt == rtts.size() || reports[report].at < rtts[rtt].first)) {
+        const auto &row = reports[report++];
+        if (row.at > through_ms) {
+          break;
+        }
+        policy.report(origin + row.at, row.expected, row.lost);
+      } else {
+        const auto &[at, ms] = rtts[rtt++];
+        if (at > through_ms) {
+          break;
+        }
+        policy.rtt(origin + at, ms);
+      }
+    }
+    return policy;
+  }
+
 }  // namespace
+
+TEST(LiveTuningPolicy, Rp6S2DoesNotApproveARetryFromItsFirstMixedReport) {
+  auto policy = rp6_s2_prefix(21411);
+  ASSERT_EQ(policy.target_kbps(), 11264);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+
+  // Actual next report, 1.012 s later: a half-weight 118/0 was enough to approve 11264 and jump
+  // to 16896, above the still-active 9615.184 kbps cap. It cannot yet establish the retried rate.
+  policy.report(700000 + 22423, 118, 0);
+  EXPECT_EQ(policy.target_kbps(), 11264);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+
+  // The following actual report exposes the failed retry. Its lower bound must still be 4000,
+  // rather than the 11264 that was prematurely called clean.
+  policy.rtt(700000 + 22743, 38.0);
+  policy.report(700000 + 23438, 129, 91);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::bisect);
+  EXPECT_EQ(policy.ceiling_kbps(), 11264);
+  EXPECT_EQ(policy.target_kbps(), 6712);  // sqrt(4000 * 11264), below the actual cap
+}
+
+TEST(LiveTuningPolicy, Rp6S2CongestionDoesNotBecomeBurstinessForCleanRecovery) {
+  // Isolate the baseline seam after the actual first 132/163-loss report, before a second lossy
+  // report can authorize a probe. Adopt seeds the observed settled minimum; it does not assert
+  // that an outside writer existed in S2. This is a component test, not a complete S2 replay.
+  auto policy = rp6_s2_prefix(1136);
+  ASSERT_EQ(policy.target_kbps(), 25987);
+  policy.adopt(700000 + 5000, 4000);
+
+  // Actual first 24 distinct clean report receipts/counts after cap removal. The first is after a
+  // gap; the hold then uses its existing 20-report retry. No reports are synthesized to clear it.
+  const std::vector<std::pair<int, int>> clean_reports {
+    {181127, 120}, {182137, 120}, {183163, 121}, {184139, 120},
+    {185155, 121}, {186155, 120}, {187155, 121}, {188167, 118},
+    {189172, 121}, {190168, 120}, {191183, 121}, {192201, 121},
+    {193190, 120}, {194191, 121}, {195210, 121}, {196204, 120},
+    {197209, 119}, {198225, 121}, {199224, 121}, {200221, 120},
+    {201239, 121}, {202238, 120}, {203244, 121}, {204247, 121},
+  };
+  for (std::size_t i = 0; i <= 20; ++i) {
+    policy.report(700000 + clean_reports[i].first, clean_reports[i].second, 0);
+  }
+  ASSERT_EQ(policy.target_kbps(), 25987);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  for (std::size_t i = 21; i < clean_reports.size(); ++i) {
+    policy.report(700000 + clean_reports[i].first, clean_reports[i].second, 0);
+  }
+  // After discarding the mixed report, 241 clean frames cross the unchanged log(19) SPRT boundary
+  // with the clean baseline's dispersion floor of 2. The old contaminated dispersion of 10 does not.
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::normal);
+  EXPECT_EQ(policy.target_kbps(), 25987);
+}
 
 TEST(LiveTuningPolicyReplays, MatchTheReferenceModelSecondForSecond) {
   const auto pauses = [] {

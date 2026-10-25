@@ -408,11 +408,11 @@ namespace live_tuning_policy {
     }
     const auto first = after_change_;
     after_change_ = after_change_e::none;
-    if (gap || first == after_change_e::down) {
-      // After a pause or a cut, this report still covers frames sent before it.
+    if (gap || first != after_change_e::none) {
+      // The first report after either direction still covers the previous rate. Even half of a
+      // clean report can approve a retry against severe prior loss before its queue builds.
       return;
     }
-    const double weight = first == after_change_e::up ? 0.5 : 1.0;
     if (backoff_ > 0) {
       --backoff_;
     }
@@ -425,7 +425,7 @@ namespace live_tuning_policy {
       if (!test_) {
         return;
       }
-      const auto res = test_->add(expected, lost, weight);
+      const auto res = test_->add(expected, lost, 1.0);
       if (res) {
         if (st == state_e::descend) {
           descend_result(*res == 1, now_ms);
@@ -459,8 +459,16 @@ namespace live_tuning_policy {
       p0 = std::max(p0, lo_loss_);
     }
     const double p1 = std::max(2.5 * p0, p0 + REACT_EXCESS);
+    const double lossy_at = std::max(LOSSY_MIN, p0 + REACT_EXCESS / 2.0);
+    const bool lossy_report = lost / expected >= lossy_at;
     cusum_ = std::max(0.0, cusum_ + llr(expected, lost, p0, p1, std::max(2.0, disp())));
-    note_baseline(expected, lost);
+    // A change being detected is not background burstiness. In RP6 S2 the first 132/163-loss
+    // report arrived before the second lossy report needed for a probe; learning it here saturated
+    // dispersion, which then survived every rate change and slowed every clean recovery step.
+    // Reports below the existing lossy-report gate still teach ordinary background loss.
+    if (cusum_ == 0.0 || !lossy_report) {
+      note_baseline(expected, lost);
+    }
     if (cusum_ == 0.0) {
       run_.clear();
     } else {
@@ -498,8 +506,7 @@ namespace live_tuning_policy {
         hold_reports_ = 0;
       }
     }
-    const double lossy_at = std::max(LOSSY_MIN, p0 + REACT_EXCESS / 2.0);
-    push_bounded(duty_, lost / expected >= lossy_at, DUTY_WINDOW);
+    push_bounded(duty_, lossy_report, DUTY_WINDOW);
     const auto lossy = std::count(duty_.begin(), duty_.end(), true);
     if (cusum_ >= CUSUM_H && lossy >= DUTY_NEEDED) {
       double frames = 0.0;
