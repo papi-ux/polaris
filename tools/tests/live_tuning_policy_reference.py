@@ -19,8 +19,9 @@ Loss
   2.5 s, or the first after any rate change, is not judged because it covers the previous rate.
 - A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss, and a probe
   also needs two of the last three reports to lose 3% of their frames or more. Loss under 3% never starts one,
-  and neither does one burst. Reports meeting that lossy-report gate while the change detector is above zero
-  do not update the background baseline or its burstiness.
+  and neither does one burst. Reports keep teaching the baseline while a change is only a candidate. An actual
+  cut restores the level and burstiness from before that candidate; if the detector clears, the learned
+  baseline stays. A skipped report gap alone does not resolve the candidate.
 - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link is
   in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend on
@@ -151,6 +152,7 @@ class Controller:
         self.base_loss = self.base_m2 = 0.0
         self.base_disp = 1.0
         self.base_n = self.disp_n = 0
+        self._baseline_before_run = None
         self.normal_stats = [0, 0]
         self.normal_reports = 0
         # search
@@ -199,6 +201,15 @@ class Controller:
     def p_background(self):
         return max(self.background, self.MIN_LOSS)
 
+    def clear_loss_run(self, restore_baseline):
+        if restore_baseline and self._baseline_before_run is not None:
+            (self.base_loss, self.base_m2, self.base_disp,
+             self.base_n, self.disp_n) = self._baseline_before_run
+        self._baseline_before_run = None
+        self.cusum = 0.0
+        self.run = []
+        self.duty.clear()
+
     def note_baseline(self, expected, lost):
         a = 1.0 / min(self.BASELINE_REPORTS, self.base_n + 1)
         self.base_n += 1
@@ -211,6 +222,8 @@ class Controller:
             self.base_disp = var * expected / max(self.base_loss, 0.5 / expected)
 
     def reset_baseline(self, loss):
+        # A selected hold or rate-independent result resolves the candidate, retaining its burstiness.
+        self.clear_loss_run(False)
         # Keep the measured burstiness; move only the level.
         var = max(0.0, self.base_m2 - self.base_loss ** 2)
         self.base_loss = loss
@@ -221,14 +234,13 @@ class Controller:
         kbps = int(max(self.floor, min(self.base, kbps)))
         if kbps == self.target:
             return
+        # Only an actual cut rejects the candidate's baseline samples. A raise retains what was learned.
+        self.clear_loss_run(kbps < self.target)
         self.log.append((now // 1000, self.target // 1000, kbps // 1000, why))
         self.after_change = 'up' if kbps > self.target else 'down'
         if kbps < self.target:
             self.standing_run = self.building_run = 0
         self.target = kbps
-        self.cusum = 0.0
-        self.run = []
-        self.duty.clear()
 
     def to_normal(self, now, kbps, why):
         self.state = NORMAL
@@ -392,6 +404,7 @@ class Controller:
         if gap or first is not None:
             # The first report after either direction still covers the previous rate. Even half of a
             # clean report can approve a retry against severe prior loss before its queue builds.
+            # A gap alone leaves the candidate and its snapshot pending: RTT may still confirm a cut.
             return
         if self.backoff:
             self.backoff -= 1
@@ -430,14 +443,16 @@ class Controller:
         lossy_at = max(self.LOSSY_MIN, p0 + self.REACT_EXCESS / 2.0)
         lossy_report = lost / expected >= lossy_at
         self.cusum = max(0.0, self.cusum + llr(expected, lost, p0, p1, max(2.0, self.disp())))
-        # A detected change is not background burstiness. Reports below the existing lossy-report
-        # gate still teach ordinary background loss, as in the C++ policy.
-        if self.cusum == 0.0 or not lossy_report:
-            self.note_baseline(expected, lost)
         if self.cusum == 0.0:
+            self._baseline_before_run = None
             self.run = []
         else:
+            if self._baseline_before_run is None:
+                self._baseline_before_run = (self.base_loss, self.base_m2, self.base_disp,
+                                             self.base_n, self.disp_n)
             self.run.append((expected, lost))
+        # Recurring bursts must teach both the level and dispersion. A real cut restores the snapshot.
+        self.note_baseline(expected, lost)
         if st == NORMAL:
             self.normal_stats[0] += expected
             self.normal_stats[1] += lost
@@ -473,6 +488,7 @@ class Controller:
             mean = sum(l for _, l in self.run) / frames
             if self.backoff and mean <= self.background + self.ABSORB_EXCESS:
                 self.background = max(self.background, mean)
+                self._baseline_before_run = None
                 self.cusum = 0.0
                 self.run = []
                 return
