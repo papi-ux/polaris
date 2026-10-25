@@ -240,6 +240,18 @@ namespace {
     return policy;
   }
 
+  const std::vector<std::pair<int, int>> &rp6_s2_clean_reports() {
+    static const std::vector<std::pair<int, int>> clean_reports {
+      {181127, 120}, {182137, 120}, {183163, 121}, {184139, 120},
+      {185155, 121}, {186155, 120}, {187155, 121}, {188167, 118},
+      {189172, 121}, {190168, 120}, {191183, 121}, {192201, 121},
+      {193190, 120}, {194191, 121}, {195210, 121}, {196204, 120},
+      {197209, 119}, {198225, 121}, {199224, 121}, {200221, 120},
+      {201239, 121}, {202238, 120}, {203244, 121}, {204247, 121},
+    };
+    return clean_reports;
+  }
+
 }  // namespace
 
 TEST(LiveTuningPolicy, Rp6S2DoesNotApproveARetryFromItsFirstMixedReport) {
@@ -273,14 +285,7 @@ TEST(LiveTuningPolicy, Rp6S2CongestionDoesNotBecomeBurstinessForCleanRecovery) {
   // Actual first 24 distinct clean report receipts/counts after cap removal. This component test's
   // omitted middle creates the first-report gap; in the trace 181127 follows 180139 by about 1 s.
   // The hold then uses its existing 20-report retry. No reports are synthesized to clear it.
-  const std::vector<std::pair<int, int>> clean_reports {
-    {181127, 120}, {182137, 120}, {183163, 121}, {184139, 120},
-    {185155, 121}, {186155, 120}, {187155, 121}, {188167, 118},
-    {189172, 121}, {190168, 120}, {191183, 121}, {192201, 121},
-    {193190, 120}, {194191, 121}, {195210, 121}, {196204, 120},
-    {197209, 119}, {198225, 121}, {199224, 121}, {200221, 120},
-    {201239, 121}, {202238, 120}, {203244, 121}, {204247, 121},
-  };
+  const auto &clean_reports = rp6_s2_clean_reports();
   for (std::size_t i = 0; i <= 20; ++i) {
     policy.report(700000 + clean_reports[i].first, clean_reports[i].second, 0);
   }
@@ -293,6 +298,37 @@ TEST(LiveTuningPolicy, Rp6S2CongestionDoesNotBecomeBurstinessForCleanRecovery) {
   // with the clean baseline's dispersion floor of 2. The old contaminated dispersion of 10 does not.
   EXPECT_EQ(policy.state(), live_tuning_policy::state_e::normal);
   EXPECT_EQ(policy.target_kbps(), 25987);
+}
+
+TEST(LiveTuningPolicy, ANewLossCandidateDefersAnOtherwiseDueHoldRetry) {
+  live_tuning_policy::policy_t policy {25987, FLOOR};
+  policy.adopt(0, 4000);
+  policy.report(0, 120, 0);  // First report after the outside cut is mixed.
+  for (int i = 1; i < 20; ++i) {
+    policy.report(i * 1000, 120, 0);
+  }
+  ASSERT_EQ(policy.target_kbps(), 4000);
+  // The actual S2 onset counts, deliberately placed on the twentieth judged hold report.
+  policy.report(20000, 163, 132);
+  EXPECT_EQ(policy.target_kbps(), 4000);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  // A second lossy report still authorizes the existing probe; the retry is not a new loss gate.
+  policy.report(21000, 163, 132);
+  EXPECT_EQ(policy.target_kbps(), 2400);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::descend);
+}
+
+TEST(LiveTuningPolicy, Rp6RttCutRestoresTheBaselineAcrossSkippedGapReports) {
+  auto policy = rp6_s2_prefix(8666);
+  ASSERT_EQ(policy.target_kbps(), 22088);  // Actual first RTT cut, after both skipped gap reports.
+  policy.adopt(700000 + 10000, 4000);
+  for (const auto &[at, expected] : rp6_s2_clean_reports()) {
+    policy.report(700000 + at, expected, 0);
+  }
+  // At d=2 the last two clean reports verify 22088 and begin a climb to the requested base.
+  // d=10 would still be verifying 22088. This is restore-path coverage, not a full S2 replay.
+  EXPECT_EQ(policy.target_kbps(), 25987);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::climb);
 }
 
 TEST(LiveTuningPolicyReplays, MatchTheReferenceModelSecondForSecond) {

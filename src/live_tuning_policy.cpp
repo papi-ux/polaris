@@ -553,14 +553,22 @@ namespace live_tuning_policy {
     }
     if (st == state_e::hold && !hi_ && target_ < base_) {
       // Nothing above is known to fail: carry on climbing.
-      if (--retry_wait_ <= 0) {
+      if (retry_wait_ > 0) {
+        --retry_wait_;
+      }
+      // A due probe must not commit a newly suspicious baseline by raising in this report.
+      if (retry_wait_ == 0 && cusum_ == 0.0) {
         state_ = state_e::climb;
         climb_step(now_ms);
       }
       return;
     }
     if (st == state_e::hold && hi_) {
-      if (--retry_wait_ <= 0) {
+      if (retry_wait_ > 0) {
+        --retry_wait_;
+      }
+      // A due probe must not commit a newly suspicious baseline by raising in this report.
+      if (retry_wait_ == 0 && cusum_ == 0.0) {
         ++retries_;
         state_ = state_e::verify_hi;
         set_target(*hi_, "retry", now_ms);
