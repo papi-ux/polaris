@@ -42,7 +42,9 @@
  *   someone else's, and is left alone for 5 minutes.
  * - Heavy loss while cutting for a queue hands the stream to the loss probe.
  *
- * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second.
+ * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second, and
+ * tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells pass, and the
+ * four that need a congestion signal while reports stop stay named as unmet.
  */
 #pragma once
 

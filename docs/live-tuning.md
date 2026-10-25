@@ -55,7 +55,10 @@ stream's loss is, so a noisy second does not decide. ENet only reports its smoot
 so the sample behind each change is an estimate; Live Tuning uses it only to fail a raise early.
 The policy and its replays are `src/live_tuning_policy.h` and
 `tests/unit/test_live_tuning_policy.cpp`; the reference model they follow is
-`tools/tests/live_tuning_policy_reference.py`.
+`tools/tests/live_tuning_policy_reference.py`. `tests/unit/test_live_tuning_acceptance.cpp` holds
+the policy to a 26-cell acceptance bench. It passes 22. The 4 it misses are a link that shrinks
+just as the client's reports pause, which needs a congestion signal that keeps arriving while
+reports are missing.
 
 ## Range
 
