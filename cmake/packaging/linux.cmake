@@ -112,6 +112,8 @@ endif()
 # the helper ran polaris-spaces-setup remove, taking the Spaces security setup away from a Polaris
 # that stayed installed. rpm does the helper's real work from its file list and sysusers.d entry, so
 # it needs no script. The DEB helper has its own, set below.
+# Apply Debian policy modes to maintainer scripts for both package components.
+set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 set(CPACK_RPM_POLARIS_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 
