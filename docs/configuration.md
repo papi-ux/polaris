@@ -27,13 +27,13 @@ linux_prefer_gpu_native_capture = enabled
 trusted_subnets = ["10.0.0.0/24"]
 encoder = nvenc
 nvenc_split_encode_mode = disabled
-adaptive_bitrate_enabled = disabled
+adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
 These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto tries it first on AMD only for Private Stream, which checks an exact live frame, and for Gamescope Stream through the portal ([Vulkan Encoder](#vulkan-encoder)).
 
-The example keeps Live Tuning off for the initial stream, matching the default. You can turn it on separately; an existing configuration that enables it stays enabled.
+Live Tuning is on by default from 1.5.0, as in this example. The first start after upgrading turns a saved Off on once; turn it off afterwards in Quick Controls or Audio/Video settings and it stays off. See [Live Tuning](live-tuning.md).
 
 The `encoder` key remains the host-wide default. Clients that advertise the typed session-encoder contract can ask Polaris to keep that default, use Auto, or require one backend for a single game. Polaris accepts only a backend compiled into the running build, validates it again against the live capture route at launch, and restores the host value at teardown. Auto is the only request allowed to fall back; a named backend fails closed instead of silently selecting another encoder.
 
@@ -77,7 +77,7 @@ refuses that request with `app_launch_mode_pinned`. Also, `headless_mode = enabl
 | `capture` | empty (automatic) | Capture backend override; explicit Vulkan supports `kms`, `wlr`, and `portal` |
 | `encoder` | `nvenc` / `vaapi` / `vulkan` / `software` | Primary encoder backend; `vulkan` is experimental and strict when selected explicitly |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
-| `adaptive_bitrate_enabled` | `disabled` | Allow mid-stream bitrate adjustment (Live Tuning). Opt-in; a value already in your config file is kept |
+| `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment (Live Tuning). On by default from 1.5.0; existing hosts get it once on upgrade. Turning it off afterwards keeps it off |
 | `disconnect_resume_timeout_seconds` | `300` | Seconds to keep an app paused after client disconnect for resume |
 | `max_sessions` | `2` | Number of simultaneous sessions or viewers |
 | `enable_pairing` | `enabled` | Accept new clients |

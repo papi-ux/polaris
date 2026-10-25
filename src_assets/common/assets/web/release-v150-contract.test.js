@@ -227,9 +227,11 @@ describe('v1.5.0 release contract', () => {
     expect(notes).toContain('never past 300 Mbps or your `max_bitrate`')
     // Live Tuning lifts a request below adaptive_bitrate_min to that floor, so Doctor is not the only lift.
     expect(notes).toContain('Live Tuning lifting a request below `adaptive_bitrate_min` (2 Mbps by default) to that floor')
-    // Live Tuning is opt-in; while it is on Doctor's PyroWave finding is advice
+    // Live Tuning is on by default; while it is on Doctor's PyroWave finding is advice
     // to set a bitrate, not the one tap raise.
-    expect(notes).toContain("With Live Tuning on (it's off unless you turn it on), Doctor says what to set instead.")
+    expect(notes).toContain('With Live Tuning on (the default from 1.5.0), Doctor says what to set instead.')
+    expect(notes).toContain('existing hosts get it once on upgrade.')
+    expect(notes).toContain('Adaptive parity becomes active with Live Tuning on eligible Nova Linux NVENC streams')
     // A tunnel that carries Ethernet, ZeroTier or an OpenVPN tap, still reports its own MAC.
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
@@ -260,8 +262,9 @@ describe('v1.5.0 release contract', () => {
     expect(loss).toContain('in two of three reports, each losing 3% of its frames or more')
     expect(loss).toContain('Live Tuning treats a sustained rise in round trip time as queue evidence and lowers the bitrate while checking whether it drains.')
     expect(loss).toContain('Doctor takes no bitrate step of its own for sustained loss.')
-    // Its checks are a replay bench and unit tests, and the notes say what they do not cover.
-    expect(notes).toContain('not yet in a stream on a Steam Deck or a Retroid Pocket 6')
+    // Device observations supplement the bench without claiming full device qualification.
+    expect(notes).toContain('Retroid Pocket 6 streams under induced loss and Retroid Pocket 6 and Steam Deck streams under a capped link')
+    expect(notes).toContain('these are limited checks, not full device qualification')
     expect(notes).toContain("A link that shrinks while the client's media reports pause can go unnoticed without fresh congestion evidence")
   })
 })
