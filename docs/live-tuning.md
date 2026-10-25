@@ -48,7 +48,7 @@ stopped, perhaps because the link is overloaded, takes one deep sample and goes 
   drains and holds under it, with the reason `holding_under_a_queue`. A short rise is not a queue. A
   Steam Deck's Wi-Fi background scan lifts the reading to about 83 ms for 5 seconds every five
   minutes and then lets it fall, and 1.4.13 cut the stream for each one. A raise that starts a queue
-  fails once the reading is that far over its lowest and has climbed 2 ms a second for 2 seconds.
+  fails once the reading rises twice in a row to that far over its lowest.
 
 Every verdict is a sequential likelihood-ratio test on frame counts, scaled by how bursty the
 stream's loss is, so a noisy second does not decide. Live Tuning reads only ENet's smoothed round

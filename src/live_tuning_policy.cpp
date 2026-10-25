@@ -44,6 +44,7 @@ namespace live_tuning_policy {
     constexpr int RTT_STANDING_S = 8;
     constexpr double RTT_BUILD_MS_S = 2.0;
     constexpr int RTT_BUILD_FAIL_S = 2;
+    constexpr int RTT_RISES = 2;
     constexpr int RTT_DRAIN_S = 6;
     constexpr double RTT_CUT = 0.85;
     constexpr int RTT_MAX_CUTS = 3;
@@ -550,6 +551,19 @@ namespace live_tuning_policy {
   }
 
   void policy_t::rtt(std::int64_t now_ms, double smoothed_rtt_ms) {
+    if (last_rtt_ && smoothed_rtt_ms != *last_rtt_) {
+      rises_ = smoothed_rtt_ms > *last_rtt_ ? rises_ + 1 : 0;
+    }
+    last_rtt_ = smoothed_rtt_ms;
+    if (raising() && rises_ >= RTT_RISES && !rtt_min_.empty()) {
+      const double floor_rtt = *std::min_element(rtt_min_.begin(), rtt_min_.end());
+      if (smoothed_rtt_ms >= floor_rtt + std::max(10.0, 0.5 * floor_rtt)) {
+        // The smoothed RTT rose at its last two changes, to a queue's height: this step is building one.
+        rises_ = 0;
+        hi_is_queue_ = true;
+        step_result(true, now_ms);
+      }
+    }
     tick(now_ms);
     const std::int64_t sec = now_ms / 1000;
     if (!sec_) {

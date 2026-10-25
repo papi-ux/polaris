@@ -32,7 +32,8 @@
  *   than real loss at the rate above it, the loss is rate-independent after all.
  *
  * Queues
- * - A raise fails when the smoothed RTT is raised (10 ms, or half the minute's floor) and climbing 2 ms/s for 2 s.
+ * - A raise fails when the smoothed RTT rises at two changes in a row to a raised level, 10 ms or half the
+ *   minute's floor over that floor, whichever is more, or is raised and climbing 2 ms/s for 2 s.
  * - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background
  *   scan only raises it for about 5 s before it falls: a Steam Deck's scans peak at 83 ms for 5 s, every
  *   306.9 s. Cuts go on every 6 s until the queue starts to drain, at most three; the rate that queued is then
@@ -250,6 +251,8 @@ namespace live_tuning_policy {
     std::deque<double> sec_meds_;
     int standing_run_ = 0;
     int building_run_ = 0;
+    std::optional<double> last_rtt_;
+    int rises_ = 0;
     int rtt_suppress_ = 0;
     int rtt_cut_wait_ = 0;
     int rtt_cuts_ = 0;

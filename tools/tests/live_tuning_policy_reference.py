@@ -33,7 +33,8 @@ Loss
   than real loss at the rate above it, the loss is rate-independent after all.
 
 Queues
-- A raise fails when the smoothed RTT is raised (10 ms or half the minute's floor) and climbing 2 ms/s for 2 s.
+- A raise fails when the smoothed RTT rises at two changes in a row to a raised level, 10 ms or half the minute's
+  floor over that floor, whichever is more, or is raised and climbing 2 ms/s for 2 s.
 - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background scan
   only raises it for about 5 s before it falls (the Deck's peak at 83 ms for 5 s). Cuts go on every 6 s until
   the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. A queue
@@ -128,6 +129,7 @@ class Controller:
     RTT_STANDING_S = 8
     RTT_BUILD_MS_S = 2.0
     RTT_BUILD_FAIL_S = 2
+    RTT_RISES = 2
     RTT_DRAIN_S = 6
     RTT_CUT = 0.85
     RTT_MAX_CUTS = 3
@@ -174,6 +176,8 @@ class Controller:
         self.sec_vals = []
         self.sec_meds = deque(maxlen=4)
         self.standing_run = self.building_run = 0
+        self.last_rtt = None
+        self.rises = 0
         self.rtt_suppress = 0
         self.rtt_cut_wait = self.rtt_cuts = 0
         self.rtt_cut_lossy = False
@@ -495,6 +499,16 @@ class Controller:
         return self.state in UPWARD and self.lo is not None and self.target > self.lo
 
     def ping(self, t_ms, rtt):
+        if self.last_rtt is not None and rtt != self.last_rtt:
+            self.rises = self.rises + 1 if rtt > self.last_rtt else 0
+        self.last_rtt = rtt
+        floor = min(self.rtt_min) if self.rtt_min else None
+        if (self.raising() and self.rises >= self.RTT_RISES and floor is not None and
+                rtt >= floor + max(10.0, 0.5 * floor)):
+            # The smoothed RTT rose at its last two changes, to a queue's height: this step is building one.
+            self.rises = 0
+            self.hi_kind = 'queue'
+            self.step_result(True, t_ms)
         self.tick(t_ms)
         sec = t_ms // 1000
         if self.sec is None:
