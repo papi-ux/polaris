@@ -551,13 +551,16 @@ namespace live_tuning_policy {
       climb_step(now_ms);
       return;
     }
+    // Allow one existing duty window to confirm a new candidate before retrying. Two lossy
+    // reports already probe above; one isolated burst must not defer a due retry indefinitely.
+    const bool probe_deferred = cusum_ > 0.0 && run_.size() < DUTY_WINDOW;
     if (st == state_e::hold && !hi_ && target_ < base_) {
       // Nothing above is known to fail: carry on climbing.
       if (retry_wait_ > 0) {
         --retry_wait_;
       }
-      // A due probe must not commit a newly suspicious baseline by raising in this report.
-      if (retry_wait_ == 0 && cusum_ == 0.0) {
+      // Judge the existing loss window before a due probe commits an isolated burst.
+      if (retry_wait_ == 0 && !probe_deferred) {
         state_ = state_e::climb;
         climb_step(now_ms);
       }
@@ -567,8 +570,8 @@ namespace live_tuning_policy {
       if (retry_wait_ > 0) {
         --retry_wait_;
       }
-      // A due probe must not commit a newly suspicious baseline by raising in this report.
-      if (retry_wait_ == 0 && cusum_ == 0.0) {
+      // Judge the existing loss window before a due probe commits an isolated burst.
+      if (retry_wait_ == 0 && !probe_deferred) {
         ++retries_;
         state_ = state_e::verify_hi;
         set_target(*hi_, "retry", now_ms);

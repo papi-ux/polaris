@@ -318,17 +318,35 @@ TEST(LiveTuningPolicy, ANewLossCandidateDefersAnOtherwiseDueHoldRetry) {
   EXPECT_EQ(policy.state(), live_tuning_policy::state_e::descend);
 }
 
+TEST(LiveTuningPolicy, AnIsolatedBurstDefersADueRetryByOnlyTheExistingDutyWindow) {
+  live_tuning_policy::policy_t policy {25987, FLOOR};
+  policy.adopt(0, 4000);
+  policy.report(0, 120, 0);  // First report after the outside cut is mixed.
+  for (int i = 1; i < 20; ++i) {
+    policy.report(i * 1000, 120, 0);
+  }
+  policy.report(20000, 163, 132);
+  ASSERT_EQ(policy.target_kbps(), 4000);
+  policy.report(21000, 120, 0);
+  EXPECT_EQ(policy.target_kbps(), 4000);
+  // The same three-report loss window has now judged one burst and two clean reports.
+  policy.report(22000, 120, 0);
+  EXPECT_EQ(policy.target_kbps(), 25987);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+}
+
 TEST(LiveTuningPolicy, Rp6RttCutRestoresTheBaselineAcrossSkippedGapReports) {
   auto policy = rp6_s2_prefix(8666);
   ASSERT_EQ(policy.target_kbps(), 22088);  // Actual first RTT cut, after both skipped gap reports.
-  policy.adopt(700000 + 10000, 4000);
+  policy.adopt(700000 + 10000, 24000);  // An upward adoption cannot repair a missed cut rollback.
   for (const auto &[at, expected] : rp6_s2_clean_reports()) {
     policy.report(700000 + at, expected, 0);
   }
-  // At d=2 the last two clean reports verify 22088 and begin a climb to the requested base.
-  // d=10 would still be verifying 22088. This is restore-path coverage, not a full S2 replay.
+  // At d=2 the final clean reports finish the climb to base. At d=10 it remains a probe.
+  // The upward adoption commits rather than restores: only the actual RTT cut can repair it.
+  // This is restore-path coverage, not a full S2 replay.
   EXPECT_EQ(policy.target_kbps(), 25987);
-  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::climb);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::normal);
 }
 
 TEST(LiveTuningPolicyReplays, MatchTheReferenceModelSecondForSecond) {
