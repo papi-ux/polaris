@@ -22,6 +22,7 @@ Loss
   and neither does one burst. Reports keep teaching the baseline while a change is only a candidate. An actual
   cut restores the level and burstiness from before that candidate; if the detector clears, the learned
   baseline stays. A skipped report gap alone does not resolve the candidate.
+- A scheduled hold retry or climb waits for the detector to clear; an outside writer still owns its change.
 - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link is
   in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend on
@@ -501,14 +502,16 @@ class Controller:
             return
         if st == HOLD and self.hi is None and self.target < self.base:
             # Nothing above is known to fail: carry on climbing.
-            self.retry_wait -= 1
-            if self.retry_wait <= 0:
+            if self.retry_wait > 0:
+                self.retry_wait -= 1
+            if self.retry_wait == 0 and self.cusum == 0.0:
                 self.state = CLIMB
                 self.climb_step(t_ms)
             return
         if st == HOLD and self.hi is not None:
-            self.retry_wait -= 1
-            if self.retry_wait <= 0:
+            if self.retry_wait > 0:
+                self.retry_wait -= 1
+            if self.retry_wait == 0 and self.cusum == 0.0:
                 self.retries += 1
                 self.state = VERIFY_HI
                 self.set_target(self.hi, 'retry', t_ms)
