@@ -16,10 +16,11 @@ Evidence
 
 Loss
 - Decisions count reports, never wall time, so a report pause freezes them. A report after a gap of more than
-  2.5 s, or the first after a cut, is not judged; the first after a raise counts at half weight.
+  2.5 s, or the first after any rate change, is not judged because it covers the previous rate.
 - A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss, and a probe
   also needs two of the last three reports to lose 3% of their frames or more. Loss under 3% never starts one,
-  and neither does one burst.
+  and neither does one burst. Reports meeting that lossy-report gate while the change detector is above zero
+  do not update the background baseline or its burstiness.
 - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link is
   in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend on
@@ -388,10 +389,10 @@ class Controller:
             return
         first = self.after_change
         self.after_change = None
-        if gap or first == 'down':
-            # After a pause or a cut, this report still covers frames sent before it.
+        if gap or first is not None:
+            # The first report after either direction still covers the previous rate. Even half of a
+            # clean report can approve a retry against severe prior loss before its queue builds.
             return
-        weight = 0.5 if first == 'up' else 1.0
         if self.backoff:
             self.backoff -= 1
         st = self.state
@@ -399,7 +400,7 @@ class Controller:
             self.probe_stats[0] += expected
             self.probe_stats[1] += lost
         if st == DESCEND or st in UPWARD:
-            res = self.test.add(expected, lost, weight)
+            res = self.test.add(expected, lost, 1.0)
             if res is not None:
                 if st == DESCEND:
                     self.descend_result(res == 1, t_ms)
@@ -426,8 +427,13 @@ class Controller:
         if st == HOLD:
             p0 = max(p0, self.lo_loss)
         p1 = max(2.5 * p0, p0 + self.REACT_EXCESS)
+        lossy_at = max(self.LOSSY_MIN, p0 + self.REACT_EXCESS / 2.0)
+        lossy_report = lost / expected >= lossy_at
         self.cusum = max(0.0, self.cusum + llr(expected, lost, p0, p1, max(2.0, self.disp())))
-        self.note_baseline(expected, lost)
+        # A detected change is not background burstiness. Reports below the existing lossy-report
+        # gate still teach ordinary background loss, as in the C++ policy.
+        if self.cusum == 0.0 or not lossy_report:
+            self.note_baseline(expected, lost)
         if self.cusum == 0.0:
             self.run = []
         else:
@@ -460,7 +466,7 @@ class Controller:
                     self.background = rate * 1.2
                 self.hold_stats = [0, 0]
                 self.hold_reports = 0
-        self.duty.append(lost / expected >= max(self.LOSSY_MIN, p0 + self.REACT_EXCESS / 2))
+        self.duty.append(lossy_report)
         lossy = sum(self.duty)
         if self.cusum >= self.CUSUM_H and lossy >= self.DUTY_NEEDED:
             frames = sum(e for e, _ in self.run)
