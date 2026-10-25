@@ -5685,16 +5685,6 @@ TEST(DoctorActionTests, ASecondPressWhileTheLossStepHoldsTakesNoSecondStepAndSay
   EXPECT_TRUE(stream.saved_preference_untouched());
 }
 
-namespace {
-  /// The capture path a real stream publishes, which Doctor needs before it offers a quality restore.
-  stream_stats::stats_t with_gpu_capture_path(stream_stats::stats_t stats) {
-    stats.capture_transport = platf::frame_transport_e::dmabuf;
-    stats.capture_residency = platf::frame_residency_e::gpu;
-    stats.encode_target_residency = platf::frame_residency_e::gpu;
-    return stats;
-  }
-}  // namespace
-
 TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   // Earlier suites in this binary leave adaptive_bitrate process state
   // behind; normalize the two pieces this arc depends on before seeding
