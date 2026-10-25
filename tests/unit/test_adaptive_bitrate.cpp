@@ -10,6 +10,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <initializer_list>
 #include <optional>
 #include <string>
@@ -38,59 +39,79 @@ namespace {
     adaptive_bitrate::set_runtime_update_supported(true);
     adaptive_bitrate::set_base_bitrate(base_bitrate_kbps);
   }
+
+  /// Client media reports of 120 frames each, losing loss_pct of them. Three are what Live Tuning's policy
+  /// needs to start a probe while its baseline warms up; the probe's first step is 0.6x.
+  void sustain_media_loss(double loss_pct, int reports = 3, double rtt_ms = 8.0) {
+    for (int i = 0; i < reports; ++i) {
+      adaptive_bitrate::update_media_report(120.0, std::round(120.0 * loss_pct / 100.0), rtt_ms);
+    }
+  }
 }
 
 TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   enable_controller();
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(8.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
+  sustain_media_loss(8.0);
 
   const auto state = adaptive_bitrate::get_state();
   EXPECT_TRUE(state.enabled);
-  EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
+  EXPECT_EQ(state.target_bitrate_kbps, 12000);
   EXPECT_EQ("network_pressure", state.state);
+  EXPECT_EQ("packet_loss", state.reason);
 }
 
-TEST(AdaptiveBitrateController, IgnoresSubthresholdRelativeRttSpikeOnFastLan) {
+TEST(AdaptiveBitrateController, OneLossyReportNeverCuts) {
+  // A single burst, such as one second of Wi-Fi interference, is not a change in the stream's loss.
   enable_controller();
 
-  // Build enough history to arm relative spike detection. The final sample is
-  // three times the baseline, but 3 ms is not actionable network pressure.
-  for (int i = 0; i < 6; ++i) {
-    adaptive_bitrate::update_network_stats(0.0, 1.0);
-  }
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(0.0, 3.0);
+  adaptive_bitrate::update_rtt(8.0);
+  sustain_media_loss(40.0, 1);
+  sustain_media_loss(0.0, 5);
 
   const auto state = adaptive_bitrate::get_state();
   EXPECT_EQ(state.target_bitrate_kbps, state.base_bitrate_kbps);
   EXPECT_NE(state.state, "network_pressure");
 }
 
-TEST(AdaptiveBitrateController, ReducesTargetOnActionableRelativeRttSpike) {
+TEST(AdaptiveBitrateController, AHighRttReadingAloneNeverCuts) {
+  // 1.4.13 cut 10% for one reading of 45 ms and over twice the average. A Steam Deck's Wi-Fi background
+  // scan lifts ENet's reading to 83 ms for 5 s every 306.9 s, so that cut every five minutes on a clean
+  // link. The policy cuts for a queue only after the reading has been raised and not falling for 8 s.
   enable_controller();
 
   for (int i = 0; i < 6; ++i) {
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
+    adaptive_bitrate::update_rtt(3.0);
   }
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(0.0, 55.0);
+  for (int i = 0; i < 22; ++i) {
+    std::this_thread::sleep_for(100ms);
+    adaptive_bitrate::update_rtt(83.0);
+  }
 
   const auto state = adaptive_bitrate::get_state();
-  EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.reason, "rtt_spike");
+  EXPECT_EQ(state.target_bitrate_kbps, state.base_bitrate_kbps);
+  EXPECT_NE(state.state, "network_pressure");
+}
+
+TEST(AdaptiveBitrateController, MediaReportsWithoutFramesOrWithMoreLostThanExpectedAreNoEvidence) {
+  enable_controller();
+  adaptive_bitrate::update_rtt(8.0);
+  for (int i = 0; i < 5; ++i) {
+    adaptive_bitrate::update_media_report(0.0, 0.0, 8.0);
+    adaptive_bitrate::update_media_report(120.0, 121.0, 8.0);
+    adaptive_bitrate::update_media_report(std::nan(""), 10.0, 8.0);
+  }
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+  EXPECT_EQ(adaptive_bitrate::get_state().ewma_packet_loss, 0.0);
 }
 
 TEST(AdaptiveBitrateController, TelemetryMovementInvalidatesAStaleDoctorSnapshot) {
   enable_controller();
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before_pressure = adaptive_bitrate::get_doctor_state();
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(8.0, 8.0);
+  sustain_media_loss(8.0);
 
   const auto after_pressure = adaptive_bitrate::get_doctor_state();
   ASSERT_LT(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
@@ -109,10 +130,10 @@ TEST(AdaptiveBitrateController, TelemetryMovementInvalidatesAStaleDoctorSnapshot
 TEST(AdaptiveBitrateController, NetworkPressureAtFloorInvalidatesAStaleDoctorSnapshot) {
   enable_controller(2000);
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before_pressure = adaptive_bitrate::get_doctor_state();
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(8.0, 8.0);
+  // A probe at the floor cannot move the target, and still starts a new decision.
+  sustain_media_loss(8.0);
 
   const auto after_pressure = adaptive_bitrate::get_doctor_state();
   ASSERT_EQ(after_pressure.live_bitrate_kbps, before_pressure.live_bitrate_kbps);
@@ -127,12 +148,12 @@ TEST(AdaptiveBitrateController, NetworkPressureAtFloorInvalidatesAStaleDoctorSna
 TEST(AdaptiveBitrateController, HostEvidenceInsideAdjustmentIntervalInvalidatesAStaleDoctorSnapshot) {
   enable_controller();
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before_observation = adaptive_bitrate::get_doctor_state();
   // Production publishes the host evidence epoch before feeding the adaptive
   // loop. No interval sleep is intentional: this covers the early-return path.
   adaptive_bitrate::note_network_evidence_arrival(true);
-  adaptive_bitrate::update_network_stats(0.0, 55.0);
+  adaptive_bitrate::update_rtt(55.0);
 
   const auto after_observation = adaptive_bitrate::get_doctor_state();
   ASSERT_EQ(after_observation.live_bitrate_kbps, before_observation.live_bitrate_kbps);
@@ -252,7 +273,7 @@ TEST(AdaptiveBitrateController, NetworkRegressionBlocksTheNextDoctorQualityStep)
 TEST(AdaptiveBitrateController, ReportsFramePacingWithoutLoweringBitrate) {
   enable_controller();
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   std::this_thread::sleep_for(1100ms);
   adaptive_bitrate::update_stream_health(0.75, 0.05, 0.02, 3.0, 4.0, 28.0);
 
@@ -265,7 +286,7 @@ TEST(AdaptiveBitrateController, ReportsFramePacingWithoutLoweringBitrate) {
 TEST(AdaptiveBitrateController, ReducesTargetOnEncoderPressure) {
   enable_controller();
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   std::this_thread::sleep_for(1100ms);
   adaptive_bitrate::update_stream_health(0.96, 0.0, 0.0, 1.0, 12.0, 20.0);
 
@@ -302,7 +323,7 @@ TEST(AdaptiveBitrateController, HighRefreshEncoderPressureRequiresAnOverrunAndDe
   for (const auto &sample : samples) {
     SCOPED_TRACE(::testing::Message() << sample.fps << " fps, ratio=" << sample.ratio << ", work=" << sample.encode_ms);
     enable_controller();
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
+    adaptive_bitrate::update_rtt(8.0);
     std::this_thread::sleep_for(1100ms);
     const auto before = adaptive_bitrate::get_doctor_state();
     adaptive_bitrate::update_stream_health(sample.ratio, 0.0, 0.0, 0.0, sample.encode_ms, 0.0, sample.fps);
@@ -323,7 +344,7 @@ TEST(AdaptiveBitrateController, HighRefreshEncoderPressureRequiresAnOverrunAndDe
 TEST(AdaptiveBitrateController, EncoderPressureMovementAdvancesControllerRevision) {
   enable_controller();
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before_pressure = adaptive_bitrate::get_doctor_state();
   std::this_thread::sleep_for(1100ms);
   adaptive_bitrate::update_stream_health(0.96, 0.0, 0.0, 1.0, 12.0, 20.0);
@@ -336,7 +357,7 @@ TEST(AdaptiveBitrateController, EncoderPressureMovementAdvancesControllerRevisio
 TEST(AdaptiveBitrateController, EncoderPressureInsideAdjustmentIntervalInvalidatesAStaleDoctorSnapshot) {
   enable_controller();
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before_pressure = adaptive_bitrate::get_doctor_state();
   // No interval sleep is intentional: a pressure sample must invalidate a
   // stale Doctor snapshot even when the adaptive target cannot move yet.
@@ -413,7 +434,7 @@ TEST(AdaptiveBitrateController, ProvisionalPacingTransitionInvalidatesWithoutBlo
 TEST(AdaptiveBitrateController, EncoderPressureAtFloorAdvancesControllerRevision) {
   enable_controller(2000);
 
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before_pressure = adaptive_bitrate::get_doctor_state();
   std::this_thread::sleep_for(1100ms);
   adaptive_bitrate::update_stream_health(0.96, 0.0, 0.0, 1.0, 12.0, 20.0);
@@ -440,12 +461,11 @@ TEST(AdaptiveBitrateController, ConfiguredCeilingNeverCutsTheClientsStartingBitr
   EXPECT_EQ(161000, request->target_bitrate_kbps);
 
   // Pressure lowers the bitrate from the client's request, not from the ceiling.
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(8.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
+  sustain_media_loss(8.0);
   state = adaptive_bitrate::get_state();
   EXPECT_EQ("network_pressure", state.state);
-  EXPECT_LT(state.target_bitrate_kbps, 161000);
+  EXPECT_EQ(state.target_bitrate_kbps, 96600);
   EXPECT_GT(state.target_bitrate_kbps, 50000);
 
   // The raise belongs to the stream. It never reaches the configured value, so
@@ -531,11 +551,10 @@ TEST(AdaptiveBitrateController, ExplicitLiveWriteAboveTheConfiguredCeilingIsKept
 
   // Adaptive stays on in this controller, so pressure works down from the
   // written 180 Mbps and must not snap to the configured 50 Mbps ceiling.
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(8.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
+  sustain_media_loss(8.0);
   state = adaptive_bitrate::get_state();
-  EXPECT_LT(state.target_bitrate_kbps, 180000);
+  EXPECT_EQ(state.target_bitrate_kbps, 108000);
   EXPECT_GT(state.target_bitrate_kbps, 50000);
 }
 
@@ -560,7 +579,7 @@ TEST(AdaptiveBitrateController, HidesTargetsWhenEncoderCannotApplyRuntimeUpdates
   enable_controller(26000);
   adaptive_bitrate::set_runtime_update_supported(false);
 
-  adaptive_bitrate::update_network_stats(21.8, 12.0);
+  sustain_media_loss(21.8, 5, 12.0);
 
   const auto state = adaptive_bitrate::get_state();
   EXPECT_TRUE(state.enabled);
@@ -840,7 +859,8 @@ TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
   );
   ASSERT_TRUE(doctor_revision.has_value());
 
-  adaptive_bitrate::update_network_stats(12.0, 120.0);
+  sustain_media_loss(12.0, 5, 120.0);
+  adaptive_bitrate::update_rtt(120.0);
   adaptive_bitrate::update_stream_health(0.70, 0.10, 0.20, 8.0, 18.0, 50.0);
 
   const auto during = adaptive_bitrate::get_doctor_state();
@@ -857,7 +877,7 @@ TEST(AdaptiveBitrateController, DoctorTargetCannotDriftFromTelemetry) {
 
 TEST(AdaptiveBitrateController, RollbackTargetCannotDriftBeforeEncoderAcknowledgement) {
   enable_controller(20000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before = adaptive_bitrate::get_doctor_state();
   ASSERT_TRUE(before.enabled);
 
@@ -877,7 +897,7 @@ TEST(AdaptiveBitrateController, RollbackTargetCannotDriftBeforeEncoderAcknowledg
   ASSERT_EQ(adaptive_bitrate::get_target_bitrate_kbps(), 20000);
 
   std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(12.0, 120.0);
+  sustain_media_loss(12.0, 5, 120.0);
   adaptive_bitrate::update_stream_health(0.70, 0.10, 0.20, 8.0, 18.0, 50.0);
 
   const auto pending = adaptive_bitrate::get_doctor_state();
@@ -889,8 +909,7 @@ TEST(AdaptiveBitrateController, RollbackTargetCannotDriftBeforeEncoderAcknowledg
   ).has_value());
 
   adaptive_bitrate::acknowledge_live_bitrate_applied(*restore_revision, 20000);
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(12.0, 120.0);
+  sustain_media_loss(12.0, 3, 120.0);
 
   const auto resumed = adaptive_bitrate::get_doctor_state();
   EXPECT_LT(resumed.live_bitrate_kbps, 20000);
@@ -1004,18 +1023,37 @@ TEST(AdaptiveBitrateController, PyroWaveFloorStopsLiveTuningAndNeverLiftsAReques
   EXPECT_EQ(state.target_bitrate_kbps, 20000);
   EXPECT_EQ(state.floor_source, "pyrowave_advice");
 
-  // Above the floor, heavy loss cuts down to it and no further.
+  // Above the floor, a probe goes no lower than it. Heavy loss the floor does not help is not the
+  // bitrate's doing, so the stream goes back to its request rather than softening the picture for nothing.
   enable_controller(100000);
   adaptive_bitrate::set_session_floor(90000, "pyrowave_advice");
   ASSERT_EQ(adaptive_bitrate::get_state().min_bitrate_kbps, 90000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  for (int i = 0; i < 2; ++i) {
-    std::this_thread::sleep_for(1100ms);
-    adaptive_bitrate::update_network_stats(20.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
+  int lowest = 100000;
+  for (int i = 0; i < 12; ++i) {
+    sustain_media_loss(20.0, 1);
+    lowest = std::min(lowest, adaptive_bitrate::get_state().target_bitrate_kbps);
   }
+  EXPECT_EQ(lowest, 90000);
   state = adaptive_bitrate::get_state();
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.target_bitrate_kbps, 90000);
+  EXPECT_EQ(state.target_bitrate_kbps, 100000);
+  EXPECT_EQ(state.reason, "loss_independent_of_bitrate");
+
+  // Loss the floor does help, over a link of 95 Mbps, holds between the floor and the link.
+  enable_controller(100000);
+  adaptive_bitrate::set_session_floor(90000, "pyrowave_advice");
+  adaptive_bitrate::update_rtt(8.0);
+  std::vector<int> targets;
+  for (int i = 0; i < 80; ++i) {
+    sustain_media_loss(adaptive_bitrate::get_state().target_bitrate_kbps > 95000 ? 20.0 : 0.0, 1);
+    targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
+  }
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), 90000);
+  // Settled under the link, trying the request again only now and then.
+  const auto over_link = std::count_if(targets.end() - 40, targets.end(), [](int t) {
+    return t > 95000;
+  });
+  EXPECT_LE(over_link, 4);
 
   // The next stream starts from adaptive_bitrate_min again.
   enable_controller(20000);
@@ -1025,20 +1063,10 @@ TEST(AdaptiveBitrateController, PyroWaveFloorStopsLiveTuningAndNeverLiftsAReques
 }
 
 namespace {
-  // Live Tuning keeps 1.4.13's loss handling in this release. Every control ping reaches it as a reading
-  // with 0% loss, about ten a second, and each client media report with its own loss. Every reading moves
-  // its loss average by ewma_alpha, 0.3, and it acts on the first reading once a second is up: an average
-  // above 1% cuts in proportion and one above 5% by the whole 20%, an RTT reading of 45 ms or more and
-  // twice the running average cuts 10%, and it recovers only after 10 seconds with no lossy report.
-
   /// One client media report: the frames the client expected in its second, and how many never arrived.
   struct media_report_t {
     double expected;
     double lost;
-
-    double loss_pct() const {
-      return lost * 100.0 / expected;
-    }
   };
 
   // The Retroid Pocket 6's recorded HEVC run, 3840x2160 at 120 fps over Wi-Fi: 9 of 122 frames lost and 9
@@ -1050,44 +1078,6 @@ namespace {
   constexpr std::array<double, 8> k_rp6_hevc_rtt_ms {4.0, 4.4, 10.1, 7.6, 9.6, 7.9, 8.6, 4.3};
   constexpr int k_rp6_hevc_kbps = 268988;
 
-  struct live_second_t {
-    int target_kbps = 0;
-    /// Live Tuning's loss average when it acted, after the second's first reading.
-    double loss_acted_on_pct = 0.0;
-  };
-
-  /// One second as Live Tuning hears it: ten control pings and, when there is one, the client's media
-  /// report after `pings_before_report` of them. The second begins once a second has passed since the
-  /// last one began, so its first reading is the one Live Tuning acts on.
-  live_second_t live_second(std::optional<double> report_loss_pct, int pings_before_report, double rtt_ms = 8.0) {
-    std::this_thread::sleep_for(1005ms);
-    live_second_t second;
-    for (int ping = 0; ping < 10; ++ping) {
-      if (report_loss_pct && ping == pings_before_report) {
-        adaptive_bitrate::update_network_stats(*report_loss_pct, rtt_ms);
-        if (ping == 0) {
-          second.loss_acted_on_pct = adaptive_bitrate::get_state().ewma_packet_loss;
-        }
-      }
-      adaptive_bitrate::update_network_stats(0.0, rtt_ms);
-      if (ping == 0 && !(report_loss_pct && pings_before_report == 0)) {
-        second.loss_acted_on_pct = adaptive_bitrate::get_state().ewma_packet_loss;
-      }
-    }
-    second.target_kbps = adaptive_bitrate::get_state().target_bitrate_kbps;
-    return second;
-  }
-
-  /// Live Tuning's loss average after each of `readings`, fed back to back so none is acted on.
-  std::vector<double> loss_average_after(std::initializer_list<double> readings) {
-    std::vector<double> averages;
-    for (const double loss : readings) {
-      adaptive_bitrate::update_network_stats(loss, 8.0);
-      averages.push_back(adaptive_bitrate::get_state().ewma_packet_loss);
-    }
-    return averages;
-  }
-
   /// Leave no cut target behind for a later suite in this binary to read as a reduced stream.
   void leave_live_tuning_clean() {
     adaptive_bitrate::reset();
@@ -1096,103 +1086,60 @@ namespace {
   }
 }  // namespace
 
-TEST(AdaptiveBitrateController, TheRecordedRp6HevcRunCutsNothingForItsLoss) {
-  // The Retroid Pocket 6's HEVC run with its reports landing mid-second, five pings after each second
-  // begins. A 7.4% report lifts the loss average to 2.2%, and the six pings before the next adjustment
-  // take it under 0.3%, so no adjustment sees loss above 1% and the stream stays at 269 Mbps.
+TEST(AdaptiveBitrateController, TheRecordedRp6HevcRunProbesOnceAndKeepsItsBitrate) {
+  // Loss in two of every eight reports, whatever the rate. The policy probes once as the bursts begin,
+  // finds the same loss far below the request, learns it as loss that does not depend on the bitrate, and
+  // keeps the request for the rest of the run.
   enable_controller(k_rp6_hevc_kbps);
-  adaptive_bitrate::update_network_stats(0.0, k_rp6_hevc_rtt_ms[0]);
-  for (int ping = 0; ping < 6; ++ping) {
-    adaptive_bitrate::update_network_stats(0.0, k_rp6_hevc_rtt_ms[ping % k_rp6_hevc_rtt_ms.size()]);
-  }
-  for (std::size_t second = 0; second < k_rp6_hevc_reports.size(); ++second) {
-    const auto heard = live_second(k_rp6_hevc_reports[second].loss_pct(), 5, k_rp6_hevc_rtt_ms[second]);
-    EXPECT_EQ(heard.target_kbps, k_rp6_hevc_kbps) << "second " << second;
-    EXPECT_LT(heard.loss_acted_on_pct, 1.0) << "second " << second;
-    EXPECT_NE(adaptive_bitrate::get_state().state, "network_pressure") << "second " << second;
-  }
-  leave_live_tuning_clean();
-}
-
-TEST(AdaptiveBitrateController, AnRp6ReportThatMeetsAnAdjustmentCutsForItsOwnLoss) {
-  // Where the run's reports land decides whether 1.4.13 cuts for them. A 7.4% report keeps the loss
-  // average above 1% for its own reading and the two pings after it and no longer, so an adjustment
-  // that falls on one of those three cuts in proportion, under a tenth, and the others see none.
-  enable_controller(k_rp6_hevc_kbps);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const double report = k_rp6_hevc_reports[6].loss_pct();
-  const auto averages = loss_average_after({report, 0.0, 0.0, 0.0});
-  EXPECT_NEAR(averages[0], 0.3 * report, 1e-9);
-  EXPECT_GT(averages[1], 1.0);
-  EXPECT_GT(averages[2], 1.0);
-  EXPECT_LT(averages[3], 1.0);
-  for (int ping = 0; ping < 30; ++ping) {
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
-  }
-  ASSERT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
-
-  // The report is the first reading once the second is up.
-  const auto heard = live_second(report, 0);
-  EXPECT_GT(heard.loss_acted_on_pct, 1.0);
-  EXPECT_LT(heard.target_kbps, k_rp6_hevc_kbps);
-  EXPECT_GT(heard.target_kbps, k_rp6_hevc_kbps * 9 / 10);
-  const auto state = adaptive_bitrate::get_state();
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.reason, "packet_loss");
-  leave_live_tuning_clean();
-}
-
-TEST(AdaptiveBitrateController, ATwentyPercentBurstCutsWhereItsReportsLandLateInTheSecond) {
-  // Three seconds that lose a fifth of their frames, each report landing two pings before the second
-  // ends. The pings before the next adjustment leave the average near 2%, and each of the three
-  // adjustments after a lossy report cuts in proportion. A 20% report keeps the average above 1% for
-  // its own reading and five pings, so a burst whose reports land six readings or more before an
-  // adjustment is under the line when Live Tuning acts, and one that lands on the adjustment is heavy
-  // loss and cuts the whole 20%.
-  enable_controller(k_rp6_hevc_kbps);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto averages = loss_average_after({20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
-  EXPECT_GT(averages[0], 5.0);
-  EXPECT_GT(averages[5], 1.0);
-  EXPECT_LT(averages[6], 1.0);
-  for (int ping = 0; ping < 30; ++ping) {
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
-  }
-  ASSERT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
-
+  config::video.adaptive_bitrate.max_bitrate_kbps = 300000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(k_rp6_hevc_kbps);
   std::vector<int> targets;
-  for (int second = 0; second < 3; ++second) {
-    targets.push_back(live_second(20.0, 8).target_kbps);
+  for (int report = 0; report < 300; ++report) {
+    const auto &recorded = k_rp6_hevc_reports[report % k_rp6_hevc_reports.size()];
+    adaptive_bitrate::update_rtt(k_rp6_hevc_rtt_ms[report % k_rp6_hevc_rtt_ms.size()]);
+    adaptive_bitrate::update_media_report(recorded.expected, recorded.lost, k_rp6_hevc_rtt_ms[report % k_rp6_hevc_rtt_ms.size()]);
+    targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
   }
-  targets.push_back(live_second(0.0, 8).target_kbps);
-  // The first lossy second's adjustment came before its report.
-  EXPECT_EQ(targets[0], k_rp6_hevc_kbps);
+  int probes = 0;
   for (std::size_t i = 1; i < targets.size(); ++i) {
-    EXPECT_LT(targets[i], targets[i - 1]) << i;
-    EXPECT_GT(targets[i], targets[i - 1] * 9 / 10) << i;
+    probes += targets[i - 1] == k_rp6_hevc_kbps && targets[i] < k_rp6_hevc_kbps;
   }
+  EXPECT_LE(probes, 1);
+  EXPECT_GT(*std::min_element(targets.begin(), targets.end()), 2000);
+  EXPECT_TRUE(std::all_of(targets.end() - 200, targets.end(), [](int t) {
+    return t == k_rp6_hevc_kbps;
+  }));
   const auto state = adaptive_bitrate::get_state();
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.reason, "packet_loss");
+  EXPECT_EQ(state.state, "steady");
+  EXPECT_EQ(state.reason, "loss_independent_of_bitrate");
+  EXPECT_GT(state.background_loss_pct, 1.0);
   leave_live_tuning_clean();
 }
 
-TEST(AdaptiveBitrateController, AnRttSpikeCutsTenPercentEachSecondItLasts) {
-  // A Wi-Fi RTT spike to 60 ms on a stream that has read 8 ms, two seconds long, as ENet's estimate
-  // stays up. Every ping and report carries it, and each second's adjustment cuts 10% with no loss at all.
+TEST(AdaptiveBitrateController, ATwentyPercentBurstIsBackAtTheRequestSoonAfterItEnds) {
+  // Three seconds that lose a fifth of their frames at every rate, then clean reports.
   enable_controller(k_rp6_hevc_kbps);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  for (int ping = 0; ping < 200; ++ping) {
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  config::video.adaptive_bitrate.max_bitrate_kbps = 300000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_rtt(8.0);
+  sustain_media_loss(0.0, 20);
+  sustain_media_loss(20.0, 3);
+  EXPECT_LT(adaptive_bitrate::get_state().target_bitrate_kbps, k_rp6_hevc_kbps);
+  int back_after = -1;
+  for (int report = 1; report <= 40 && back_after < 0; ++report) {
+    sustain_media_loss(0.0, 1);
+    if (adaptive_bitrate::get_state().target_bitrate_kbps == k_rp6_hevc_kbps) {
+      back_after = report;
+    }
   }
-  const auto first = live_second(0.0, 5, 60.0);
-  EXPECT_EQ(first.target_kbps, static_cast<int>(k_rp6_hevc_kbps * 0.9));
-  EXPECT_EQ(adaptive_bitrate::get_state().reason, "rtt_spike");
-  const auto second = live_second(0.0, 5, 60.0);
-  EXPECT_EQ(second.target_kbps, static_cast<int>(static_cast<int>(k_rp6_hevc_kbps * 0.9) * 0.9));
-  const auto state = adaptive_bitrate::get_state();
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.reason, "rtt_spike");
+  EXPECT_GT(back_after, 0);
+  EXPECT_LE(back_after, 30);
   leave_live_tuning_clean();
 }
 
@@ -1362,10 +1309,10 @@ TEST(AdaptiveBitrateHistory, LabelsARevisionOnlyReaffirmationApartFromABackendUp
 TEST(AdaptiveBitrateHistory, RepeatedUnchangedPollsFoldInsteadOfFillingTheHistory) {
   start_history_scope();
   apply_current_request(true);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_rtt(8.0);
   const auto before = history_now();
   for (int poll = 0; poll < 500; ++poll) {
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
+    adaptive_bitrate::update_rtt(8.0);
     adaptive_bitrate::note_network_evidence_arrival(false);
     const auto request = adaptive_bitrate::get_live_bitrate_request();
     ASSERT_TRUE(request.has_value());
@@ -1459,7 +1406,7 @@ TEST(AdaptiveBitrateHistory, RecordingLeavesTheControllerSnapshotUnchanged) {
 TEST(AdaptiveBitrateHistory, ANewScopeWithoutAResetKeepsNothingRecordedBeforeIt) {
   start_history_scope();
   apply_current_request(true);
-  adaptive_bitrate::update_network_stats(0.0, 9.0);
+  adaptive_bitrate::update_rtt(9.0);
 
   // The stream ends, the controller keeps moving unscoped, and a new scope begins with no reset.
   adaptive_bitrate::set_session_scope(0, {}, false);

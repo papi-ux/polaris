@@ -1,6 +1,6 @@
 /**
  * @file src/adaptive_bitrate.cpp
- * @brief Adaptive bitrate controller using EWMA-based network feedback.
+ * @brief Live Tuning's bitrate actuator: the policy's target, Doctor's transactions and the encoder's proof.
  */
 
 // standard includes
@@ -15,16 +15,12 @@
 #include "adaptive_bitrate.h"
 #include <cmath>
 #include "config.h"
+#include "live_tuning_policy.h"
 #include "logging.h"
 
 using namespace std::literals;
 
 namespace adaptive_bitrate {
-
-  // Keep autonomous bitrate changes behind the same actionable RTT boundary
-  // Doctor uses. A relative-only spike check turns normal LAN jitter such as
-  // 1 ms -> 3 ms into "congestion" even though the path is still excellent.
-  static constexpr double ACTIONABLE_RTT_MS = 45.0;
 
   // Internal state protected by mutex for complex operations,
   // atomics for simple reads from the encoding thread.
@@ -87,13 +83,18 @@ namespace adaptive_bitrate {
   // increase over an intervening bad observation. Protected by state_mutex.
   static bool doctor_network_policy_regressed_during_override = false;
 
-  // EWMA-smoothed network metrics
+  // Diagnostic averages of the media reports' loss and the RTT readings, for status and history. Live
+  // Tuning's decisions come from the policy below, which never reads them.
   static double ewma_packet_loss = 0.0;
   static double ewma_rtt = 0.0;
-  static double avg_rtt = 0.0;
-  static int rtt_sample_count = 0;
+  // The first media report starts the loss average.
+  static bool loss_average_started = false;
 
-  // Timing for recovery and adjustment intervals
+  // This stream's loss and queue policy. Protected by state_mutex. Created when feedback first arrives
+  // with a base bitrate, and dropped by reset().
+  static std::optional<live_tuning_policy::policy_t> stream_policy;
+
+  // Timing for encoder-pressure adjustments
   static std::chrono::steady_clock::time_point last_adjustment_time;
   static std::chrono::steady_clock::time_point last_pressure_time;
 
@@ -378,137 +379,169 @@ namespace adaptive_bitrate {
       doctor_network_policy_regressed_during_override;
   }
 
-  void update_network_stats(double packet_loss_percent, double rtt_ms) {
+  static std::int64_t policy_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+  }
+
+  // This stream's policy, following every writer outside it. Requires state_mutex and a base bitrate.
+  // A client request, a floor or a ceiling the policy has not seen is a rebase; a target it did not set
+  // (encoder load, Doctor, a manual bitrate, a clamp) is where it carries on from.
+  static live_tuning_policy::policy_t &policy_locked(std::int64_t now_ms) {
+    const int base = std::min(base_bitrate_kbps.load(std::memory_order_relaxed), current_config.max_bitrate_kbps);
+    const int floor = std::min(current_config.min_bitrate_kbps, base);
+    const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
+    if (!stream_policy) {
+      stream_policy.emplace(base, floor);
+    }
+    if (stream_policy->base_kbps() != base || stream_policy->floor_kbps() != floor) {
+      stream_policy->rebase(base, floor);
+    }
+    if (target > 0 && stream_policy->target_kbps() != target) {
+      stream_policy->adopt(now_ms, target);
+    }
+    return *stream_policy;
+  }
+
+  // The controller state and reason Live Tuning reports for where the policy is. The states are the ones
+  // clients already read; the reasons say what the policy is doing.
+  static void set_policy_status_locked(const live_tuning_policy::policy_t &p) {
+    using live_tuning_policy::state_e;
+    switch (p.state()) {
+      case state_e::descend:
+        set_controller_status("network_pressure", "packet_loss");
+        return;
+      case state_e::rtt_cut:
+        set_controller_status("network_pressure", "standing_queue");
+        return;
+      case state_e::bisect:
+        set_controller_status("network_pressure", "finding_the_link");
+        return;
+      case state_e::hold:
+        if (p.ceiling_kbps()) {
+          // Settled under a link or a queue: holding, not recovering, though it retries above now and then.
+          set_controller_status("network_pressure", p.ceiling_is_queue() ? "holding_under_a_queue" : "holding_under_the_link");
+        } else {
+          set_controller_status("recovering", "waiting_to_climb");
+        }
+        return;
+      case state_e::verify_hi:
+        set_controller_status("recovering", "testing_a_step_up");
+        return;
+      case state_e::climb:
+        set_controller_status("recovering", "climbing");
+        return;
+      case state_e::normal:
+        // Loss that does not depend on the bitrate is left to the stream: cutting would not help it.
+        set_controller_status("steady", p.background_loss() >= 0.005 ? "loss_independent_of_bitrate" : "healthy");
+        return;
+    }
+  }
+
+  // Publish what the policy decided. Requires state_mutex. A decision that could not move a clamped target,
+  // such as a probe that starts at the floor, still advances the revision, so Doctor cannot raise quality
+  // from a clean snapshot taken before it.
+  static void apply_policy_locked(const live_tuning_policy::policy_t &p,
+                                  std::uint64_t changes_before,
+                                  live_tuning_policy::state_e state_before) {
+    if (p.changes() == changes_before && p.state() == state_before) {
+      // Nothing decided: leave the status, which encoder load or frame pacing may have set since.
+      return;
+    }
+    set_policy_status_locked(p);
+    const int base = base_bitrate_kbps.load(std::memory_order_relaxed);
+    const int current = target_bitrate_kbps.load(std::memory_order_relaxed);
+    const int next = clamp_target(p.target_kbps(), base);
+    if (next != current) {
+      target_bitrate_kbps.store(next, std::memory_order_relaxed);
+      ++action_authority_revision;
+      BOOST_LOG(debug) << "Live Tuning: " << current << " -> " << next << " kbps ("
+                       << p.last_change().why << ", " << live_tuning_policy::name(p.state()) << ')';
+    }
+    ++operator_revision;
+    state_changed.notify_all();
+  }
+
+  // Requires state_mutex. False when nothing may move the bitrate from feedback now.
+  static bool feedback_accepted_locked() {
+    return !doctor_override_active.load(std::memory_order_relaxed) &&
+      !pending_live_update_active.load(std::memory_order_relaxed) &&
+      base_bitrate_kbps.load(std::memory_order_relaxed) > 0;
+  }
+
+  // The first feedback starts the encoder-pressure interval, as it always has.
+  static void initialize_feedback_locked() {
+    if (initialized) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    last_adjustment_time = now;
+    last_pressure_time = now - 10s;
+    initialized = true;
+  }
+
+  static void note_rtt_locked(double rtt_ms) {
+    if (!initialized) {
+      ewma_rtt = rtt_ms;
+      initialize_feedback_locked();
+    }
+    ewma_rtt = current_config.ewma_alpha * rtt_ms + (1.0 - current_config.ewma_alpha) * ewma_rtt;
+    last_input_available = true;
+    last_input_rtt_ms = rtt_ms;
+  }
+
+  void update_rtt(double rtt_ms) {
     if (!enabled.load(std::memory_order_relaxed) ||
-        !runtime_update_supported.load(std::memory_order_relaxed)) {
+        !runtime_update_supported.load(std::memory_order_relaxed) ||
+        !std::isfinite(rtt_ms) || rtt_ms < 0.0) {
       return;
     }
 
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"network_feedback"};
-    if (doctor_override_active.load(std::memory_order_relaxed) ||
-        pending_live_update_active.load(std::memory_order_relaxed)) {
+    if (!feedback_accepted_locked()) {
       return;
     }
-    // Kept for the history only; the decision below reads its arguments as before.
-    last_input_available = true;
-    last_input_packet_loss_percent = packet_loss_percent;
-    last_input_rtt_ms = rtt_ms;
-    auto now = std::chrono::steady_clock::now();
+    note_rtt_locked(rtt_ms);
+    const auto now_ms = policy_now_ms();
+    auto &p = policy_locked(now_ms);
+    const auto changes_before = p.changes();
+    const auto state_before = p.state();
+    p.rtt(now_ms, rtt_ms);
+    apply_policy_locked(p, changes_before, state_before);
+  }
 
-    if (!initialized) {
-      ewma_packet_loss = packet_loss_percent;
-      ewma_rtt = rtt_ms;
-      avg_rtt = rtt_ms;
-      rtt_sample_count = 1;
-      last_adjustment_time = now;
-      last_pressure_time = (packet_loss_percent > 0) ? now : (now - 10s);
-      set_controller_status("steady", "warming_up");
-      initialized = true;
-      return;
-    }
-
-    // Update EWMA smoothed values
-    double alpha = current_config.ewma_alpha;
-    ewma_packet_loss = alpha * packet_loss_percent + (1.0 - alpha) * ewma_packet_loss;
-    ewma_rtt = alpha * rtt_ms + (1.0 - alpha) * ewma_rtt;
-
-    // Track long-term average RTT for spike detection
-    if (rtt_sample_count < 1000) {
-      rtt_sample_count++;
-    }
-    avg_rtt += (rtt_ms - avg_rtt) / rtt_sample_count;
-
-    // Track when we last saw loss
-    if (packet_loss_percent > 0.0) {
-      last_pressure_time = now;
-    }
-
-    // Check if enough time has passed for an adjustment
-    if (!interval_elapsed(now)) {
+  void update_media_report(double frames_expected, double frames_lost, double rtt_ms) {
+    if (!enabled.load(std::memory_order_relaxed) ||
+        !runtime_update_supported.load(std::memory_order_relaxed) ||
+        !std::isfinite(frames_expected) || !std::isfinite(frames_lost) ||
+        frames_expected <= 0.0 || frames_lost < 0.0 || frames_lost > frames_expected) {
       return;
     }
 
-    int base = base_bitrate_kbps.load(std::memory_order_relaxed);
-    int current_target = target_bitrate_kbps.load(std::memory_order_relaxed);
-    if (base <= 0) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"network_feedback"};
+    if (!feedback_accepted_locked()) {
       return;
     }
-
-    double max_change = current_config.max_change_rate;
-    int new_target = current_target;
-
-    // RTT spike detection: if current RTT is more than 2x the long-term average,
-    // treat it as congestion and reduce bitrate immediately
-    bool rtt_spike = (rtt_sample_count > 5) &&
-                     (rtt_ms >= ACTIONABLE_RTT_MS) &&
-                     (rtt_ms > avg_rtt * 2.0) &&
-                     (avg_rtt > 0);
-
-    const bool network_pressure = ewma_packet_loss > 1.0 || rtt_spike;
-    if (network_pressure) {
-      // Network is congested -- reduce bitrate
-
-      // Scale reduction by severity of the loss
-      double reduction_factor;
-      if (rtt_spike && ewma_packet_loss <= 1.0) {
-        // RTT spike without packet loss: moderate reduction
-        reduction_factor = 0.5 * max_change;
-      } else if (ewma_packet_loss > 5.0) {
-        // Heavy loss: maximum reduction
-        reduction_factor = max_change;
-      } else {
-        // Moderate loss: proportional reduction (1-5% loss -> proportional within max_change)
-        reduction_factor = max_change * std::min(ewma_packet_loss / 5.0, 1.0);
-      }
-
-      new_target = static_cast<int>(current_target * (1.0 - reduction_factor));
-      last_pressure_time = now;
-      set_controller_status("network_pressure", rtt_spike ? "rtt_spike" : "packet_loss");
-
-      BOOST_LOG(debug) << "Adaptive bitrate: reducing "
-                       << current_target << " -> " << new_target << " kbps"
-                       << " (loss=" << ewma_packet_loss << "%, rtt=" << ewma_rtt << "ms"
-                       << (rtt_spike ? ", RTT spike" : "") << ")";
-
+    const double loss_pct = 100.0 * frames_lost / frames_expected;
+    ewma_packet_loss = !loss_average_started ? loss_pct :
+      current_config.ewma_alpha * loss_pct + (1.0 - current_config.ewma_alpha) * ewma_packet_loss;
+    loss_average_started = true;
+    last_input_packet_loss_percent = loss_pct;
+    if (std::isfinite(rtt_ms) && rtt_ms >= 0.0) {
+      note_rtt_locked(rtt_ms);
     } else {
-      // Network is healthy -- consider increasing bitrate back toward base
-
-      // Only increase if the stream has been healthy for at least 10 seconds
-      auto time_since_pressure = std::chrono::duration_cast<std::chrono::seconds>(now - last_pressure_time);
-      if (time_since_pressure.count() >= 10 && current_target < base) {
-        // Gradual recovery: increase by a fraction of max_change_rate
-        // Use a smaller recovery step so reconnects and transient spikes do not bounce.
-        double increase_factor = max_change * 0.4;
-        new_target = static_cast<int>(current_target * (1.0 + increase_factor));
-
-        // Don't overshoot the base bitrate
-        new_target = std::min(new_target, base);
-        set_controller_status("recovering", "healthy_window");
-
-        BOOST_LOG(debug) << "Adaptive bitrate: recovering "
-                         << current_target << " -> " << new_target << " kbps"
-                         << " (loss=" << ewma_packet_loss << "%, rtt=" << ewma_rtt << "ms)";
-      }
+      initialize_feedback_locked();
+      last_input_available = true;
     }
-
-    if (new_target == current_target && controller_state != "network_pressure") {
-      set_controller_status("steady", "healthy");
-    }
-
-    const int clamped_target = clamp_target(new_target, base);
-    if (clamped_target != current_target) {
-      target_bitrate_kbps.store(clamped_target, std::memory_order_relaxed);
-      ++action_authority_revision;
-    }
-    // Keep direct controller callers safe at the floor too. Production network
-    // observations already advance the common evidence/controller epoch before
-    // this callback; this additional bump records a controller pressure
-    // decision that could not move the clamped target.
-    if (clamped_target != current_target || network_pressure) {
-      ++operator_revision;
-      state_changed.notify_all();
-    }
+    const auto now_ms = policy_now_ms();
+    auto &p = policy_locked(now_ms);
+    const auto changes_before = p.changes();
+    const auto state_before = p.state();
+    p.report(now_ms, frames_expected, frames_lost);
+    apply_policy_locked(p, changes_before, state_before);
   }
 
   void update_stream_health(double fps_ratio,
@@ -622,6 +655,11 @@ namespace adaptive_bitrate {
     state.paused_for_stream = paused_for_stream;
     state.ewma_packet_loss = ewma_packet_loss;
     state.ewma_rtt_ms = ewma_rtt;
+    if (stream_policy) {
+      state.ceiling_bitrate_kbps = stream_policy->ceiling_kbps().value_or(0);
+      state.ceiling_is_queue = stream_policy->ceiling_kbps() && stream_policy->ceiling_is_queue();
+      state.background_loss_pct = 100.0 * stream_policy->background_loss();
+    }
     state.state = std::move(status.state);
     state.reason = std::move(status.reason);
     return state;
@@ -1215,8 +1253,8 @@ namespace adaptive_bitrate {
 
     ewma_packet_loss = 0.0;
     ewma_rtt = 0.0;
-    avg_rtt = 0.0;
-    rtt_sample_count = 0;
+    loss_average_started = false;
+    stream_policy.reset();
     initialized = false;
     runtime_update_supported.store(false, std::memory_order_relaxed);
     runtime_update_reason = "encoder_not_initialized";

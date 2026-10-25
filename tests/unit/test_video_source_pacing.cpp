@@ -50,7 +50,7 @@ TEST(SourcePacingPolicyTests, ALowerGameFrameRateIsNotEncoderPressureButASlowEnc
     adaptive_bitrate::set_runtime_update_supported(true);
     adaptive_bitrate::set_base_bitrate(20000);
     // Initialise the controller, then let its adjustment interval elapse so every later sample is judged.
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
+    adaptive_bitrate::update_rtt(8.0);
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
   };
   constexpr double ceiling_fps = 120.0;

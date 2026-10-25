@@ -5407,7 +5407,10 @@ TEST(DoctorActionTests, ALossStepWithLiveTuningOnTurnsItOffForThisStreamAndUndoT
   expect_live_tuning_off_for_stream_at(16000);
   EXPECT_TRUE(stream.saved_preference_untouched());
   // Live Tuning's feedback moves nothing while the step holds.
-  adaptive_bitrate::update_network_stats(10.0, 60.0);
+  for (int i = 0; i < 5; ++i) {
+    adaptive_bitrate::update_rtt(60.0);
+    adaptive_bitrate::update_media_report(120.0, 12.0, 60.0);
+  }
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
   // Doctor now reads the stream as one Live Tuning does not own.
   EXPECT_FALSE(stream_stats::get_current().adaptive_bitrate_enabled);
@@ -7795,7 +7798,7 @@ TEST(DoctorActionTests, PyroWaveRaiseClimbsPastTheRequestToTheAdviceAndLiveTunin
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 89121);
 
   // Live Tuning cannot follow the raise: its feedback is held while Doctor owns the change.
-  adaptive_bitrate::update_network_stats(0.0, 3.0);
+  adaptive_bitrate::update_rtt(3.0);
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 89121);
 
   // Turning Live Tuning on first puts back the player's own request, which stays its ceiling.
@@ -7808,7 +7811,7 @@ TEST(DoctorActionTests, PyroWaveRaiseClimbsPastTheRequestToTheAdviceAndLiveTunin
   EXPECT_EQ(state.base_bitrate_kbps, 20000);
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
   for (int i = 0; i < 3; ++i) {
-    adaptive_bitrate::update_network_stats(0.0, 3.0);
+    adaptive_bitrate::update_rtt(3.0);
   }
   EXPECT_LE(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
 }
@@ -7844,7 +7847,10 @@ TEST(DoctorActionTests, ManualLiveBitrateTurnsLiveTuningOffForThisStreamOnly) {
   const auto during = live_tuning::snapshot(stream_stats::get_current());
   EXPECT_EQ(during.at("enabled"), false);
   EXPECT_EQ(during.at("state"), "off");
-  adaptive_bitrate::update_network_stats(10.0, 60.0);
+  for (int i = 0; i < 5; ++i) {
+    adaptive_bitrate::update_rtt(60.0);
+    adaptive_bitrate::update_media_report(120.0, 12.0, 60.0);
+  }
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 180000);
 
   // The stream ends, and the saved preference is back.
@@ -9469,11 +9475,10 @@ TEST(StreamStatsDoctorTests, AMoonlightClientsLossRowSaysItSendsNoReports) {
 }
 
 TEST(StreamStatsHotFieldTests, LiveTuningHearsEachMediaReportsOwnLoss) {
-  // Live Tuning keeps 1.4.13's loss input in this release: each client media report brings it that
-  // report's own loss, whatever Doctor's verdict says, and every control ping brings it 0%
-  // (DoctorResetContract.ControlPingsBringLiveTuningZeroLoss). The verdict judges the same reports over
-  // its window for Doctor alone. The HEVC run's second report, 9 of 122 frames, reaches Live Tuning
-  // while the window has too few reports for a verdict.
+  // Each counted client media interval brings Live Tuning its own frames, whatever Doctor's verdict says;
+  // control pings bring only the RTT (DoctorResetContract.ControlPingsBringLiveTuningOnlyTheRtt). The
+  // verdict judges the same reports over its window for Doctor alone. The HEVC run's second report, 9 of
+  // 122 frames, reaches Live Tuning while the window has too few reports for a verdict.
   config::video.adaptive_bitrate.enabled = true;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
@@ -9515,7 +9520,7 @@ TEST(StreamStatsHotFieldTests, LiveTuningHearsEachMediaReportsOwnLoss) {
     sample.frames_received = sample.frames_expected - sample.frames_lost;
     ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
     const double loss = static_cast<double>(recorded.lost) * 100.0 / static_cast<double>(recorded.expected);
-    // The controller's first reading starts its average; each one after moves it by ewma_alpha, 0.3.
+    // The first report starts Live Tuning's diagnostic loss average; each one after moves it by ewma_alpha, 0.3.
     expected = expected ? 0.3 * loss + 0.7 * *expected : loss;
     EXPECT_NEAR(adaptive_bitrate::get_state().ewma_packet_loss, *expected, 1e-9) << "report " << report;
     if (report == 2) {

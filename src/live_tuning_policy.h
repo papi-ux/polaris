@@ -122,6 +122,9 @@ namespace live_tuning_policy {
     int base_kbps() const {
       return base_;
     }
+    int floor_kbps() const {
+      return floor_;
+    }
     state_e state() const {
       return state_;
     }

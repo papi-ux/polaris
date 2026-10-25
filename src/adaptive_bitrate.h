@@ -1,10 +1,10 @@
 /**
  * @file src/adaptive_bitrate.h
- * @brief Adaptive bitrate controller using EWMA-based network feedback.
+ * @brief Live Tuning's bitrate actuator: the policy's target, Doctor's transactions and the encoder's proof.
  *
- * Dynamically adjusts encoding bitrate based on packet loss and RTT
- * statistics reported by the streaming client, similar to Parsec and
- * Steam Remote Play adaptive streaming.
+ * live_tuning_policy.h decides the bitrate from client media reports and the control channel's RTT. This
+ * controller owns everything around that decision: the client's request and the floor, explicit and Doctor
+ * writers, revisions that keep a stale writer from winning, and what the encoder actually applied.
  */
 #pragma once
 
@@ -132,8 +132,15 @@ namespace adaptive_bitrate {
     std::string floor_source = "adaptive_bitrate_min";
     /// A manual live bitrate turned Live Tuning off for this stream; the saved preference stands.
     bool paused_for_stream = false;
+    /// Diagnostic averages of the media reports' loss and the RTT readings. No decision reads them.
     double ewma_packet_loss = 0.0;
     double ewma_rtt_ms = 0.0;
+    /// The lowest rate the policy found lossy or queueing above its hold, or 0 when it knows none.
+    int ceiling_bitrate_kbps = 0;
+    /// True when that ceiling was found by a standing queue rather than by loss.
+    bool ceiling_is_queue = false;
+    /// Loss the policy learned does not depend on the bitrate, in percent of frames.
+    double background_loss_pct = 0.0;
     std::string state = "disabled";
     std::string reason = "disabled";
     /// Filled only by get_state_with_history(), from the same locked snapshot as the fields above.
@@ -185,11 +192,24 @@ namespace adaptive_bitrate {
   };
 
   /**
-   * @brief Feed network statistics from client loss reports.
-   * @param packet_loss_percent Packet loss percentage (0-100).
-   * @param rtt_ms Round-trip time in milliseconds.
+   * @brief Feed one reading of the control channel's ENet-smoothed RTT, about ten a second.
+   *
+   * Live Tuning's policy (live_tuning_policy.h) acts on a standing queue, never on a single high
+   * reading: a Wi-Fi background scan lifts the reading for seconds and is not congestion.
+   * @param rtt_ms ENet's smoothed round-trip time in milliseconds.
    */
-  void update_network_stats(double packet_loss_percent, double rtt_ms);
+  void update_rtt(double rtt_ms);
+
+  /**
+   * @brief Feed one client media report: the frames its interval expected and the frames it lost.
+   *
+   * Lost frames are frames FEC could not save. The policy counts reports, not wall time, so a pause in
+   * reports freezes its decisions.
+   * @param frames_expected Frames the interval expected.
+   * @param frames_lost Frames that never arrived whole.
+   * @param rtt_ms The host's RTT reading when the report arrived.
+   */
+  void update_media_report(double frames_expected, double frames_lost, double rtt_ms);
 
   /**
    * @brief Linearize a newly received host network observation with Doctor.

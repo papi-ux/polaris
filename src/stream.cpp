@@ -1401,7 +1401,7 @@ namespace stream {
       const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
       record_network_stats(client_ip, rtt_ms, loss_pct, 0);
       if (adaptive_bitrate::is_enabled()) {
-        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
+        adaptive_bitrate::update_rtt(rtt_ms);
       }
     });
 
@@ -1439,8 +1439,8 @@ namespace stream {
       // not a total-packet denominator. Dividing count by time manufactured a
       // percentage, so retain RTT and wait for quantified media telemetry.
       record_network_stats(client_ip, rtt_ms, 0.0, 0);
-      if (adaptive_bitrate::is_enabled() && t.count() > 0) {
-        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
+      if (adaptive_bitrate::is_enabled() && t.count() > 0 && session->control.peer) {
+        adaptive_bitrate::update_rtt(rtt_ms);
       }
     });
 

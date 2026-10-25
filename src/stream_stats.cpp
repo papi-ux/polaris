@@ -5618,9 +5618,15 @@ namespace stream_stats {
         }
       }
     }
-    if (adaptive_bitrate::is_enabled()) {
-      // Live Tuning hears the report's own loss, whatever the verdict above says, as it did in 1.4.13.
-      adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
+    if (adaptive_bitrate::is_enabled() && result.state == client_media_ingest_state_e::observed) {
+      // Live Tuning hears each counted interval's own frames, whatever the verdict above says. An interval
+      // with no frames, a counter reset or a rejected report is no loss evidence, and the control pings
+      // carry the RTT.
+      adaptive_bitrate::update_media_report(
+        static_cast<double>(result.frames_expected),
+        static_cast<double>(result.frames_lost),
+        host.latency_ms
+      );
     }
     result.observation_published = true;
     if (result.receipt) {
