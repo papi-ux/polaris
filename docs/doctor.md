@@ -281,15 +281,15 @@ Doctor uses a small action vocabulary so the button says what will happen:
 - **Manual** explains the next check when Polaris cannot safely act for you.
 - **Undo** restores the previous live bitrate while the same stream generation still owns it.
 
-With Live Tuning on, Doctor leaves round trip time to Live Tuning and offers only **Recheck** for it.
-For sustained video frame loss it offers **Auto Fix**, one step down. Taking that step turns Live
-Tuning off for that stream, as a live bitrate you set yourself does, and saves nothing. Undoing the
-step, a step that fails its check and rolls back, or turning Live Tuning back on puts back the
-bitrate from before the step and turns Live Tuning on again. Otherwise Live Tuning stays off until
-the stream ends, and the next stream starts with your saved preference. Pressing **Auto Fix** again
-while the step holds takes no second step: Doctor says the step still holds and how to undo it. Once
-the network is clean with the step still holding, Doctor offers the step's **Undo** instead of
-raising the bitrate itself.
+With Live Tuning on and an encoder that can change its rate live, network pressure is Live
+Tuning's to act on, sustained video frame loss and round trip time alike, and Doctor offers only
+**Recheck** for it. Doctor says what Live Tuning found: the bitrate it holds under and whether loss
+or a queue set it, or loss that does not get better at a lower bitrate, which neither of them cuts
+for. For that loss Doctor's advice is the Wi-Fi link itself: a closer access point, its 5 or 6 GHz
+band, or a wired connection ([Live Tuning](live-tuning.md#how-it-decides)). With Live Tuning off, or
+an encoder that cannot change its rate live, Doctor offers **Auto Fix** under confirmed pressure as
+above. Pressing **Auto Fix** again while its step holds takes no second step: Doctor says the step
+still holds and how to undo it.
 
 A change that needs a new stream is not an Auto Fix. Fresh-launch experiments are a separate future
 **Run a trial** workflow and are not enabled in this release.

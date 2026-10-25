@@ -17,13 +17,41 @@ until the stream ends, the next stream starts with the saved preference, and
 switching tuning on during the stream resumes it. Auto, Quality, High FPS, and Stability launch presets still
 apply at the next explicit launch.
 
-Doctor's one step down for sustained video frame loss turns tuning off the same way
-while tuning is on: for that stream only, with nothing saved. Tuning comes back on,
-with the bitrate from before the step, when you undo the step, when the step fails
-Doctor's check, or when you switch tuning on. Otherwise it stays off until the stream
-ends, and the next stream starts with the saved preference. Round trip time alone
-stays with tuning, and Doctor only rechecks it
+While tuning is on and the encoder can change its rate live, network pressure is
+tuning's to act on, sustained video frame loss and round trip time alike. Doctor does
+not take a bitrate step of its own then: it rechecks and says what tuning found
 ([Doctor](doctor.md#pick-the-offered-action)).
+
+## How it decides
+
+Live Tuning reads two things: each client media report's frames, expected and lost after FEC
+recovery, and the control channel's round trip time, about ten readings a second. It decides on
+reports, not on the clock, so a pause in reports pauses it, and a step it was trying when the
+reports stopped is taken back without counting against it.
+
+- **A change in loss.** It learns the stream's usual loss and how bursty that loss is, and starts a
+  probe only when loss rises clearly above it over at least two reports, three in the stream's first
+  ten. One burst never cuts.
+- **A link limit, or not.** A probe steps to 60% of the rate. If the loss goes, it checks the rate
+  it left, since the loss may simply have ended, and either climbs straight back or narrows in on
+  the highest clean rate. If the loss stays, it takes one sample at an eighth of the rate, never
+  below twice the floor. Clean there means a link limit somewhere between. The same loss there means
+  the loss does not depend on the bitrate: the stream goes back to its rate, and Live Tuning learns
+  that loss and leaves it alone, with the reason `loss_independent_of_bitrate`. Only loss that is
+  clearly heavy even there probes on toward the floor.
+- **Under a link.** Settled under a link it found, it tries the rate above about every 20 reports
+  and climbs back toward the request when that is clean, with the reason `holding_under_the_link`.
+- **Queues.** A round trip time that rises and stays, 10 ms or more over the minute's lowest reading
+  and not falling for 8 seconds, is a queue at the link: Live Tuning cuts 15% at a time until it
+  drains and holds under it, with the reason `holding_under_a_queue`. A short rise is not a queue. A
+  Steam Deck's Wi-Fi background scan lifts the reading to about 83 ms for 5 seconds every five
+  minutes and then lets it fall, and 1.4.13 cut the stream for each one. A raise that starts a queue
+  fails within about two seconds.
+
+Every verdict is a sequential likelihood-ratio test on frame counts, scaled by how bursty the
+stream's loss is, so a noisy second does not decide. The policy and its replays are
+`src/live_tuning_policy.h` and `tests/unit/test_live_tuning_policy.cpp`; the reference model they
+follow is `tools/tests/live_tuning_policy_reference.py`.
 
 ## Range
 
