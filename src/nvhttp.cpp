@@ -9,6 +9,7 @@
 #ifdef __linux__
   #include "platform/linux/process_environment.h"
   #include "platform/linux/session_manager.h"
+  #include "platform/linux/spaces_host_admin.h"
 #endif
 
 #include <algorithm>
@@ -7659,6 +7660,15 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+    // Hold through preflight and publication of app/pending-RTSP busy facts, including failures.
+#ifdef __linux__
+    const auto host_activity = multiseat::spaces::try_begin_host_activity();
+    if (!host_activity) {
+      tree.put("root.gamesession", 0);
+      put_launch_refusal(tree, 409, "Polaris is updating or changing this PC. Try again when it finishes.");
+      return;
+    }
+#endif
     auto args = request->parse_query_string();
 
     auto appid_str = get_arg(args, "appid", "0");
@@ -8166,6 +8176,14 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+#ifdef __linux__
+    const auto host_activity = multiseat::spaces::try_begin_host_activity();
+    if (!host_activity) {
+      tree.put("root.resume", 0);
+      put_launch_refusal(tree, 409, "Polaris is updating or changing this PC. Try again when it finishes.");
+      return;
+    }
+#endif
     auto named_cert_p = get_verified_cert(request);
     if (!named_cert_p) {
       tree.put("root.resume", 0);

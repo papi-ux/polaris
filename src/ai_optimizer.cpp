@@ -1105,9 +1105,16 @@ namespace ai_optimizer {
     return session.last_safe_target_fps;
   }
 
+  static bool has_explicit_clean_issues(const session_history_t &session) {
+    return session.last_primary_issue == "steady" &&
+      session.last_health_grade == "good" &&
+      session.last_issues.empty();
+  }
+
   static void enrich_session_reliability_context(const std::string &device_name,
                                                  const std::string &app_name,
-                                                 session_history_t &session) {
+                                                 session_history_t &session,
+                                                 bool preserve_clean_issues) {
     const auto device_profile = device_db::get_device(device_name);
     const bool mobile_client = is_mobile_client_type(device_profile);
     const std::string quality_grade = latest_quality_grade(session);
@@ -1199,7 +1206,7 @@ namespace ai_optimizer {
       else session.last_primary_issue = "steady";
     }
 
-    if (session.last_issues.empty()) {
+    if (session.last_issues.empty() && !preserve_clean_issues) {
       if (network_risk) session.last_issues.push_back("network_jitter");
       if (host_render_limited) session.last_issues.push_back("host_render_limited");
       else if (pacing_risk) session.last_issues.push_back("frame_pacing");
@@ -1381,7 +1388,8 @@ namespace ai_optimizer {
     merged.last_recommendation_version = latest.last_recommendation_version;
     merged.last_health_grade = latest.last_health_grade.empty() ? merged.last_health_grade : latest.last_health_grade;
     merged.last_primary_issue = latest.last_primary_issue.empty() ? merged.last_primary_issue : latest.last_primary_issue;
-    merged.last_issues = latest.last_issues.empty() ? merged.last_issues : latest.last_issues;
+    merged.last_issues = latest.last_issues.empty() && !has_explicit_clean_issues(latest) ?
+      merged.last_issues : latest.last_issues;
     merged.last_decoder_risk = latest.last_decoder_risk.empty() ? merged.last_decoder_risk : latest.last_decoder_risk;
     merged.last_hdr_risk = latest.last_hdr_risk.empty() ? merged.last_hdr_risk : latest.last_hdr_risk;
     merged.last_network_risk = latest.last_network_risk.empty() ? merged.last_network_risk : latest.last_network_risk;
@@ -4063,11 +4071,13 @@ namespace ai_optimizer {
         auto pos = key.find(':');
         const auto device_name = pos == std::string::npos ? key : key.substr(0, pos);
         const auto app_name = pos == std::string::npos ? std::string {} : key.substr(pos + 1);
+        // Preserve a supplied clean verdict, not one synthesized by legacy repair.
+        const bool preserve_clean_issues = has_explicit_clean_issues(h);
         auto before_repair = h;
         h = sanitize_session_history(h);
         repaired_history = repaired_history || history_repair_should_persist(before_repair, h);
         before_repair = h;
-        enrich_session_reliability_context(device_name, app_name, h);
+        enrich_session_reliability_context(device_name, app_name, h, preserve_clean_issues);
         h = sanitize_session_history(h);
         repaired_history = repaired_history || history_repair_should_persist(before_repair, h);
         const auto normalized_key = history_key(device_name, app_name);
@@ -4160,12 +4170,13 @@ namespace ai_optimizer {
                       const session_history_t &session,
                       history_writer_observation_t *observation) {
     if (observation) *observation = {};
+    const bool preserve_clean_issues = has_explicit_clean_issues(session);
     auto normalized_session = session;
     if (normalized_session.last_target_fps <= 0.0 && normalized_session.avg_fps > 0.0) {
       normalized_session.last_target_fps = normalized_session.avg_fps;
     }
     const auto canonical_device = canonical_device_name(device_name);
-    enrich_session_reliability_context(canonical_device, app_name, normalized_session);
+    enrich_session_reliability_context(canonical_device, app_name, normalized_session, preserve_clean_issues);
     auto feedback_policy = classify_session_feedback(app_name, normalized_session);
     normalized_session.last_end_reason = feedback_policy.end_reason;
     normalized_session.last_sample_confidence = feedback_policy.confidence;
@@ -4298,7 +4309,7 @@ namespace ai_optimizer {
       }
 
       if (recovery_feedback_allowed) {
-        enrich_session_reliability_context(canonical_device, app_name, existing);
+        enrich_session_reliability_context(canonical_device, app_name, existing, preserve_clean_issues);
       }
       if (graduated_safe_target) {
         existing.last_safe_target_fps = 0.0;

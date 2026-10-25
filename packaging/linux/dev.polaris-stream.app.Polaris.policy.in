@@ -34,4 +34,15 @@
     <annotate key="org.freedesktop.policykit.exec.path">@CMAKE_INSTALL_FULL_BINDIR@/polaris-spaces-setup</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">docker-access</annotate>
   </action>
+  <action id="@POLARIS_POLKIT_ACTION_PREFIX@.update-install">
+    <description>Install the reviewed Polaris update</description>
+    <message>Polaris wants to update its installed packages from the official release on this PC. It will not restart until you choose Finish.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">@CMAKE_INSTALL_FULL_BINDIR@/polaris-update-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">install</annotate>
+  </action>
 </policyconfig>

@@ -602,12 +602,17 @@ int main(int argc, char *argv[]) {
       const auto admin = service->admin_snapshot();
       return admin.changing || !admin.activity.empty();
     },
-    .stream_active = [] { return rtsp_stream::session_count() != 0; },
+    .stream_active = [] {
+      // Include the admitted launch waiting for RTSP, even for a desktop with no owned app.
+      return rtsp_stream::session_count() != 0 || rtsp_stream::session_snapshot({}).pending_sessions != 0;
+    },
     .setup = []() -> std::optional<nlohmann::json> {
       multiseat::container::local_host_t host;
       const auto service = multiseat::installed_profile_service();
       return multiseat::spaces::inspect_setup(host, config::multiseat.enabled, service && service->admin_snapshot().available);
     },
+    .resumable_active = [] { return proc::proc.running() > 0; },
+    .session_active = [] { return confighttp::get_session_state() != "idle"; },
   });
   auto host_admin_guard = util::fail_guard([&] {
     host_admin->shutdown();

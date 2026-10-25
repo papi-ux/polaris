@@ -6,6 +6,8 @@ install(FILES "${POLARIS_SPACES_INPUT}" "${POLARIS_SPACES_WORKER}" "${POLARIS_SP
 if(NOT POLARIS_BUILD_APPIMAGE)
     install(PROGRAMS "${CMAKE_BINARY_DIR}/generated/polaris-spaces-setup"
             DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(PROGRAMS "${CMAKE_SOURCE_DIR}/scripts/update_helper.py"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}" RENAME "polaris-update-helper")
     # The polkit actions the Spaces page asks for; they only name the helper installed above.
     install(FILES "${CMAKE_BINARY_DIR}/generated/${POLARIS_POLKIT_POLICY_NAME}"
             DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polkit-1/actions")
@@ -112,6 +114,8 @@ endif()
 # the helper ran polaris-spaces-setup remove, taking the Spaces security setup away from a Polaris
 # that stayed installed. rpm does the helper's real work from its file list and sysusers.d entry, so
 # it needs no script. The DEB helper has its own, set below.
+# Apply Debian policy modes to maintainer scripts for both package components.
+set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 set(CPACK_RPM_POLARIS_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 

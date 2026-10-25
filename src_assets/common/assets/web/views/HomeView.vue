@@ -221,7 +221,7 @@
         <div class="system-update-copy">
           <div class="section-kicker">{{ $t('index.software') }}</div>
           <h2 class="section-title">{{ $t('index.update_center') }}</h2>
-          <p><span class="system-update-state-summary">{{ updateCenterState.statusLabel }}</span> · {{ updateCheckError || updateCenterState.primaryActionSummary }}</p>
+          <p><span class="system-update-state-summary">{{ updateCenterState.statusLabel }}</span> · {{ (hostPlan?.route === 'helper' ? '' : updateCheckError) || updateCenterState.primaryActionSummary }}</p>
           <p class="system-update-safety">
             {{ $t('index.never_auto_installs') }}
             <a href="https://papi-ux.com/docs/updates/" target="_blank" rel="noopener" class="focus-ring system-text-link">{{ $t('index.updates_docs_link') }}</a>
@@ -268,6 +268,8 @@
         @saved="handleUpdateChannelSaved"
         @refresh="refreshUpdateStatus"
       />
+
+      <HostUpdateFlow v-if="updateHost.platform === 'linux'" ref="hostUpdateFlow" :channel="notifyPreReleases ? 'beta' : 'stable'" @plan="hostPlan = $event" @state="hostJourney = $event" />
 
       <div v-show="showUpdateDetails" id="system-update-details" data-update-center-details class="system-update-details">
         <div class="system-update-grid">
@@ -359,6 +361,7 @@ import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } fro
 import { describeKmsCapture } from '../kms-capture-readiness.js'
 import { readConfigOrNull } from '../config-cache.js'
 import UpdateChannelControl from '../components/UpdateChannelControl.vue'
+import HostUpdateFlow from '../components/HostUpdateFlow.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { resources, legalDocs, sponsor } from '../resource-links.js'
@@ -391,6 +394,9 @@ const logs = ref(null)
 const copiedVersion = ref(false)
 const copiedInstallCommand = ref(false)
 const updateHost = ref({ platform: '', distro: {} })
+const hostPlan = ref(null)
+const hostJourney = ref(null)
+const hostUpdateFlow = ref(null)
 const checkingUpdates = ref(false)
 const updateCheckError = ref('')
 const updateCenterSection = ref(null)
@@ -492,6 +498,8 @@ const updateCenterState = computed(() => buildUpdateCenterState({
   prereleaseRelease: preReleaseVersion.value?.release || null,
   includePrereleases: notifyPreReleases.value,
   host: updateHost.value,
+  hostPlan: hostPlan.value,
+  hostJourney: hostJourney.value,
 }))
 
 const updateCenterStatusLightClass = computed(() => updateStatusLightClass(updateCenterState.value.statusTone))
@@ -593,6 +601,11 @@ function scrollToUpdateCenter() {
 
 async function handlePrimaryUpdateAction() {
   const action = updateCenterState.value.primaryActionKind
+  if (action === 'review_host_update') {
+    scrollToUpdateCenter()
+    await hostUpdateFlow.value?.reviewUpdate()
+    return
+  }
   if (action === 'refresh_update_status') {
     await refreshUpdateStatus()
     return
@@ -613,6 +626,7 @@ async function handleUpdateChannelSaved(enabled) {
 
 async function refreshUpdateStatus() {
   if (checkingUpdates.value) return
+  const previousChannel = notifyPreReleases.value
   checkingUpdates.value = true
   updateCheckError.value = ''
   try {
@@ -624,6 +638,8 @@ async function refreshUpdateStatus() {
     updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }
     notifyPreReleases.value = isPrereleaseOptIn(config.notify_pre_releases)
     version.value = new PolarisVersion(null, hostStatus?.version || config.version)
+    // Channel changes refresh the flow through its watcher; a same-channel Check again must too.
+    if (notifyPreReleases.value === previousChannel) await hostUpdateFlow.value?.refresh()
 
     try {
       githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((response) => response.json()), null)

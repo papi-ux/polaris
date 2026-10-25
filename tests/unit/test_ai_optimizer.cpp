@@ -4,6 +4,8 @@
  */
 
 #include "src/ai_optimizer.h"
+#include "src/owned_child.h"
+#include "src/platform/common.h"
 #include "src/stream_stats.h"
 
 #include <gtest/gtest.h>
@@ -17,9 +19,15 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
+
+#ifdef __linux__
+  #include <sys/stat.h>
+extern char **environ;
+#endif
 
 namespace {
 #ifndef _WIN32
@@ -1271,3 +1279,268 @@ TEST(AiOptimizerHistoryWriter, RecordSessionObservesItsOwnClassificationMergeAnd
   EXPECT_LT(close, close_check);
   for (const auto *absent : {"fsync", "rename", "retry"}) EXPECT_EQ(writer.find(absent), std::string::npos) << absent;
 }
+
+#ifdef __linux__
+namespace {
+  // appdata() resolves during global initialization. Execute the actual writer in a
+  // fresh process whose supported config paths are private BEFORE it starts.
+  class AiOptimizerCleanHistory: public ::testing::Test {
+  protected:
+    void SetUp() override {
+      const auto *info = ::testing::UnitTest::GetInstance()->current_test_info();
+      case_name_ = std::string {info->test_suite_name()} + "." + info->name();
+      if (const char *root = std::getenv("POLARIS_CLEAN_HISTORY_TEST_ROOT")) {
+        child_ = true;
+        root_ = root;
+        struct stat metadata {};
+        ASSERT_TRUE(root_.is_absolute());
+        ASSERT_EQ(::lstat(root_.c_str(), &metadata), 0);
+        ASSERT_TRUE(S_ISDIR(metadata.st_mode));
+        ASSERT_EQ(metadata.st_uid, ::geteuid());
+        ASSERT_EQ(metadata.st_mode & 077, 0);
+        ASSERT_TRUE(root_.filename().string().starts_with("polaris-clean-history-"));
+        const char *config = std::getenv("CONFIGURATION_DIRECTORY");
+        ASSERT_NE(config, nullptr);
+        ASSERT_EQ(std::filesystem::path {config}, root_ / "config");
+        ASSERT_STREQ(std::getenv("POLARIS_MIGRATE_CONFIG"), "0");
+        ASSERT_EQ(platf::appdata(), root_ / "config" / "polaris");
+        history_ = platf::appdata() / "ai_session_history.json";
+        // Both public readers have a lazy-load flag. Prime them while no file
+        // exists so a newly recorded entry cannot be imported a second time.
+        ai_optimizer::clear_history_at(history_);
+        (void) ai_optimizer::get_history_json();
+        (void) ai_optimizer::get_session_history("unlisted-vrr-test-host", "unused");
+        ai_optimizer::init(ai_optimizer::config_t {});  // disabled; no provider request
+        return;
+      }
+
+      auto pattern = (std::filesystem::temp_directory_path() / "polaris-clean-history-XXXXXX").string();
+      char *created = ::mkdtemp(pattern.data());
+      ASSERT_NE(created, nullptr);
+      root_ = created;
+      for (const char *name : {"config", "data", "state", "cache", "tmp"}) {
+        std::filesystem::create_directory(root_ / name);
+      }
+      ASSERT_TRUE(std::filesystem::create_directory(root_ / "config" / "polaris"));
+      std::vector<std::string> environment;
+      for (char **entry = environ; entry && *entry; ++entry) {
+        const std::string value {*entry};
+        const auto key = value.substr(0, value.find('='));
+        if (key.starts_with("GTEST_") || key == "CONFIGURATION_DIRECTORY" ||
+            key == "XDG_CONFIG_HOME" || key == "XDG_DATA_HOME" || key == "XDG_STATE_HOME" ||
+            key == "XDG_CACHE_HOME" || key == "TMPDIR" || key == "POLARIS_MIGRATE_CONFIG" ||
+            key == "POLARIS_CLEAN_HISTORY_TEST_ROOT") continue;
+        environment.push_back(value);
+      }
+      environment.push_back("CONFIGURATION_DIRECTORY=" + (root_ / "config").string());
+      environment.push_back("XDG_CONFIG_HOME=" + (root_ / "config").string());
+      environment.push_back("XDG_DATA_HOME=" + (root_ / "data").string());
+      environment.push_back("XDG_STATE_HOME=" + (root_ / "state").string());
+      environment.push_back("XDG_CACHE_HOME=" + (root_ / "cache").string());
+      environment.push_back("TMPDIR=" + (root_ / "tmp").string());
+      environment.push_back("POLARIS_MIGRATE_CONFIG=0");
+      environment.push_back("POLARIS_CLEAN_HISTORY_TEST_ROOT=" + root_.string());
+      const auto xml_path = root_ / "child.xml";
+      const std::vector<std::string> argv {
+        std::filesystem::read_symlink("/proc/self/exe").string(),
+        "--gtest_filter=" + case_name_, "--gtest_repeat=1",
+        "--gtest_output=xml:" + xml_path.string()
+      };
+      owned_child::child_t process;
+      ASSERT_TRUE(process.start(argv, environment)) << root_;
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {15};
+      while (process.poll() == owned_child::state_e::running && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds {10});
+      }
+      if (process.state() == owned_child::state_e::running) process.abort();
+      ASSERT_EQ(process.state(), owned_child::state_e::exited) << "child evidence retained at " << root_;
+      ASSERT_TRUE(process.exit_code().has_value());
+      std::ifstream xml {xml_path};
+      const std::string details {std::istreambuf_iterator<char> {xml}, {}};
+      ASSERT_EQ(*process.exit_code(), 0) << "child evidence retained at " << root_ << "\n" << details;
+      const auto result = read_json(root_ / "PASSED.json");
+      ASSERT_EQ(result.at("case"), case_name_) << "a zero-test child is not a pass";
+      ASSERT_TRUE(result.at("passed").get<bool>());
+      std::filesystem::remove_all(root_);  // only this exited test child's private tree
+    }
+
+    void TearDown() override {
+      if (child_ && !HasFailure() && !IsSkipped()) {
+        std::ofstream result {root_ / "PASSED.json"};
+        result << nlohmann::json {{"case", case_name_}, {"passed", true}};
+        ASSERT_TRUE(result.good());
+      }
+    }
+
+    static nlohmann::json read_json(const std::filesystem::path &path) {
+      std::ifstream input {path};
+      return nlohmann::json::parse(input);
+    }
+
+    static ai_optimizer::session_history_t healthy() {
+      auto session = make_session("C", "host_pause", 0, 0);
+      session.avg_fps = session.last_fps = 90.0;
+      session.last_target_fps = 120.0;
+      session.avg_latency_ms = session.last_latency_ms = 5.0;
+      session.avg_bitrate_kbps = session.last_bitrate_kbps = 15000;
+      session.codec = session.last_codec = session.last_safe_codec = "h264";
+      session.last_primary_issue = "steady";
+      session.last_health_grade = "good";
+      session.last_network_risk = session.last_decoder_risk = session.last_hdr_risk = "normal";
+      session.last_capture_path = "gpu_native";
+      session.session_count = 1;
+      return session;
+    }
+
+    static nlohmann::json raw_entry(double fps, const std::string &primary,
+                                    const std::string &health, std::vector<std::string> issues, int timestamp) {
+      const auto grade = fps >= 120.0 ? "A" : "C";
+      return {{"avg_fps", fps}, {"last_fps", fps}, {"last_target_fps", 120.0},
+              {"avg_latency_ms", 5.0}, {"last_latency_ms", 5.0},
+              {"avg_bitrate_kbps", 15000}, {"last_bitrate_kbps", 15000},
+              {"quality_grade", grade}, {"last_quality_grade", grade},
+              {"codec", "h264"}, {"last_codec", "h264"}, {"session_count", 1},
+              {"last_primary_issue", primary}, {"last_health_grade", health}, {"last_issues", issues},
+              {"last_network_risk", "normal"}, {"last_decoder_risk", "normal"}, {"last_hdr_risk", "normal"},
+              {"last_capture_path", "gpu_native"}, {"last_end_reason", "host_pause"},
+              {"last_sample_confidence", "low"}, {"last_updated_at", timestamp}};
+    }
+
+    void reload() {
+      ai_optimizer::clear_history_at(root_ / "unused-memory-reset.json");
+      ai_optimizer::init(ai_optimizer::config_t {});
+    }
+
+    void write_fixture(const nlohmann::json &data) {
+      std::ofstream output {history_};
+      output << data.dump();
+      ASSERT_TRUE(output.good());
+    }
+
+    void expect_clean(const std::string &device, const std::string &app) {
+      const auto saved = ai_optimizer::get_session_history(device, app);
+      ASSERT_TRUE(saved.has_value());
+      EXPECT_EQ(saved->last_primary_issue, "steady");
+      EXPECT_EQ(saved->last_health_grade, "good");
+      EXPECT_TRUE(saved->last_issues.empty());
+    }
+
+    bool child_ = false;
+    std::filesystem::path root_;
+    std::filesystem::path history_;
+    std::string case_name_;
+  };
+}
+
+TEST_F(AiOptimizerCleanHistory, SourceVerdictSurvivesRealRecordSaveAndReload) {
+  if (!child_) return;
+  const std::vector<std::pair<std::string, std::string>> shapes {
+    {"unlisted-vrr-test-host", "h264"}, {"unlisted-vrr-test-host", "av1"},
+    {"RP6", "hevc"}, {"unlisted-vrr-test-host", "virtual_display"}
+  };
+  for (std::size_t i = 0; i < shapes.size(); ++i) {
+    auto session = healthy();
+    if (shapes[i].second == "virtual_display") session.last_capture_path = "virtual_display";
+    else session.codec = session.last_codec = session.last_safe_codec = shapes[i].second;
+    const auto app = "Source cadence " + std::to_string(i);
+    ai_optimizer::record_session(shapes[i].first, app, session);
+    expect_clean(shapes[i].first, app);
+    const auto saved = ai_optimizer::get_session_history(shapes[i].first, app);
+    ASSERT_TRUE(saved.has_value());
+    EXPECT_DOUBLE_EQ(saved->last_safe_target_fps, 0.0);  // fresh zero-poor record only
+    EXPECT_FALSE(saved->last_relaunch_recommended);
+    const auto key = device_db::canonicalize_name(shapes[i].first) + ":" + app;
+    EXPECT_TRUE(read_json(history_).at(key).at("last_issues").empty());
+  }
+  reload();
+  for (std::size_t i = 0; i < shapes.size(); ++i) {
+    expect_clean(shapes[i].first, "Source cadence " + std::to_string(i));
+  }
+}
+
+TEST_F(AiOptimizerCleanHistory, LatestCleanRecordReplacesOlderTags) {
+  if (!child_) return;
+  auto old = healthy();
+  old.last_primary_issue = "frame_pacing";
+  old.last_health_grade = "watch";
+  old.last_issues = {"frame_pacing"};
+  old.last_end_reason = "end";
+  old.last_duration_s = 60;
+  old.last_sample_count = 10;
+  ai_optimizer::record_session("unlisted-vrr-test-host", "Rolling game", old);
+  const auto previous = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Rolling game");
+  ASSERT_TRUE(previous.has_value());
+  ASSERT_EQ(previous->last_issues, std::vector<std::string> {"frame_pacing"});
+  ai_optimizer::record_session("unlisted-vrr-test-host", "Rolling game", healthy());
+  expect_clean("unlisted-vrr-test-host", "Rolling game");
+  EXPECT_TRUE(read_json(history_).at("unlisted-vrr-test-host:Rolling game").at("last_issues").empty());
+  reload();
+  expect_clean("unlisted-vrr-test-host", "Rolling game");
+}
+
+TEST_F(AiOptimizerCleanHistory, LatestCleanAliasKeepsItsEmptyList) {
+  if (!child_) return;
+  write_fixture({{"RP6:Alias game", raw_entry(90, "host_render_limited", "watch", {"host_render_limited"}, 100)},
+                 {"RetroidPocket6:Alias game", raw_entry(120, "steady", "good", {}, 200)}});
+  reload();
+  expect_clean("RP6", "Alias game");
+  const auto merged = ai_optimizer::get_session_history("RetroidPocket6", "Alias game");
+  ASSERT_TRUE(merged.has_value());
+  EXPECT_EQ(merged->session_count, 2);
+  const auto copy = root_ / "merged.json";
+  ASSERT_EQ(ai_optimizer::save_history_at(copy), ai_optimizer::history_write_e::closed_without_error);
+  const auto disk = read_json(copy);
+  ASSERT_EQ(disk.size(), 1);
+  EXPECT_TRUE(disk.at("RetroidPocket6:Alias game").at("last_issues").empty());
+}
+
+TEST_F(AiOptimizerCleanHistory, UnclassifiedClientFeedbackStillGetsDiagnosis) {
+  if (!child_) return;
+  auto session = healthy();
+  session.last_primary_issue.clear();
+  session.last_health_grade.clear();
+  session.last_network_risk.clear();
+  session.last_decoder_risk.clear();
+  session.last_hdr_risk.clear();
+  session.last_end_reason = "end";
+  session.last_duration_s = 60;
+  session.last_sample_count = 10;
+  ai_optimizer::record_session("unlisted-vrr-test-host", "Client game", session);
+  const auto saved = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Client game");
+  ASSERT_TRUE(saved.has_value());
+  EXPECT_EQ(saved->last_primary_issue, "host_render_limited");
+  EXPECT_EQ(saved->last_issues, std::vector<std::string> {"host_render_limited"});
+  EXPECT_GT(saved->last_safe_target_fps, 0.0);
+}
+
+TEST_F(AiOptimizerCleanHistory, PartialLegacyDiagnosisStillGetsSecondaryTags) {
+  if (!child_) return;
+  auto entry = raw_entry(90, "network_jitter", "watch", {}, 100);
+  entry["last_end_reason"] = "end";
+  entry["last_duration_s"] = 60;
+  entry["last_sample_count"] = 10;
+  entry["packet_loss_pct"] = entry["last_packet_loss_pct"] = 3.0;
+  entry["last_network_risk"] = "elevated";
+  write_fixture({{"unlisted-vrr-test-host:Partial game", entry}});
+  reload();
+  const auto saved = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Partial game");
+  ASSERT_TRUE(saved.has_value());
+  EXPECT_EQ(saved->last_primary_issue, "network_jitter");
+  EXPECT_EQ(saved->last_issues, (std::vector<std::string> {"network_jitter", "frame_pacing"}));
+}
+
+TEST_F(AiOptimizerCleanHistory, LegacyRepairDoesNotInventAnExplicitCleanVerdict) {
+  if (!child_) return;
+  auto entry = raw_entry(90, "network_jitter", "watch", {"network_jitter"}, 100);
+  entry["packet_loss_pct"] = entry["last_packet_loss_pct"] = 3.2;
+  entry["last_network_risk"] = "elevated";
+  write_fixture({{"unlisted-vrr-test-host:Legacy repair", entry}});
+  reload();
+  const auto saved = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Legacy repair");
+  ASSERT_TRUE(saved.has_value());
+  EXPECT_EQ(saved->last_packet_loss_source, "legacy_control_channel");
+  EXPECT_EQ(saved->last_primary_issue, "steady");
+  EXPECT_EQ(saved->last_network_risk, "normal");
+  EXPECT_EQ(saved->last_issues, std::vector<std::string> {"host_render_limited"});
+}
+#endif
