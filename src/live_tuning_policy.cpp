@@ -163,6 +163,21 @@ namespace live_tuning_policy {
     return std::max(background_, MIN_LOSS);
   }
 
+  void policy_t::clear_loss_run(bool restore_baseline) {
+    if (restore_baseline && baseline_before_run_) {
+      const auto &before = *baseline_before_run_;
+      base_loss_ = before.loss;
+      base_m2_ = before.m2;
+      base_disp_ = before.dispersion;
+      base_n_ = before.reports;
+      disp_n_ = before.dispersion_reports;
+    }
+    baseline_before_run_.reset();
+    cusum_ = 0.0;
+    run_.clear();
+    duty_.clear();
+  }
+
   void policy_t::note_baseline(double expected, double lost) {
     const double a = 1.0 / std::min(BASELINE_REPORTS, base_n_ + 1);
     base_n_ += 1;
@@ -177,6 +192,8 @@ namespace live_tuning_policy {
   }
 
   void policy_t::reset_baseline(double loss) {
+    // A selected hold or rate-independent result resolves the candidate, retaining its burstiness.
+    clear_loss_run(false);
     // Keep the measured burstiness; move only the level.
     const double var = std::max(0.0, base_m2_ - base_loss_ * base_loss_);
     base_loss_ = loss;
@@ -189,6 +206,8 @@ namespace live_tuning_policy {
     if (next == target_) {
       return;
     }
+    // Only an actual cut rejects the candidate's baseline samples. A raise retains what was learned.
+    clear_loss_run(next < target_);
     ++changes_;
     last_change_ = change_t {now_ms, target_, next, why};
     after_change_ = next > target_ ? after_change_e::up : after_change_e::down;
@@ -197,9 +216,6 @@ namespace live_tuning_policy {
       building_run_ = 0;
     }
     target_ = next;
-    cusum_ = 0.0;
-    run_.clear();
-    duty_.clear();
   }
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
@@ -411,6 +427,7 @@ namespace live_tuning_policy {
     if (gap || first != after_change_e::none) {
       // The first report after either direction still covers the previous rate. Even half of a
       // clean report can approve a retry against severe prior loss before its queue builds.
+      // A gap alone leaves the candidate and its snapshot pending: RTT may still confirm a cut.
       return;
     }
     if (backoff_ > 0) {
@@ -462,18 +479,18 @@ namespace live_tuning_policy {
     const double lossy_at = std::max(LOSSY_MIN, p0 + REACT_EXCESS / 2.0);
     const bool lossy_report = lost / expected >= lossy_at;
     cusum_ = std::max(0.0, cusum_ + llr(expected, lost, p0, p1, std::max(2.0, disp())));
-    // A change being detected is not background burstiness. In RP6 S2 the first 132/163-loss
-    // report arrived before the second lossy report needed for a probe; learning it here saturated
-    // dispersion, which then survived every rate change and slowed every clean recovery step.
-    // Reports below the existing lossy-report gate still teach ordinary background loss.
-    if (cusum_ == 0.0 || !lossy_report) {
-      note_baseline(expected, lost);
-    }
     if (cusum_ == 0.0) {
+      baseline_before_run_.reset();
       run_.clear();
     } else {
+      if (!baseline_before_run_) {
+        baseline_before_run_ = baseline_t {base_loss_, base_m2_, base_disp_, base_n_, disp_n_};
+      }
       run_.emplace_back(expected, lost);
     }
+    // Recurring bursts must teach both the level and the dispersion. If this candidate instead
+    // ends in a real cut, clear_loss_run() restores the baseline from before its first report.
+    note_baseline(expected, lost);
     if (st == state_e::normal) {
       normal_stats_.first += expected;
       normal_stats_.second += lost;
@@ -518,6 +535,7 @@ namespace live_tuning_policy {
       const double mean = run_lost / frames;
       if (backoff_ > 0 && mean <= background_ + ABSORB_EXCESS) {
         background_ = std::max(background_, mean);
+        baseline_before_run_.reset();
         cusum_ = 0.0;
         run_.clear();
         return;
@@ -699,14 +717,14 @@ namespace live_tuning_policy {
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
     const int previous = target_;
     const int next = std::clamp(kbps, std::min(floor_, base_), base_);
+    // Use the clamped rate, including a no-op adoption which resolves the run without a cut.
+    clear_loss_run(next < target_);
     if (next != target_) {
       after_change_ = next > target_ ? after_change_e::up : after_change_e::down;
       target_ = next;
     }
     (void) now_ms;
     test_.reset();
-    cusum_ = 0.0;
-    run_.clear();
     standing_run_ = 0;
     building_run_ = 0;
     if (target_ >= base_) {
@@ -736,7 +754,16 @@ namespace live_tuning_policy {
   void policy_t::rebase(int base_kbps, int floor_kbps) {
     base_ = std::max(1, base_kbps);
     floor_ = std::min(floor_kbps, base_);
-    target_ = std::clamp(target_, floor_, base_);
+    const int next = std::clamp(target_, floor_, base_);
+    if (next != target_) {
+      clear_loss_run(next < target_);
+      after_change_ = next > target_ ? after_change_e::up : after_change_e::down;
+      if (next < target_) {
+        standing_run_ = 0;
+        building_run_ = 0;
+      }
+      target_ = next;
+    }
     episode_start_ = std::min(episode_start_, base_);
     r0_ = std::min(r0_, base_);
     rtt_start_ = std::min(rtt_start_, base_);

@@ -270,8 +270,9 @@ TEST(LiveTuningPolicy, Rp6S2CongestionDoesNotBecomeBurstinessForCleanRecovery) {
   ASSERT_EQ(policy.target_kbps(), 25987);
   policy.adopt(700000 + 5000, 4000);
 
-  // Actual first 24 distinct clean report receipts/counts after cap removal. The first is after a
-  // gap; the hold then uses its existing 20-report retry. No reports are synthesized to clear it.
+  // Actual first 24 distinct clean report receipts/counts after cap removal. This component test's
+  // omitted middle creates the first-report gap; in the trace 181127 follows 180139 by about 1 s.
+  // The hold then uses its existing 20-report retry. No reports are synthesized to clear it.
   const std::vector<std::pair<int, int>> clean_reports {
     {181127, 120}, {182137, 120}, {183163, 121}, {184139, 120},
     {185155, 121}, {186155, 120}, {187155, 121}, {188167, 118},
@@ -288,7 +289,7 @@ TEST(LiveTuningPolicy, Rp6S2CongestionDoesNotBecomeBurstinessForCleanRecovery) {
   for (std::size_t i = 21; i < clean_reports.size(); ++i) {
     policy.report(700000 + clean_reports[i].first, clean_reports[i].second, 0);
   }
-  // After discarding the mixed report, 241 clean frames cross the unchanged log(19) SPRT boundary
+  // After discarding the mixed report, 242 clean frames score -3.63, crossing the unchanged log(19) boundary
   // with the clean baseline's dispersion floor of 2. The old contaminated dispersion of 10 does not.
   EXPECT_EQ(policy.state(), live_tuning_policy::state_e::normal);
   EXPECT_EQ(policy.target_kbps(), 25987);
@@ -361,7 +362,9 @@ TEST(LiveTuningPolicy, AShrunkLinkSettlesJustUnderItAndTriesItRarely) {
     const std::vector<int> settled(targets.begin() + 120, targets.end());
     EXPECT_GE(median(settled), kbps * 0.9);
     EXPECT_LE(median(settled), kbps);
-    // A retry every 20 reports costs about one second over the link.
+    // Record the mixed-report discard's retry cost without changing the existing bound.
+    RecordProperty("seconds_over_last480_link_" + std::to_string(kbps), seconds_over(targets, 120, kbps));
+    RecordProperty("seconds_over_per240_link_" + std::to_string(kbps), std::to_string(seconds_over(targets, 120, kbps) * 240.0 / 480));
     EXPECT_LE(seconds_over(targets, 120, kbps) * 240 / 480, 25);
   }
 }
@@ -411,6 +414,25 @@ TEST(LiveTuningPolicy, TheRp6HevcBurstsNeverReachTheFloor) {
     return t < BASE / 2;
   }), 12);
   EXPECT_EQ(targets.back(), BASE);
+}
+
+TEST(LiveTuningPolicy, WarmedRp6BurstsCanMoveTogetherWithoutStartingAProbe) {
+  const std::vector<std::pair<double, double>> hevc {{120, 0}, {122, 9}, {120, 0}, {120, 0}, {120, 0}, {120, 0}, {121, 9}, {120, 0}};
+  // The same 18 lost frames and 963 expected in every eight reports; move the second burst from
+  // slot 6 to slot 2 so two bursts are within three. The loss still does not depend on the rate.
+  const std::vector<std::pair<double, double>> jittered {{120, 0}, {122, 9}, {121, 9}, {120, 0}, {120, 0}, {120, 0}, {120, 0}, {120, 0}};
+  live_tuning_policy::policy_t policy {BASE, FLOOR};
+  const auto targets = run(480, [&](int i, int) {
+    // Thirty complete cycles (240 s) teach the ordinary level and dispersion before the spacing changes.
+    return i < 240 ? hevc[i % 8] : jittered[i % 8];
+  }, {}, {}, &policy);
+  const auto cut = std::find_if(targets.begin(), targets.end(), [](int t) {
+    return t != BASE;
+  });
+  EXPECT_EQ(cut, targets.end()) << "first rate change at second " << (cut - targets.begin());
+  EXPECT_EQ(policy.changes(), 0u);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::normal);
+  EXPECT_EQ(policy.background_loss(), 0.0);  // No false probe followed by rate-independent back-off.
 }
 
 TEST(LiveTuningPolicy, ASteamDeckWifiScanNeverCutsTheRate) {

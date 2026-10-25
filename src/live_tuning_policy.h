@@ -17,8 +17,9 @@
  *   than 2.5 s, or the first after any rate change, is not judged because it covers the previous rate.
  * - A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss, and a probe
  *   also needs two of the last three reports to lose 3% of their frames or more. Loss under 3% never starts
- *   one, and neither does one burst. Reports meeting that lossy-report gate while the change detector is
- *   above zero do not update the background baseline or its burstiness.
+ *   one, and neither does one burst. Reports keep teaching the baseline while a change is only a candidate.
+ *   An actual cut restores the level and burstiness from before that candidate; if the detector clears,
+ *   the learned baseline stays. A skipped report gap alone does not resolve the candidate.
  * - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
  *   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link
  *   is in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend
@@ -174,6 +175,7 @@ namespace live_tuning_policy {
     sprt_t make_sprt(double p0, double p1, int min_reports = 0, std::optional<int> undecided = std::nullopt) const;
     int upward_min() const;
     double p_background() const;
+    void clear_loss_run(bool restore_baseline);
     void note_baseline(double expected, double lost);
     void reset_baseline(double loss);
     void set_target(double kbps, std::string_view why, std::int64_t now_ms);
@@ -216,6 +218,14 @@ namespace live_tuning_policy {
     double base_disp_ = 1.0;
     int base_n_ = 0;
     int disp_n_ = 0;
+    struct baseline_t {
+      double loss;
+      double m2;
+      double dispersion;
+      int reports;
+      int dispersion_reports;
+    };
+    std::optional<baseline_t> baseline_before_run_;
     std::pair<double, double> normal_stats_ {0.0, 0.0};
     int normal_reports_ = 0;
 

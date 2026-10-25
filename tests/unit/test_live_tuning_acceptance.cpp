@@ -575,6 +575,14 @@ namespace {
 
 TEST(LiveTuningAcceptance, TheFrozenBenchPasses22CellsAndNamesTheFourThatNeedACongestionSignalWhileReportsStop) {
   const auto runs = all_runs();
+  const std::set<std::string> shrunk_families {"F1-link-100000", "F2-link-50000", "F8-link-200000", "F3-link-100000-1in120"};
+  std::size_t metric = 0;
+  for (const auto &r : runs) {
+    if (shrunk_families.count(r.family)) {
+      RecordProperty("over_capacity_last120_" + std::to_string(metric++),
+                     "scenario=" + r.scenario + ";order=" + r.order + ";tenths=" + std::to_string(r.over_capacity_last120));
+    }
+  }
   ASSERT_EQ(runs.size(), 519u);
   const auto verdicts = cells(runs);
   ASSERT_EQ(verdicts.size(), 26u);
