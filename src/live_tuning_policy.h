@@ -9,34 +9,40 @@
  * - Media reports, about one a second: frames expected and frames lost. Lost frames are frames FEC could not
  *   save.
  * - RTT readings, about ten a second: the host's ENet-smoothed RTT. ENet moves it 1/8 of the way to each new
- *   sample, about twice a second, so each change also gives back the sample behind it.
+ *   sample, about twice a second, so a change gives an estimate of the sample behind it. Only an estimate:
+ *   ENet rounds each step to a whole millisecond, and two acknowledgements can land between readings.
  *
  * Loss
  * - Decisions count reports, never wall time, so a report pause freezes them. A report after a gap of more
  *   than 2.5 s, or the first after a cut, is not judged; the first after a raise counts at half weight.
- * - A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss. It needs
- *   two lossy reports, three before the baseline has warmed up, so one burst never starts a probe.
+ * - A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss, and a probe
+ *   also needs two of the last three reports to lose 3% of their frames or more. Loss under 3% never starts
+ *   one, and neither does one burst.
  * - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
  *   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link
  *   is in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend
  *   on the rate, so the stream goes back to where the episode started, learns that loss as background, and
  *   does not probe again at that level for 1200 reports. Clearly heavy loss there: it halves on to the floor.
+ *   When reports stop before the first step is judged, perhaps because the link is overloaded, the probe takes
+ *   its deep sample after 1.5 s, once, and goes no further until reports return.
  * - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
  *   the measured burstiness. An undecided descent test counts as not having helped.
- * - A hold retries the rate above it every 20 reports and climbs from there when it is clean. While its loss
- *   is not significantly lower than real loss at the rate above it, the loss is rate-independent after all.
+ * - A hold retries the rate above it after 8 reports, then every 20, and climbs from there when it is clean. A
+ *   clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
+ *   than real loss at the rate above it, the loss is rate-independent after all.
  *
  * Queues
- * - A raise fails as soon as three raw RTT samples in a row climb 2 ms each to 10 ms over the minute's lowest
+ * - A raise fails as soon as three estimated samples in a row climb 2 ms each to 10 ms over the minute's lowest
  *   sample, or the smoothed RTT is raised (10 ms, or half the minute's floor) and climbing 2 ms/s for 2 s.
  * - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background
  *   scan only raises it for about 5 s before it falls: a Steam Deck's scans peak at 83 ms for 5 s, every
  *   306.9 s. Cuts go on every 6 s until the queue starts to drain, at most three; the rate that queued is then
- *   the ceiling above the hold. A queue three cuts did not drain, with nothing lost meanwhile, is someone
- *   else's, and is left alone for 5 minutes.
+ *   the ceiling above the hold, and the first step past it, once it holds clean, is 1.1x: a queue at the link
+ *   builds slower than a retry can see. A queue three cuts did not drain, with nothing lost meanwhile, is
+ *   someone else's, and is left alone for 5 minutes.
  * - Heavy loss while cutting for a queue hands the stream to the loss probe.
  *
- * The replays in tests/unit/test_live_tuning_policy.cpp pin this against the Live Tuning replay bench.
+ * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second.
  */
 #pragma once
 
@@ -107,8 +113,11 @@ namespace live_tuning_policy {
     /// One media report at host time now_ms: frames expected and frames lost since the last one.
     void report(std::int64_t now_ms, double expected, double lost);
 
-    /// One reading of the ENet-smoothed RTT at host time now_ms.
+    /// One reading of the ENet-smoothed RTT at host time now_ms. It also advances time, as tick() does.
     void rtt(std::int64_t now_ms, double smoothed_rtt_ms);
+
+    /// Host time passed with no reading: a raise no report can judge is taken back.
+    void tick(std::int64_t now_ms);
 
     /// An outside writer (encoder load, Doctor, a manual bitrate) set the rate: carry on from it.
     void adopt(std::int64_t now_ms, int kbps);
@@ -200,6 +209,7 @@ namespace live_tuning_policy {
     int backoff_ = 0;
     double cusum_ = 0.0;
     std::vector<std::pair<double, double>> run_;
+    std::deque<bool> duty_;
     double base_loss_ = 0.0;
     double base_m2_ = 0.0;
     double base_disp_ = 1.0;
@@ -229,6 +239,10 @@ namespace live_tuning_policy {
     int hold_reports_ = 0;
     std::optional<sprt_t> test_;
     int retry_wait_ = 0;
+    int retries_ = 0;
+    bool blind_step_ = false;
+    bool hi_rechecked_ = false;
+    bool gentle_climb_ = false;
 
     // RTT.
     std::optional<double> last_smoothed_;

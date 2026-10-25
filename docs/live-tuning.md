@@ -27,11 +27,12 @@ not take a bitrate step of its own then: it rechecks and says what tuning found
 Live Tuning reads two things: each client media report's frames, expected and lost after FEC
 recovery, and the control channel's round trip time, about ten readings a second. It decides on
 reports, not on the clock, so a pause in reports pauses it, and a step it was trying when the
-reports stopped is taken back without counting against it.
+reports stopped is taken back without counting against it. A probe that had only begun when reports
+stopped, perhaps because the link is overloaded, takes one deep sample and goes no further.
 
 - **A change in loss.** It learns the stream's usual loss and how bursty that loss is, and starts a
-  probe only when loss rises clearly above it over at least two reports, three in the stream's first
-  ten. One burst never cuts.
+  probe only when loss rises clearly above it and two of the last three reports lose 3% of their
+  frames or more. Loss under 3% never starts a probe, and one burst never cuts.
 - **A link limit, or not.** A probe steps to 60% of the rate. If the loss goes, it checks the rate
   it left, since the loss may simply have ended, and either climbs straight back or narrows in on
   the highest clean rate. If the loss stays, it takes one sample at an eighth of the rate, never
@@ -39,8 +40,9 @@ reports stopped is taken back without counting against it.
   the loss does not depend on the bitrate: the stream goes back to its rate, and Live Tuning learns
   that loss and leaves it alone, with the reason `loss_independent_of_bitrate`. Only loss that is
   clearly heavy even there probes on toward the floor.
-- **Under a link.** Settled under a link it found, it tries the rate above about every 20 reports
-  and climbs back toward the request when that is clean, with the reason `holding_under_the_link`.
+- **Under a link.** Settled under a link it found, it tries the rate above after 8 reports and then
+  about every 20, and climbs back toward the request when that is clean, with the reason
+  `holding_under_the_link`.
 - **Queues.** A round trip time that rises and stays, 10 ms or more over the minute's lowest reading
   and not falling for 8 seconds, is a queue at the link: Live Tuning cuts 15% at a time until it
   drains and holds under it, with the reason `holding_under_a_queue`. A short rise is not a queue. A
@@ -49,9 +51,11 @@ reports stopped is taken back without counting against it.
   fails within about two seconds.
 
 Every verdict is a sequential likelihood-ratio test on frame counts, scaled by how bursty the
-stream's loss is, so a noisy second does not decide. The policy and its replays are
-`src/live_tuning_policy.h` and `tests/unit/test_live_tuning_policy.cpp`; the reference model they
-follow is `tools/tests/live_tuning_policy_reference.py`.
+stream's loss is, so a noisy second does not decide. ENet only reports its smoothed round trip time,
+so the sample behind each change is an estimate; Live Tuning uses it only to fail a raise early.
+The policy and its replays are `src/live_tuning_policy.h` and
+`tests/unit/test_live_tuning_policy.cpp`; the reference model they follow is
+`tools/tests/live_tuning_policy_reference.py`.
 
 ## Range
 

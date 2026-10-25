@@ -21,9 +21,16 @@ namespace live_tuning_policy {
     constexpr double STEP = 0.5;
     constexpr double PROBE_DEPTH = 8.0;
     constexpr double BISECT_DONE = 1.06;
+    constexpr double RECHECK_CEILING = 1.25;  // a clean step this close under the ceiling rechecks the ceiling
     constexpr double CLIMB_STEP = 1.25;
     constexpr double CLIMB_FAR = 1.5;
+    constexpr double CLIMB_PAST_QUEUE = 1.1;  // the first step above a queue ceiling that just held clean
     constexpr int RETRY_REPORTS = 20;
+    constexpr int FIRST_RETRY_REPORTS = 8;  // the first retry after a hold begins, for a link that recovered meanwhile
+    constexpr double LOSSY_MIN = 0.03;  // loss under 3% never starts a probe: the bench's line for background loss
+    constexpr int DUTY_WINDOW = 3;  // a probe needs two lossy reports among the last three
+    constexpr int DUTY_NEEDED = 2;
+    constexpr std::int64_t MISSING_MS = 1500;  // no report this long while probing down: step to the deep sample
     constexpr int HOLD_CHECK_REPORTS = 12;
     constexpr int BACKOFF_REPORTS = 1200;
     constexpr int BACKGROUND_DECAY_REPORTS = 60;
@@ -193,6 +200,7 @@ namespace live_tuning_policy {
     target_ = next;
     cusum_ = 0.0;
     run_.clear();
+    duty_.clear();
   }
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
@@ -221,6 +229,8 @@ namespace live_tuning_policy {
     r0_ = target_;
     l0_ = l0;
     phase_ = phase_e::first;
+    blind_step_ = false;
+    retries_ = 0;
     hi_ = target_;
     hi_loss_ = l0;
     hi_is_queue_ = false;
@@ -288,6 +298,9 @@ namespace live_tuning_policy {
   void policy_t::verify_hi_result(bool lossy, std::int64_t now_ms) {
     if (!lossy) {
       lo_ = target_;
+      // A queue ceiling that held clean may still be the link: a queue there builds slower than a
+      // retry can see, so the first step above it is a small one.
+      gentle_climb_ = hi_is_queue_;
       hi_.reset();
       hi_is_queue_ = false;  // the ceiling held; climbs above it need no queue dwell
       state_ = state_e::climb;
@@ -296,6 +309,7 @@ namespace live_tuning_policy {
     }
     hi_loss_ = std::max(test_->rate(), hi_loss_);
     hi_stats_ = {hi_stats_.first + test_->frames(), hi_stats_.second + test_->lost()};
+    hi_rechecked_ = true;
     state_ = state_e::bisect;
     bisect_step(now_ms);
   }
@@ -318,8 +332,18 @@ namespace live_tuning_policy {
       hi_ = target_;
       hi_loss_ = std::max(test_->rate(), hi_loss_ * 0.5);
       hi_stats_ = {test_->frames(), test_->lost()};
+      hi_rechecked_ = false;
     } else {
       lo_ = target_;
+      if (hi_ && !hi_rechecked_ && static_cast<double>(*hi_) / *lo_ < RECHECK_CEILING &&
+          static_cast<double>(*hi_) / *lo_ > BISECT_DONE) {
+        // Clean this close under the ceiling: the ceiling may have gone, so try it before narrowing in.
+        hi_rechecked_ = true;
+        state_ = state_e::verify_hi;
+        set_target(*hi_, "recheck_ceiling", now_ms);
+        test_ = make_sprt(std::max(lo_loss_, p_background()), std::max(hi_loss_ * 0.6, lo_loss_ + CLIMB_LOSSY), upward_min());
+        return;
+      }
     }
     bisect_step(now_ms);
   }
@@ -329,7 +353,7 @@ namespace live_tuning_policy {
     reset_baseline(lo_loss_);
     set_target(kbps, "hold", now_ms);
     lo_ = target_;
-    retry_wait_ = RETRY_REPORTS;
+    retry_wait_ = retries_ == 0 ? FIRST_RETRY_REPORTS : RETRY_REPORTS;
     hold_stats_ = {0.0, 0.0};
     hold_reports_ = 0;
     test_.reset();
@@ -340,7 +364,9 @@ namespace live_tuning_policy {
       to_normal(now_ms, base_, "base");
       return;
     }
-    const double step = static_cast<double>(target_) * 2.0 < base_ ? CLIMB_FAR : CLIMB_STEP;
+    const double step = gentle_climb_ ? CLIMB_PAST_QUEUE :
+      static_cast<double>(target_) * 2.0 < base_ ? CLIMB_FAR : CLIMB_STEP;
+    gentle_climb_ = false;
     set_target(target_ * step, "climb", now_ms);
     const double p0 = std::max(lo_loss_, p_background());
     test_ = make_sprt(p0, p0 + CLIMB_LOSSY);
@@ -473,10 +499,10 @@ namespace live_tuning_policy {
         hold_reports_ = 0;
       }
     }
-    const auto lossy = std::count_if(run_.begin(), run_.end(), [&](const auto &report) {
-      return report.second / report.first > p0 + REACT_EXCESS / 2.0;
-    });
-    if (cusum_ >= CUSUM_H && lossy >= (warm ? 2 : 3)) {
+    const double lossy_at = std::max(LOSSY_MIN, p0 + REACT_EXCESS / 2.0);
+    push_bounded(duty_, lost / expected >= lossy_at, DUTY_WINDOW);
+    const auto lossy = std::count(duty_.begin(), duty_.end(), true);
+    if (cusum_ >= CUSUM_H && lossy >= DUTY_NEEDED) {
       double frames = 0.0;
       double run_lost = 0.0;
       for (const auto &[e, l] : run_) {
@@ -511,6 +537,7 @@ namespace live_tuning_policy {
     }
     if (st == state_e::hold && hi_) {
       if (--retry_wait_ <= 0) {
+        ++retries_;
         state_ = state_e::verify_hi;
         set_target(*hi_, "retry", now_ms);
         const double retry_p0 = std::max(lo_loss_, p_background());
@@ -520,7 +547,9 @@ namespace live_tuning_policy {
   }
 
   bool policy_t::note_raw(double rtt) {
-    // ENet moves its smoothed RTT 1/8 of the way to each new sample, so a change reveals the sample.
+    // ENet moves its smoothed RTT 1/8 of the way to each new sample, so a change gives an estimate of that sample.
+    // Only an estimate: ENet rounds the step, and two acknowledgements between readings make it wrong. It is used
+    // only to fail a raise early, where a wrong estimate costs a step or leaves the smoothed rules to catch it.
     if (!last_smoothed_) {
       last_smoothed_ = rtt;
       push_bounded(raw_, rtt, RAW_WINDOW);
@@ -529,7 +558,8 @@ namespace live_tuning_policy {
     if (rtt == *last_smoothed_) {
       return false;
     }
-    // ENet rounds the step up to a whole millisecond, so the sample sits within 7 ms: take the middle.
+    // ENet rounds the step up to a whole millisecond: one acknowledgement puts the sample within 7 ms, so take the
+    // middle.
     const double last = *last_smoothed_;
     const double sample = last + 8.0 * (rtt - last) - (rtt > last ? 3.5 : -3.5);
     last_smoothed_ = rtt;
@@ -562,6 +592,35 @@ namespace live_tuning_policy {
       raw_.clear();
       step_result(true, now_ms);
     }
+    tick(now_ms);
+    const std::int64_t sec = now_ms / 1000;
+    if (!sec_) {
+      sec_ = sec;
+    }
+    if (sec != *sec_) {
+      close_second(now_ms);
+      sec_ = sec;
+      sec_vals_.clear();
+    }
+    sec_vals_.push_back(smoothed_rtt_ms);
+  }
+
+  void policy_t::tick(std::int64_t now_ms) {
+    if (state_ == state_e::descend && phase_ == phase_e::first && !blind_step_ && last_report_ms_ &&
+        now_ms - *last_report_ms_ > MISSING_MS) {
+      // The probe's first step cannot be judged: the reports stopped, maybe because the link is overloaded.
+      // Take the deep sample now, once, rather than ride the rate for the whole pause.
+      const double deep = std::max<double>(2.0 * floor_, r0_ / PROBE_DEPTH);
+      if (deep < target_ * 0.9) {
+        blind_step_ = true;
+        hi_ = target_;
+        hi_loss_ = std::max(hi_loss_, l0_ * 0.5);
+        phase_ = phase_e::deep;
+        deep_stats_ = {0.0, 0.0};
+        set_target(deep, "descend_deep_unjudged", now_ms);
+        test_ = make_sprt(hi_loss_, std::max(hi_loss_ / 3.0, MIN_LOSS), 0, 0);
+      }
+    }
     if (raising() && last_report_ms_ && now_ms - *last_report_ms_ > PAUSE_TAKE_BACK_MS) {
       // No report can judge this raise: take it back without counting it as a failure,
       // and try it again once reports are back.
@@ -574,16 +633,6 @@ namespace live_tuning_policy {
       enter_hold(now_ms, *lo_);
       retry_wait_ = 3;
     }
-    const std::int64_t sec = now_ms / 1000;
-    if (!sec_) {
-      sec_ = sec;
-    }
-    if (sec != *sec_) {
-      close_second(now_ms);
-      sec_ = sec;
-      sec_vals_.clear();
-    }
-    sec_vals_.push_back(smoothed_rtt_ms);
   }
 
   void policy_t::close_second(std::int64_t now_ms) {

@@ -11,25 +11,29 @@ Live Tuning's loss and queue policy: the reference model the C++ port follows.
 Evidence
 - Media reports, about one a second: frames expected and frames lost. Lost frames are frames FEC could not save.
 - Pings, about ten a second: the host's ENet-smoothed RTT. ENet moves it 1/8 of the way to each new sample,
-  about twice a second, so each change also reveals the sample behind it.
+  about twice a second, so a change gives an estimate of the sample behind it. Only an estimate: ENet rounds
+  each step to a whole millisecond, and two acknowledgements can land between readings.
 
 Loss
 - Decisions count reports, never wall time, so a report pause freezes them. A report after a gap of more than
   2.5 s, or the first after a cut, is not judged; the first after a raise counts at half weight.
-- A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss. It needs
-  two lossy reports, three before the baseline has warmed up, so one burst never starts a probe.
+- A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss, and a probe
+  also needs two of the last three reports to lose 3% of their frames or more. Loss under 3% never starts one,
+  and neither does one burst.
 - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link is
   in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend on
   the rate, so the stream goes back to where the episode started, learns that loss as background, and does
   not probe again at that level for 1200 reports. Clearly heavy loss there: it halves on down to the floor.
+  When reports stop before the first step is judged, the probe takes its deep sample after 1.5 s, once.
 - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
   the measured burstiness. An undecided descent test counts as not having helped.
-- A hold retries the rate above it every 20 reports and climbs from there when it is clean. While its loss is
-  not significantly lower than real loss at the rate above it, the loss is rate-independent after all.
+- A hold retries the rate above it after 8 reports, then every 20, and climbs from there when it is clean. A
+  clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
+  than real loss at the rate above it, the loss is rate-independent after all.
 
 Queues
-- A raise fails as soon as three raw RTT samples in a row climb 2 ms each to 10 ms over the minute's lowest
+- A raise fails as soon as three estimated samples in a row climb 2 ms each to 10 ms over the minute's lowest
   sample, or the smoothed RTT is raised (10 ms or half the minute's floor) and climbing 2 ms/s for 2 s.
 - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background scan
   only raises it for about 5 s before it falls (the Deck's peak at 83 ms for 5 s). Cuts go on every 6 s until
@@ -105,7 +109,13 @@ class Controller:
     PROBE_DEPTH = 8
     BISECT_DONE = 1.06
     CLIMB_STEP, CLIMB_FAR = 1.25, 1.5
+    CLIMB_PAST_QUEUE = 1.1    # the first step above a queue ceiling that just held clean
     RETRY_REPORTS = 20
+    FIRST_RETRY_REPORTS = 8   # the first retry after a hold begins, for a link that recovered meanwhile
+    LOSSY_MIN = 0.03          # loss under 3% never starts a probe
+    DUTY_WINDOW, DUTY_NEEDED = 3, 2   # a probe needs two lossy reports among the last three
+    MISSING_MS = 1500         # no report this long while probing down: step to the deep sample
+    RECHECK_CEILING = 1.25    # a clean step this close under the ceiling rechecks the ceiling
     HOLD_CHECK_REPORTS = 12
     BACKOFF_REPORTS = 1200
     BACKGROUND_DECAY_REPORTS = 60
@@ -137,6 +147,7 @@ class Controller:
         self.backoff = 0
         self.cusum = 0.0
         self.run = []
+        self.duty = deque(maxlen=self.DUTY_WINDOW)
         self.base_loss = self.base_m2 = 0.0
         self.base_disp = 1.0
         self.base_n = self.disp_n = 0
@@ -156,6 +167,10 @@ class Controller:
         self.hold_reports = 0
         self.test = None
         self.retry_wait = 0
+        self.retries = 0
+        self.blind_step = False
+        self.hi_rechecked = False
+        self.gentle_climb = False
         # rtt
         self.last_smoothed = None
         self.raw = deque(maxlen=self.RAW_WINDOW)
@@ -213,6 +228,7 @@ class Controller:
         self.target = kbps
         self.cusum = 0.0
         self.run = []
+        self.duty.clear()
 
     def to_normal(self, now, kbps, why):
         self.state = NORMAL
@@ -237,6 +253,8 @@ class Controller:
             self.episode_start = self.target
         self.r0, self.l0 = self.target, l0
         self.phase = 'first'
+        self.blind_step = False
+        self.retries = 0
         self.hi, self.hi_loss, self.hi_kind = self.target, l0, 'loss'
         self.probe_stats = [0, 0]
         self.hi_stats = [sum(e for e, _ in self.run), sum(l for _, l in self.run)]
@@ -287,6 +305,9 @@ class Controller:
 
     def verify_hi_result(self, lossy, now):
         if not lossy:
+            # A queue ceiling that held clean may still be the link: a queue there builds slower than a
+            # retry can see, so the first step above it is a small one.
+            self.gentle_climb = self.hi_kind == 'queue'
             self.lo, self.hi = self.target, None
             self.hi_kind = 'loss'   # the ceiling held; climbs above it need no queue dwell
             self.state = CLIMB
@@ -294,6 +315,7 @@ class Controller:
             return
         self.hi_loss = max(self.test.rate(), self.hi_loss)
         self.hi_stats = [self.hi_stats[0] + self.test.frames, self.hi_stats[1] + self.test.lost]
+        self.hi_rechecked = True
         self.state = BISECT
         self.bisect_step(now)
 
@@ -309,8 +331,18 @@ class Controller:
         if lossy:
             self.hi, self.hi_loss = self.target, max(self.test.rate(), self.hi_loss * 0.5)
             self.hi_stats = [self.test.frames, self.test.lost]
+            self.hi_rechecked = False
         else:
             self.lo = self.target
+            if (self.hi is not None and not self.hi_rechecked
+                    and self.BISECT_DONE < self.hi / self.lo < self.RECHECK_CEILING):
+                # Clean this close under the ceiling: the ceiling may have gone, so try it before narrowing in.
+                self.hi_rechecked = True
+                self.state = VERIFY_HI
+                self.set_target(self.hi, 'recheck_ceiling', now)
+                self.test = self.sprt(max(self.lo_loss, self.p_background()),
+                                      max(self.hi_loss * 0.6, self.lo_loss + self.CLIMB_LOSSY), self.upward_min())
+                return
         self.bisect_step(now)
 
     def enter_hold(self, now, kbps):
@@ -318,7 +350,7 @@ class Controller:
         self.reset_baseline(self.lo_loss)
         self.set_target(kbps, 'hold', now)
         self.lo = self.target
-        self.retry_wait = self.RETRY_REPORTS
+        self.retry_wait = self.FIRST_RETRY_REPORTS if self.retries == 0 else self.RETRY_REPORTS
         self.hold_stats = [0, 0]
         self.hold_reports = 0
         self.test = None
@@ -327,7 +359,9 @@ class Controller:
         if self.target >= self.base:
             self.to_normal(now, self.base, 'base')
             return
-        step = self.CLIMB_FAR if self.target * 2 < self.base else self.CLIMB_STEP
+        step = (self.CLIMB_PAST_QUEUE if self.gentle_climb else
+                self.CLIMB_FAR if self.target * 2 < self.base else self.CLIMB_STEP)
+        self.gentle_climb = False
         self.set_target(self.target * step, 'climb', now)
         p0 = max(self.lo_loss, self.p_background())
         self.test = self.sprt(p0, p0 + self.CLIMB_LOSSY)
@@ -427,8 +461,9 @@ class Controller:
                     self.background = rate * 1.2
                 self.hold_stats = [0, 0]
                 self.hold_reports = 0
-        lossy = sum(1 for e, l in self.run if l / e > p0 + self.REACT_EXCESS / 2)
-        if self.cusum >= self.CUSUM_H and lossy >= (2 if warm else 3):
+        self.duty.append(lost / expected >= max(self.LOSSY_MIN, p0 + self.REACT_EXCESS / 2))
+        lossy = sum(self.duty)
+        if self.cusum >= self.CUSUM_H and lossy >= self.DUTY_NEEDED:
             frames = sum(e for e, _ in self.run)
             mean = sum(l for _, l in self.run) / frames
             if self.backoff and mean <= self.background + self.ABSORB_EXCESS:
@@ -453,6 +488,7 @@ class Controller:
         if st == HOLD and self.hi is not None:
             self.retry_wait -= 1
             if self.retry_wait <= 0:
+                self.retries += 1
                 self.state = VERIFY_HI
                 self.set_target(self.hi, 'retry', t_ms)
                 p0 = max(self.lo_loss, self.p_background())
@@ -461,14 +497,15 @@ class Controller:
     # ------------------------------------------------------------ rtt
 
     def note_raw(self, rtt):
-        """ENet moves its smoothed RTT 1/8 of the way to each new sample, so a change reveals the sample."""
+        """ENet moves its smoothed RTT 1/8 of the way to each new sample, so a change estimates that sample."""
         if self.last_smoothed is None:
             self.last_smoothed = rtt
             self.raw.append(rtt)
             return False
         if rtt == self.last_smoothed:
             return False
-        # ENet rounds the step up to a whole millisecond, so the sample sits within 7 ms: take the middle.
+        # ENet rounds the step up to a whole millisecond: one acknowledgement puts the sample within 7 ms, so take
+        # the middle. Two acknowledgements between readings make the estimate wrong; it only fails a raise early.
         sample = self.last_smoothed + 8 * (rtt - self.last_smoothed) - (3.5 if rtt > self.last_smoothed else -3.5)
         self.last_smoothed = rtt
         self.raw.append(max(1.0, sample))
@@ -490,6 +527,29 @@ class Controller:
             self.hi_kind = 'queue'
             self.raw.clear()
             self.step_result(True, t_ms)
+        self.tick(t_ms)
+        sec = t_ms // 1000
+        if self.sec is None:
+            self.sec = sec
+        if sec != self.sec:
+            self.close_second(t_ms)
+            self.sec, self.sec_vals = sec, []
+        self.sec_vals.append(rtt)
+
+    def tick(self, t_ms):
+        """Host time passed with no reading: a raise no report can judge is taken back."""
+        if (self.state == DESCEND and self.phase == 'first' and not self.blind_step
+                and self.last_report_ms is not None and t_ms - self.last_report_ms > self.MISSING_MS):
+            # The probe's first step cannot be judged: the reports stopped, maybe because the link is
+            # overloaded. Take the deep sample now, once, rather than ride the rate for the whole pause.
+            deep = max(2 * self.floor, self.r0 / self.PROBE_DEPTH)
+            if deep < self.target * 0.9:
+                self.blind_step = True
+                self.hi, self.hi_loss = self.target, max(self.hi_loss, self.l0 * 0.5)
+                self.phase = 'deep'
+                self.deep_stats = [0, 0]
+                self.set_target(deep, 'descend_deep_unjudged', t_ms)
+                self.test = self.sprt(self.hi_loss, max(self.hi_loss / 3, self.MIN_LOSS), undecided=0)
         if (self.raising() and self.last_report_ms is not None
                 and t_ms - self.last_report_ms > self.PAUSE_TAKE_BACK_MS):
             # No report can judge this raise: take it back without counting it as a failure,
@@ -499,13 +559,6 @@ class Controller:
                 self.hi, self.hi_kind, self.hi_stats = tried, 'loss', [0, 0]
             self.enter_hold(t_ms, self.lo)
             self.retry_wait = 3
-        sec = t_ms // 1000
-        if self.sec is None:
-            self.sec = sec
-        if sec != self.sec:
-            self.close_second(t_ms)
-            self.sec, self.sec_vals = sec, []
-        self.sec_vals.append(rtt)
 
     def close_second(self, now):
         if not self.sec_vals:

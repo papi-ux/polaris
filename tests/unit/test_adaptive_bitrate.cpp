@@ -1086,36 +1086,24 @@ namespace {
   }
 }  // namespace
 
-TEST(AdaptiveBitrateController, TheRecordedRp6HevcRunProbesOnceAndKeepsItsBitrate) {
-  // Loss in two of every eight reports, whatever the rate. The policy probes once as the bursts begin,
-  // finds the same loss far below the request, learns it as loss that does not depend on the bitrate, and
-  // keeps the request for the rest of the run.
+TEST(AdaptiveBitrateController, TheRecordedRp6HevcRunNeverProbesAndKeepsItsBitrate) {
+  // Loss in two of every eight reports, whatever the rate, and never in two of three: no probe starts, and
+  // the stream keeps the request for the whole run.
   enable_controller(k_rp6_hevc_kbps);
   config::video.adaptive_bitrate.max_bitrate_kbps = 300000;
   adaptive_bitrate::load_config();
   adaptive_bitrate::reset();
   adaptive_bitrate::set_runtime_update_supported(true);
   adaptive_bitrate::set_base_bitrate(k_rp6_hevc_kbps);
-  std::vector<int> targets;
+  int moved = 0;
   for (int report = 0; report < 300; ++report) {
     const auto &recorded = k_rp6_hevc_reports[report % k_rp6_hevc_reports.size()];
     adaptive_bitrate::update_rtt(k_rp6_hevc_rtt_ms[report % k_rp6_hevc_rtt_ms.size()]);
     adaptive_bitrate::update_media_report(recorded.expected, recorded.lost, k_rp6_hevc_rtt_ms[report % k_rp6_hevc_rtt_ms.size()]);
-    targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
+    moved += adaptive_bitrate::get_state().target_bitrate_kbps != k_rp6_hevc_kbps;
   }
-  int probes = 0;
-  for (std::size_t i = 1; i < targets.size(); ++i) {
-    probes += targets[i - 1] == k_rp6_hevc_kbps && targets[i] < k_rp6_hevc_kbps;
-  }
-  EXPECT_LE(probes, 1);
-  EXPECT_GT(*std::min_element(targets.begin(), targets.end()), 2000);
-  EXPECT_TRUE(std::all_of(targets.end() - 200, targets.end(), [](int t) {
-    return t == k_rp6_hevc_kbps;
-  }));
-  const auto state = adaptive_bitrate::get_state();
-  EXPECT_EQ(state.state, "steady");
-  EXPECT_EQ(state.reason, "loss_independent_of_bitrate");
-  EXPECT_GT(state.background_loss_pct, 1.0);
+  EXPECT_EQ(moved, 0);
+  EXPECT_EQ(adaptive_bitrate::get_state().state, "steady");
   leave_live_tuning_clean();
 }
 
