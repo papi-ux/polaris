@@ -48,8 +48,6 @@ namespace live_tuning_policy {
     constexpr double RTT_CUT = 0.85;
     constexpr int RTT_MAX_CUTS = 3;
     constexpr int RTT_SUPPRESS_S = 300;
-    constexpr double RAW_RISE_MS = 2.0;
-    constexpr std::size_t RAW_WINDOW = 120;
     constexpr std::size_t SEC_MEDS = 4;
 
     double llr(double expected, double lost, double p0, double p1, double dispersion) {
@@ -546,52 +544,12 @@ namespace live_tuning_policy {
     }
   }
 
-  bool policy_t::note_raw(double rtt) {
-    // ENet moves its smoothed RTT 1/8 of the way to each new sample, so a change gives an estimate of that sample.
-    // Only an estimate: ENet rounds the step, and two acknowledgements between readings make it wrong. It is used
-    // only to fail a raise early, where a wrong estimate costs a step or leaves the smoothed rules to catch it.
-    if (!last_smoothed_) {
-      last_smoothed_ = rtt;
-      push_bounded(raw_, rtt, RAW_WINDOW);
-      return false;
-    }
-    if (rtt == *last_smoothed_) {
-      return false;
-    }
-    // ENet rounds the step up to a whole millisecond: one acknowledgement puts the sample within 7 ms, so take the
-    // middle.
-    const double last = *last_smoothed_;
-    const double sample = last + 8.0 * (rtt - last) - (rtt > last ? 3.5 : -3.5);
-    last_smoothed_ = rtt;
-    push_bounded(raw_, std::max(1.0, sample), RAW_WINDOW);
-    return true;
-  }
-
-  bool policy_t::raw_building() const {
-    if (raw_.size() < 4) {
-      return false;
-    }
-    const auto n = raw_.size();
-    const double a = raw_[n - 4];
-    const double b = raw_[n - 3];
-    const double c = raw_[n - 2];
-    const double d = raw_[n - 1];
-    const double floor_raw = *std::min_element(raw_.begin(), raw_.end());
-    return b >= a + RAW_RISE_MS && c >= b + RAW_RISE_MS && d >= c + RAW_RISE_MS && d >= floor_raw + 10.0;
-  }
-
   bool policy_t::raising() const {
     const bool upward = state_ == state_e::verify_hi || state_ == state_e::bisect || state_ == state_e::climb;
     return upward && lo_ && target_ > *lo_;
   }
 
   void policy_t::rtt(std::int64_t now_ms, double smoothed_rtt_ms) {
-    if (note_raw(smoothed_rtt_ms) && raising() && raw_building()) {
-      // Raw samples climbing: this raise is building a queue now.
-      hi_is_queue_ = true;
-      raw_.clear();
-      step_result(true, now_ms);
-    }
     tick(now_ms);
     const std::int64_t sec = now_ms / 1000;
     if (!sec_) {
@@ -652,8 +610,9 @@ namespace live_tuning_policy {
     if (!raised) {
       push_bounded(rtt_min_, vals.front(), RTT_WINDOW_S);
     }
-    // A drained queue still reads high for 15-20 s through ENet's smoothing. A raised RTT that is not
-    // falling is a standing queue; one climbing 2 ms/s or more is a queue being built now.
+    // At ENet's idle cadence, an acknowledgement about every 500 ms, a drained queue still reads high for 15-20 s
+    // through its smoothing. A raised RTT that is not falling is a standing queue; one climbing 2 ms/s or more is
+    // a queue being built now.
     const bool standing = raised && prev.size() >= 3 && med >= prev[prev.size() - 3] - 0.5;
     const bool building = raised && prev.size() >= 2 && (med - prev[prev.size() - 2]) / 2.0 >= RTT_BUILD_MS_S;
     standing_run_ = standing ? standing_run_ + 1 : 0;

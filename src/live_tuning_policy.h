@@ -8,9 +8,9 @@
  * Evidence
  * - Media reports, about one a second: frames expected and frames lost. Lost frames are frames FEC could not
  *   save.
- * - RTT readings, about ten a second: the host's ENet-smoothed RTT. ENet moves it 1/8 of the way to each new
- *   sample, about twice a second, so a change gives an estimate of the sample behind it. Only an estimate:
- *   ENet rounds each step to a whole millisecond, and two acknowledgements can land between readings.
+ * - RTT readings, about ten a second: the host's ENet-smoothed RTT, the only RTT ENet keeps. It moves 1/8 of the
+ *   way to a new sample, rounded up to a whole millisecond, with each acknowledgement, and the host cannot tell
+ *   how many came between two readings, so the policy judges the smoothed value alone.
  *
  * Loss
  * - Decisions count reports, never wall time, so a report pause freezes them. A report after a gap of more
@@ -32,8 +32,7 @@
  *   than real loss at the rate above it, the loss is rate-independent after all.
  *
  * Queues
- * - A raise fails as soon as three estimated samples in a row climb 2 ms each to 10 ms over the minute's lowest
- *   sample, or the smoothed RTT is raised (10 ms, or half the minute's floor) and climbing 2 ms/s for 2 s.
+ * - A raise fails when the smoothed RTT is raised (10 ms, or half the minute's floor) and climbing 2 ms/s for 2 s.
  * - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background
  *   scan only raises it for about 5 s before it falls: a Steam Deck's scans peak at 83 ms for 5 s, every
  *   306.9 s. Cuts go on every 6 s until the queue starts to drain, at most three; the rate that queued is then
@@ -191,8 +190,6 @@ namespace live_tuning_policy {
     void step_result(bool lossy, std::int64_t now_ms);
     void watch(std::int64_t now_ms, double expected, double lost);
 
-    bool note_raw(double rtt);
-    bool raw_building() const;
     bool raising() const;
     void close_second(std::int64_t now_ms);
     void rtt_cut(std::int64_t now_ms);
@@ -247,8 +244,6 @@ namespace live_tuning_policy {
     bool gentle_climb_ = false;
 
     // RTT.
-    std::optional<double> last_smoothed_;
-    std::deque<double> raw_;
     std::deque<double> rtt_min_;
     std::optional<std::int64_t> sec_;
     std::vector<double> sec_vals_;

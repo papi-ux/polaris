@@ -10,9 +10,9 @@ Live Tuning's loss and queue policy: the reference model the C++ port follows.
 
 Evidence
 - Media reports, about one a second: frames expected and frames lost. Lost frames are frames FEC could not save.
-- Pings, about ten a second: the host's ENet-smoothed RTT. ENet moves it 1/8 of the way to each new sample,
-  about twice a second, so a change gives an estimate of the sample behind it. Only an estimate: ENet rounds
-  each step to a whole millisecond, and two acknowledgements can land between readings.
+- Pings, about ten a second: the host's ENet-smoothed RTT, the only RTT ENet keeps. It moves 1/8 of the way to a
+  new sample, rounded up to a whole millisecond, with each acknowledgement, and the host cannot tell how many
+  came between two readings, so the policy judges the smoothed value alone.
 
 Loss
 - Decisions count reports, never wall time, so a report pause freezes them. A report after a gap of more than
@@ -33,8 +33,7 @@ Loss
   than real loss at the rate above it, the loss is rate-independent after all.
 
 Queues
-- A raise fails as soon as three estimated samples in a row climb 2 ms each to 10 ms over the minute's lowest
-  sample, or the smoothed RTT is raised (10 ms or half the minute's floor) and climbing 2 ms/s for 2 s.
+- A raise fails when the smoothed RTT is raised (10 ms or half the minute's floor) and climbing 2 ms/s for 2 s.
 - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background scan
   only raises it for about 5 s before it falls (the Deck's peak at 83 ms for 5 s). Cuts go on every 6 s until
   the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. A queue
@@ -133,8 +132,6 @@ class Controller:
     RTT_CUT = 0.85
     RTT_MAX_CUTS = 3
     RTT_SUPPRESS_S = 300
-    RAW_RISE_MS = 2.0
-    RAW_WINDOW = 120
 
     def __init__(self, base, floor=2000):
         self.base, self.floor, self.target = base, floor, base
@@ -172,8 +169,6 @@ class Controller:
         self.hi_rechecked = False
         self.gentle_climb = False
         # rtt
-        self.last_smoothed = None
-        self.raw = deque(maxlen=self.RAW_WINDOW)
         self.rtt_min = deque(maxlen=self.RTT_WINDOW_S)
         self.sec = None
         self.sec_vals = []
@@ -496,37 +491,10 @@ class Controller:
 
     # ------------------------------------------------------------ rtt
 
-    def note_raw(self, rtt):
-        """ENet moves its smoothed RTT 1/8 of the way to each new sample, so a change estimates that sample."""
-        if self.last_smoothed is None:
-            self.last_smoothed = rtt
-            self.raw.append(rtt)
-            return False
-        if rtt == self.last_smoothed:
-            return False
-        # ENet rounds the step up to a whole millisecond: one acknowledgement puts the sample within 7 ms, so take
-        # the middle. Two acknowledgements between readings make the estimate wrong; it only fails a raise early.
-        sample = self.last_smoothed + 8 * (rtt - self.last_smoothed) - (3.5 if rtt > self.last_smoothed else -3.5)
-        self.last_smoothed = rtt
-        self.raw.append(max(1.0, sample))
-        return True
-
-    def raw_building(self):
-        if len(self.raw) < 4:
-            return False
-        a, b, c, d = list(self.raw)[-4:]
-        r = self.RAW_RISE_MS
-        return b >= a + r and c >= b + r and d >= c + r and d >= min(self.raw) + 10.0
-
     def raising(self):
         return self.state in UPWARD and self.lo is not None and self.target > self.lo
 
     def ping(self, t_ms, rtt):
-        if self.note_raw(rtt) and self.raising() and self.raw_building():
-            # Raw samples climbing: this raise is building a queue now.
-            self.hi_kind = 'queue'
-            self.raw.clear()
-            self.step_result(True, t_ms)
         self.tick(t_ms)
         sec = t_ms // 1000
         if self.sec is None:
@@ -571,8 +539,9 @@ class Controller:
         raised = floor_rtt is not None and med >= floor_rtt + max(10.0, 0.5 * floor_rtt)
         if not raised:
             self.rtt_min.append(vals[0])
-        # A drained queue still reads high for 15-20 s through ENet's smoothing. A raised RTT that is not
-        # falling is a standing queue; one climbing 2 ms/s or more is a queue being built now.
+        # At ENet's idle cadence, an acknowledgement about every 500 ms, a drained queue still reads high for 15-20 s
+        # through its smoothing. A raised RTT that is not falling is a standing queue; one climbing 2 ms/s or more is
+        # a queue being built now.
         standing = raised and len(prev) >= 3 and med >= prev[-3] - 0.5
         building = raised and len(prev) >= 2 and (med - prev[-2]) / 2 >= self.RTT_BUILD_MS_S
         self.standing_run = self.standing_run + 1 if standing else 0

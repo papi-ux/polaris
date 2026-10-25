@@ -48,11 +48,11 @@ stopped, perhaps because the link is overloaded, takes one deep sample and goes 
   drains and holds under it, with the reason `holding_under_a_queue`. A short rise is not a queue. A
   Steam Deck's Wi-Fi background scan lifts the reading to about 83 ms for 5 seconds every five
   minutes and then lets it fall, and 1.4.13 cut the stream for each one. A raise that starts a queue
-  fails within about two seconds.
+  fails once the reading is that far over its lowest and has climbed 2 ms a second for 2 seconds.
 
 Every verdict is a sequential likelihood-ratio test on frame counts, scaled by how bursty the
-stream's loss is, so a noisy second does not decide. ENet only reports its smoothed round trip time,
-so the sample behind each change is an estimate; Live Tuning uses it only to fail a raise early.
+stream's loss is, so a noisy second does not decide. Live Tuning reads only ENet's smoothed round
+trip time: ENet keeps no sample behind it, and the host cannot tell how many fed each change.
 The policy and its replays are `src/live_tuning_policy.h` and
 `tests/unit/test_live_tuning_policy.cpp`; the reference model they follow is
 `tools/tests/live_tuning_policy_reference.py`. `tests/unit/test_live_tuning_acceptance.cpp` holds
