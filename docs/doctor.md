@@ -286,8 +286,11 @@ Tuning's to act on, sustained video frame loss and round trip time alike, and Do
 **Recheck** for it. Doctor says what Live Tuning found: the bitrate it holds under and whether loss
 or a queue set it, or loss that does not get better at a lower bitrate, which neither of them cuts
 for. For that loss Doctor's advice is the Wi-Fi link itself: a closer access point, its 5 or 6 GHz
-band, or a wired connection ([Live Tuning](live-tuning.md#how-it-decides)). With Live Tuning off, or
-an encoder that cannot change its rate live, Doctor offers **Auto Fix** under confirmed pressure as
+band, or a wired connection ([Live Tuning](live-tuning.md#how-it-decides)). Doctor calls loss
+pressure from 2% over its window, and Live Tuning cuts only when loss rises over the stream's usual
+level in two of three reports, each losing 3% of its frames or more. For loss between the two,
+Doctor says Live Tuning keeps the bitrate, and still takes no step. With Live Tuning off, or an
+encoder that cannot change its rate live, Doctor offers **Auto Fix** under confirmed pressure as
 above. Pressing **Auto Fix** again while its step holds takes no second step: Doctor says the step
 still holds and how to undo it.
 

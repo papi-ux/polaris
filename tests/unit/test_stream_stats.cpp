@@ -4293,15 +4293,26 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   const auto queue = judged_doctor(stats, pressure).at("recommendation").at("body").get<std::string>();
   EXPECT_NE(queue.find("where it found a queue"), std::string::npos) << queue;
 
-  // Live Tuning has not found a ceiling yet.
-  stats.adaptive_bitrate_state = "steady";
-  stats.adaptive_bitrate_reason = "healthy";
+  // Live Tuning is cutting and has not found a ceiling yet.
+  stats.adaptive_bitrate_reason = "packet_loss";
   stats.adaptive_ceiling_bitrate_kbps = 0;
   stats.adaptive_ceiling_is_queue = false;
+  const auto cutting = judged_doctor(stats, pressure);
+  EXPECT_EQ(cutting.at("safe_recovery_action").at("id"), "recheck_network");
+  const auto cutting_body = cutting.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(cutting_body.find("Live Tuning is lowering the bitrate to what the link carries. Doctor measures again"), std::string::npos) << cutting_body;
+
+  // Live Tuning keeps the bitrate: Doctor's window calls this loss pressure, but it has not risen enough for
+  // Live Tuning to cut. Doctor says so rather than that Live Tuning is lowering it, and still takes no step.
+  stats.adaptive_bitrate_state = "steady";
+  stats.adaptive_bitrate_reason = "healthy";
   const auto watching = judged_doctor(stats, pressure);
   EXPECT_EQ(watching.at("safe_recovery_action").at("id"), "recheck_network");
   const auto watching_body = watching.at("recommendation").at("body").get<std::string>();
-  EXPECT_NE(watching_body.find("Live Tuning is lowering the bitrate to what the link carries. Doctor measures again"), std::string::npos) << watching_body;
+  EXPECT_NE(watching_body.find("Live Tuning has not lowered the bitrate for it"), std::string::npos) << watching_body;
+  EXPECT_NE(watching_body.find("in two of three reports, each losing 3% of its frames or more"), std::string::npos) << watching_body;
+  EXPECT_EQ(watching_body.find("is lowering the bitrate"), std::string::npos) << watching_body;
+  EXPECT_EQ(watching.at("recommendation").at("next_step_label"), "Recheck Live Tuning");
 
   // Loss Live Tuning found does not depend on the bitrate: neither of them cuts, and Doctor's advice is not
   // a bitrate change.

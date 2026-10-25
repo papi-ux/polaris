@@ -2629,6 +2629,7 @@ namespace stream_stats {
       /// Live Tuning is on and the encoder can change its rate live: it acts on network pressure, and Doctor
       /// measures again rather than changing the bitrate as well.
       bool acts = false;
+      std::string state;
       std::string reason;
       int ceiling_kbps = 0;
       bool ceiling_is_queue = false;
@@ -2753,6 +2754,12 @@ namespace stream_stats {
           body = "Sustained video frame loss is affecting this stream, and Live Tuning found that it does not get better at a lower bitrate, so it keeps the bitrate. Doctor does not lower it either: a lower bitrate would only soften the picture. Loss like this usually comes from the Wi-Fi itself, such as a busy or distant access point or interference.";
           next_step = "Improve the Wi-Fi link";
           expected = "Moving closer to the access point, using its 5 or 6 GHz band, or a wired connection should lower this loss. Live Tuning keeps watching, and cuts if the loss starts to depend on the bitrate.";
+        } else if (live_tuning.acts && live_tuning.state == "steady") {
+          // Doctor's window calls loss pressure from 2%; Live Tuning cuts only for a rise over the stream's usual
+          // loss in two of three reports, each 3% or more. Say it keeps the bitrate, not that it lowers it.
+          body = "Sustained video frame loss is affecting this stream, and Live Tuning has not lowered the bitrate for it: it cuts when the loss rises over what this stream usually loses in two of three reports, each losing 3% of its frames or more. Doctor measures again instead of changing the bitrate itself.";
+          next_step = "Recheck Live Tuning";
+          expected = "If the loss grows, Live Tuning lowers the bitrate. Light loss that stays usually comes from the Wi-Fi itself: moving closer to the access point, using its 5 or 6 GHz band, or a wired connection should lower it.";
         } else if (live_tuning.acts) {
           // Sustained video frame loss is Live Tuning's to act on while it can change the rate live.
           const bool found = live_tuning.ceiling_kbps > 0;
@@ -3215,6 +3222,7 @@ namespace stream_stats {
     // and says what Live Tuning found.
     live_tuning_doctor_t live_tuning_doctor;
     live_tuning_doctor.acts = auto_safe_managing && stats.adaptive_runtime_update_supported;
+    live_tuning_doctor.state = stats.adaptive_bitrate_state;
     live_tuning_doctor.reason = stats.adaptive_bitrate_reason;
     live_tuning_doctor.ceiling_kbps = stats.adaptive_ceiling_bitrate_kbps;
     live_tuning_doctor.ceiling_is_queue = stats.adaptive_ceiling_is_queue;
