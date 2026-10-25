@@ -3684,7 +3684,7 @@ namespace stream_stats {
       auto_safe_managing || live_bitrate_tunable ? "pass" : "watch",
       "deterministic_controller",
       auto_safe_managing ?
-        "Live Tuning adjusts the live bitrate on its own. Doctor offers one reversible step only for sustained video frame loss, and taking it turns Live Tuning off for this stream." :
+        "Live Tuning adjusts the live bitrate on its own. While it is on, Doctor takes no bitrate step of its own and measures again instead." :
       live_bitrate_tunable ?
         "Live Tuning is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
         "The current stream has no safe, exclusive live bitrate actuator. Doctor remains observational."

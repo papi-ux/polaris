@@ -118,18 +118,8 @@ starts at `v1.0.0`.
   capture give the stream no place on a larger desktop, so they are unchanged. Touch and pen
   still leave the place out.
 
-- With Live Tuning on, Doctor offers to lower the bitrate for sustained video frame loss. It left all
-  network pressure to Live Tuning and offered only a recheck. Doctor now offers one step with Undo,
-  verified like any other. Taking it turns Live Tuning off for this stream only, as a live bitrate
-  set by hand does, and never writes the saved preference. Undo, a step that does not verify, or
-  turning Live Tuning back on puts back the bitrate from before the step and turns Live Tuning on
-  again, and the step's receipt says so. Otherwise Live Tuning stays off until the stream ends, and
-  the next stream starts with it on. While the step holds, pressing Auto Fix again takes no second
-  step and says why, and once the network is clean Doctor offers the step's Undo instead of a
-  quality restore the step would refuse. If a network report reaches the controller just as Doctor
-  takes the step, Doctor takes none, turns Live Tuning back on and says so. Round trip time alone
-  stays Live Tuning's to cut for, and Doctor only rechecks it, saying what Live Tuning's own rule
-  does rather than promising a cut.
+- With Live Tuning on, round trip time alone stays Live Tuning's to cut for, and Doctor only
+  rechecks it, saying what Live Tuning's own rule does rather than promising a cut.
 
 - The Dashboard quotes the loss Doctor judges as well. Its Loss tile, the tile's colour, the quality
   grade and the loss chart read the newest one second report, and so did the stream's client line

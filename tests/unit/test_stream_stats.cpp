@@ -56,7 +56,9 @@ namespace {
    * as the object lives; the previous PATH comes back after. The Doctor reads the configured mode's
    * availability from PATH, so a case about something else in a private mode makes the mode
    * available here instead of depending on what the runner has installed. Same shape as the fixture
-   * in test_stream_display_policy.cpp; kept local so this file needs no new seam or dependency.
+   * in test_stream_display_policy.cpp; kept local so this file needs no new seam or dependency. The
+   * stand-ins live under TMPDIR when it is set: a runner may mount /tmp noexec, and a stand-in there
+   * is not executable, so it is not on PATH.
    */
   class ScopedPrivateRuntimePath {
   public:
@@ -66,8 +68,8 @@ namespace {
         previous = current;
       }
 
-      char path_template[] = "/tmp/polaris-stream-stats-runtime-XXXXXX";
-      const char *created = mkdtemp(path_template);
+      auto path_template = (std::filesystem::temp_directory_path() / "polaris-stream-stats-runtime-XXXXXX").string();
+      const char *created = mkdtemp(path_template.data());
       if (!created) {
         throw std::runtime_error("failed to create stream-stats runtime test directory");
       }
