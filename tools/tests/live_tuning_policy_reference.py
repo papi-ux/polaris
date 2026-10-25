@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""Reference model of src/live_tuning_policy.cpp, and the replays that pin the C++ port to it.
+
+    python3 tools/tests/live_tuning_policy_reference.py --write tests/fixtures/live-tuning-policy-replays.json
+
+regenerates the golden per-second targets tests/unit/test_live_tuning_policy.cpp replays. A change to the policy
+changes both files: edit the C++ and this model the same way, regenerate, and read the diff of the fixture.
+
+Live Tuning's loss and queue policy: the reference model the C++ port follows.
+
+Evidence
+- Media reports, about one a second: frames expected and frames lost. Lost frames are frames FEC could not save.
+- Pings, about ten a second: the host's ENet-smoothed RTT. ENet moves it 1/8 of the way to each new sample,
+  about twice a second, so each change also reveals the sample behind it.
+
+Loss
+- Decisions count reports, never wall time, so a report pause freezes them. A report after a gap of more than
+  2.5 s, or the first after a cut, is not judged; the first after a raise counts at half weight.
+- A CUSUM against a slow running baseline (its level and its burstiness) detects a change in loss. It needs
+  two lossy reports, three before the baseline has warmed up, so one burst never starts a probe.
+- A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
+  climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link is
+  in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend on
+  the rate, so the stream goes back to where the episode started, learns that loss as background, and does
+  not probe again at that level for 1200 reports. Clearly heavy loss there: it halves on down to the floor.
+- "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
+  the measured burstiness. An undecided descent test counts as not having helped.
+- A hold retries the rate above it every 20 reports and climbs from there when it is clean. While its loss is
+  not significantly lower than real loss at the rate above it, the loss is rate-independent after all.
+
+Queues
+- A raise fails as soon as three raw RTT samples in a row climb 2 ms each to 10 ms over the minute's lowest
+  sample, or the smoothed RTT is raised (10 ms or half the minute's floor) and climbing 2 ms/s for 2 s.
+- A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background scan
+  only raises it for about 5 s before it falls (the Deck's peak at 83 ms for 5 s). Cuts go on every 6 s until
+  the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. A queue
+  three cuts did not drain, with nothing lost meanwhile, is someone else's, and is left alone for 5 minutes.
+- Heavy loss while cutting for a queue hands the stream to the loss probe.
+"""
+import argparse
+import json
+import math
+from collections import deque
+from pathlib import Path
+
+NORMAL, DESCEND, VERIFY_HI, BISECT, HOLD, CLIMB, RTT_CUT = (
+    'normal', 'descend', 'verify_hi', 'bisect', 'hold', 'climb', 'rtt_cut')
+UPWARD = (VERIFY_HI, BISECT, CLIMB)
+
+
+def llr(expected, lost, p0, p1, dispersion):
+    return (lost * math.log(p1 / p0) - expected * (p1 - p0)) / dispersion
+
+
+def z_lower(a_lost, a_frames, b_lost, b_frames, dispersion):
+    """How many standard errors rate a sits under rate b, allowing for bursty loss."""
+    if a_frames <= 0 or b_frames <= 0:
+        return 0.0
+    pa, pb = a_lost / a_frames, b_lost / b_frames
+    p = (a_lost + b_lost) / (a_frames + b_frames)
+    se = math.sqrt(max(p, 1e-4) * dispersion * (1 / a_frames + 1 / b_frames))
+    return (pb - pa) / se
+
+
+class Sprt:
+    """H0: loss rate p0. H1: loss rate p1. add() returns 1 for H1, 0 for H0, None while undecided."""
+
+    def __init__(self, p0, p1, dispersion, min_reports=0, undecided=None, alpha=0.05, beta=0.05):
+        self.p0, self.p1 = max(p0, 1e-3), max(p1, 2e-3)
+        if self.p0 / 1.2 < self.p1 < self.p0 * 1.2:
+            self.p1 = self.p0 * 1.2 if self.p1 >= self.p0 else self.p0 / 1.2
+        self.a, self.b = math.log((1 - beta) / alpha), math.log(beta / (1 - alpha))
+        self.d = dispersion
+        self.min = min_reports
+        self.max = min(20, max(6, int(round(1.5 * dispersion))))
+        self.undecided = undecided
+        self.v = self.n = self.frames = self.lost = 0.0
+
+    def add(self, expected, lost, weight):
+        self.n += weight
+        self.frames += expected * weight
+        self.lost += lost * weight
+        self.v += weight * llr(expected, lost, self.p0, self.p1, self.d)
+        if self.v >= self.a:
+            return 1
+        if self.v <= self.b and self.n >= self.min:
+            return 0
+        if self.n >= max(self.max, self.min):
+            if self.undecided is not None:
+                return self.undecided
+            return 1 if self.v > 0 else 0
+        return None
+
+    def rate(self):
+        return self.lost / self.frames if self.frames else 0.0
+
+
+class Controller:
+    MIN_LOSS = 0.002          # the smallest loss rate any test assumes
+    REACT_EXCESS = 0.015      # loss this far over the expected level is worth a probe
+    MILD_LOSS = 0.045         # deep-sample loss not clearly this far over the background is rate-independent
+    ABSORB_EXCESS = 0.02      # while backing off, loss this close to the background only updates it
+    CLIMB_LOSSY = 0.03        # a raise is lossy at this much loss over its floor
+    FIRST_STEP, STEP = 0.6, 0.5
+    PROBE_DEPTH = 8
+    BISECT_DONE = 1.06
+    CLIMB_STEP, CLIMB_FAR = 1.25, 1.5
+    RETRY_REPORTS = 20
+    HOLD_CHECK_REPORTS = 12
+    BACKOFF_REPORTS = 1200
+    BACKGROUND_DECAY_REPORTS = 60
+    CUSUM_H = 4.0
+    BASELINE_REPORTS = 40
+    WARMUP_REPORTS = 10
+    REPORT_GAP_MS = 2500
+    PAUSE_TAKE_BACK_MS = 2500
+    QUEUE_RETRY_REPORTS = 4
+    RTT_WINDOW_S = 60
+    RTT_STANDING_S = 8
+    RTT_BUILD_MS_S = 2.0
+    RTT_BUILD_FAIL_S = 2
+    RTT_DRAIN_S = 6
+    RTT_CUT = 0.85
+    RTT_MAX_CUTS = 3
+    RTT_SUPPRESS_S = 300
+    RAW_RISE_MS = 2.0
+    RAW_WINDOW = 120
+
+    def __init__(self, base, floor=2000):
+        self.base, self.floor, self.target = base, floor, base
+        self.state = NORMAL
+        self.log = []
+        # loss evidence
+        self.after_change = None
+        self.last_report_ms = None
+        self.background = 0.0
+        self.backoff = 0
+        self.cusum = 0.0
+        self.run = []
+        self.base_loss = self.base_m2 = 0.0
+        self.base_disp = 1.0
+        self.base_n = self.disp_n = 0
+        self.normal_stats = [0, 0]
+        self.normal_reports = 0
+        # search
+        self.episode_start = self.r0 = base
+        self.l0 = 0.0
+        self.phase = 'first'
+        self.hi = self.lo = None
+        self.hi_loss = self.lo_loss = 0.0
+        self.hi_kind = 'loss'
+        self.hi_stats = [0, 0]
+        self.probe_stats = [0, 0]
+        self.deep_stats = [0, 0]
+        self.hold_stats = [0, 0]
+        self.hold_reports = 0
+        self.test = None
+        self.retry_wait = 0
+        # rtt
+        self.last_smoothed = None
+        self.raw = deque(maxlen=self.RAW_WINDOW)
+        self.rtt_min = deque(maxlen=self.RTT_WINDOW_S)
+        self.sec = None
+        self.sec_vals = []
+        self.sec_meds = deque(maxlen=4)
+        self.standing_run = self.building_run = 0
+        self.rtt_suppress = 0
+        self.rtt_cut_wait = self.rtt_cuts = 0
+        self.rtt_cut_lossy = False
+        self.rtt_from = self.rtt_start = base
+
+    # ------------------------------------------------------------ helpers
+
+    def disp(self):
+        return min(10.0, max(1.0, self.base_disp))
+
+    def sprt(self, p0, p1, min_reports=0, undecided=None):
+        return Sprt(p0, p1, max(2.0, self.disp()), min_reports, undecided)
+
+    def upward_min(self):
+        # A queue ceiling needs a few seconds for a queue to show in ENet's smoothed RTT.
+        return self.QUEUE_RETRY_REPORTS if self.hi_kind == 'queue' else 0
+
+    def p_background(self):
+        return max(self.background, self.MIN_LOSS)
+
+    def note_baseline(self, expected, lost):
+        a = 1.0 / min(self.BASELINE_REPORTS, self.base_n + 1)
+        self.base_n += 1
+        x = lost / expected
+        self.base_loss = (1 - a) * self.base_loss + a * x
+        self.base_m2 = (1 - a) * self.base_m2 + a * x * x
+        self.disp_n = min(self.disp_n + 1, self.BASELINE_REPORTS)
+        if self.disp_n >= self.WARMUP_REPORTS:
+            var = max(0.0, self.base_m2 - self.base_loss ** 2)
+            self.base_disp = var * expected / max(self.base_loss, 0.5 / expected)
+
+    def reset_baseline(self, loss):
+        # Keep the measured burstiness; move only the level.
+        var = max(0.0, self.base_m2 - self.base_loss ** 2)
+        self.base_loss = loss
+        self.base_m2 = var + loss * loss
+        self.base_n = self.WARMUP_REPORTS
+
+    def set_target(self, kbps, why, now):
+        kbps = int(max(self.floor, min(self.base, kbps)))
+        if kbps == self.target:
+            return
+        self.log.append((now // 1000, self.target // 1000, kbps // 1000, why))
+        self.after_change = 'up' if kbps > self.target else 'down'
+        if kbps < self.target:
+            self.standing_run = self.building_run = 0
+        self.target = kbps
+        self.cusum = 0.0
+        self.run = []
+
+    def to_normal(self, now, kbps, why):
+        self.state = NORMAL
+        self.hi = self.lo = None
+        self.test = None
+        self.set_target(kbps, why, now)
+
+    def rate_independent(self, rate, now, why):
+        self.background = max(self.background, rate)
+        self.reset_baseline(self.background)
+        self.backoff = self.BACKOFF_REPORTS
+        self.to_normal(now, max(self.r0, self.episode_start), why)
+
+    def probe_rate(self):
+        frames, lost = self.probe_stats
+        return lost / frames if frames else self.l0
+
+    # ------------------------------------------------------------ loss search
+
+    def begin_descent(self, now, why, l0):
+        if self.state == NORMAL:
+            self.episode_start = self.target
+        self.r0, self.l0 = self.target, l0
+        self.phase = 'first'
+        self.hi, self.hi_loss, self.hi_kind = self.target, l0, 'loss'
+        self.probe_stats = [0, 0]
+        self.hi_stats = [sum(e for e, _ in self.run), sum(l for _, l in self.run)]
+        self.state = DESCEND
+        self.set_target(self.target * self.FIRST_STEP, f'descend:{why}', now)
+        self.test = self.sprt(self.l0, max(self.l0 / 3, self.MIN_LOSS), undecided=0)
+
+    def descend_result(self, helped, now):
+        if helped:
+            self.lo, self.lo_loss = self.target, self.test.rate()
+            self.state = VERIFY_HI
+            self.set_target(self.hi, 'verify_hi', now)
+            self.test = self.sprt(max(self.lo_loss, self.p_background()),
+                                  max(self.hi_loss * 0.6, self.lo_loss + self.CLIMB_LOSSY), self.upward_min())
+            return
+        rate = self.test.rate()
+        if self.phase == 'first':
+            self.hi, self.hi_loss = self.target, max(rate, self.l0 * 0.5)
+            self.hi_stats = [self.test.frames, self.test.lost]
+            deep = max(2 * self.floor, self.r0 / self.PROBE_DEPTH)
+            if deep >= self.target * 0.9:
+                self.rate_independent(self.probe_rate(), now, 'rate_independent')
+                return
+            self.phase = 'deep'
+            self.deep_stats = [0, 0]
+            self.set_target(deep, 'descend_deep', now)
+            self.test = self.sprt(self.hi_loss, max(self.hi_loss / 3, self.MIN_LOSS), undecided=0)
+            return
+        if self.phase == 'deep':
+            self.deep_stats[0] += self.test.frames
+            self.deep_stats[1] += self.test.lost
+            frames, lost = self.deep_stats
+            r = lost / frames
+            se = math.sqrt(max(r, 1e-4) * max(2.0, self.disp()) / frames)
+            if r - 2 * se - self.background <= self.MILD_LOSS:
+                # The same loss far under the rate, not clearly heavier: it does not depend on the rate.
+                self.rate_independent(self.probe_rate(), now, 'rate_independent')
+                return
+        # Heavy loss even far down: keep halving, as far as the floor.
+        self.phase = 'down'
+        self.hi, self.hi_loss = self.target, max(rate, self.hi_loss * 0.5)
+        self.hi_stats = [self.test.frames, self.test.lost]
+        if self.target <= self.floor:
+            self.enter_hold(now, self.target)
+            return
+        self.set_target(self.target * self.STEP, 'descend', now)
+        self.test = self.sprt(self.hi_loss, max(self.hi_loss / 3, self.MIN_LOSS), undecided=0)
+
+    def verify_hi_result(self, lossy, now):
+        if not lossy:
+            self.lo, self.hi = self.target, None
+            self.hi_kind = 'loss'   # the ceiling held; climbs above it need no queue dwell
+            self.state = CLIMB
+            self.climb_step(now)
+            return
+        self.hi_loss = max(self.test.rate(), self.hi_loss)
+        self.hi_stats = [self.hi_stats[0] + self.test.frames, self.hi_stats[1] + self.test.lost]
+        self.state = BISECT
+        self.bisect_step(now)
+
+    def bisect_step(self, now):
+        if self.hi is None or self.hi / self.lo <= self.BISECT_DONE:
+            self.enter_hold(now, self.lo)
+            return
+        self.set_target(math.sqrt(self.lo * self.hi), 'bisect', now)
+        self.test = self.sprt(max(self.lo_loss, self.p_background()),
+                              max(self.hi_loss * 0.6, self.lo_loss + self.CLIMB_LOSSY))
+
+    def bisect_result(self, lossy, now):
+        if lossy:
+            self.hi, self.hi_loss = self.target, max(self.test.rate(), self.hi_loss * 0.5)
+            self.hi_stats = [self.test.frames, self.test.lost]
+        else:
+            self.lo = self.target
+        self.bisect_step(now)
+
+    def enter_hold(self, now, kbps):
+        self.state = HOLD
+        self.reset_baseline(self.lo_loss)
+        self.set_target(kbps, 'hold', now)
+        self.lo = self.target
+        self.retry_wait = self.RETRY_REPORTS
+        self.hold_stats = [0, 0]
+        self.hold_reports = 0
+        self.test = None
+
+    def climb_step(self, now):
+        if self.target >= self.base:
+            self.to_normal(now, self.base, 'base')
+            return
+        step = self.CLIMB_FAR if self.target * 2 < self.base else self.CLIMB_STEP
+        self.set_target(self.target * step, 'climb', now)
+        p0 = max(self.lo_loss, self.p_background())
+        self.test = self.sprt(p0, p0 + self.CLIMB_LOSSY)
+
+    def climb_result(self, lossy, now):
+        if lossy:
+            self.hi, self.hi_loss = self.target, self.test.rate()
+            self.hi_stats = [self.test.frames, self.test.lost]
+            self.state = BISECT
+            self.bisect_step(now)
+        else:
+            self.lo = self.target
+            self.climb_step(now)
+
+    def step_result(self, lossy, now):
+        {VERIFY_HI: self.verify_hi_result, BISECT: self.bisect_result,
+         CLIMB: self.climb_result}[self.state](lossy, now)
+
+    # ------------------------------------------------------------ reports
+
+    def report(self, t_ms, expected, lost):
+        gap = self.last_report_ms is not None and t_ms - self.last_report_ms > self.REPORT_GAP_MS
+        self.last_report_ms = t_ms
+        if expected <= 0:
+            return
+        first = self.after_change
+        self.after_change = None
+        if gap or first == 'down':
+            # After a pause or a cut, this report still covers frames sent before it.
+            return
+        weight = 0.5 if first == 'up' else 1.0
+        if self.backoff:
+            self.backoff -= 1
+        st = self.state
+        if st == DESCEND:
+            self.probe_stats[0] += expected
+            self.probe_stats[1] += lost
+        if st == DESCEND or st in UPWARD:
+            res = self.test.add(expected, lost, weight)
+            if res is not None:
+                if st == DESCEND:
+                    self.descend_result(res == 1, t_ms)
+                else:
+                    self.step_result(res == 1, t_ms)
+            return
+        if st == RTT_CUT:
+            loss = lost / expected
+            if loss > self.p_background() + self.REACT_EXCESS:
+                self.rtt_cut_lossy = True
+            if loss > max(0.2, self.p_background() + self.MILD_LOSS):
+                # Heavy loss is stronger evidence than the queue: the loss probe takes it from here.
+                self.state = HOLD
+                self.run = [(expected, lost), (expected, lost)]
+                self.begin_descent(t_ms, 'loss_in_rtt_cut', loss)
+            return
+        self.watch(t_ms, expected, lost)
+
+    def watch(self, t_ms, expected, lost):
+        """NORMAL or HOLD: look for a change in loss, keep the background honest, retry what is above."""
+        st = self.state
+        warm = self.base_n >= self.WARMUP_REPORTS
+        p0 = max(self.base_loss if warm else 0.0, self.p_background())
+        if st == HOLD:
+            p0 = max(p0, self.lo_loss)
+        p1 = max(2.5 * p0, p0 + self.REACT_EXCESS)
+        self.cusum = max(0.0, self.cusum + llr(expected, lost, p0, p1, max(2.0, self.disp())))
+        self.note_baseline(expected, lost)
+        if self.cusum == 0.0:
+            self.run = []
+        else:
+            self.run.append((expected, lost))
+        if st == NORMAL:
+            self.normal_stats[0] += expected
+            self.normal_stats[1] += lost
+            self.normal_reports += 1
+            if self.normal_reports >= self.BACKGROUND_DECAY_REPORTS:
+                rate = self.normal_stats[1] / self.normal_stats[0]
+                if rate * 1.2 < self.background:
+                    self.background = rate * 1.2   # background loss that has gone
+                self.normal_stats = [0, 0]
+                self.normal_reports = 0
+        else:
+            self.hold_stats[0] += expected
+            self.hold_stats[1] += lost
+            self.hold_reports += 1
+            if self.hold_reports >= self.HOLD_CHECK_REPORTS:
+                frames, lst = self.hold_stats
+                rate = lst / frames
+                hf, hl = self.hi_stats
+                real_loss = self.hi_kind == 'loss' and hf > 0 and hl / hf >= self.background + self.REACT_EXCESS
+                if self.hi is not None and real_loss and z_lower(lst, frames, hl, hf, max(2.0, self.disp())) < 2.0:
+                    # The lower rate is no better: the loss does not depend on the rate after all.
+                    self.rate_independent(rate, t_ms, 'hold_no_better')
+                    return
+                self.lo_loss = rate
+                if rate * 1.2 < self.background:
+                    self.background = rate * 1.2
+                self.hold_stats = [0, 0]
+                self.hold_reports = 0
+        lossy = sum(1 for e, l in self.run if l / e > p0 + self.REACT_EXCESS / 2)
+        if self.cusum >= self.CUSUM_H and lossy >= (2 if warm else 3):
+            frames = sum(e for e, _ in self.run)
+            mean = sum(l for _, l in self.run) / frames
+            if self.backoff and mean <= self.background + self.ABSORB_EXCESS:
+                self.background = max(self.background, mean)
+                self.cusum = 0.0
+                self.run = []
+                return
+            self.begin_descent(t_ms, 'loss' if st == NORMAL else 'loss_at_hold', mean)
+            return
+        if st == NORMAL and self.target < self.base and self.cusum == 0.0:
+            self.lo, self.hi, self.lo_loss = self.target, None, max(self.base_loss, self.p_background())
+            self.state = CLIMB
+            self.climb_step(t_ms)
+            return
+        if st == HOLD and self.hi is None and self.target < self.base:
+            # Nothing above is known to fail: carry on climbing.
+            self.retry_wait -= 1
+            if self.retry_wait <= 0:
+                self.state = CLIMB
+                self.climb_step(t_ms)
+            return
+        if st == HOLD and self.hi is not None:
+            self.retry_wait -= 1
+            if self.retry_wait <= 0:
+                self.state = VERIFY_HI
+                self.set_target(self.hi, 'retry', t_ms)
+                p0 = max(self.lo_loss, self.p_background())
+                self.test = self.sprt(p0, p0 + self.CLIMB_LOSSY, self.upward_min())
+
+    # ------------------------------------------------------------ rtt
+
+    def note_raw(self, rtt):
+        """ENet moves its smoothed RTT 1/8 of the way to each new sample, so a change reveals the sample."""
+        if self.last_smoothed is None:
+            self.last_smoothed = rtt
+            self.raw.append(rtt)
+            return False
+        if rtt == self.last_smoothed:
+            return False
+        # ENet rounds the step up to a whole millisecond, so the sample sits within 7 ms: take the middle.
+        sample = self.last_smoothed + 8 * (rtt - self.last_smoothed) - (3.5 if rtt > self.last_smoothed else -3.5)
+        self.last_smoothed = rtt
+        self.raw.append(max(1.0, sample))
+        return True
+
+    def raw_building(self):
+        if len(self.raw) < 4:
+            return False
+        a, b, c, d = list(self.raw)[-4:]
+        r = self.RAW_RISE_MS
+        return b >= a + r and c >= b + r and d >= c + r and d >= min(self.raw) + 10.0
+
+    def raising(self):
+        return self.state in UPWARD and self.lo is not None and self.target > self.lo
+
+    def ping(self, t_ms, rtt):
+        if self.note_raw(rtt) and self.raising() and self.raw_building():
+            # Raw samples climbing: this raise is building a queue now.
+            self.hi_kind = 'queue'
+            self.raw.clear()
+            self.step_result(True, t_ms)
+        if (self.raising() and self.last_report_ms is not None
+                and t_ms - self.last_report_ms > self.PAUSE_TAKE_BACK_MS):
+            # No report can judge this raise: take it back without counting it as a failure,
+            # and try it again once reports are back.
+            tried = self.target
+            if self.hi is None or tried < self.hi:
+                self.hi, self.hi_kind, self.hi_stats = tried, 'loss', [0, 0]
+            self.enter_hold(t_ms, self.lo)
+            self.retry_wait = 3
+        sec = t_ms // 1000
+        if self.sec is None:
+            self.sec = sec
+        if sec != self.sec:
+            self.close_second(t_ms)
+            self.sec, self.sec_vals = sec, []
+        self.sec_vals.append(rtt)
+
+    def close_second(self, now):
+        if not self.sec_vals:
+            return
+        vals = sorted(self.sec_vals)
+        med = vals[len(vals) // 2]
+        floor_rtt = min(self.rtt_min) if self.rtt_min else None
+        prev = list(self.sec_meds)
+        self.sec_meds.append(med)
+        raised = floor_rtt is not None and med >= floor_rtt + max(10.0, 0.5 * floor_rtt)
+        if not raised:
+            self.rtt_min.append(vals[0])
+        # A drained queue still reads high for 15-20 s through ENet's smoothing. A raised RTT that is not
+        # falling is a standing queue; one climbing 2 ms/s or more is a queue being built now.
+        standing = raised and len(prev) >= 3 and med >= prev[-3] - 0.5
+        building = raised and len(prev) >= 2 and (med - prev[-2]) / 2 >= self.RTT_BUILD_MS_S
+        self.standing_run = self.standing_run + 1 if standing else 0
+        self.building_run = self.building_run + 1 if building else 0
+        if self.rtt_suppress:
+            self.rtt_suppress -= 1
+        if self.raising() and self.building_run >= self.RTT_BUILD_FAIL_S:
+            # This raise is building a queue: it fails, whatever the loss says.
+            self.building_run = 0
+            self.hi_kind = 'queue'
+            self.step_result(True, now)
+            return
+        if self.state == RTT_CUT:
+            if not standing:
+                # The queue is draining: the rate before the cut was over the link.
+                self.lo, self.lo_loss = self.target, max(self.lo_loss, self.p_background())
+                self.hi, self.hi_loss, self.hi_kind = self.rtt_from, self.CLIMB_LOSSY, 'queue'
+                self.hi_stats = [0, 0]
+                self.enter_hold(now, self.target)
+                return
+            self.rtt_cut_wait -= 1
+            if self.rtt_cut_wait <= 0:
+                if self.rtt_cuts >= self.RTT_MAX_CUTS and self.rtt_cut_lossy:
+                    # Our own queue three cuts did not drain: the loss probe takes it from here.
+                    self.lo, self.lo_loss = self.target, max(self.lo_loss, self.p_background())
+                    self.enter_hold(now, self.target)
+                    return
+                if self.rtt_cuts >= self.RTT_MAX_CUTS:
+                    # Cutting did not drain it and nothing was lost: someone else's queue.
+                    self.rtt_suppress = self.RTT_SUPPRESS_S
+                    self.to_normal(now, self.rtt_start, 'rtt_not_ours')
+                    return
+                self.rtt_cut(now)
+            return
+        if self.standing_run >= self.RTT_STANDING_S and not self.rtt_suppress and self.state in (NORMAL, HOLD, CLIMB):
+            self.standing_run = 0
+            self.rtt_start = self.target if self.state != HOLD else self.r0
+            self.rtt_cuts = 0
+            self.rtt_cut_lossy = False
+            self.state = RTT_CUT
+            self.rtt_cut(now)
+
+    def rtt_cut(self, now):
+        self.rtt_from = self.target
+        self.rtt_cuts += 1
+        self.rtt_cut_wait = self.RTT_DRAIN_S
+        self.set_target(self.target * self.RTT_CUT, 'rtt', now)
+
+
+# ---------------------------------------------------------------- replays
+#
+# One simulated second carries ten RTT readings, at 50, 150, ... 950 ms, and one media report at 500 ms. The
+# feed sees the target the second starts with. tests/unit/test_live_tuning_policy.cpp runs the same harness.
+
+BASE = 268988
+FLOOR = 2000
+HEVC = [(120, 0), (122, 9), (120, 0), (120, 0), (120, 0), (120, 0), (121, 9), (120, 0)]
+
+
+def enet_smooth(s, raw):
+    """enet/protocol.c: roundTripTime moves 1/8 of the way to the sample, in whole milliseconds."""
+    s, r = int(round(s)), max(int(round(raw)), 1)
+    if r >= s:
+        return s + (r - s + 7) // 8
+    return s - (s - r + 7) // 8
+
+
+def run(seconds, feed, rtt=None, quiet=lambda i: False):
+    policy = Controller(BASE, FLOOR)
+    rtt = rtt or (lambda t_ms, target: 3.0)
+    targets = []
+    for i in range(seconds):
+        t0 = i * 1000
+        expected, lost = feed(i, policy.target)
+        for k in range(10):
+            at = t0 + 100 * k + 50
+            if k == 5 and not quiet(i):
+                policy.report(t0 + 500, expected, lost)
+            policy.ping(at, rtt(at, policy.target))
+        targets.append(policy.target)
+    return targets
+
+
+def link(kbps, over=(120, 6), under=(120, 0), start=25, recover_at=None):
+    def feed(i, target):
+        lk = kbps if i >= start and (recover_at is None or i < recover_at) else 10 ** 9
+        return over if target > lk else under
+    return feed
+
+
+def phases(*spans):
+    seq = []
+    for n, expected, lost in spans:
+        seq += [(expected, lost)] * n
+    return lambda i, target: seq[i] if i < len(seq) else (120, 0)
+
+
+def queue(kbps, start=25):
+    """Tail drop behind a 120 ms buffer: loss grows with the overload, and so does the queue."""
+    state = {'q': 0.0, 's': 3.0, 'last': -1000}
+
+    def feed(i, target):
+        overload = max(0.0, 1.0 - kbps / target) if i >= start else 0.0
+        return 120, int(120 * min(1.0, 6.0 * overload))
+
+    def rtt(t_ms, target):
+        lk = kbps if t_ms // 1000 >= start else 10 ** 9
+        state['q'] = min(120.0, max(0.0, state['q'] + 100.0 * (target - lk) / lk))
+        if t_ms - state['last'] >= 500:
+            state['s'] = enet_smooth(state['s'], 3.0 + state['q'])
+            state['last'] = t_ms
+        return state['s']
+    return feed, rtt
+
+
+def scenarios(deck_scan):
+    pauses = set(range(150, 170)) | set(range(300, 335))
+    scan = lambda t_ms, target: deck_scan[(t_ms // 100) % len(deck_scan)]
+    q100, q30 = queue(100000), queue(30000)
+    return {
+        'link_100': (600, link(100000), None, None),
+        'link_50': (600, link(50000), None, None),
+        'link_100_with_background': (600, link(100000, over=(120, 7), under=(120, 1)), None, None),
+        'link_200': (600, link(200000), None, None),
+        'rp6_hevc': (1200, lambda i, target: HEVC[i % 8], None, None),
+        'burst_10s_at_5_percent': (90, phases((20, 120, 0), (10, 120, 6), (60, 120, 0)), None, None),
+        'burst_3s_at_20_percent': (90, phases((20, 120, 0), (3, 120, 24), (60, 120, 0)), None, None),
+        'link_100_recovers_at_200': (400, link(100000, recover_at=200), None, None),
+        'link_100_with_report_pauses': (600, link(100000), None, lambda i: i in pauses),
+        'deck_scan': (1230, lambda i, target: (120, 0), scan, None),
+        'queue_link_100': (600, q100[0], q100[1], None),
+        'queue_link_30': (600, q30[0], q30[1], None),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--write', type=Path, required=True, help='fixture to write')
+    parser.add_argument('--deck-scan', type=Path, help='ENet-smoothed RTT per 100 ms over one scan period')
+    args = parser.parse_args()
+    deck_scan = json.loads(args.deck_scan.read_text()) if args.deck_scan else json.loads(args.write.read_text())['deck_scan_rtt_ms']
+    replays = {}
+    for name, (seconds, feed, rtt, quiet) in scenarios(deck_scan).items():
+        replays[name] = run(seconds, feed, rtt, quiet or (lambda i: False))
+    fixture = {
+        'comment': 'Generated by tools/tests/live_tuning_policy_reference.py; do not edit by hand.',
+        'base_kbps': BASE,
+        'floor_kbps': FLOOR,
+        'deck_scan_rtt_ms': deck_scan,
+        'targets_kbps': replays,
+    }
+    args.write.write_text(json.dumps(fixture, separators=(',', ':')) + '\n')
+
+
+if __name__ == '__main__':
+    main()
