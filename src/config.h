@@ -569,6 +569,29 @@ namespace config {
   std::string new_install_config(bool private_stream_available);
 
   /**
+   * @brief What startup did about Live Tuning's 1.5.0 default in an existing configuration file.
+   */
+  enum class live_tuning_default_migration_e {
+    already_applied,  ///< An earlier start did this, so the file is left as it is.
+    turned_on,  ///< The file kept Live Tuning off and now says enabled.
+    left_as_is,  ///< The file did not keep Live Tuning off, so there was nothing to change.
+    failed,  ///< The file or the record could not be read or written; the next start tries again.
+  };
+
+  /**
+   * @brief Turn Live Tuning on, once, in a configuration file saved before 1.5.0.
+   * @details Live Tuning was off by default before 1.5.0, and every settings save wrote the value it had
+   *          into the file, so `adaptive_bitrate_enabled = disabled` there is usually the old default
+   *          rather than a choice. The first start of 1.5.0 turns it on and notes that in @p record, so
+   *          a host that turns it off afterwards keeps it off. An unreadable record changes nothing,
+   *          since it cannot say whether this already ran.
+   * @param config_file The configuration file.
+   * @param record The state file beside it that lists the settings migrations already applied.
+   */
+  live_tuning_default_migration_e migrate_live_tuning_default(const std::string &config_file,
+                                                              const std::filesystem::path &record);
+
+  /**
    * @brief The configuration file's variables as this process read them at startup, before command
    *        line overrides, or nothing before the file was read. Safe to call from any thread.
    * @details A settings save compares the file it wrote against these, so an earlier change that still

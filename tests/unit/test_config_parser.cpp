@@ -30,6 +30,7 @@
 #include <unordered_map>
 
 #include <boost/core/null_deleter.hpp>
+#include <nlohmann/json.hpp>
 #include <boost/log/core.hpp>
 #include <boost/log/sinks/sync_frontend.hpp>
 #include <boost/log/sinks/text_ostream_backend.hpp>
@@ -1016,3 +1017,146 @@ TEST(ConfigParserTests, KeybindingsWithAnUnrepresentableEntryKeepTheirMap) {
   const std::unordered_map<int, int> mapped {{0x10, 0xA0}, {0x11, 0xA2}, {0x41, 0x42}, {67, 68}};
   EXPECT_EQ(bindings, mapped);
 }
+
+TEST(ConfigLiveTuningDefaultTests, LiveTuningIsOnByDefaultAndStartupMigratesBeforeReading) {
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_TRUE(contains(source, "      true,    // adaptive_bitrate.enabled"));
+  EXPECT_FALSE(contains(source, "      false,   // adaptive_bitrate.enabled"));
+
+  // The migration has to change the file before startup reads it, so this start streams with
+  // Live Tuning on and a later save does not see a change still waiting for a restart.
+  const auto restricted = source.find("restrict_config_file_mode(sunshine.config_file);");
+  const auto migrated = source.find("migrate_live_tuning_default(sunshine.config_file, ");
+  const auto read = source.find("auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));");
+  ASSERT_NE(restricted, std::string::npos);
+  ASSERT_NE(migrated, std::string::npos) << "startup no longer applies Live Tuning's 1.5.0 default";
+  ASSERT_NE(read, std::string::npos);
+  EXPECT_LT(restricted, migrated);
+  EXPECT_LT(migrated, read);
+}
+
+#ifndef _WIN32
+namespace {
+  // A configuration file and its migrations record in a private directory of their own.
+  struct live_tuning_migration_fixture_t {
+    std::filesystem::path directory;
+    std::filesystem::path file;
+    std::filesystem::path record;
+
+    explicit live_tuning_migration_fixture_t(std::string_view contents) {
+      auto pattern = (std::filesystem::temp_directory_path() / "polaris-live-tuning-default-XXXXXX").string();
+      directory = ::mkdtemp(pattern.data());
+      file = directory / "polaris.conf";
+      record = directory / "settings_migrations.json";
+      EXPECT_TRUE(private_state_file::write_atomic(file, contents));
+    }
+
+    ~live_tuning_migration_fixture_t() {
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
+
+    config::live_tuning_default_migration_e migrate() const {
+      return config::migrate_live_tuning_default(file.string(), record);
+    }
+
+    std::string contents() const {
+      return private_state_file::read_secure(file, 4096, true, false).payload;
+    }
+
+    std::string saved_value() const {
+      const auto vars = config::parse_config(contents());
+      const auto it = vars.find("adaptive_bitrate_enabled");
+      return it == vars.end() ? std::string {} : it->second;
+    }
+
+    nlohmann::json recorded() const {
+      return nlohmann::json::parse(private_state_file::read_secure(record, 4096).payload, nullptr, false);
+    }
+  };
+}  // namespace
+
+TEST(ConfigLiveTuningDefaultTests, AnOlderFileThatSavedItOffIsTurnedOnOnce) {
+  live_tuning_migration_fixture_t fixture {"# keep this note\nencoder = vaapi\nadaptive_bitrate_enabled = disabled\n"};
+
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::turned_on);
+  EXPECT_EQ(fixture.saved_value(), "enabled");
+  EXPECT_TRUE(contains(fixture.contents(), "# keep this note")) << fixture.contents();
+  EXPECT_TRUE(contains(fixture.contents(), "encoder = vaapi")) << fixture.contents();
+  EXPECT_EQ(fixture.recorded(), nlohmann::json::parse(R"({"applied":["live_tuning_on_by_default"]})"));
+
+  // Turned off after the upgrade, it is a choice, and later starts keep it.
+  ASSERT_EQ(configuration_store::patch(fixture.file.string(), {{"adaptive_bitrate_enabled", "disabled"}}),
+            configuration_store::result::committed);
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::already_applied);
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::already_applied);
+  EXPECT_EQ(fixture.saved_value(), "disabled");
+}
+
+TEST(ConfigLiveTuningDefaultTests, AFileThatRunsWithItOffIsTurnedOnAndOneThatRunsWithItOnIsLeft) {
+  // Startup reads an unrecognized value as off unless it holds a '1', so the migration does too.
+  for (const char *value : {"disabled", "off", "false", "0", "NO", "maybe"}) {
+    live_tuning_migration_fixture_t fixture {std::string("adaptive_bitrate_enabled = ") + value + "\n"};
+    EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::turned_on) << value;
+    EXPECT_EQ(fixture.saved_value(), "enabled") << value;
+  }
+  for (const char *value : {"enabled", "on", "maybe1"}) {
+    const auto contents = std::string("adaptive_bitrate_enabled = ") + value + "\n";
+    live_tuning_migration_fixture_t fixture {contents};
+    EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::left_as_is) << value;
+    EXPECT_EQ(fixture.contents(), contents) << value;
+    EXPECT_TRUE(std::filesystem::exists(fixture.record)) << value;
+  }
+}
+
+TEST(ConfigLiveTuningDefaultTests, AFileWithoutTheSettingIsLeftAsIsAndRecorded) {
+  // A new install's file, and an older one never saved from the console, already get the new default.
+  live_tuning_migration_fixture_t fixture {"linux_stream_mode = headless_stream\n"};
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::left_as_is);
+  EXPECT_EQ(fixture.contents(), "linux_stream_mode = headless_stream\n");
+  EXPECT_EQ(fixture.recorded(), nlohmann::json::parse(R"({"applied":["live_tuning_on_by_default"]})"));
+
+  ASSERT_EQ(configuration_store::patch(fixture.file.string(), {{"adaptive_bitrate_enabled", "disabled"}}),
+            configuration_store::result::committed);
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::already_applied);
+  EXPECT_EQ(fixture.saved_value(), "disabled");
+}
+
+TEST(ConfigLiveTuningDefaultTests, TheRecordKeepsWhatItAlreadyHeld) {
+  live_tuning_migration_fixture_t fixture {"adaptive_bitrate_enabled = disabled\n"};
+  ASSERT_TRUE(private_state_file::write_atomic(fixture.record, R"({"applied":["earlier"],"note":1})"));
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::turned_on);
+  EXPECT_EQ(fixture.recorded(), nlohmann::json::parse(R"({"applied":["earlier","live_tuning_on_by_default"],"note":1})"));
+}
+
+TEST(ConfigLiveTuningDefaultTests, ARecordItCannotReadChangesNothing) {
+  // Without the record there is no telling whether this ran, and running again would undo a choice.
+  for (const char *record : {"not json", "[]", R"({"applied":"live_tuning_on_by_default"})"}) {
+    live_tuning_migration_fixture_t fixture {"adaptive_bitrate_enabled = disabled\n"};
+    ASSERT_TRUE(private_state_file::write_atomic(fixture.record, record));
+    EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::failed) << record;
+    EXPECT_EQ(fixture.saved_value(), "disabled") << record;
+    EXPECT_EQ(private_state_file::read_secure(fixture.record, 4096).payload, record);
+  }
+
+  live_tuning_migration_fixture_t readable_by_others {"adaptive_bitrate_enabled = disabled\n"};
+  ASSERT_TRUE(private_state_file::write_atomic(readable_by_others.record, R"({"applied":[]})"));
+  ASSERT_EQ(::chmod(readable_by_others.record.c_str(), 0644), 0);
+  EXPECT_EQ(readable_by_others.migrate(), config::live_tuning_default_migration_e::failed);
+  EXPECT_EQ(readable_by_others.saved_value(), "disabled");
+}
+
+TEST(ConfigLiveTuningDefaultTests, ASettingsFileTheStoreRefusesIsNotRecorded) {
+  live_tuning_migration_fixture_t fixture {"adaptive_bitrate_enabled = disabled\n"};
+  ASSERT_EQ(::chmod(fixture.file.c_str(), 0664), 0);
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::failed);
+  EXPECT_FALSE(std::filesystem::exists(fixture.record));
+
+  // Once the file can be saved, the next start finishes the job.
+  ASSERT_EQ(::chmod(fixture.file.c_str(), 0644), 0);
+  EXPECT_EQ(fixture.migrate(), config::live_tuning_default_migration_e::turned_on);
+  EXPECT_EQ(fixture.saved_value(), "enabled");
+}
+#endif

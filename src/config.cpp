@@ -1457,6 +1457,11 @@ namespace config {
     return private_stream_available ? "linux_stream_mode = headless_stream\n" : std::string {};
   }
 
+  // Before 1.5.0 there is no migration: an older file keeps what it saved.
+  live_tuning_default_migration_e migrate_live_tuning_default(const std::string &, const fs::path &) {
+    return live_tuning_default_migration_e::left_as_is;
+  }
+
   std::optional<std::unordered_map<std::string, std::string>> loaded_config_file_vars() {
     std::lock_guard<std::mutex> lock(loaded_config_file_mutex);
     return loaded_config_file;
