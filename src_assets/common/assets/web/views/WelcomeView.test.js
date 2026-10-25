@@ -491,6 +491,47 @@ describe('WelcomeView optional setup steps', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    { name: 'the configured default', port: 47989, tcp: 'HTTP 47989, HTTPS 47984, RTSP 48010', udp: '47998-48000', consolePort: 47990 },
+    { name: 'a custom base returned as text', port: '50000', tcp: 'HTTP 50000, HTTPS 49995, RTSP 50021', udp: '50009-50011', consolePort: 50001 },
+    { name: 'a missing base', port: undefined, tcp: 'HTTP 47989, HTTPS 47984, RTSP 48010', udp: '47998-48000', consolePort: 47990 },
+  ])('renders the client port map for $name without changing settings', async ({ port, tcp, udp, consolePort }) => {
+    routeFetch(baseRoutes({ port }))
+    const wrapper = mountWelcome()
+    await reachStep(wrapper, 3)
+
+    const card = wrapper.findAll('.surface-subtle').find(candidate => candidate.text().includes('Streaming Ports'))
+    expect(card.text()).toContain(`TCP: ${tcp}`)
+    expect(card.text()).toContain(`UDP: ${udp} (video, control, audio)`)
+    expect(card.text()).toContain(`Web console (optional): TCP ${consolePort}`)
+    expect(calls().filter(call => call.method === 'PATCH')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('replaces default ports when the delayed configuration loads on the Network step', async () => {
+    const routes = baseRoutes({ port: 50000 })
+    const configResponse = routes['GET ./api/config']()
+    let resolveConfig
+    routes['GET ./api/config'] = () => new Promise(resolve => { resolveConfig = resolve })
+    routeFetch(routes)
+    const wrapper = mountWelcome()
+    await reachStep(wrapper, 3)
+    const card = () => wrapper.findAll('.surface-subtle').find(candidate => candidate.text().includes('Streaming Ports'))
+
+    expect(card().text()).toContain('TCP: HTTP 47989, HTTPS 47984, RTSP 48010')
+    expect(card().text()).toContain('UDP: 47998-48000 (video, control, audio)')
+
+    resolveConfig(configResponse)
+    await settle()
+
+    expect(card().text()).toContain('TCP: HTTP 50000, HTTPS 49995, RTSP 50021')
+    expect(card().text()).toContain('UDP: 50009-50011 (video, control, audio)')
+    expect(card().text()).toContain('Web console (optional): TCP 50001')
+    expect(card().text()).not.toContain('47989')
+    expect(calls().filter(call => call.method === 'PATCH')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
   it('trusts the detected network and a typed one, keeping what was trusted before', async () => {
     const routes = baseRoutes({ trusted_subnets: '["192.168.50.0/24"]', trusted_subnet_auto_pairing: 'disabled' })
     let revision = 1
@@ -504,7 +545,7 @@ describe('WelcomeView optional setup steps', () => {
     await reachStep(wrapper, 3)
 
     expect(wrapper.text()).toContain('Step 4 of 8')
-    expect(wrapper.text()).toContain('UDP: 47998-48000, 48002, 48010')
+    expect(wrapper.text()).toContain('UDP: 47998-48000 (video, control, audio)')
     expect(wrapper.text()).toContain('welcome.network_trusted_warning')
     const detected = wrapper.get('[data-network="10.0.0.0/24"]')
     expect(detected.text()).toContain('welcome.network_on_interface')

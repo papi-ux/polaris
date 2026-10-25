@@ -96,10 +96,13 @@
                 <div class="surface-subtle p-4">
                   <div class="text-sm text-storm">Streaming Ports</div>
                   <div class="mt-2 text-base font-medium text-silver">
-                    TCP: {{ configData?.port ?? '47989' }} (HTTPS: {{ configData?.port ? parseInt(configData.port) - 2 : '47984' }})
+                    TCP: HTTP {{ streamingBasePort }}, HTTPS {{ streamingBasePort - 5 }}, RTSP {{ streamingBasePort + 21 }}
                   </div>
                   <div class="mt-1 text-base font-medium text-silver">
-                    UDP: 47998-48000, 48002, 48010
+                    UDP: {{ streamingBasePort + 9 }}-{{ streamingBasePort + 11 }} (video, control, audio)
+                  </div>
+                  <div class="mt-3 text-sm text-storm">
+                    Web console (optional): TCP {{ streamingBasePort + 1 }}
                   </div>
                 </div>
                 <div class="rounded-2xl border border-warning/25 bg-warning/10 px-4 py-3 text-sm text-warning-bright">
@@ -262,6 +265,7 @@ const success = ref(false)
 const loading = ref(false)
 const configLoading = ref(false)
 const configData = ref(null)
+const streamingBasePort = computed(() => Number(configData.value?.port) || 47989)
 const hardwareLoading = ref(false)
 const hardware = ref(null)
 
