@@ -47,6 +47,7 @@
 
 #if defined(__linux__)
   #include <src/platform/linux/game_mode_host.h>
+  #include <src/platform/linux/spaces_host_admin.h>
   #include <src/platform/linux/stream_display_policy.h>
 
 namespace {
@@ -923,6 +924,118 @@ namespace {
     }
   };
 }  // namespace
+
+TEST_F(LaunchDesktopSteamTest, HostUpdateInstallAndFinishRefuseConsoleAndBrowserBeforePrelaunch) {
+  namespace spaces = multiseat::spaces;
+  using json = nlohmann::json;
+  const std::string request_id = "12345678-1234-4234-8234-123456789abc";
+  console_routes_t console {host.cert.string(), host.key.string(), directory / "host-update-launch-apps.json"};
+  for (const auto action : {spaces::host_action_e::update_install, spaces::host_action_e::update_finish}) {
+    SCOPED_TRACE(action == spaces::host_action_e::update_install ? "approved install" : "Finish");
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool approved_run = false;
+    auto service = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+      .facts = [] {
+        spaces::host_admin_facts_t facts;
+        facts.helper = facts.pkexec = facts.policy = facts.update_helper = facts.update_family = true;
+        return facts;
+      },
+      .update_plan = [](std::string_view channel) {
+        return json {{"channel", channel}, {"version", "9.9.9"}, {"review_guard", std::string(64, 'a')}, {"update_needed", true}};
+      },
+      .update_status = [] { return json {{"installed", {{"polaris", {{"state", "installed"}, {"version", "9.9.9"}}},
+        {"polaris-kms", {{"state", "absent"}}}}}}; },
+      .run_update = [&](const spaces::host_action_request_t &, std::chrono::milliseconds,
+          const std::function<void()> &approved, const std::function<void(const json &)> &, std::stop_token stop) {
+        approved();
+        std::unique_lock lock(mutex);
+        approved_run = true;
+        changed.notify_all();
+        changed.wait(lock, stop, [] { return false; });
+        return spaces::host_action_run_t {.exit_status = 0, .approved = true};
+      },
+      .finish = [] {}, // never restart a host in a unit test
+      .running_binary = [] { return json {{"matches_package", true}}; },
+    });
+    ASSERT_TRUE(spaces::install_host_admin_service(service));
+    auto cleanup = util::fail_guard([&] { service->shutdown(); spaces::uninstall_host_admin_service(service); });
+    const auto plan = service->review_update("stable");
+    ASSERT_EQ(service->submit({action, request_id, "stable", "9.9.9", plan.at("review_id").get<std::string>()}).status, 202);
+    if (action == spaces::host_action_e::update_install) {
+      std::unique_lock lock(mutex);
+      ASSERT_TRUE(changed.wait_for(lock, 3s, [&] { return approved_run; }));
+    }
+    int stages = 0;
+    prelaunch::set_stage_sink_for_tests([&](std::string_view) { ++stages; throw std::runtime_error("unexpected prelaunch"); });
+    auto restore = util::fail_guard([] { prelaunch::set_stage_sink_for_tests({}); });
+    const auto [status, reply] = console.request("POST", "/api/apps/launch", json {{"uuid", desktop().uuid}}.dump());
+    EXPECT_EQ(status, 409);
+    EXPECT_EQ(reply.value("error_code", ""), "host_admin_running");
+    std::string error;
+    EXPECT_FALSE(browser_stream::launch_isolated_app_for_tests(desktop(), error));
+    EXPECT_NE(error.find("updating or changing"), std::string::npos);
+    EXPECT_EQ(stages, 0);
+    EXPECT_EQ(steam.close_requests.load(), 0);
+  }
+}
+
+TEST_F(LaunchDesktopSteamTest, ConsoleAndBrowserHoldHostAdmissionUntilBusyFactsArePublished) {
+  namespace spaces = multiseat::spaces;
+  using json = nlohmann::json;
+  const std::string install_id = "12345678-1234-4234-8234-123456789abc";
+  const std::string finish_id = "87654321-4321-4321-8321-cba987654321";
+  console_routes_t console {host.cert.string(), host.key.string(), directory / "host-update-race-apps.json"};
+  for (const bool browser : {false, true}) {
+    SCOPED_TRACE(browser ? "Browser Stream" : "console launch");
+    std::atomic<bool> published = false;
+    auto service = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+      .facts = [&] {
+        spaces::host_admin_facts_t facts;
+        facts.helper = facts.pkexec = facts.policy = facts.update_helper = facts.update_family = true;
+        facts.session_active = published.load();
+        return facts;
+      },
+      .update_plan = [](std::string_view channel) {
+        return json {{"channel", channel}, {"version", "9.9.9"}, {"review_guard", std::string(64, 'a')}, {"update_needed", true}};
+      },
+      .update_status = [] { return json {{"installed", {{"polaris", {{"state", "installed"}, {"version", "9.9.9"}}},
+        {"polaris-kms", {{"state", "absent"}}}}}}; },
+      .finish = [] {},
+      .running_binary = [] { return json {{"matches_package", true}}; },
+    });
+    ASSERT_TRUE(spaces::install_host_admin_service(service));
+    auto cleanup = util::fail_guard([&] { service->shutdown(); spaces::uninstall_host_admin_service(service); });
+    const auto plan = service->review_update("stable");
+    const spaces::host_action_request_t install {spaces::host_action_e::update_install, install_id,
+      "stable", "9.9.9", plan.at("review_id").get<std::string>()};
+    const spaces::host_action_request_t finish {spaces::host_action_e::update_finish, finish_id, {}, "9.9.9"};
+    int reached = 0;
+    prelaunch::set_stage_sink_for_tests([&](std::string_view stage) {
+      if (stage != "launch_as") return;
+      ++reached;
+      EXPECT_FALSE(published.load());
+      EXPECT_EQ(service->submit(install).status, 409) << "launch admission must cover preflight before busy facts exist";
+      EXPECT_EQ(service->submit(finish).status, 409);
+      published = true; // stand in for execute's owned session publication
+      throw std::runtime_error("synthetic stop before host effects");
+    });
+    auto restore = util::fail_guard([] { prelaunch::set_stage_sink_for_tests({}); });
+    if (browser) {
+      std::string error;
+      EXPECT_THROW(browser_stream::launch_isolated_app_for_tests(desktop(), error), std::runtime_error);
+    } else {
+      EXPECT_EQ(console.request("POST", "/api/apps/launch", json {{"uuid", desktop().uuid}}.dump()).first, 400);
+    }
+    ASSERT_EQ(reached, 1);
+    // After the RAII reservation leaves, published busy facts keep BOTH actions blocked.
+    EXPECT_EQ(service->submit(install).status, 409);
+    EXPECT_EQ(service->submit(finish).status, 409);
+    EXPECT_EQ(steam.close_requests.load(), 0);
+    published = false;
+    EXPECT_TRUE(service->update_snapshot()["available"].get<bool>());
+  }
+}
 
 TEST_F(LaunchDesktopSteamTest, ConsoleCloseReturnsCommittedGameModeLaunchAfterRetainedResumes) {
   const auto apps_file = directory / "console-return-apps.json";

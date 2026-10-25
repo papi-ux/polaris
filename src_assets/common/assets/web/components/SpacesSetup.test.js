@@ -622,6 +622,10 @@ describe('Spaces host setup approved at the PC', () => {
 
   it('reads only host action snapshots it understands', () => {
     expect(validHostActionSnapshot(idle())).toBe(true)
+    // Update Center shares admission, while Spaces receives only its own closed job schema.
+    expect(validHostActionSnapshot(idle({ available: false, reason: 'host_setup_running', message: 'Wait for the current host change to finish.' }))).toBe(true)
+    for (const action of ['install', 'finish'])
+      expect(validHostActionSnapshot(idle({ job: { ...job('running').job, action } }))).toBe(false)
     expect(validHostActionSnapshot(job('waiting_for_approval'))).toBe(true)
     expect(validHostActionSnapshot(job('done', 'docker_access', { check: { id: 'docker_access', state: 'ready' } }))).toBe(true)
     const done = job('done').job

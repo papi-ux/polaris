@@ -9,8 +9,9 @@ import xml.etree.ElementTree as ElementTree
 POLICY = 'dev.polaris-stream.app.Polaris.policy'
 # The only operations Polaris asks polkit for, each bound to one helper operation.
 POLICY_ACTIONS = {
-    'dev.polaris-stream.app.polaris.spaces-security-install': 'install',
-    'dev.polaris-stream.app.polaris.spaces-docker-access': 'docker-access',
+    'dev.polaris-stream.app.polaris.spaces-security-install': ('polaris-spaces-setup', 'install'),
+    'dev.polaris-stream.app.polaris.spaces-docker-access': ('polaris-spaces-setup', 'docker-access'),
+    'dev.polaris-stream.app.polaris.update-install': ('polaris-update-helper', 'install'),
 }
 
 
@@ -26,15 +27,17 @@ def verify_policy(base, prefix):
     actions = {}
     for action in root.findall('action'):
         identity = action.get('id')
-        assert identity not in actions, identity
+        assert identity in POLICY_ACTIONS and identity not in actions, identity
         defaults = action.find('defaults')
         assert defaults is not None and [(item.tag, item.text) for item in defaults] == [
             ('allow_any', 'no'), ('allow_inactive', 'no'), ('allow_active', 'auth_admin')], identity
         annotations = {item.get('key'): item.text for item in action.findall('annotate')}
+        assert len(action.findall('annotate')) == 2, identity
         assert set(annotations) == {'org.freedesktop.policykit.exec.path', 'org.freedesktop.policykit.exec.argv1'}, identity
-        assert annotations['org.freedesktop.policykit.exec.path'] == prefix + '/bin/polaris-spaces-setup', identity
+        helper, _ = POLICY_ACTIONS[identity]
+        assert annotations['org.freedesktop.policykit.exec.path'] == prefix + '/bin/' + helper, identity
         assert (action.findtext('message') or '').strip() and (action.findtext('description') or '').strip(), identity
-        actions[identity] = annotations['org.freedesktop.policykit.exec.argv1']
+        actions[identity] = (helper, annotations['org.freedesktop.policykit.exec.argv1'])
     assert actions == POLICY_ACTIONS, actions
 
 
@@ -47,6 +50,12 @@ def verify(root, prefix='/usr'):
     source = helper.read_text()
     assert source.startswith('#!/usr/bin/python3 -I\n')
     compile(source, str(helper), 'exec')
+    update_helper = base / 'bin/polaris-update-helper'
+    assert update_helper.is_file() and not update_helper.is_symlink()
+    assert update_helper.stat().st_mode & stat.S_IXUSR and not update_helper.stat().st_mode & 0o022
+    update_source = update_helper.read_text()
+    assert update_source.startswith('#!/usr/bin/python3 -I\n')
+    compile(update_source, str(update_helper), 'exec')
     tree = ast.parse(source)
     values = {}
     for item in tree.body:
@@ -80,7 +89,8 @@ def verify(root, prefix='/usr'):
     # Packages ship inert sources. Activation belongs to the explicit helper.
     for path in ('etc/udev/rules.d/97-polaris-multiseat-input.rules',
                  'usr/lib/udev/rules.d/97-polaris-multiseat-input.rules',
-                 'var/lib/polaris/spaces-security/ready.json'):
+                 'var/lib/polaris/spaces-security/ready.json',
+                 'var/lib/polaris/update/status.json', 'var/lib/polaris/update/lock'):
         assert not (root / path).exists(), 'Package must not activate ' + path
     verify_policy(base, prefix)
     return values['RELEASE']

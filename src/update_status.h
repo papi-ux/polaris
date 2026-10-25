@@ -47,6 +47,13 @@ namespace update_status {
   bool kms_helper_installed();
   nlohmann::json distro_json(const distro_info_t &distro);
   nlohmann::json host_update_status();
+  nlohmann::json running_binary_json();
+#ifdef __linux__
+  /// Unprivileged, fixed helper read operations. Never executes the install entry point.
+  nlohmann::json helper_update_read(std::string_view action, std::string_view channel = {});
+  /// Root-owned flock survives a Polaris process exit while an approved helper finishes.
+  bool privileged_update_active();
+#endif
 
   /**
    * The Polaris version the OS package database reports, or empty when it
