@@ -245,18 +245,23 @@ describe('v1.5.0 release contract', () => {
         'pressure at 2% and clears it below 1%.',
     )
     expect(notes).toContain('the share of video frames that never arrived whole after FEC.')
-    // With Live Tuning on, sustained loss gets Doctor's one step, which turns Live Tuning off for the
-    // stream, as a live bitrate set by hand does, until Undo, a rollback (restore_bitrate_run_locked)
-    // or the end of the stream turns it back on.
+    // With Live Tuning on, sustained loss is Live Tuning's to act on: Doctor measures again and takes no
+    // bitrate step of its own. The step the betas offered, which turned Live Tuning off, is gone.
     expect(notes).toContain(
-      'With Live Tuning on and loss at that level, Doctor now offers to lower your bitrate one step, with Undo. ' +
-        'Taking it turns Live Tuning off for that stream until you undo it, it rolls back, or the stream ends.',
+      'With Live Tuning on and loss at that level, Doctor measures again and says what Live Tuning found, ' +
+        'and takes no bitrate step of its own.',
     )
+    expect(notes).not.toContain('Doctor now offers to lower your bitrate one step')
     expect(notes).not.toContain('for the rest of that stream')
-    // Live Tuning keeps 1.4.13's loss handling, and nothing here says otherwise.
-    expect(notes).toContain("Live Tuning's own loss handling is unchanged in this release.")
-    for (const claim of ['Live Tuning cuts for loss', 'tests the rates below', 'climbs back', 'held level', 'pause in those reports']) {
-      expect(notes).not.toContain(claim)
-    }
+    expect(notes).not.toContain("Live Tuning's own loss handling is unchanged in this release.")
+    // Live Tuning acts on the loss in each media report by the rule src/live_tuning_policy.h states, and
+    // cuts for a queue, not for one high round trip reading.
+    const loss = section(currentNotes(), '**New since beta.2: Live Tuning acts on video frame loss**', '**Fixed since beta.2**')
+    expect(loss).toContain('in two of three reports, each losing 3% of its frames or more')
+    expect(loss).toContain('Live Tuning treats a sustained rise in round trip time as queue evidence and lowers the bitrate while checking whether it drains.')
+    expect(loss).toContain('Doctor takes no bitrate step of its own for sustained loss.')
+    // Its checks are a replay bench and unit tests, and the notes say what they do not cover.
+    expect(notes).toContain('not yet in a stream on a Steam Deck or a Retroid Pocket 6')
+    expect(notes).toContain("A link that shrinks while the client's media reports pause can go unnoticed without fresh congestion evidence")
   })
 })
