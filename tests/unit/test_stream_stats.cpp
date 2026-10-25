@@ -4241,13 +4241,10 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   EXPECT_EQ(owner->at("value"), "auto_safe");
 }
 
-TEST(StreamStatsDoctorTests, LiveTuningLeavesSustainedFrameLossToOneDoctorStep) {
-  // Live Tuning keeps 1.4.13's loss handling, which averages each report with every control ping's 0%,
-  // so whether a few percent of lost frames cuts depends on when the report lands. Doctor offers one
-  // step for sustained video frame loss even while Live Tuning is on, with Undo, and says taking it
-  // turns Live Tuning off for this stream until the step is undone or rolls back or the stream ends.
-  // Round trip time alone stays Live Tuning's to cut for, and Doctor only rechecks it, saying what
-  // Live Tuning's 1.4.13 rule does and no more.
+TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItFound) {
+  // While Live Tuning is on and the encoder can change its rate live, network pressure is Live Tuning's to
+  // act on, sustained video frame loss and round trip time alike. Doctor offers a recheck, never a bitrate
+  // step of its own, and says what Live Tuning found.
   stream_stats::stats_t stats {};
   stats.streaming = true;
   stats.fps = 60.0;
@@ -4257,6 +4254,7 @@ TEST(StreamStatsDoctorTests, LiveTuningLeavesSustainedFrameLossToOneDoctorStep) 
   stats.adaptive_bitrate_enabled = true;
   stats.adaptive_bitrate_active = true;
   stats.adaptive_bitrate_state = "steady";
+  stats.adaptive_bitrate_reason = "healthy";
   stats.adaptive_runtime_update_supported = true;
   stats.capture_transport = platf::frame_transport_e::dmabuf;
   stats.capture_residency = platf::frame_residency_e::gpu;
@@ -4269,52 +4267,84 @@ TEST(StreamStatsDoctorTests, LiveTuningLeavesSustainedFrameLossToOneDoctorStep) 
   stats.media_loss_sample_revision = 1;
   stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 8.0;
+  const nlohmann::json pressure {{"primary_issue", "network_jitter"}, {"grade", "degraded"}};
 
-  const auto loss = judged_doctor(stats, {{"primary_issue", "network_jitter"}, {"grade", "degraded"}});
+  // Sustained frame loss while Live Tuning searches for the link.
+  stats.adaptive_bitrate_state = "network_pressure";
+  stats.adaptive_bitrate_reason = "holding_under_the_link";
+  stats.adaptive_ceiling_bitrate_kbps = 18400;
+  const auto holding = judged_doctor(stats, pressure);
   ASSERT_TRUE(stream_stats::judged_network(judged(stats)).loss_pressure);
-  const auto &step = loss.at("safe_recovery_action");
-  EXPECT_EQ(loss.at("primary_issue"), "network_jitter");
-  EXPECT_EQ(step.at("id"), "lower_bitrate");
-  EXPECT_EQ(step.at("capability"), "auto_fix");
-  EXPECT_EQ(step.at("payload_preview").at("target_bitrate_kbps"), 16000);
-  EXPECT_TRUE(step.at("undo").at("supported").get<bool>());
-  // Off until Undo, a rollback or the end of the stream, each of which turns it back on.
-  const std::string until = "Live Tuning off for this stream until you undo the step, the step rolls back, or the stream ends";
-  const auto rollback = step.at("rollback").get<std::string>();
-  EXPECT_NE(rollback.find("turns " + until), std::string::npos) << rollback;
-  EXPECT_NE(rollback.find("turns Live Tuning back on"), std::string::npos) << rollback;
-  const auto body = loss.at("recommendation").at("body").get<std::string>();
-  EXPECT_NE(body.find("Sustained video frame loss"), std::string::npos) << body;
-  EXPECT_NE(body.find("turns Live Tuning off for this stream only"), std::string::npos) << body;
-  const auto expected = loss.at("recommendation").at("expected_effect").get<std::string>();
-  EXPECT_NE(expected.find("Live Tuning stays off for this stream until you undo the step, the step rolls back, or the stream ends"), std::string::npos) << expected;
-  EXPECT_EQ(loss.dump().find("for the rest of this stream"), std::string::npos);
-  EXPECT_EQ(loss.dump().find("owns the live bitrate correction"), std::string::npos);
+  EXPECT_EQ(holding.at("primary_issue"), "network_jitter");
+  const auto &recheck = holding.at("safe_recovery_action");
+  EXPECT_EQ(recheck.at("id"), "recheck_network");
+  EXPECT_FALSE(recheck.at("undo").at("supported").get<bool>());
+  EXPECT_EQ(recheck.at("rollback"), "This check does not change bitrate or stream settings. While Live Tuning is on, it stays the only live bitrate controller.");
+  EXPECT_EQ(recheck.at("verification").at("success_when").at(0), "Live Tuning stays the live bitrate owner");
+  const auto body = holding.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(body.find("Live Tuning is lowering the bitrate to what the link carries, and holds under about 19 Mbps, where it found loss"), std::string::npos) << body;
+  EXPECT_NE(body.find("Doctor measures again instead of changing the bitrate as well"), std::string::npos) << body;
+  EXPECT_EQ(holding.at("recommendation").at("next_step_label"), "Recheck Live Tuning");
+  EXPECT_EQ(holding.dump().find("turns Live Tuning off"), std::string::npos);
+
+  // A queue found the ceiling.
+  stats.adaptive_bitrate_reason = "holding_under_a_queue";
+  stats.adaptive_ceiling_is_queue = true;
+  const auto queue = judged_doctor(stats, pressure).at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(queue.find("where it found a queue"), std::string::npos) << queue;
+
+  // Live Tuning has not found a ceiling yet.
+  stats.adaptive_bitrate_state = "steady";
+  stats.adaptive_bitrate_reason = "healthy";
+  stats.adaptive_ceiling_bitrate_kbps = 0;
+  stats.adaptive_ceiling_is_queue = false;
+  const auto watching = judged_doctor(stats, pressure);
+  EXPECT_EQ(watching.at("safe_recovery_action").at("id"), "recheck_network");
+  const auto watching_body = watching.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(watching_body.find("Live Tuning is lowering the bitrate to what the link carries. Doctor measures again"), std::string::npos) << watching_body;
+
+  // Loss Live Tuning found does not depend on the bitrate: neither of them cuts, and Doctor's advice is not
+  // a bitrate change.
+  stats.adaptive_bitrate_reason = "loss_independent_of_bitrate";
+  stats.adaptive_background_loss_pct = 3.1;
+  const auto independent = judged_doctor(stats, pressure);
+  EXPECT_EQ(independent.at("safe_recovery_action").at("id"), "recheck_network");
+  const auto independent_body = independent.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(independent_body.find("does not get better at a lower bitrate, so it keeps the bitrate"), std::string::npos) << independent_body;
+  EXPECT_NE(independent_body.find("a lower bitrate would only soften the picture"), std::string::npos) << independent_body;
+  EXPECT_EQ(independent.at("recommendation").at("next_step_label"), "Improve the Wi-Fi link");
+  const auto independent_expected = independent.at("recommendation").at("expected_effect").get<std::string>();
+  EXPECT_NE(independent_expected.find("5 or 6 GHz band, or a wired connection"), std::string::npos) << independent_expected;
 
   // Round trip time alone at the fail line, no loss.
+  stats.adaptive_bitrate_reason = "healthy";
+  stats.adaptive_background_loss_pct = 0.0;
   stats.packet_loss = 0.0;
   stats.latency_ms = 52.0;
-  const auto rtt = judged_doctor(stats, {{"primary_issue", "network_jitter"}, {"grade", "degraded"}});
+  const auto rtt = judged_doctor(stats, pressure);
   ASSERT_FALSE(stream_stats::judged_network(judged(stats)).loss_pressure);
   EXPECT_EQ(rtt.at("primary_issue"), "network_jitter");
   EXPECT_EQ(rtt.at("safe_recovery_action").at("id"), "recheck_network");
-  EXPECT_FALSE(rtt.at("safe_recovery_action").at("undo").at("supported").get<bool>());
   const auto rtt_body = rtt.at("recommendation").at("body").get<std::string>();
   EXPECT_NE(rtt_body.find("Doctor leaves round trip time to Live Tuning"), std::string::npos) << rtt_body;
-  // No promise that Live Tuning cuts for any high RTT: its 1.4.13 rule counts a reading at its once a
-  // second check, at 45 ms and over twice its own average, which RTT that stays high lifts.
-  EXPECT_EQ(rtt_body.find("lowers the bitrate on its own"), std::string::npos) << rtt_body;
   const auto rtt_expected = rtt.at("recommendation").at("expected_effect").get<std::string>();
-  EXPECT_NE(rtt_expected.find("at its once a second check when that round trip reading is 45 ms or more and over twice its own average"), std::string::npos) << rtt_expected;
-  EXPECT_NE(rtt_expected.find("lifts that average until it no longer counts"), std::string::npos) << rtt_expected;
-  // Any report of lost frames restarts the 10 seconds before it climbs, not only a spike.
-  EXPECT_NE(rtt_expected.find("only after 10 seconds without a cut or a report of lost frames"), std::string::npos) << rtt_expected;
-  EXPECT_EQ(rtt_expected.find("for each spike it sees"), std::string::npos) << rtt_expected;
-  // Live Tuning is the only live bitrate controller for round trip time alone, and the recheck says so.
-  const auto &recheck = rtt.at("safe_recovery_action");
-  EXPECT_NE(recheck.at("rollback").get<std::string>().find("For round trip time alone, Live Tuning stays the only live bitrate controller."), std::string::npos)
-    << recheck.at("rollback");
-  EXPECT_EQ(recheck.at("verification").at("success_when").at(0), "Live Tuning stays the live bitrate owner for round trip time");
+  EXPECT_NE(rtt_expected.find("for a queue that builds up and stays"), std::string::npos) << rtt_expected;
+  EXPECT_NE(rtt_expected.find("not falling for 8 seconds"), std::string::npos) << rtt_expected;
+  EXPECT_NE(rtt_expected.find("A short rise, such as a Wi-Fi background scan, is not a queue"), std::string::npos) << rtt_expected;
+  // 1.4.13's spike rule is gone, and Doctor no longer describes it.
+  EXPECT_EQ(rtt.dump().find("twice its own average"), std::string::npos);
+
+  // An encoder that cannot change its rate live leaves Live Tuning nothing to act with, and Doctor says
+  // what the next stream needs instead.
+  stats.packet_loss = 3.4;
+  stats.latency_ms = 8.0;
+  stats.adaptive_runtime_update_supported = false;
+  const auto frozen = judged_doctor(stats, pressure);
+  ASSERT_TRUE(stream_stats::judged_network(judged(stats)).loss_pressure);
+  EXPECT_NE(frozen.at("safe_recovery_action").at("id"), "lower_bitrate");
+  EXPECT_NE(frozen.at("safe_recovery_action").at("id"), "recheck_network");
+  const auto frozen_body = frozen.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(frozen_body.find("this encoder cannot change bitrate during a live stream"), std::string::npos) << frozen_body;
 }
 
 TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuatorStates) {
@@ -5306,17 +5336,19 @@ TEST(DoctorActionTests, AStepThatCuresHeavyLossVerifiesPastTheReportThatStraddle
 }
 
 namespace {
-  /// A stream Live Tuning owns, one session in scope, the host's saved preference on, under sustained
-  /// video frame loss: 3.4% of its frames lost at an RTT of 8 ms.
+  /// A stream with one session in scope under sustained video frame loss, 3.4% of its frames lost at an
+  /// RTT of 8 ms. Live Tuning owns it when the host's saved preference is on; with it off, Doctor may step.
   struct live_tuning_loss_stream_t {
     static constexpr std::uint64_t generation = 434;
     LiveConfigurationGuard live_configuration;
     std::string saved_before;
+    bool live_tuning;
 
-    live_tuning_loss_stream_t() {
-      EXPECT_TRUE(private_state_file::write_atomic(config::sunshine.config_file, "adaptive_bitrate_enabled = enabled\n"));
+    explicit live_tuning_loss_stream_t(bool live_tuning_on = true): live_tuning {live_tuning_on} {
+      EXPECT_TRUE(private_state_file::write_atomic(config::sunshine.config_file,
+        live_tuning ? "adaptive_bitrate_enabled = enabled\n" : "adaptive_bitrate_enabled = disabled\n"));
       saved_before = private_state_file::read_secure(config::sunshine.config_file, 4096).payload;
-      config::video.adaptive_bitrate.enabled = true;
+      config::video.adaptive_bitrate.enabled = live_tuning;
       config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
       config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
       adaptive_bitrate::load_config();
@@ -5363,9 +5395,10 @@ namespace {
       return request;
     }
 
-    /// Nothing saved for later streams: the preference in memory and on disk is still on.
+    /// Nothing saved for later streams: the preference in memory and on disk is as the stream began.
     bool saved_preference_untouched() const {
-      return config::video.adaptive_bitrate.enabled && adaptive_bitrate::get_state().configured_enabled &&
+      return config::video.adaptive_bitrate.enabled == live_tuning &&
+             adaptive_bitrate::get_state().configured_enabled == live_tuning &&
              private_state_file::read_secure(config::sunshine.config_file, 4096).payload == saved_before;
     }
   };
@@ -5378,125 +5411,34 @@ namespace {
     EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, kbps);
   }
 
-  /// Live Tuning off for this stream only, as after a live bitrate set by hand, and the rate at kbps.
-  void expect_live_tuning_off_for_stream_at(int kbps) {
+  /// Live Tuning off for the host, not paused for a stream, and the rate Doctor or a writer left at kbps.
+  void expect_doctor_rate_at(int kbps) {
     EXPECT_FALSE(adaptive_bitrate::is_enabled());
-    EXPECT_TRUE(adaptive_bitrate::get_state().paused_for_stream);
-    EXPECT_EQ(live_tuning::snapshot(stream_stats::get_current()).at("enabled"), false);
+    EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
     EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, kbps);
   }
 }  // namespace
 
-TEST(DoctorActionTests, ALossStepWithLiveTuningOnTurnsItOffForThisStreamAndUndoTurnsItBackOn) {
-  live_tuning_loss_stream_t stream;
-  auto context = live_tuning_loss_stream_t::context();
-  const auto doctor = stream_stats::build_doctor_json(context.stats, nlohmann::json::object(), context.app_uuid);
-  ASSERT_EQ(doctor.at("primary_issue"), "network_jitter");
-  ASSERT_EQ(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
-  expect_live_tuning_on_at(20000);
+TEST(DoctorActionTests, NetworkPressureWithLiveTuningOnTakesNoDoctorStep) {
+  // Network pressure is Live Tuning's to act on while it can change the rate live: sustained video frame
+  // loss, and round trip time alone. Doctor offers only a recheck, and a lower_bitrate sent anyway changes
+  // nothing.
+  for (const double loss_pct : {3.4, 0.0}) {
+    SCOPED_TRACE(loss_pct);
+    live_tuning_loss_stream_t stream;
+    sustain_network_pressure(loss_pct > 0.0 ? 8.0 : 52.0, loss_pct);
+    const auto network = stream_stats::judged_network(stream_stats::get_current());
+    ASSERT_EQ(network.loss_pressure, loss_pct > 0.0);
 
-  // The payload Doctor offered, as a paired client sends it back.
-  const auto request = trusted_doctor_action_request(context);
-  const auto applied = execute_with_encoder_ack(16000, [&] {
-    return doctor_actions::execute(request, context);
-  });
-  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
-  EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 16000);
-  EXPECT_FALSE(applied.at("requested").at("adaptive_bitrate_enabled").get<bool>());
-  EXPECT_TRUE(applied.at("before").at("adaptive_bitrate_enabled").get<bool>());
-  expect_live_tuning_off_for_stream_at(16000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-  // Live Tuning's feedback moves nothing while the step holds.
-  for (int i = 0; i < 5; ++i) {
-    adaptive_bitrate::update_rtt(60.0);
-    adaptive_bitrate::update_media_report(120.0, 12.0, 60.0);
+    const auto context = live_tuning_loss_stream_t::context();
+    EXPECT_EQ(trusted_doctor_action_request(context).at("action_id"), "recheck_network");
+    const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+    EXPECT_FALSE(refused.at("status").get<bool>());
+    EXPECT_FALSE(refused.at("changed").get<bool>());
+    EXPECT_EQ(refused.at("state"), "evidence_changed");
+    expect_live_tuning_on_at(20000);
+    EXPECT_TRUE(stream.saved_preference_untouched());
   }
-  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
-  // Doctor now reads the stream as one Live Tuning does not own.
-  EXPECT_FALSE(stream_stats::get_current().adaptive_bitrate_enabled);
-
-  context = live_tuning_loss_stream_t::context();
-  const auto undone = execute_with_encoder_ack(20000, [&] {
-    return doctor_actions::execute(
-      live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", applied.at("run_id")}}), context
-    );
-  });
-  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
-  EXPECT_EQ(undone.at("restored_bitrate_kbps"), 20000);
-  EXPECT_TRUE(undone.at("adaptive_bitrate_enabled").get<bool>());
-  expect_live_tuning_on_at(20000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-}
-
-TEST(DoctorActionTests, ALossStepWithLiveTuningOnVerifiesOnTheReadingsAfterIt) {
-  // The step is verified as any other: on the window judged from the moment the encoder applied it,
-  // leaving out the report that straddles it. Live Tuning stays off for the stream once it verifies,
-  // and Undo still turns it back on.
-  live_tuning_loss_stream_t stream;
-  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
-  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
-  const auto run_id = applied.at("run_id").get<std::string>();
-  doctor_actions::confirm_encoder_application_for_tests();
-  expect_live_tuning_off_for_stream_at(16000);
-
-  for (int i = 0; i < 8; ++i) {
-    stream_stats::update_network_stats(8.0, 0.5, 1000);
-  }
-  doctor_actions::make_verification_window_complete_for_tests();
-  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
-  EXPECT_EQ(verified.at("state"), "resolved") << verified.dump();
-  expect_live_tuning_off_for_stream_at(16000);
-
-  const auto undone = execute_with_encoder_ack(20000, [&] {
-    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
-  });
-  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
-  expect_live_tuning_on_at(20000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-}
-
-TEST(DoctorActionTests, ALossStepWithLiveTuningOnThatDoesNotHelpRollsBackAndTurnsItBackOn) {
-  live_tuning_loss_stream_t stream;
-  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
-  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
-  const auto run_id = applied.at("run_id").get<std::string>();
-  doctor_actions::confirm_encoder_application_for_tests();
-  expect_live_tuning_off_for_stream_at(16000);
-
-  // The stepped-down stream goes on losing 4% of its frames.
-  for (int i = 0; i < 6; ++i) {
-    stream_stats::update_network_stats(8.0, 4.0, 1000);
-  }
-  for (int i = 0; i < 2; ++i) {
-    stream_stats::update_network_stats(8.0, 0.0, 1000);
-  }
-  doctor_actions::make_verification_window_complete_for_tests();
-  const auto result = execute_with_encoder_ack(20000, [&] {
-    return doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
-  });
-  EXPECT_EQ(result.at("state"), "rolled_back") << result.dump();
-  // The receipt says Live Tuning is back on, not only the rate.
-  EXPECT_NE(result.value("message", std::string {}).find("Live Tuning is back on for this stream."), std::string::npos) << result.dump();
-  EXPECT_TRUE(result.value("adaptive_bitrate_enabled", false)) << result.dump();
-  expect_live_tuning_on_at(20000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-}
-
-TEST(DoctorActionTests, RoundTripPressureWithLiveTuningOnTakesNoDoctorStep) {
-  // Round trip time alone, with no loss, is Live Tuning's to cut for. Doctor offers only a recheck, and
-  // a lower_bitrate sent anyway changes nothing.
-  live_tuning_loss_stream_t stream;
-  sustain_network_pressure(52.0, 0.0);
-  const auto network = stream_stats::judged_network(stream_stats::get_current());
-  ASSERT_TRUE(network.fail);
-  ASSERT_FALSE(network.loss_pressure);
-
-  const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
-  EXPECT_FALSE(refused.at("status").get<bool>());
-  EXPECT_FALSE(refused.at("changed").get<bool>());
-  EXPECT_EQ(refused.at("state"), "evidence_changed");
-  expect_live_tuning_on_at(20000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
 }
 
 
@@ -5511,7 +5453,8 @@ TEST_P(DoctorMediaVerificationTests, UsesRealPostEncoderMediaCoverageOnBothRoute
   const auto [scenario, watchdog_first] = GetParam();
   doctor_actions::defer_verification_watchdog_for_tests(true);
   const auto watchdog_guard = util::fail_guard([] { doctor_actions::defer_verification_watchdog_for_tests(false); });
-  live_tuning_loss_stream_t stream;
+  // Doctor's own step, which a stream gets with Live Tuning off.
+  live_tuning_loss_stream_t stream(false);
   stream_stats::client_media_counters_t counters {
     .owner_uuid = "client-owner", .app_session_id = "launch-434",
     .session_generation = live_tuning_loss_stream_t::generation,
@@ -5590,17 +5533,17 @@ TEST_P(DoctorMediaVerificationTests, UsesRealPostEncoderMediaCoverageOnBothRoute
   const auto result = accepts || no_ack || new_writer ? verify() : execute_with_encoder_ack(20000, verify);
   EXPECT_EQ(result.at("state"), accepts ? "resolved" : no_ack ? "rollback_unconfirmed" : new_writer ? "superseded" : "rolled_back") << result.dump();
   EXPECT_TRUE(stream.saved_preference_untouched());
-  if (accepts) expect_live_tuning_off_for_stream_at(16000);
+  if (accepts) expect_doctor_rate_at(16000);
   else if (no_ack) {
     EXPECT_FALSE(result.at("status").get<bool>());
     EXPECT_TRUE(result.at("changed").get<bool>());
     EXPECT_EQ(result.at("requested_restore_bitrate_kbps"), 20000);
-    EXPECT_TRUE(adaptive_bitrate::is_enabled());
+    EXPECT_FALSE(adaptive_bitrate::is_enabled());
     EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
   } else if (new_writer) {
-    expect_live_tuning_off_for_stream_at(24000);
+    expect_doctor_rate_at(24000);
     EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, newer_revision);
-  } else expect_live_tuning_on_at(20000);
+  } else expect_doctor_rate_at(20000);
 
   // Clean up the old-code false success too, so the next case has no unresolved actuator.
   if (result.at("state") == "resolved") {
@@ -5661,8 +5604,10 @@ TEST_P(DoctorRecheckReceiptTests, MessageFollowsTheRefreshedOffer) {
     const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
     EXPECT_FALSE(refused.at("changed").get<bool>());
   } else if (scenario == 1) {
-    EXPECT_EQ(offer.at("id"), "lower_bitrate");
-    EXPECT_NE(message.find("Doctor offers one guarded bitrate step"), std::string::npos) << message;
+    // Sustained frame loss with Live Tuning on is Live Tuning's to act on too.
+    EXPECT_EQ(offer.at("id"), "recheck_network");
+    EXPECT_NE(message.find("Live Tuning remains the live bitrate controller"), std::string::npos) << message;
+    EXPECT_EQ(message.find("Doctor offers one guarded bitrate step"), std::string::npos) << message;
   } else {
     EXPECT_NE(offer.at("id"), "lower_bitrate");
     EXPECT_EQ(message.find("Doctor can safely apply"), std::string::npos) << message;
@@ -5673,109 +5618,8 @@ TEST_P(DoctorRecheckReceiptTests, MessageFollowsTheRefreshedOffer) {
 }
 INSTANTIATE_TEST_SUITE_P(AvailableActions, DoctorRecheckReceiptTests, testing::Values(0, 1, 2));
 
-TEST(DoctorActionTests, ALossStepThatMeetsANewerReadingTurnsLiveTuningBackOnAndSaysSo) {
-  // Doctor turns Live Tuning off for the stream, then takes its step, and a network report can reach
-  // the controller between the two. Then the step is not taken: Live Tuning goes back on for the
-  // stream with the rate it had, and the answer says so.
-  live_tuning_loss_stream_t stream;
-  const auto hook_guard = util::fail_guard([] {
-    doctor_actions::set_live_tuning_step_hook_for_tests({});
-  });
-  doctor_actions::set_live_tuning_step_hook_for_tests([](std::string_view stage) {
-    if (stage == "paused") {
-      adaptive_bitrate::note_network_evidence_arrival(false);
-    }
-  });
-  const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
-  EXPECT_FALSE(refused.at("status").get<bool>()) << refused.dump();
-  EXPECT_FALSE(refused.at("changed").get<bool>());
-  EXPECT_EQ(refused.at("state"), "controller_changed");
-  ASSERT_TRUE(refused.contains("adaptive_bitrate_enabled")) << refused.dump();
-  EXPECT_TRUE(refused.at("adaptive_bitrate_enabled").get<bool>());
-  const auto error = refused.value("error", std::string {});
-  EXPECT_NE(error.find("so Doctor turned Live Tuning back on for this stream and left the bitrate as it was."), std::string::npos) << error;
-  expect_live_tuning_on_at(20000);
-  EXPECT_FALSE(adaptive_bitrate::get_doctor_state().explicit_live_override_active);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-
-  // Every try at putting the rate back meets a newer reading too. Live Tuning is back on all the same,
-  // and the answer claims nothing about the rate.
-  doctor_actions::set_live_tuning_step_hook_for_tests([](std::string_view) {
-    adaptive_bitrate::note_network_evidence_arrival(false);
-  });
-  const auto lost = doctor_actions::execute({{"action_id", "lower_bitrate"}});
-  EXPECT_FALSE(lost.at("status").get<bool>()) << lost.dump();
-  EXPECT_EQ(lost.at("state"), "controller_changed");
-  const auto lost_error = lost.value("error", std::string {});
-  EXPECT_NE(lost_error.find("so Doctor turned Live Tuning back on for this stream."), std::string::npos) << lost_error;
-  EXPECT_EQ(lost_error.find("left the bitrate as it was"), std::string::npos) << lost_error;
-  expect_live_tuning_on_at(20000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-
-  // Nothing is left behind for Undo, and with no reading in between Doctor takes the step.
-  doctor_actions::set_live_tuning_step_hook_for_tests({});
-  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
-  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
-  doctor_actions::confirm_encoder_application_for_tests();
-  expect_live_tuning_off_for_stream_at(16000);
-  const auto undone = execute_with_encoder_ack(20000, [&] {
-    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", applied.at("run_id")}});
-  });
-  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
-  expect_live_tuning_on_at(20000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-}
-
-TEST(DoctorActionTests, AStreamThatEndsWhileTheLossStepHoldsLeavesTheNextStreamClean) {
-  // The stream ends while Doctor's step holds with Live Tuning off. The saved preference is never
-  // touched, and the next stream starts with Live Tuning on, nothing of the step left, and Doctor free
-  // to take a step of its own.
-  live_tuning_loss_stream_t stream;
-  auto context = live_tuning_loss_stream_t::context();
-  const auto applied = execute_with_encoder_ack(16000, [&] {
-    return doctor_actions::execute(trusted_doctor_action_request(context), context);
-  });
-  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
-  expect_live_tuning_off_for_stream_at(16000);
-
-  // The encoder goes first, as it does when a stream is torn down.
-  adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
-  doctor_actions::session_ended("client-owner", live_tuning_loss_stream_t::generation);
-  EXPECT_TRUE(adaptive_bitrate::is_enabled());
-  EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
-  EXPECT_NE(adaptive_bitrate::get_state().state, "doctor_override");
-  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-
-  constexpr std::uint64_t next = live_tuning_loss_stream_t::generation + 1;
-  doctor_actions::session_started("client-owner", next, "launch-435", 20000);
-  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
-  expect_live_tuning_on_at(20000);
-  EXPECT_FALSE(adaptive_bitrate::get_doctor_state().explicit_live_override_active);
-  EXPECT_EQ(adaptive_bitrate::get_state().state, "steady");
-  EXPECT_TRUE(stream.saved_preference_untouched());
-  // The old step's Undo changes nothing on the new stream.
-  const auto stale_undo = doctor_actions::execute({{"action_id", "undo"}, {"run_id", applied.at("run_id")}});
-  EXPECT_FALSE(stale_undo.at("status").get<bool>()) << stale_undo.dump();
-  expect_live_tuning_on_at(20000);
-
-  // A step on the new stream is Doctor's to take, and turns Live Tuning off for that stream alone.
-  const auto again = doctor_actions::execute({{"action_id", "lower_bitrate"}});
-  ASSERT_TRUE(again.at("status").get<bool>()) << again.dump();
-  EXPECT_NE(again.at("run_id"), applied.at("run_id"));
-  doctor_actions::confirm_encoder_application_for_tests();
-  expect_live_tuning_off_for_stream_at(16000);
-  const auto undone = execute_with_encoder_ack(20000, [&] {
-    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", again.at("run_id")}});
-  });
-  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
-  expect_live_tuning_on_at(20000);
-  doctor_actions::session_ended("client-owner", next);
-  EXPECT_TRUE(stream.saved_preference_untouched());
-}
-
 TEST(DoctorActionTests, ASecondPressWhileTheLossStepHoldsTakesNoSecondStepAndSaysWhy) {
-  live_tuning_loss_stream_t stream;
+  live_tuning_loss_stream_t stream(false);
   auto context = live_tuning_loss_stream_t::context();
   const auto first = trusted_doctor_action_request(context);
   const auto applied = execute_with_encoder_ack(16000, [&] {
@@ -5801,10 +5645,11 @@ TEST(DoctorActionTests, ASecondPressWhileTheLossStepHoldsTakesNoSecondStepAndSay
   EXPECT_EQ(second.at("state"), "action_in_progress");
   EXPECT_EQ(second.at("run_id"), run_id);
   const auto error = second.value("error", std::string {});
-  EXPECT_NE(error.find("Doctor already lowered this stream's bitrate one step and turned Live Tuning off for it, and takes one step at a time."), std::string::npos) << error;
+  EXPECT_NE(error.find("Doctor already lowered this stream's bitrate one step, and takes one step at a time."), std::string::npos) << error;
   EXPECT_NE(error.find("Doctor is still checking that step."), std::string::npos) << error;
-  EXPECT_NE(error.find("Undo puts the bitrate back and turns Live Tuning on again."), std::string::npos) << error;
-  expect_live_tuning_off_for_stream_at(16000);
+  EXPECT_NE(error.find("Undo puts the bitrate back."), std::string::npos) << error;
+  EXPECT_EQ(error.find("Live Tuning"), std::string::npos) << error;
+  expect_doctor_rate_at(16000);
 
   // Verified, the step stays until it is undone, and a press says that.
   for (int i = 0; i < 8; ++i) {
@@ -5819,60 +5664,14 @@ TEST(DoctorActionTests, ASecondPressWhileTheLossStepHoldsTakesNoSecondStepAndSay
   EXPECT_FALSE(later.at("status").get<bool>()) << later.dump();
   EXPECT_EQ(later.at("state"), "action_in_progress");
   EXPECT_NE(later.value("error", std::string {}).find("That step is verified and stays until you undo it."), std::string::npos) << later.dump();
-  expect_live_tuning_off_for_stream_at(16000);
+  expect_doctor_rate_at(16000);
 
   const auto undone = execute_with_encoder_ack(20000, [&] {
     return doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", run_id}}), context);
   });
   EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
-  expect_live_tuning_on_at(20000);
+  expect_doctor_rate_at(20000);
   EXPECT_TRUE(stream.saved_preference_untouched());
-}
-
-TEST(DoctorActionTests, TurningLiveTuningOnWhileTheLossStepHoldsEndsItAndTheReceiptSaysSo) {
-  // The console shows Live Tuning off while Doctor's step holds. Turning it on there puts back the
-  // rate from before the step with Live Tuning, and the step's receipt says the player did that, not
-  // that a newer change superseded Doctor.
-  live_tuning_loss_stream_t stream;
-  auto context = live_tuning_loss_stream_t::context();
-  const auto request = trusted_doctor_action_request(context);
-  const auto applied = execute_with_encoder_ack(16000, [&] {
-    return doctor_actions::execute(request, context);
-  });
-  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
-  const auto run_id = applied.at("run_id").get<std::string>();
-  expect_live_tuning_off_for_stream_at(16000);
-
-  const auto turned_on = execute_with_encoder_ack(20000, [] {
-    auto authority = doctor_actions::acquire_admin_global_control();
-    auto result = live_tuning::set_enabled(authority, true);
-    authority.release();
-    return result;
-  });
-  ASSERT_TRUE(turned_on.at("status").get<bool>()) << turned_on.dump();
-  EXPECT_EQ(turned_on.at("live_tuning").at("enabled"), true);
-  expect_live_tuning_on_at(20000);
-  EXPECT_TRUE(config::video.adaptive_bitrate.enabled);
-  EXPECT_NE(private_state_file::read_secure(config::sunshine.config_file, 4096).payload.find("adaptive_bitrate_enabled = enabled"), std::string::npos);
-
-  // The step's receipt, as its retry, its verification and its Undo each read it back.
-  context = live_tuning_loss_stream_t::context();
-  const auto receipt = doctor_actions::execute(request, context);
-  EXPECT_TRUE(receipt.at("status").get<bool>()) << receipt.dump();
-  EXPECT_TRUE(receipt.at("changed").get<bool>());
-  EXPECT_EQ(receipt.at("state"), "rolled_back") << receipt.dump();
-  EXPECT_EQ(receipt.at("run_id"), run_id);
-  EXPECT_EQ(receipt.value("restored_bitrate_kbps", 0), 20000);
-  EXPECT_TRUE(receipt.value("adaptive_bitrate_enabled", false));
-  EXPECT_FALSE(receipt.at("undo").at("available").get<bool>());
-  const auto message = receipt.value("message", std::string {});
-  EXPECT_NE(message.find("You turned Live Tuning back on, so Doctor put back the bitrate from before its step and ended it."), std::string::npos) << message;
-  EXPECT_EQ(receipt.dump().find("superseded"), std::string::npos) << receipt.dump();
-  const auto verify = doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "verify"}, {"run_id", run_id}}), context);
-  EXPECT_EQ(verify.at("state"), "rolled_back") << verify.dump();
-  const auto undo = doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", run_id}}), context);
-  EXPECT_EQ(undo.at("state"), "rolled_back") << undo.dump();
-  expect_live_tuning_on_at(20000);
 }
 
 namespace {
@@ -5884,86 +5683,6 @@ namespace {
     return stats;
   }
 }  // namespace
-
-TEST(DoctorActionTests, AVerifiedLossStepOffersItsUndoInsteadOfAQualityRestoreUntilItIsUndone) {
-  // Verified, the step holds for Undo with Live Tuning off. The network is clean and the rate below the
-  // one the stream opened at, which is a quality restore's cue, but that restore would meet the step's
-  // own run and change nothing. Doctor offers the step's Undo instead, and once it is undone the normal
-  // flow is back.
-  live_tuning_loss_stream_t stream;
-  // The stream opened at 20000 kbps, as a launch records it.
-  stream_stats::update_session_targets(
-    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
-    "deterministic", "not_applicable", "Capability-validated launch profile.",
-    "", 1, 0, 20000
-  );
-  auto context = live_tuning_loss_stream_t::context();
-  const auto applied = execute_with_encoder_ack(16000, [&] {
-    return doctor_actions::execute(trusted_doctor_action_request(context), context);
-  });
-  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
-  const auto run_id = applied.at("run_id").get<std::string>();
-  for (int i = 0; i < 8; ++i) {
-    stream_stats::update_network_stats(8.0, 0.5, 1000);
-  }
-  doctor_actions::make_verification_window_complete_for_tests();
-  context = live_tuning_loss_stream_t::context();
-  const auto verified = doctor_actions::execute(
-    live_tuning_loss_stream_t::scoped({{"action_id", "verify"}, {"run_id", run_id}}), context
-  );
-  ASSERT_EQ(verified.at("state"), "resolved") << verified.dump();
-  expect_live_tuning_off_for_stream_at(16000);
-  // Clean reports go on arriving at the lower rate, so the verdict is current.
-  for (int i = 0; i < 6; ++i) {
-    stream_stats::update_network_stats(8.0, 0.0, 1000);
-  }
-
-  const auto live = with_gpu_capture_path(stream_stats::get_current());
-  EXPECT_EQ(live.doctor_live_tuning_step_run_id, run_id);
-  auto doctor = stream_stats::build_doctor_json(live, nlohmann::json::object(), context.app_uuid);
-  ASSERT_EQ(doctor.at("primary_issue"), "quality_reduced_live") << doctor.at("summary");
-  const auto &offer = doctor.at("safe_recovery_action");
-  ASSERT_EQ(offer.at("id"), "undo") << offer.dump();
-  EXPECT_EQ(offer.at("label"), "Undo");
-  EXPECT_FALSE(offer.at("requires_confirmation").get<bool>());
-  EXPECT_TRUE(offer.at("requires_owner").get<bool>());
-  EXPECT_EQ(offer.at("endpoint"), "/api/doctor/action");
-  EXPECT_EQ(offer.at("payload_preview").at("action_id"), "undo");
-  EXPECT_EQ(offer.at("payload_preview").at("run_id"), run_id);
-  EXPECT_NE(offer.at("rollback").get<std::string>().find("turns Live Tuning on again"), std::string::npos) << offer.dump();
-  EXPECT_EQ(doctor.dump().find("restore_quality"), std::string::npos);
-  const auto body = doctor.at("recommendation").at("body").get<std::string>();
-  EXPECT_NE(body.find("Doctor's bitrate step still holds with Live Tuning off for this stream"), std::string::npos) << body;
-  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Undo Doctor's step");
-
-  // Bound to this stream, as the console and a paired client send it, the offer is the step's Undo.
-  stream_stats::bind_doctor_action_scope(
-    doctor, "launch-434", live_tuning_loss_stream_t::generation,
-    adaptive_bitrate::get_doctor_state().action_authority_revision,
-    live.network_sample_revision, live.video_sample_revision
-  );
-  const auto payload = doctor.at("safe_recovery_action").at("payload_preview");
-  EXPECT_EQ(payload.at("app_session_id"), "launch-434");
-  EXPECT_EQ(payload.at("session_generation"), live_tuning_loss_stream_t::generation);
-  const auto undone = execute_with_encoder_ack(20000, [&] {
-    return doctor_actions::execute(payload, context);
-  });
-  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
-  expect_live_tuning_on_at(20000);
-
-  // Undone, the normal flow is back: no step holds, Live Tuning owns the rate on a clean network, and
-  // sustained loss gets Doctor's step again.
-  const auto after = with_gpu_capture_path(stream_stats::get_current());
-  EXPECT_TRUE(after.doctor_live_tuning_step_run_id.empty()) << after.doctor_live_tuning_step_run_id;
-  const auto resumed = stream_stats::build_doctor_json(after, nlohmann::json::object(), context.app_uuid);
-  EXPECT_NE(resumed.at("safe_recovery_action").at("id"), "undo") << resumed.at("safe_recovery_action").dump();
-  EXPECT_NE(resumed.at("safe_recovery_action").at("id"), "restore_quality");
-  sustain_network_pressure(8.0, 3.4);
-  const auto lossy = stream_stats::build_doctor_json(
-    with_gpu_capture_path(stream_stats::get_current()), nlohmann::json::object(), context.app_uuid
-  );
-  EXPECT_EQ(lossy.at("safe_recovery_action").at("id"), "lower_bitrate") << lossy.at("safe_recovery_action").dump();
-}
 
 TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   // Earlier suites in this binary leave adaptive_bitrate process state

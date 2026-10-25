@@ -154,13 +154,6 @@ namespace doctor_actions {
   /** Run the active receipt's verification watchdog synchronously in unit tests. */
   void run_verification_watchdog_for_tests();
 
-  /**
-   * Run @p hook where a newer controller writer can meet Doctor's loss step with Live Tuning off:
-   * "paused", once Live Tuning is off for the stream and the step's revision is read, before the step,
-   * and "restoring", once a restore's revision is read, before each try at putting back the state from
-   * before the step. An empty hook removes it.
-   */
-  void set_live_tuning_step_hook_for_tests(std::function<void(std::string_view)> hook);
 #endif
 
 }  // namespace doctor_actions

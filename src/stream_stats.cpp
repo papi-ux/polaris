@@ -144,10 +144,6 @@ namespace stream_stats {
     std::atomic<bool> hot_network_risk {false};
     std::atomic<uint64_t> hot_bytes_sent {0};
     std::atomic<bool> hot_doctor_live_action_scope_available {false};
-    // Doctor's loss step with Live Tuning off for the stream, and the controller revision it holds.
-    std::mutex doctor_live_tuning_step_mutex;
-    std::string doctor_live_tuning_step_run;
-    std::uint64_t doctor_live_tuning_step_revision = 0;
 
     struct doctor_video_policy_state_t {
       double target_fps = 0.0;
@@ -2628,6 +2624,17 @@ namespace stream_stats {
       int manual_max_kbps = 0;
     };
 
+    /// What Live Tuning is doing about the network, for Doctor to explain while Live Tuning owns the bitrate.
+    struct live_tuning_doctor_t {
+      /// Live Tuning is on and the encoder can change its rate live: it acts on network pressure, and Doctor
+      /// measures again rather than changing the bitrate as well.
+      bool acts = false;
+      std::string reason;
+      int ceiling_kbps = 0;
+      bool ceiling_is_queue = false;
+      double background_loss_pct = 0.0;
+    };
+
     /// A bitrate as a player sets it, in whole Mbps, rounded up so setting it satisfies it.
     std::string whole_mbps(int kbps) {
       return std::to_string((std::max(kbps, 0) + 999) / 1000) + " Mbps";
@@ -2713,7 +2720,8 @@ namespace stream_stats {
                                          bool single_session_scope,
                                          bool auto_safe_managing,
                                          const pyrowave_doctor_t &pyrowave,
-                                         const judged_network_t &network) {
+                                         const judged_network_t &network,
+                                         const live_tuning_doctor_t &live_tuning) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -2735,20 +2743,25 @@ namespace stream_stats {
           next_step = "Use HEVC or a lower mode";
           expected = "A codec that needs fewer bits, or a smaller picture, fits the link without the picture falling apart.";
         } else if (auto_safe_managing && !network.loss_pressure) {
-          // Round trip time alone stays Live Tuning's, so Doctor adds no step. Its 1.4.13 rule counts a
-          // reading as a spike only at its once a second check, at 45 ms or more and over twice its long
-          // run average, and a cut or any report with lost frames restarts the 10 seconds before it climbs.
+          // Round trip time alone stays Live Tuning's, so Doctor adds no step. Live Tuning cuts for a queue
+          // that stays, not for a short rise such as a Wi-Fi scan.
           body = "Round trip time is high enough to count as network pressure. With Live Tuning on, Doctor leaves round trip time to Live Tuning and measures again instead of changing the bitrate as well.";
           next_step = "Recheck Live Tuning";
-          expected = "Live Tuning cuts the bitrate at its once a second check when that round trip reading is 45 ms or more and over twice its own average, and round trip time that stays high lifts that average until it no longer counts. It raises the bitrate again a step at a time only after 10 seconds without a cut or a report of lost frames.";
-        } else if (auto_safe_managing && live_bitrate_tunable) {
-          // Sustained video frame loss. Live Tuning's own loss handling averages each report with every
-          // control ping's 0% and acts once a second, so whether a few percent of lost frames cuts depends
-          // on when the report lands in that second. Doctor offers the step, which turns Live Tuning off
-          // for this stream only.
-          body = "Sustained video frame loss is affecting this stream. Doctor can lower the bitrate one step and watch whether the loss clears. That turns Live Tuning off for this stream only, and Undo puts the bitrate back and turns Live Tuning on again.";
-          next_step = "Fix and verify";
-          expected = "Video frame loss should drop out of network pressure at the lower bitrate. Live Tuning stays off for this stream until you undo the step, the step rolls back, or the stream ends.";
+          expected = "Live Tuning cuts the bitrate for a queue that builds up and stays: round trip time 10 ms or more over its lowest reading of the last minute and not falling for 8 seconds. A short rise, such as a Wi-Fi background scan, is not a queue, and it does not cut for that.";
+        } else if (live_tuning.acts && live_tuning.reason == "loss_independent_of_bitrate") {
+          // Live Tuning found this loss the same far below the request: a cut would only soften the picture.
+          body = "Sustained video frame loss is affecting this stream, and Live Tuning found that it does not get better at a lower bitrate, so it keeps the bitrate. Doctor does not lower it either: a lower bitrate would only soften the picture. Loss like this usually comes from the Wi-Fi itself, such as a busy or distant access point or interference.";
+          next_step = "Improve the Wi-Fi link";
+          expected = "Moving closer to the access point, using its 5 or 6 GHz band, or a wired connection should lower this loss. Live Tuning keeps watching, and cuts if the loss starts to depend on the bitrate.";
+        } else if (live_tuning.acts) {
+          // Sustained video frame loss is Live Tuning's to act on while it can change the rate live.
+          const bool found = live_tuning.ceiling_kbps > 0;
+          body = "Sustained video frame loss is affecting this stream. Live Tuning is lowering the bitrate to what the link carries" +
+                 (found ? std::string {", and holds under about "} + whole_mbps(live_tuning.ceiling_kbps) + ", where it found " +
+                            (live_tuning.ceiling_is_queue ? "a queue" : "loss") : std::string {}) +
+                 ". Doctor measures again instead of changing the bitrate as well.";
+          next_step = "Recheck Live Tuning";
+          expected = "The loss should clear at the bitrate Live Tuning settles on. It tries a higher bitrate again about every 20 seconds and climbs back toward your request when the link allows.";
         } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
@@ -2881,6 +2894,7 @@ namespace stream_stats {
                                       bool single_session_scope,
                                       bool auto_safe_managing,
                                       bool loss_pressure,
+                                      bool live_tuning_acts,
                                       const pyrowave_doctor_t &pyrowave,
                                       const std::string &source_result_id,
                                       std::string_view app_uuid,
@@ -2901,11 +2915,11 @@ namespace stream_stats {
         {"success_when", nlohmann::json::array()}
       };
 
-      // Live Tuning keeps the live bitrate to itself for round trip time alone. For sustained video frame
-      // loss, which its 1.4.13 loss handling cuts for or not depending on when each report lands, Doctor
-      // offers one step, and taking it turns Live Tuning off for this stream.
+      // Live Tuning keeps the live bitrate to itself for network pressure while it can change the rate live:
+      // for round trip time alone, and for sustained video frame loss. Doctor measures again.
       const bool auto_safe_network_management = auto_safe_managing &&
-        ((primary_issue == "network_jitter" && !loss_pressure) || primary_issue == "quality_reduced_live");
+        ((primary_issue == "network_jitter" && (!loss_pressure || live_tuning_acts)) ||
+         primary_issue == "quality_reduced_live");
       const auto read_only_guidance = [&](std::string reason) {
         id = "none";
         label = "Manual";
@@ -2961,12 +2975,12 @@ namespace stream_stats {
         method = "POST";
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        rollback = "This check does not change bitrate or stream settings. For round trip time alone, Live Tuning stays the only live bitrate controller.";
+        rollback = "This check does not change bitrate or stream settings. While Live Tuning is on, it stays the only live bitrate controller.";
         verification = {
           {"mode", "live_telemetry"},
           {"delay_seconds", 3},
           {"endpoint", "/api/doctor/action"},
-          {"success_when", nlohmann::json::array({"Live Tuning stays the live bitrate owner for round trip time", "current loss and latency are measured again"})}
+          {"success_when", nlohmann::json::array({"Live Tuning stays the live bitrate owner", "current loss and latency are measured again"})}
         };
       } else if (primary_issue == "network_jitter" && live_bitrate_tunable) {
         id = "lower_bitrate";
@@ -2983,9 +2997,7 @@ namespace stream_stats {
         // names no step, so the payload names one guarded 20% step instead.
         payload["target_bitrate_kbps"] = health_bitrate_kbps > 0 && health_bitrate_kbps < current_bitrate_kbps ?
           health_bitrate_kbps : derived_bitrate_kbps;
-        rollback = auto_safe_managing ?
-          "This turns Live Tuning off for this stream until you undo the step, the step rolls back, or the stream ends. Undo restores the live bitrate and turns Live Tuning back on." :
-          "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
+        rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "live_telemetry"},
           {"delay_seconds", 8},
@@ -3101,29 +3113,6 @@ namespace stream_stats {
           {"paired_endpoint", ""}}}
       };
     }
-
-    /// Doctor's loss step with Live Tuning off for the stream, offered for its Undo.
-    nlohmann::json doctor_live_tuning_step_undo(const std::string &run_id, const std::string &source_result_id) {
-      return {
-        {"id", "undo"},
-        {"label", "Undo"},
-        {"capability", "undo"},
-        {"kind", "live_tuning"},
-        {"destructive", false},
-        {"requires_confirmation", false},
-        {"requires_owner", true},
-        {"allowed_in_viewer_mode", false},
-        {"endpoint", "/api/doctor/action"},
-        {"method", "POST"},
-        {"unavailable_reason", ""},
-        {"payload_preview", {{"action_id", "undo"}, {"run_id", run_id}, {"source_result_id", source_result_id}}},
-        {"rollback", "Undo puts back the bitrate from before Doctor's step and turns Live Tuning on again for this stream."},
-        {"verification", {{"mode", "none"}, {"delay_seconds", 0}, {"endpoint", ""}, {"success_when", nlohmann::json::array()}}},
-        {"paired_endpoint", ""},
-        {"owner_tuning_allowed", false},
-        {"undo", {{"supported", false}, {"endpoint", ""}, {"paired_endpoint", ""}}}
-      };
-    }
   }  // namespace
 
   nlohmann::json build_doctor_json(const stats_t &stats,
@@ -3221,9 +3210,15 @@ namespace stream_stats {
     // FFmpeg bitrate changes can briefly recreate the encoder, and explicit or
     // rollback hand-offs can temporarily change the controller-state label.
     // None of those transitions authorizes Doctor to become a second writer.
-    // While Live Tuning is on, Doctor observes the live result, except for
-    // sustained video frame loss: its one step turns Live Tuning off for this
-    // stream first, so the two never write at once.
+    // While Live Tuning is on and can change the rate live, it acts on network
+    // pressure, loss and round trip time alike, and Doctor observes the result
+    // and says what Live Tuning found.
+    live_tuning_doctor_t live_tuning_doctor;
+    live_tuning_doctor.acts = auto_safe_managing && stats.adaptive_runtime_update_supported;
+    live_tuning_doctor.reason = stats.adaptive_bitrate_reason;
+    live_tuning_doctor.ceiling_kbps = stats.adaptive_ceiling_bitrate_kbps;
+    live_tuning_doctor.ceiling_is_queue = stats.adaptive_ceiling_is_queue;
+    live_tuning_doctor.background_loss_pct = stats.adaptive_background_loss_pct;
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -3898,7 +3893,7 @@ namespace stream_stats {
       failed_start_recommendation(*failed_start, summary) :
       doctor_recommendation(
         primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
-        auto_safe_managing, pyrowave_doctor, network
+        auto_safe_managing, pyrowave_doctor, network, live_tuning_doctor
       );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
@@ -3911,27 +3906,12 @@ namespace stream_stats {
       single_session_scope,
       auto_safe_managing,
       network.loss_pressure,
+      live_tuning_doctor.acts,
       pyrowave_doctor,
       doctor["result_id"].get<std::string>(),
       app_uuid,
       failed_start ? stream_start::failed_start_next_step(failed_start->codec) : std::string {}
     );
-    // Doctor's loss step turned Live Tuning off for this stream and still holds for its Undo. A quality
-    // restore would meet that step's run and change nothing, so Doctor offers the Undo in its place,
-    // which puts back the bitrate from before the step and turns Live Tuning on again.
-    if (!stats.doctor_live_tuning_step_run_id.empty() &&
-        doctor["safe_recovery_action"].value("id", std::string {}) == "restore_quality") {
-      doctor["safe_recovery_action"] = doctor_live_tuning_step_undo(
-        stats.doctor_live_tuning_step_run_id, doctor["result_id"].get<std::string>()
-      );
-      doctor["recommendation"]["body"] =
-        "The network is clean again, and Doctor's bitrate step still holds with Live Tuning off for this stream. "
-        "Doctor offers the step's Undo rather than a second change: Undo puts back the bitrate from before the step "
-        "and turns Live Tuning on again.";
-      doctor["recommendation"]["next_step_label"] = "Undo Doctor's step";
-      doctor["recommendation"]["expected_effect"] =
-        "The bitrate goes back to where it was before the step, and Live Tuning adjusts it from there.";
-    }
     doctor["suppressed_findings"] = nlohmann::json::array();
     if (suppressed_stale_network_finding) {
       doctor["suppressed_findings"].push_back({
@@ -5769,12 +5749,6 @@ namespace stream_stats {
     hot_doctor_live_action_scope_available.store(available, std::memory_order_release);
   }
 
-  void set_doctor_live_tuning_step(std::string run_id, std::uint64_t controller_revision) {
-    std::lock_guard<std::mutex> lock(doctor_live_tuning_step_mutex);
-    doctor_live_tuning_step_run = std::move(run_id);
-    doctor_live_tuning_step_revision = controller_revision;
-  }
-
   network_verification_window_t get_network_verification_window(
       std::uint64_t after_revision,
       std::chrono::steady_clock::time_point applied_at,
@@ -6915,6 +6889,10 @@ namespace stream_stats {
       current_stats.adaptive_bitrate_enabled = adaptive_state.enabled;
       current_stats.adaptive_bitrate_active = adaptive_state.active;
       current_stats.adaptive_bitrate_state = adaptive_state.state;
+      current_stats.adaptive_bitrate_reason = adaptive_state.reason;
+      current_stats.adaptive_ceiling_bitrate_kbps = adaptive_state.ceiling_bitrate_kbps;
+      current_stats.adaptive_ceiling_is_queue = adaptive_state.ceiling_is_queue;
+      current_stats.adaptive_background_loss_pct = adaptive_state.background_loss_pct;
       current_stats.adaptive_runtime_update_supported = adaptive_state.runtime_update_supported;
       current_stats.adaptive_min_bitrate_kbps = adaptive_state.min_bitrate_kbps;
       current_stats.adaptive_floor_source = adaptive_state.floor_source;
@@ -7008,16 +6986,6 @@ namespace stream_stats {
     result.invalidate_ref_frames_requests_total = hot_invalidate_ref_frames_requests_total.load(std::memory_order_relaxed);
     result.doctor_live_action_scope_available =
       hot_doctor_live_action_scope_available.load(std::memory_order_acquire);
-    // Doctor's step holds only while nothing has written the controller since: Undo, a rollback, a new
-    // stream and every newer writer move its revision.
-    const auto controller_revision = adaptive_bitrate::get_doctor_state().revision;
-    {
-      std::lock_guard<std::mutex> step_lock(doctor_live_tuning_step_mutex);
-      if (!doctor_live_tuning_step_run.empty() && doctor_live_tuning_step_revision == controller_revision) {
-        result.doctor_live_tuning_step_run_id = doctor_live_tuning_step_run;
-      }
-    }
-
     return result;
   }
 
