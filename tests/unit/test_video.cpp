@@ -5,6 +5,7 @@
 #include "../tests_common.h"
 
 #include <src/video.h>
+#include <src/nvenc/nvenc_base.h>
 #include <src/encoder_probe_reuse.h>
 #include <src/launch_failure.h>
 #include <src/stream_stats.h>
@@ -13,8 +14,10 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <thread>
 #include <future>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -542,6 +545,210 @@ TEST(VideoNvencSplitEncodeModeTests, SelectsFfmpegOptionOnlyForSupportedNvencCod
   );
 }
 #endif
+
+namespace {
+  // A stand-in for the NVENC driver, through nvenc_base's own protected seam: just enough of the
+  // call sequence to create an encoder, and a scripted answer to each reconfiguration. No GPU,
+  // driver library or symbol interposition.
+  struct fake_nvenc_reconfigure_t {
+    std::uint32_t average_bitrate;
+    std::uint32_t vbv_buffer_size;
+    std::uint32_t encode_width;
+    std::uint32_t frame_rate_num;
+    bool force_idr;
+    bool reset_encoder;
+  };
+
+  struct fake_nvenc_driver_t {
+    std::vector<NVENCSTATUS> reconfigure_results;  // in order, then success
+    std::vector<fake_nvenc_reconfigure_t> reconfigures;
+  };
+
+  fake_nvenc_driver_t *fake_nvenc_driver = nullptr;
+  int fake_nvenc_session = 0;
+  int fake_nvenc_bitstream = 0;
+  int fake_nvenc_input = 0;
+
+  NVENCSTATUS NVENCAPI fake_nvenc_open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS *, void **encoder) {
+    *encoder = &fake_nvenc_session;
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_guid_count(void *, std::uint32_t *count) {
+    *count = 1;
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_guids(void *, GUID *guids, std::uint32_t size, std::uint32_t *count) {
+    if (size < 1) {
+      return NV_ENC_ERR_INVALID_PARAM;
+    }
+    guids[0] = NV_ENC_CODEC_HEVC_GUID;
+    *count = 1;
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_caps(void *, GUID, NV_ENC_CAPS_PARAM *param, int *value) {
+    switch (param->capsToQuery) {
+      case NV_ENC_CAPS_WIDTH_MAX:
+      case NV_ENC_CAPS_HEIGHT_MAX:
+        *value = 8192;
+        break;
+      case NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE:
+        *value = 1;
+        break;
+      default:
+        *value = 0;
+        break;
+    }
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_preset(void *, GUID, GUID, NV_ENC_TUNING_INFO, NV_ENC_PRESET_CONFIG *) {
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_initialize(void *, NV_ENC_INITIALIZE_PARAMS *) {
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_create_bitstream(void *, NV_ENC_CREATE_BITSTREAM_BUFFER *params) {
+    params->bitstreamBuffer = &fake_nvenc_bitstream;
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_destroy_bitstream(void *, NV_ENC_OUTPUT_PTR) {
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_unregister(void *, NV_ENC_REGISTERED_PTR) {
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_destroy(void *) {
+    return NV_ENC_SUCCESS;
+  }
+
+  NVENCSTATUS NVENCAPI fake_nvenc_reconfigure(void *, NV_ENC_RECONFIGURE_PARAMS *params) {
+    auto &driver = *fake_nvenc_driver;
+    const auto &rc = params->reInitEncodeParams.encodeConfig->rcParams;
+    driver.reconfigures.push_back({rc.averageBitRate, rc.vbvBufferSize, params->reInitEncodeParams.encodeWidth,
+      params->reInitEncodeParams.frameRateNum, params->forceIDR == 1, params->resetEncoder == 1});
+    const auto index = driver.reconfigures.size() - 1;
+    return index < driver.reconfigure_results.size() ? driver.reconfigure_results[index] : NV_ENC_SUCCESS;
+  }
+
+  class fake_nvenc_t final: public nvenc::nvenc_base {
+  public:
+    explicit fake_nvenc_t(fake_nvenc_driver_t &driver):
+        nvenc_base(NV_ENC_DEVICE_TYPE_CUDA) {
+      fake_nvenc_driver = &driver;
+    }
+
+    ~fake_nvenc_t() override {
+      destroy_encoder();
+      fake_nvenc_driver = nullptr;
+    }
+
+  protected:
+    bool init_library() override {
+      auto functions = std::make_shared<NV_ENCODE_API_FUNCTION_LIST>();
+      functions->nvEncOpenEncodeSessionEx = fake_nvenc_open;
+      functions->nvEncGetEncodeGUIDCount = fake_nvenc_guid_count;
+      functions->nvEncGetEncodeGUIDs = fake_nvenc_guids;
+      functions->nvEncGetEncodeCaps = fake_nvenc_caps;
+      functions->nvEncGetEncodePresetConfigEx = fake_nvenc_preset;
+      functions->nvEncInitializeEncoder = fake_nvenc_initialize;
+      functions->nvEncCreateBitstreamBuffer = fake_nvenc_create_bitstream;
+      functions->nvEncDestroyBitstreamBuffer = fake_nvenc_destroy_bitstream;
+      functions->nvEncUnregisterResource = fake_nvenc_unregister;
+      functions->nvEncDestroyEncoder = fake_nvenc_destroy;
+      functions->nvEncReconfigureEncoder = fake_nvenc_reconfigure;
+      nvenc = std::move(functions);
+      return true;
+    }
+
+    bool create_and_register_input_buffer() override {
+      registered_input_buffer = &fake_nvenc_input;
+      return true;
+    }
+  };
+
+  // A 1080p60 HEVC stream at 20 Mbps, created through the real create_encoder().
+  bool create_fake_nvenc(fake_nvenc_t &encoder) {
+    video::config_t client_config {};
+    client_config.width = 1920;
+    client_config.height = 1080;
+    client_config.framerate = 60;
+    client_config.bitrate = 20000;
+    client_config.slicesPerFrame = 1;
+    client_config.videoFormat = 1;
+    const nvenc::nvenc_colorspace_t colorspace {
+      NV_ENC_VUI_COLOR_PRIMARIES_BT709,
+      NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709,
+      NV_ENC_VUI_MATRIX_COEFFS_BT709,
+      false
+    };
+    return encoder.create_encoder(nvenc::nvenc_config {}, client_config, colorspace, NV_ENC_BUFFER_FORMAT_NV12);
+  }
+}  // namespace
+
+TEST(VideoNvencBitrateTests, ARefusedRateIsAskedAgainAndOnlyAConfirmedRateSkipsTheEncoder) {
+  fake_nvenc_driver_t driver;
+  driver.reconfigure_results = {NV_ENC_ERR_INVALID_PARAM, NV_ENC_SUCCESS};
+  fake_nvenc_t encoder {driver};
+  ASSERT_TRUE(create_fake_nvenc(encoder));
+
+  // The encoder refuses: not applied.
+  EXPECT_FALSE(encoder.update_bitrate(15000));
+  ASSERT_EQ(driver.reconfigures.size(), 1u);
+  EXPECT_EQ(driver.reconfigures[0].average_bitrate, 15000000u);
+  EXPECT_EQ(driver.reconfigures[0].vbv_buffer_size, 250000u);  // one 60 fps frame at 15 Mbps
+  EXPECT_EQ(driver.reconfigures[0].encode_width, 1920u);
+  EXPECT_EQ(driver.reconfigures[0].frame_rate_num, 60u);
+  EXPECT_TRUE(driver.reconfigures[0].force_idr);
+  EXPECT_TRUE(driver.reconfigures[0].reset_encoder);
+
+  // The same rate again goes to the encoder: the refusal recorded nothing as applied.
+  EXPECT_TRUE(encoder.update_bitrate(15000));
+  ASSERT_EQ(driver.reconfigures.size(), 2u);
+  EXPECT_EQ(driver.reconfigures[1].average_bitrate, 15000000u);
+  EXPECT_EQ(driver.reconfigures[1].vbv_buffer_size, 250000u);
+  EXPECT_TRUE(driver.reconfigures[1].force_idr);
+  EXPECT_TRUE(driver.reconfigures[1].reset_encoder);
+
+  // Now confirmed, the same rate needs no call.
+  EXPECT_TRUE(encoder.update_bitrate(15000));
+  EXPECT_EQ(driver.reconfigures.size(), 2u);
+
+  // The created rate is no longer current, so going back to it is a real change.
+  EXPECT_TRUE(encoder.update_bitrate(20000));
+  ASSERT_EQ(driver.reconfigures.size(), 3u);
+  EXPECT_EQ(driver.reconfigures[2].average_bitrate, 20000000u);
+}
+
+TEST(VideoNvencBitrateTests, RefusesRatesTheEncoderCannotHoldWithoutCallingIt) {
+  fake_nvenc_driver_t driver;
+  fake_nvenc_t encoder {driver};
+  ASSERT_TRUE(create_fake_nvenc(encoder));
+
+  EXPECT_FALSE(encoder.update_bitrate(0));
+  EXPECT_FALSE(encoder.update_bitrate(-1));
+  EXPECT_FALSE(encoder.update_bitrate(std::numeric_limits<int>::min()));
+  // 4294968 kbps is past the 32-bit bits per second field, and INT_MAX would overflow int.
+  EXPECT_FALSE(encoder.update_bitrate(4294968));
+  EXPECT_FALSE(encoder.update_bitrate(std::numeric_limits<int>::max()));
+  EXPECT_TRUE(driver.reconfigures.empty());
+
+  // The created rate is still the confirmed one.
+  EXPECT_TRUE(encoder.update_bitrate(20000));
+  EXPECT_TRUE(driver.reconfigures.empty());
+
+  // The largest rate the field holds is still asked for.
+  EXPECT_TRUE(encoder.update_bitrate(4294967));
+  ASSERT_EQ(driver.reconfigures.size(), 1u);
+  EXPECT_EQ(driver.reconfigures[0].average_bitrate, 4294967000u);
+}
 
 TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopologyMismatch) {
   const auto cache_dir = std::filesystem::temp_directory_path() / "polaris-encoder-cache-tests";
