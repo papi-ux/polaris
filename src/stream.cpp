@@ -1453,7 +1453,17 @@ namespace stream {
       if (!(session->config.mlFeatureFlags & fec_status::client_feature_flag)) {
         return;
       }
-      stream_stats::record_client_fec_feedback(session->session_generation, payload);
+      const auto received_at = std::chrono::steady_clock::now();
+      const auto accepted = stream_stats::record_client_fec_feedback(
+        session->session_generation, payload, received_at);
+      // Do not take the controller lock while holding stats_mutex. Only an
+      // accepted, nonduplicate selective report can refresh this evidence.
+      if (accepted == fec_status::refusal_e::none) {
+        const auto parsed = fec_status::parse(payload, session->config.mlFeatureFlags);
+        if (parsed.block && parsed.block->rank_deficit_shards() > 0) {
+          adaptive_bitrate::note_fec_partial_deficit(session->session_generation, received_at);
+        }
+      }
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
@@ -2006,6 +2016,19 @@ namespace stream {
 
       payload = std::string_view {(char *) concat_buf.data(), concat_buf.size()};
 
+      const auto [configured_fec, adaptive_fec] = adaptive_bitrate::frame_fec_allocation(
+        session->session_generation, packet->frame_index(), fecPercentage);
+      fecPercentage = configured_fec;
+      if (adaptive_fec != fecPercentage) {
+        // Keep the established configured-envelope warning and fallback for
+        // an enormous frame. A trial may step down for this frame, never strip
+        // parity from one the configured percentage can protect.
+        if (const auto fit = fit_frame_fec(payload.size(), blocksize, fecPercentage,
+              adaptive_fec, session->config.minRequiredFecPackets)) {
+          fecPercentage = fit->envelope_percentage;
+        }
+      }
+
       // The max number of data shards per block is found by solving this system of equations for D:
       // D = 255 - P
       // P = D * F
@@ -2098,6 +2121,13 @@ namespace stream {
         }
       }
 
+      std::uint64_t generated_blocks = 0, generated_data_shards = 0, generated_parity_shards = 0;
+      std::uint64_t generated_data_bytes = 0, generated_parity_bytes = 0;
+      auto generated_fec_observation = util::fail_guard([&] {
+        stream_stats::record_generated_fec(session->session_generation, generated_blocks,
+          generated_data_shards, generated_parity_shards, generated_data_bytes, generated_parity_bytes);
+      });
+
       try {
         // Use around 80% of 1Gbps          1Gbps            percent    ms     packet      byte
         size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
@@ -2148,6 +2178,11 @@ namespace stream {
           frame_fec_latency_logger.first_point_now();
           // If video encryption is enabled, we allocate space for the encryption header before each shard
           auto shards = fec::encode(current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
+          ++generated_blocks;
+          generated_data_shards += shards.data_shards;
+          generated_parity_shards += shards.size() - shards.data_shards;
+          generated_data_bytes += shards.data_shards * (shards.blocksize + shards.prefixsize);
+          generated_parity_bytes += (shards.size() - shards.data_shards) * (shards.blocksize + shards.prefixsize);
           frame_fec_latency_logger.second_point_now_and_log();
 
           auto peer_address = session->video.peer.address();
@@ -3345,6 +3380,9 @@ namespace stream {
         session.session_token,
         session.config.monitor.bitrate
       );
+      adaptive_bitrate::configure_fec_budget(session.session_generation,
+        session.config.bitrate_request,
+        (session.config.mlFeatureFlags & fec_status::client_feature_flag) != 0);
       // A PyroWave stream gets a Live Tuning floor of its own, half what the codec's model advises for
       // it on a device's own screen, never above the client's request. After session_started(), which
       // reloads the controller for this stream, and before the encoder publishes anything.

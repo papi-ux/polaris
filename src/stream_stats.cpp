@@ -1122,6 +1122,15 @@ namespace stream_stats {
         {"duplicate_reports", feedback.duplicate_reports},
         {"reported_deficit_blocks", feedback.reported_deficit_blocks},
         {"reported_sufficient_shard_blocks", feedback.reported_sufficient_shard_blocks},
+        {"sender_generated", {
+          {"basis", "generated_udp_payload_before_submission"},
+          {"blocks", feedback.generated_blocks},
+          {"data_shards", feedback.generated_data_shards},
+          {"parity_shards", feedback.generated_parity_shards},
+          {"data_bytes", feedback.generated_data_bytes},
+          {"parity_bytes", feedback.generated_parity_bytes},
+          {"delivery_verified", false}
+        }},
         {"last_report", nullptr}
       };
       if (snapshot.sample) {
@@ -1346,6 +1355,7 @@ namespace stream_stats {
     j["adaptive_bitrate_active"] = adaptive_bitrate_active;
     j["adaptive_bitrate_state"] = adaptive_bitrate_state;
     j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
+    j["fec_allocation"] = fec_allocation;
     j["client_media_interval"] = client_media_interval_json(*this);
     j["live_tuning_history"] = live_tuning_history_json(*this);
     j["doctor_live_action_scope_available"] = doctor_live_action_scope_available;
@@ -4995,6 +5005,26 @@ namespace stream_stats {
     return std::clamp((double) scaled_loss * 100.0 / (double) scale, 0.0, 100.0);
   }
 
+  void record_generated_fec(std::uint64_t generation, std::uint64_t blocks,
+                            std::uint64_t data_shards, std::uint64_t parity_shards,
+                            std::uint64_t data_bytes, std::uint64_t parity_bytes) noexcept {
+    if (!generation || !blocks) return;
+    try {
+      std::lock_guard<std::mutex> lock(stats_mutex);
+      const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+        [generation](const client_stats_t &c) { return c.session_generation == generation; });
+      if (client == current_stats.clients.end()) return;
+      auto &feedback = client->fec_feedback;
+      feedback.generated_blocks += blocks;
+      feedback.generated_data_shards += data_shards;
+      feedback.generated_parity_shards += parity_shards;
+      feedback.generated_data_bytes += data_bytes;
+      feedback.generated_parity_bytes += parity_bytes;
+    } catch (...) {
+      // An observation cannot interrupt a stream or authorize a rate change.
+    }
+  }
+
   namespace {
     using judge_clock = network_judge_t::clock_type;
 
@@ -7024,6 +7054,22 @@ namespace stream_stats {
     if (const auto identity = get_single_active_session_identity()) {
       result.session_generation = identity->session_generation;
       result.app_session_id = identity->session_token;
+    }
+    if (adaptive_state.fec_budget_available && adaptive_state.session_exclusive &&
+        result.clients.size() == 1 && result.session_generation != 0 &&
+        result.clients.front().session_generation == adaptive_state.session_generation &&
+        result.session_generation == adaptive_state.session_generation &&
+        result.app_session_id == adaptive_state.app_session_id) {
+      result.fec_allocation = {
+        {"basis", "nominal_handshake_budget"},
+        {"policy_encoder_kbps_at_configured_fec", adaptive_state.policy_target_bitrate_kbps},
+        {"requested_encoder_kbps", adaptive_state.target_bitrate_kbps},
+        {"configured_percentage", adaptive_state.configured_fec_percentage},
+        {"current_percentage", adaptive_state.current_fec_percentage},
+        {"phase", adaptive_state.fec_phase},
+        {"in_place_encoder_supported", adaptive_state.runtime_bitrate_in_place},
+        {"wire_rate_measured", false}
+      };
     }
     {
       // A coherent copy of the newest receipt, taken alone after the other locks are released. The

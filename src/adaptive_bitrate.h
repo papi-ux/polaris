@@ -17,6 +17,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <utility>
+#include "stream_bitrate.h"
 #include "vrr_trace.h"
 
 namespace adaptive_bitrate {
@@ -145,6 +147,14 @@ namespace adaptive_bitrate {
     std::string reason = "disabled";
     /// Filled only by get_state_with_history(), from the same locked snapshot as the fields above.
     history_t history;
+    /// FEC's nominal allocation. Policy rates remain in the configured-FEC
+    /// encoder units; target_bitrate_kbps is the separately actuated rate.
+    bool fec_budget_available = false;
+    bool runtime_bitrate_in_place = false;
+    int policy_target_bitrate_kbps = 0;
+    int configured_fec_percentage = 0;
+    int current_fec_percentage = 0;
+    std::string fec_phase = "fixed";
   };
 
   /**
@@ -332,9 +342,23 @@ namespace adaptive_bitrate {
   // Validate, apply and acknowledge under one boundary with operator changes.
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
                                   const std::function<bool()> &apply,
-                                  vrr_trace::bitrate_observation_t *trace_observation = nullptr);
+                                  vrr_trace::bitrate_observation_t *trace_observation = nullptr,
+                                  std::int64_t next_frame_index = 0);
   void set_session_scope(std::uint64_t generation, const std::string &app_session_id,
                          bool exclusive);
+
+  /// Trusted handshake arithmetic for the sole stream, frozen before its
+  /// encoder starts. Watchers, absent requests and unsupported clients stay fixed.
+  void configure_fec_budget(std::uint64_t generation,
+                            const stream_bitrate::request_t &request,
+                            bool client_advertised_fec);
+  /// Only an accepted selective block report with a positive shard-rank deficit
+  /// calls this. It is neither a whole-stream loss rate nor proof of recovery.
+  void note_fec_partial_deficit(std::uint64_t generation,
+                               std::chrono::steady_clock::time_point received_at);
+  /// Packetizer-only: one coherent immutable publication, scoped to this frame.
+  std::pair<int, int> frame_fec_allocation(std::uint64_t generation, std::int64_t frame_index,
+                                          int configured_fallback);
 
   /**
    * Invalidate the retiring encoder session before recreating it for an exact
@@ -349,7 +373,8 @@ namespace adaptive_bitrate {
   /** Record a successful encoder application of an exact controller request. */
   void acknowledge_live_bitrate_applied(
     std::uint64_t revision,
-    int bitrate_kbps
+    int bitrate_kbps,
+    std::int64_t next_frame_index = 0
   );
 
   /** Host-monotonic application time for an exact target/revision, if known. */
@@ -450,7 +475,9 @@ namespace adaptive_bitrate {
   void set_runtime_update_supported(
     bool supported,
     const std::string &reason = {},
-    int initial_encoder_bitrate_kbps = 0
+    int initial_encoder_bitrate_kbps = 0,
+    bool in_place = false,
+    int in_place_floor_kbps = 1
   );
 
   /**

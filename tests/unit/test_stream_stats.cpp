@@ -2105,15 +2105,25 @@ TEST(StreamStatsFecFeedbackTests, RoutesByTrustedGenerationAndRefusesRetiredWrit
   ASSERT_EQ(stats.clients.size(), 2);
   EXPECT_EQ(stats.clients.at(0).fec_feedback.accepted_reports, 0);
   EXPECT_EQ(stats.clients.at(1).fec_feedback.accepted_reports, 1);
+  stream_stats::record_generated_fec(7502, 1, 100, 10, 120000, 12000);
   const auto multiple = nlohmann::json::parse(stats.to_json()).at("fec_feedback");
   EXPECT_EQ(multiple.at("availability"), "multiple_streams");
   EXPECT_TRUE(multiple.at("last_report").is_null());
   stream_stats::remove_client("198.51.100.45", 7501);
   EXPECT_FALSE(stream_stats::record_client_fec_feedback(7501, {wire.data(), wire.size()}));
   EXPECT_FALSE(stream_stats::record_client_fec_feedback(0, {wire.data(), wire.size()}));
+  stream_stats::record_generated_fec(7501, 1, 50, 5, 60000, 6000);
+  stream_stats::record_generated_fec(0, 1, 50, 5, 60000, 6000);
   stats = stream_stats::get_current();
   ASSERT_EQ(stats.clients.size(), 1);
   EXPECT_EQ(stats.clients.front().fec_feedback.accepted_reports, 1);
+  EXPECT_EQ(stats.clients.front().fec_feedback.generated_blocks, 1);
+  EXPECT_EQ(stats.clients.front().fec_feedback.generated_data_bytes, 120000);
+  EXPECT_EQ(stats.clients.front().fec_feedback.generated_parity_bytes, 12000);
+  const auto sender = nlohmann::json::parse(stats.to_json()).at("fec_feedback").at("sender_generated");
+  EXPECT_EQ(sender.at("data_shards"), 100);
+  EXPECT_EQ(sender.at("parity_shards"), 10);
+  EXPECT_FALSE(sender.at("delivery_verified"));
   stream_stats::update_stream_active(false);
 }
 

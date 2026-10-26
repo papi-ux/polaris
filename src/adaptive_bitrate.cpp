@@ -16,6 +16,7 @@
 #include <cmath>
 #include "config.h"
 #include "live_tuning_policy.h"
+#include "live_tuning_fec.h"
 #include "logging.h"
 
 using namespace std::literals;
@@ -93,6 +94,15 @@ namespace adaptive_bitrate {
   // This stream's loss and queue policy. Protected by state_mutex. Created when feedback first arrives
   // with a base bitrate, and dropped by reset().
   static std::optional<live_tuning_policy::policy_t> stream_policy;
+  static live_tuning_fec::actuator_t fec_actuator;
+  static bool runtime_bitrate_in_place = false;
+  static int runtime_bitrate_floor_kbps = 1;
+  // The policy does not adopt its own reduced encoder allocation as an
+  // outside writer. This target always has the handshake's F0 units.
+  static int policy_target_kbps = 0;
+  static std::optional<std::chrono::steady_clock::time_point> fec_partial_deficit_at;
+  static std::optional<std::chrono::steady_clock::time_point> fec_media_at;
+  static void retire_fec_for_writer_locked();
 
   // Timing for encoder-pressure adjustments
   static std::chrono::steady_clock::time_point last_adjustment_time;
@@ -385,15 +395,148 @@ namespace adaptive_bitrate {
     ).count();
   }
 
+  static bool fec_evidence_fresh_locked() {
+    const auto now = std::chrono::steady_clock::now();
+    const auto fresh = [now](const auto &at) {
+      return at && *at <= now && *at >= now - 2500ms;
+    };
+    return fresh(fec_partial_deficit_at) && fresh(fec_media_at);
+  }
+
+  // An outside writer owns a new F0-unit target. Publish the baseline before
+  // it can raise the encoder rate, and invalidate even a same-value/ABA trial.
+  static void retire_fec_for_writer_locked() {
+    if (fec_actuator.configured()) {
+      fec_actuator.restore();
+      if (stream_policy) {
+        stream_policy->fec_applied(policy_now_ms(), fec_actuator.configured_percentage());
+      }
+    }
+    policy_target_kbps = 0;
+  }
+
+  static void apply_fec_policy_locked(live_tuning_policy::policy_t &policy) {
+    if (!fec_actuator.configured() || fec_actuator.pending()) {
+      return;
+    }
+    const auto wanted = policy.fec_request();
+    if (!wanted) {
+      return;
+    }
+    const bool restoring = *wanted == fec_actuator.configured_percentage();
+    const bool eligible = scope_exclusive && scope_generation == fec_actuator.generation() &&
+      enabled.load(std::memory_order_relaxed) && runtime_bitrate_in_place &&
+      runtime_update_supported.load(std::memory_order_relaxed) &&
+      !doctor_override_active.load(std::memory_order_relaxed) &&
+      !explicit_live_override_active.load(std::memory_order_relaxed) &&
+      !pending_live_update_active.load(std::memory_order_relaxed) && fec_evidence_fresh_locked();
+    if (!restoring && !eligible) {
+      policy.fec_refused(policy_now_ms());
+      return;
+    }
+    const int actual_target = target_bitrate_kbps.load(std::memory_order_relaxed);
+    // The rate-independent result may first restore the policy's base. Wait
+    // for its real encoder acknowledgement rather than dropping that trial
+    // or treating the requested base as applied.
+    if (encoder_applied_bitrate_kbps != actual_target) {
+      return;
+    }
+    const auto expected = fec_actuator.encoder_kbps(policy.target_kbps(), fec_actuator.percentage());
+    if (!expected || *expected != actual_target) {
+      policy.fec_refused(policy_now_ms());
+      return;
+    }
+    const auto next = fec_actuator.request(policy.target_kbps(), *wanted,
+      std::max(current_config.min_bitrate_kbps, runtime_bitrate_floor_kbps),
+      eligible, action_authority_revision + 1);
+    if (!next) {
+      policy.fec_refused(policy_now_ms());
+      return;
+    }
+    policy_target_kbps = policy.target_kbps();
+    // request() has already published a lower F, if this restores F0.
+    if (restoring) {
+      policy.fec_applied(policy_now_ms(), fec_actuator.percentage());
+    }
+    target_bitrate_kbps.store(*next, std::memory_order_relaxed);
+    ++action_authority_revision;
+    ++operator_revision;
+    record_history_locked("fec_target", restoring ? "restore_configured_parity" : "parity_trial");
+    state_changed.notify_all();
+  }
+
+  // Called only after the existing exact request/revision guard and an actual
+  // backend acknowledgement. The encoder names the next not-yet-encoded frame.
+  static void confirm_fec_locked(int bitrate_kbps, std::int64_t next_frame_index) {
+    const auto result = fec_actuator.confirm(scope_generation, action_authority_revision,
+      bitrate_kbps, next_frame_index, runtime_bitrate_in_place, fec_evidence_fresh_locked());
+    using result_e = live_tuning_fec::actuator_t::confirmation_e;
+    if (result == result_e::published && stream_policy) {
+      stream_policy->fec_applied(policy_now_ms(), fec_actuator.percentage());
+      record_history_locked("fec_published", "in_place_encoder_confirmed");
+    } else if (result == result_e::refused) {
+      // Parity was never published. Hold the known encoder rate at F0,
+      // including when the backend rejected the lower-rate request. A report
+      // gap must not itself request an increase or pretend one was applied.
+      const int known = encoder_applied_bitrate_kbps;
+      if (known > 0) {
+        policy_target_kbps = known;
+        target_bitrate_kbps.store(known, std::memory_order_relaxed);
+        if (stream_policy) {
+          stream_policy->fec_refused(policy_now_ms());
+          stream_policy->adopt(policy_now_ms(), known);
+        }
+      }
+      ++action_authority_revision;
+      ++operator_revision;
+      record_history_locked("fec_refused", "encoder_boundary_or_feedback_unavailable");
+    }
+  }
+
+  void configure_fec_budget(std::uint64_t generation,
+                            const stream_bitrate::request_t &request,
+                            bool client_advertised_fec) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (generation != scope_generation || !scope_exclusive || !client_advertised_fec) {
+      return;
+    }
+    retire_fec_for_writer_locked();
+    fec_partial_deficit_at.reset();
+    fec_media_at.reset();
+    const bool configured = fec_actuator.configure(generation, request);
+    if (stream_policy) {
+      stream_policy->configure_fec(configured ? request.fec_percentage : -1);
+    }
+  }
+
+  void note_fec_partial_deficit(std::uint64_t generation,
+                               std::chrono::steady_clock::time_point received_at) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (generation && generation == scope_generation && scope_exclusive &&
+        generation == fec_actuator.generation() &&
+        (!fec_partial_deficit_at || received_at > *fec_partial_deficit_at)) {
+      fec_partial_deficit_at = received_at;
+    }
+  }
+
+  std::pair<int, int> frame_fec_allocation(std::uint64_t generation, std::int64_t frame_index,
+                                          int configured_fallback) {
+    return fec_actuator.allocation_for_frame(generation, frame_index, configured_fallback);
+  }
+
   // This stream's policy, following every writer outside it. Requires state_mutex and a base bitrate.
   // A client request, a floor or a ceiling the policy has not seen is a rebase; a target it did not set
   // (encoder load, Doctor, a manual bitrate, a clamp) is where it carries on from.
   static live_tuning_policy::policy_t &policy_locked(std::int64_t now_ms) {
     const int base = std::min(base_bitrate_kbps.load(std::memory_order_relaxed), current_config.max_bitrate_kbps);
     const int floor = std::min(current_config.min_bitrate_kbps, base);
-    const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
+    const int target = policy_target_kbps > 0 ? policy_target_kbps :
+      target_bitrate_kbps.load(std::memory_order_relaxed);
     if (!stream_policy) {
       stream_policy.emplace(base, floor);
+      if (fec_actuator.configured()) {
+        stream_policy->configure_fec(fec_actuator.configured_percentage());
+      }
     }
     if (stream_policy->base_kbps() != base || stream_policy->floor_kbps() != floor) {
       stream_policy->rebase(base, floor);
@@ -442,24 +585,38 @@ namespace adaptive_bitrate {
   // Publish what the policy decided. Requires state_mutex. A decision that could not move a clamped target,
   // such as a probe that starts at the floor, still advances the revision, so Doctor cannot raise quality
   // from a clean snapshot taken before it.
-  static void apply_policy_locked(const live_tuning_policy::policy_t &p,
+  static void apply_policy_locked(live_tuning_policy::policy_t &p,
                                   std::uint64_t changes_before,
                                   live_tuning_policy::state_e state_before) {
     if (p.changes() == changes_before && p.state() == state_before) {
       // Nothing decided: leave the status, which encoder load or frame pacing may have set since.
+      apply_fec_policy_locked(p);
       return;
     }
     set_policy_status_locked(p);
     const int base = base_bitrate_kbps.load(std::memory_order_relaxed);
     const int current = target_bitrate_kbps.load(std::memory_order_relaxed);
     const int next = clamp_target(p.target_kbps(), base);
-    if (next != current) {
-      target_bitrate_kbps.store(next, std::memory_order_relaxed);
+    const bool parity_reverted = fec_actuator.configured() &&
+      (p.fec_request() == fec_actuator.configured_percentage() ||
+       (fec_actuator.phase() == live_tuning_fec::actuator_t::phase_e::lowering_rate &&
+        p.fec_request() != fec_actuator.pending_percentage()));
+    const bool allocated = fec_actuator.percentage() != fec_actuator.configured_percentage() ||
+      fec_actuator.pending();
+    if (allocated && ((policy_target_kbps > 0 && next != policy_target_kbps) || parity_reverted)) {
+      retire_fec_for_writer_locked();
+    }
+    policy_target_kbps = next;
+    const int encoder_next = fec_actuator.configured() ?
+      fec_actuator.encoder_kbps(next, fec_actuator.percentage()).value_or(next) : next;
+    if (encoder_next != current) {
+      target_bitrate_kbps.store(encoder_next, std::memory_order_relaxed);
       ++action_authority_revision;
-      BOOST_LOG(debug) << "Live Tuning: " << current << " -> " << next << " kbps ("
+      BOOST_LOG(debug) << "Live Tuning: " << current << " -> " << encoder_next << " kbps ("
                        << p.last_change().why << ", " << live_tuning_policy::name(p.state()) << ')';
     }
     ++operator_revision;
+    apply_fec_policy_locked(p);
     state_changed.notify_all();
   }
 
@@ -525,6 +682,7 @@ namespace adaptive_bitrate {
     if (!feedback_accepted_locked()) {
       return;
     }
+    fec_media_at = std::chrono::steady_clock::now();
     const double loss_pct = 100.0 * frames_lost / frames_expected;
     ewma_packet_loss = !loss_average_started ? loss_pct :
       current_config.ewma_alpha * loss_pct + (1.0 - current_config.ewma_alpha) * ewma_packet_loss;
@@ -605,6 +763,7 @@ namespace adaptive_bitrate {
     }
 
     const int new_target = clamp_target(static_cast<int>(current_target * 0.88), base);
+    retire_fec_for_writer_locked();
     last_pressure_time = now;
     set_controller_status("encoder_pressure", "encode_load");
     if (new_target != current_target) {
@@ -662,6 +821,15 @@ namespace adaptive_bitrate {
     }
     state.state = std::move(status.state);
     state.reason = std::move(status.reason);
+    state.fec_budget_available = fec_actuator.configured();
+    state.runtime_bitrate_in_place = runtime_bitrate_in_place;
+    state.policy_target_bitrate_kbps = policy_target_kbps > 0 ? policy_target_kbps :
+      target_bitrate_kbps.load(std::memory_order_relaxed);
+    state.configured_fec_percentage = fec_actuator.configured_percentage();
+    state.current_fec_percentage = fec_actuator.percentage();
+    using phase_e = live_tuning_fec::actuator_t::phase_e;
+    state.fec_phase = fec_actuator.phase() == phase_e::lowering_rate ? "lowering_rate" :
+      fec_actuator.phase() == phase_e::raising_rate ? "raising_rate" : "fixed";
     return state;
   }
 
@@ -716,6 +884,7 @@ namespace adaptive_bitrate {
       };
     }
 
+    retire_fec_for_writer_locked();
     if (!doctor_override_active.load(std::memory_order_relaxed)) {
       doctor_previous_max_bitrate_kbps = current_config.max_bitrate_kbps;
       doctor_video_policy_regressed_during_override = false;
@@ -784,6 +953,7 @@ namespace adaptive_bitrate {
       return std::nullopt;
     }
 
+    retire_fec_for_writer_locked();
     retire_doctor_override_locked();
     explicit_live_override_active.store(
       previous_state.explicit_live_override_active,
@@ -835,6 +1005,7 @@ namespace adaptive_bitrate {
     if (!runtime_update_supported.load(std::memory_order_relaxed)) {
       return std::nullopt;
     }
+    if (stream_policy) apply_fec_policy_locked(*stream_policy);
     const bool actuator_active =
       enabled.load(std::memory_order_relaxed) ||
       doctor_override_active.load(std::memory_order_relaxed) ||
@@ -858,7 +1029,8 @@ namespace adaptive_bitrate {
 
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
                                   const std::function<bool()> &apply,
-                                  vrr_trace::bitrate_observation_t *trace_observation) {
+                                  vrr_trace::bitrate_observation_t *trace_observation,
+                                  std::int64_t next_frame_index) {
     std::lock_guard<std::mutex> lock(state_mutex);
     if (trace_observation) {
       *trace_observation = {scope_generation, history.trace_scope ? history.trace_scope->id : 0,
@@ -880,10 +1052,17 @@ namespace adaptive_bitrate {
       pending_live_update_active.store(false, std::memory_order_relaxed);
       record_history_locked("encoder_applied", "runtime_update",
         request.target_bitrate_kbps, request.revision);
+      confirm_fec_locked(request.target_bitrate_kbps, next_frame_index);
       state_changed.notify_all();
     } else {
       record_history_locked("encoder_update_not_applied", "runtime_update",
         request.target_bitrate_kbps, request.revision);
+      if (fec_actuator.phase() == live_tuning_fec::actuator_t::phase_e::lowering_rate) {
+        // An advertised in-place backend did not apply this request. Do not
+        // let a recreation turn that refusal into an adaptive-parity ACK.
+        runtime_bitrate_in_place = false;
+        confirm_fec_locked(request.target_bitrate_kbps, next_frame_index);
+      }
     }
     note_decision_locked("encoder_callback");
     return true;
@@ -892,6 +1071,13 @@ namespace adaptive_bitrate {
   void set_session_scope(std::uint64_t generation, const std::string &app_session_id,
                          bool exclusive) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    if (generation != scope_generation || app_session_id != scope_app_session_id || !exclusive) {
+      retire_fec_for_writer_locked();
+      fec_actuator.reset();
+      if (stream_policy) stream_policy->configure_fec(-1);
+      fec_partial_deficit_at.reset();
+      fec_media_at.reset();
+    }
     scope_generation = generation;
     scope_app_session_id = app_session_id;
     scope_exclusive = exclusive;
@@ -963,7 +1149,8 @@ namespace adaptive_bitrate {
 
   void acknowledge_live_bitrate_applied(
       std::uint64_t revision,
-      int bitrate_kbps) {
+      int bitrate_kbps,
+      std::int64_t next_frame_index) {
     std::lock_guard<std::mutex> lock(state_mutex);
     if (revision != operator_revision ||
         bitrate_kbps != target_bitrate_kbps.load(std::memory_order_relaxed)) {
@@ -980,6 +1167,7 @@ namespace adaptive_bitrate {
     encoder_applied_revision = revision;
     encoder_applied_at = std::chrono::steady_clock::now();
     pending_live_update_active.store(false, std::memory_order_relaxed);
+    confirm_fec_locked(bitrate_kbps, next_frame_index);
     if (!already_proven) {
       record_history_locked("encoder_acknowledged",
         proof_was_unknown ? "applied_proof_was_unknown" : "encoder_running_at_rate", bitrate_kbps, revision);
@@ -1016,6 +1204,7 @@ namespace adaptive_bitrate {
   void set_base_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"base_bitrate"};
+    retire_fec_for_writer_locked();
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
@@ -1065,6 +1254,7 @@ namespace adaptive_bitrate {
   }
 
   static void apply_live_bitrate_locked(int kbps) {
+    retire_fec_for_writer_locked();
     retire_doctor_override_locked();
     explicit_live_override_active.store(
       !enabled.load(std::memory_order_relaxed),
@@ -1092,6 +1282,7 @@ namespace adaptive_bitrate {
     }
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"session_floor"};
+    retire_fec_for_writer_locked();
     const int base = base_bitrate_kbps.load(std::memory_order_relaxed);
     const int floor = std::max(
       current_config.min_bitrate_kbps,
@@ -1112,6 +1303,7 @@ namespace adaptive_bitrate {
   void set_max_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"max_bitrate"};
+    retire_fec_for_writer_locked();
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
@@ -1135,6 +1327,7 @@ namespace adaptive_bitrate {
   void set_enabled(bool enable) {
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"enabled_changed"};
+    retire_fec_for_writer_locked();
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     // Disabling holds what the encoder actually applied, never an unacknowledged
@@ -1162,6 +1355,7 @@ namespace adaptive_bitrate {
   void set_runtime_enabled(bool enable) {
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"runtime_enabled"};
+    retire_fec_for_writer_locked();
     retire_doctor_override_locked();
     paused_for_stream = false;
     explicit_live_override_active.store(false, std::memory_order_relaxed);
@@ -1178,9 +1372,28 @@ namespace adaptive_bitrate {
 
   void set_runtime_update_supported(bool supported,
                                     const std::string &reason,
-                                    int initial_encoder_bitrate_kbps) {
+                                    int initial_encoder_bitrate_kbps,
+                                    bool in_place,
+                                    int in_place_floor_kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"runtime_support"};
+    runtime_bitrate_in_place = supported && in_place;
+    runtime_bitrate_floor_kbps = std::max(in_place_floor_kbps, 1);
+    if (initial_encoder_bitrate_kbps > 0 && fec_actuator.configured() &&
+        fec_actuator.percentage() != fec_actuator.configured_percentage() &&
+        (fec_actuator.encoder_kbps(policy_target_kbps, fec_actuator.percentage()) !=
+           initial_encoder_bitrate_kbps ||
+         initial_encoder_bitrate_kbps < runtime_bitrate_floor_kbps)) {
+      // A capture/backend reopen may start at a different rate. It is not an
+      // ACK of the old allocation: publish F0 before this encoder's first frame.
+      retire_fec_for_writer_locked();
+      ++action_authority_revision;
+      ++operator_revision;
+    }
+    if (!runtime_bitrate_in_place &&
+        fec_actuator.phase() == live_tuning_fec::actuator_t::phase_e::lowering_rate) {
+      confirm_fec_locked(target_bitrate_kbps.load(std::memory_order_relaxed), 0);
+    }
     runtime_update_supported.store(supported, std::memory_order_relaxed);
     runtime_update_reason = supported ? "supported" :
       (reason.empty() ? "encoder_runtime_update_unsupported" : reason);
@@ -1218,6 +1431,7 @@ namespace adaptive_bitrate {
   void load_config() {
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"load_config"};
+    retire_fec_for_writer_locked();
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
     doctor_video_policy_regressed_during_override = false;
@@ -1246,6 +1460,12 @@ namespace adaptive_bitrate {
 
   void reset() {
     std::lock_guard<std::mutex> lock(state_mutex);
+    fec_actuator.reset();
+    runtime_bitrate_in_place = false;
+    runtime_bitrate_floor_kbps = 1;
+    policy_target_kbps = 0;
+    fec_partial_deficit_at.reset();
+    fec_media_at.reset();
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
     explicit_live_override_active.store(false, std::memory_order_relaxed);

@@ -5,6 +5,7 @@
 
 #include "src/adaptive_bitrate.h"
 #include "src/config.h"
+#include "src/live_tuning_fec.h"
 
 #include <gtest/gtest.h>
 
@@ -30,6 +31,142 @@
 using namespace std::chrono_literals;
 
 namespace {
+  stream_bitrate::request_t fec_budget(int percentage = 10) {
+    stream_bitrate::request_t request;
+    stream_bitrate::split_request(request, 40000, percentage, 512);
+    return request;
+  }
+}
+
+TEST(LiveTuningFecActuator, MapsPolicyUnitsOnceAndRefusesAnUnprovenBudgetOrFloor) {
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  EXPECT_EQ(actuator.encoder_kbps(budget.encoder_kbps, 10), budget.encoder_kbps);
+  const auto trial = actuator.encoder_kbps(budget.encoder_kbps, 15);
+  ASSERT_TRUE(trial);
+  EXPECT_LT(*trial, budget.encoder_kbps);
+  EXPECT_LE(stream_bitrate::wire_kbps_for_encoder(*trial, 15, 512), budget.split_kbps);
+  EXPECT_FALSE(actuator.encoder_kbps(budget.encoder_kbps + 1, 15));
+  EXPECT_FALSE(actuator.request(budget.encoder_kbps, 15, *trial + 1, true, 7));
+  EXPECT_FALSE(actuator.request(budget.encoder_kbps, 15, 2000, false, 7));
+  EXPECT_FALSE(actuator.request(budget.encoder_kbps, 51, 2000, true, 7));
+  EXPECT_FALSE(actuator.pending());
+  for (const int fixed : {50, 255}) {
+    EXPECT_FALSE(actuator.configure(1, fec_budget(fixed)));
+  }
+  auto watcher = budget;
+  watcher.split_kbps = 0;
+  EXPECT_FALSE(actuator.configure(1, watcher));
+  auto mismatch = budget;
+  ++mismatch.encoder_kbps;
+  EXPECT_FALSE(actuator.configure(1, mismatch));
+  EXPECT_FALSE(actuator.configure(0, budget));
+}
+
+TEST(LiveTuningFecActuator, PublishesOnlyAfterTheExactEncoderAckAtTheNextFrame) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  EXPECT_EQ(actuator.percentage_for_frame(1, 100, 0), 10);
+  EXPECT_EQ(actuator.confirm(2, 7, *encoder, 100, true, true), result_e::none);
+  EXPECT_EQ(actuator.confirm(1, 8, *encoder, 100, true, true), result_e::none);
+  EXPECT_EQ(actuator.confirm(1, 7, *encoder + 1, 100, true, true), result_e::none);
+  ASSERT_TRUE(actuator.pending());
+  EXPECT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  EXPECT_EQ(actuator.percentage_for_frame(1, 99, 0), 10);
+  EXPECT_EQ(actuator.percentage_for_frame(1, 100, 0), 15);
+  EXPECT_EQ(actuator.percentage_for_frame(2, 100, 77), 77);
+  EXPECT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::none);
+  // Losing evidence or capability after publication holds the proven F.
+  EXPECT_EQ(actuator.confirm(1, 7, *encoder, 101, false, false), result_e::none);
+  EXPECT_EQ(actuator.percentage_for_frame(1, 101, 0), 15);
+}
+
+TEST(LiveTuningFecActuator, MissingFeedbackCapabilityOrFrameBoundaryCannotPublishARequest) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  const auto budget = fec_budget();
+  for (const int refusal : {0, 1, 2}) {
+    SCOPED_TRACE(refusal);
+    live_tuning_fec::actuator_t actuator;
+    ASSERT_TRUE(actuator.configure(1, budget));
+    const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+    ASSERT_TRUE(encoder);
+    EXPECT_EQ(actuator.confirm(1, 7, *encoder, refusal == 0 ? 0 : 100,
+      refusal != 1, refusal != 2), result_e::refused);
+    EXPECT_FALSE(actuator.pending());
+    EXPECT_EQ(actuator.percentage_for_frame(1, 100, 0), 10);
+    EXPECT_EQ(actuator.percentage(), 10);
+  }
+}
+
+TEST(LiveTuningFecActuator, LowersParityBeforeRequestingTheHigherRateAndRejectsAnAbaAck) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  ASSERT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  const auto restore_rate = actuator.request(budget.encoder_kbps, 10, 2000, false, 8);
+  ASSERT_EQ(restore_rate, budget.encoder_kbps);
+  // Even queued older frames use lower parity before the caller can write the higher target.
+  EXPECT_EQ(actuator.percentage_for_frame(1, 99, 0), 10);
+  EXPECT_EQ(actuator.percentage_for_frame(1, 100, 0), 10);
+  EXPECT_EQ(actuator.confirm(1, 7, *restore_rate, 101, true, true), result_e::none);
+  EXPECT_EQ(actuator.confirm(1, 8, *restore_rate, 101, true, true), result_e::restored);
+  encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 9);
+  ASSERT_TRUE(encoder);
+  actuator.restore();  // outside writer, even one writing the very same kbps
+  const auto new_request = actuator.request(budget.encoder_kbps, 15, 2000, true, 10);
+  ASSERT_EQ(new_request, encoder);
+  EXPECT_EQ(actuator.confirm(1, 9, *encoder, 102, true, true), result_e::none);
+  EXPECT_EQ(actuator.percentage_for_frame(1, 102, 0), 10);
+  EXPECT_EQ(actuator.confirm(1, 10, *encoder, 103, true, true), result_e::published);
+  actuator.reset();
+  EXPECT_EQ(actuator.percentage_for_frame(1, 103, 77), 77);
+}
+
+TEST(LiveTuningFecActuator, PacketizerReadsOneCoherentGenerationAndPercentage) {
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  std::atomic<bool> done {false};
+  std::atomic<bool> invalid {false};
+  std::promise<void> first_read;
+  auto started = first_read.get_future();
+  std::thread reader([&] {
+    const auto initial = actuator.allocation_for_frame(1, 100, 77);
+    if (initial != std::pair {10, 10}) invalid.store(true);
+    first_read.set_value();
+    while (!done.load(std::memory_order_acquire)) {
+      const auto [configured, requested] = actuator.allocation_for_frame(1, 100, 77);
+      if (configured != 10 || (requested != 10 && requested != 15)) {
+        invalid.store(true, std::memory_order_relaxed);
+      }
+    }
+  });
+  started.wait();
+  bool writer_ok = true;
+  for (std::uint64_t i = 1; i <= 1000; ++i) {
+    const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, i);
+    if (!encoder || actuator.confirm(1, i, *encoder, 100, true, true) !=
+        live_tuning_fec::actuator_t::confirmation_e::published) {
+      writer_ok = false;
+      break;
+    }
+    actuator.restore();
+  }
+  done.store(true, std::memory_order_release);
+  reader.join();
+  EXPECT_TRUE(writer_ok);
+  EXPECT_FALSE(invalid.load());
+}
+
+namespace {
   void enable_controller(int base_bitrate_kbps = 20000) {
     config::video.adaptive_bitrate.enabled = true;
     config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
@@ -47,6 +184,37 @@ namespace {
       adaptive_bitrate::update_media_report(120.0, std::round(120.0 * loss_pct / 100.0), rtt_ms);
     }
   }
+}
+
+TEST(AdaptiveBitrateFecScope, RequiresTheTrustedSoleScopeAndKeepsRecreatingEncodersFixed) {
+  const auto budget = fec_budget();
+  config::video.adaptive_bitrate.enabled = true;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_base_bitrate(budget.encoder_kbps);
+  adaptive_bitrate::set_session_scope(4931, "fec-owned", true);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, budget.encoder_kbps);
+  adaptive_bitrate::configure_fec_budget(4932, budget, true);
+  EXPECT_FALSE(adaptive_bitrate::get_state().fec_budget_available);
+  adaptive_bitrate::configure_fec_budget(4931, budget, false);
+  EXPECT_FALSE(adaptive_bitrate::get_state().fec_budget_available);
+  adaptive_bitrate::configure_fec_budget(4931, budget, true);
+  EXPECT_TRUE(adaptive_bitrate::get_state().fec_budget_available);
+  EXPECT_FALSE(adaptive_bitrate::get_state().runtime_bitrate_in_place);
+  adaptive_bitrate::note_fec_partial_deficit(4931, std::chrono::steady_clock::now());
+  for (int i = 0; i < 100; ++i) adaptive_bitrate::update_media_report(120, 8, 3.0);
+  EXPECT_EQ(adaptive_bitrate::get_state().current_fec_percentage, 10);
+  EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4931, 100, 77), (std::pair {10, 10}));
+  adaptive_bitrate::set_live_bitrate(25000);
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 25000);
+  EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4931, 100, 77), (std::pair {10, 10}));
+  adaptive_bitrate::set_session_scope(4932, "shared", false);
+  EXPECT_FALSE(adaptive_bitrate::get_state().fec_budget_available);
+  EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4931, 100, 77), (std::pair {77, 77}));
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_session_scope(0, {}, false);
 }
 
 TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {

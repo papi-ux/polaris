@@ -9331,6 +9331,7 @@ namespace nvhttp {
       output["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
       output["adaptive_bitrate_state"] = adaptive_state.state;
       output["adaptive_bitrate_reason"] = adaptive_state.reason;
+      output["fec_allocation"] = stats.fec_allocation;
       output["ai_auto_quality_enabled"] = false;
       output["ai_optimizer_enabled"] = false;
       output["mangohud_configured"] = status_snapshot.mangohud_configured;

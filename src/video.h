@@ -601,6 +601,18 @@ namespace video {
       return false;
     }
 
+    /// True only when update_bitrate() confirms the change in this session,
+    /// without encoder recreation. FEC allocation needs that stronger proof.
+    virtual bool supports_in_place_bitrate_update() const {
+      return false;
+    }
+
+    /// Below this rate a backend's own minimum allocation could prevent a
+    /// real reduction. This additional FEC bound does not change the rate policy.
+    virtual int minimum_in_place_bitrate_kbps() const {
+      return 1;
+    }
+
     /**
      * @brief Dynamically update the encoder bitrate at runtime.
      * @param new_bitrate_kbps New target bitrate in kilobits per second.

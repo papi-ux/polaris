@@ -110,6 +110,14 @@ namespace stream_stats {
     std::uint64_t reported_deficit_blocks = 0;
     std::uint64_t reported_sufficient_shard_blocks = 0;
     std::optional<std::chrono::steady_clock::time_point> last_deficit_received_at;
+    // Sender observations after FEC encoding, before socket submission. These
+    // count UDP payload allocation, including the optional encryption prefix;
+    // not IP/UDP headers, successful sends, delivered bytes or a wire bitrate.
+    std::uint64_t generated_blocks = 0;
+    std::uint64_t generated_data_shards = 0;
+    std::uint64_t generated_parity_shards = 0;
+    std::uint64_t generated_data_bytes = 0;
+    std::uint64_t generated_parity_bytes = 0;
   };
 
   struct capture_source_t {
@@ -663,6 +671,9 @@ namespace stream_stats {
     /// Loss Live Tuning learned does not depend on the bitrate, in percent of frames.
     double adaptive_background_loss_pct = 0.0;
     bool adaptive_runtime_update_supported = false;
+    /// Scoped nominal parity allocation, not measured wire throughput. Filled
+    /// from the same actuator snapshot as adaptive_target_bitrate_kbps.
+    nlohmann::json fec_allocation = nullptr;
     /// True only while one uncontaminated stream generation owns the global actuator.
     bool doctor_live_action_scope_available = true;
     /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
@@ -1265,6 +1276,10 @@ namespace stream_stats {
     std::string_view payload,
     std::chrono::steady_clock::time_point received_at = std::chrono::steady_clock::now()
   );
+
+  void record_generated_fec(std::uint64_t generation, std::uint64_t blocks,
+                            std::uint64_t data_shards, std::uint64_t parity_shards,
+                            std::uint64_t data_bytes, std::uint64_t parity_bytes) noexcept;
 
   /**
    * @brief Update network statistics.

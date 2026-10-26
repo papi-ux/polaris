@@ -1899,6 +1899,16 @@ namespace video {
       return true;
     }
 
+    bool supports_in_place_bitrate_update() const override {
+      return true;
+    }
+
+    int minimum_in_place_bitrate_kbps() const override {
+      // frame_budget() clamps to 4096 bytes. Do not trade that unchanged
+      // minimum for extra parity as if the video allocation had fallen.
+      return static_cast<int>((std::int64_t {4096} * 8 * framerate + 999) / 1000);
+    }
+
     bitrate_update_e update_bitrate(int new_bitrate_kbps) override {
       if (new_bitrate_kbps <= 0) {
         return bitrate_update_e::rejected;
@@ -2213,6 +2223,10 @@ namespace video {
     }
 
     bool supports_runtime_bitrate_update() const override {
+      return true;
+    }
+
+    bool supports_in_place_bitrate_update() const override {
       return true;
     }
 
@@ -5257,7 +5271,9 @@ namespace video {
     adaptive_bitrate::set_runtime_update_supported(
       session->supports_runtime_bitrate_update(),
       {},
-      config.bitrate
+      config.bitrate,
+      session->supports_in_place_bitrate_update(),
+      session->minimum_in_place_bitrate_kbps()
     );
     auto runtime_bitrate_guard = util::fail_guard([&bitrate_session_recreation_pending] {
       if (!bitrate_session_recreation_pending) {
@@ -5824,7 +5840,7 @@ namespace video {
               const bool current = adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
                 update = session->update_bitrate(request->target_bitrate_kbps);
                 return update == encode_session_t::bitrate_update_e::applied;
-              }, trace ? &*before : nullptr);
+              }, trace ? &*before : nullptr, frame_nr);
               if (!current) record_update("superseded", std::nullopt);
               if (current) switch (update) {
                 case encode_session_t::bitrate_update_e::applied:
@@ -5859,7 +5875,8 @@ namespace video {
             } else {
               adaptive_bitrate::acknowledge_live_bitrate_applied(
                 request->revision,
-                applied_adaptive_bitrate
+                applied_adaptive_bitrate,
+                frame_nr
               );
             }
           }
