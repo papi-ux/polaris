@@ -639,7 +639,7 @@ const readinessConfig = ref(null)
 const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
 const { toast: showToast } = useToast()
-useDeviceJoinedToast(() => streamStatsConnected.value ? stats.value : null, { t, stream: true })
+useDeviceJoinedToast(() => streamStatsConnected?.value ? stats.value : null, { t, stream: true })
 const hostPlatform = ref('')
 const { state: spacesState, loaded: spacesLoaded, loading: spacesLoading, loadError: spacesError,
   load: loadSpaces, start: refreshSpaces, stop: stopSpaces } = useSpacesSnapshot({
