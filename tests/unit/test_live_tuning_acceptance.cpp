@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -401,17 +402,21 @@ namespace {
     // and loss that ends mid-probe.
     const auto base_fx = link("link-100000", 100000);
     for (const order_t &o : {order_t {"reports", false, 0}, order_t {"ping_10hz_p5", true, 5}}) {
-      // Original 51d32f3a first four unpaused step seconds above30, identical for both orders.
-      // Freeze the pause/recovery inputs across controller changes.
+      // Keep every original51d input and also exercise this controller's own step boundaries.
+      const auto unpaused = run(base_fx, o);
       const std::vector<int> reference_steps {32, 35, 38, 41};
-      std::vector<int> starts {20, 26, 27, 28, 29, 31, 45, 70, 101, 150, 233, 300};
-      int added = 0;
-      for (int s : reference_steps) {
-        if (s > 30 && added < 4) {
-          starts.push_back(s);
-          starts.push_back(s + 1);
-          ++added;
+      auto phase_steps = reference_steps;
+      int candidate_steps = 0;
+      for (int second : unpaused.step_seconds) {
+        if (second > 30 && candidate_steps < 4) {
+          phase_steps.push_back(second);
+          ++candidate_steps;
         }
+      }
+      std::vector<int> starts {20, 26, 27, 28, 29, 31, 45, 70, 101, 150, 233, 300};
+      for (int second : phase_steps) {
+        starts.push_back(second);
+        starts.push_back(second + 1);
       }
       std::sort(starts.begin(), starts.end());
       starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
@@ -454,16 +459,20 @@ namespace {
         }
         runs.push_back(run(fx, o));
       }
-      int used = 0;
-      for (int s : reference_steps) {
-        if (s <= 30 || used >= 3) {
-          continue;
+      std::set<int> recovery_points;
+      for (const auto *steps : {&reference_steps, &unpaused.step_seconds}) {
+        int used = 0;
+        for (int second : *steps) {
+          if (second <= 30 || used >= 3) {
+            continue;
+          }
+          recovery_points.insert(second);
+          recovery_points.insert(second + 1);
+          ++used;
         }
-        for (int offset : {0, 1}) {
-          const int recovery = s + offset;
-          runs.push_back(run(recovers_at("adversarial-loss-ends-mid-probe-at-" + std::to_string(recovery), "A-loss-ends-mid-probe", recovery), o));
-        }
-        ++used;
+      }
+      for (int recovery : recovery_points) {
+        runs.push_back(run(recovers_at("adversarial-loss-ends-mid-probe-at-" + std::to_string(recovery), "A-loss-ends-mid-probe", recovery), o));
       }
     }
     return runs;
@@ -590,7 +599,28 @@ TEST(LiveTuningAcceptance, TheFrozenBenchPasses22CellsAndNamesTheFourThatNeedACo
                      "scenario=" + r.scenario + ";order=" + r.order + ";tenths=" + std::to_string(r.over_capacity_last120));
     }
   }
-  ASSERT_EQ(runs.size(), 519u);
+  std::ifstream baseline(std::string(POLARIS_SOURCE_DIR) + "/tests/fixtures/live-tuning-acceptance-51d32f3a.txt");
+  ASSERT_TRUE(baseline.is_open());
+  std::set<std::string> original_roster;
+  std::string descriptor;
+  while (std::getline(baseline, descriptor)) {
+    ASSERT_TRUE(original_roster.insert(descriptor).second) << descriptor;
+  }
+  ASSERT_EQ(original_roster.size(), 519u);
+  std::set<std::string> actual_roster;
+  std::size_t additions = 0;
+  for (const auto &r : runs) {
+    const auto name = r.scenario + ";" + r.family + ";" + r.order;
+    ASSERT_TRUE(actual_roster.insert(name).second) << name;
+    additions += original_roster.count(name) == 0;
+  }
+  for (const auto &name : original_roster) {
+    EXPECT_TRUE(actual_roster.count(name)) << name;
+  }
+  ASSERT_EQ(runs.size(), original_roster.size() + additions);
+  RecordProperty("original_fixture_count", static_cast<int>(original_roster.size()));
+  RecordProperty("candidate_only_fixture_count", static_cast<int>(additions));
+  RecordProperty("total_fixture_count", static_cast<int>(runs.size()));
   const auto verdicts = cells(runs);
   ASSERT_EQ(verdicts.size(), 26u);
   // Unmet, in both orders: the link shrinks inside a pause, or just after one lossy report, and nothing tells
