@@ -44,9 +44,10 @@
  * - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background
  *   scan only raises it for about 5 s before it falls: a Steam Deck's scans peak at 83 ms for 5 s, every
  *   306.9 s. Cuts go on every 6 s until the queue starts to drain, at most three; the rate that queued is then
- *   the ceiling above the hold, and the first step past it, once it holds clean, is at most the existing
- *   1.06x bracket-completion step: a queue at the link
- *   builds slower than a retry can see. A queue three cuts did not drain, with nothing lost meanwhile, is
+ *   the ceiling above the hold. Once verified clean, climbs use the existing 1.06x bracket-completion step
+ *   while below 1.25x that rate: a queue at the link builds slower than a retry can see. A failed climb there
+ *   holds one completion step under the last clean rate, retaining that clean rate as a conservative queue
+ *   ceiling without assigning it measured loss. A queue three cuts did not drain, with nothing lost meanwhile, is
  *   someone else's, and is left alone for 5 minutes.
  * - Heavy loss while cutting for a queue hands the stream to the loss probe.
  *
@@ -82,7 +83,7 @@ namespace live_tuning_policy {
     descend,  ///< Probing down to see whether a lower rate helps.
     verify_hi,  ///< Back at the rate a probe or a hold left, to see whether it is still lossy.
     bisect,  ///< Narrowing in between a clean rate and a lossy one.
-    hold,  ///< At the highest rate known to be clean, retrying the one above it now and then.
+    hold,  ///< At a selected rate, retrying the one above it now and then.
     climb,  ///< Raising toward the request on clean reports.
     rtt_cut,  ///< Cutting until a standing queue drains.
   };
@@ -172,11 +173,12 @@ namespace live_tuning_policy {
       return last_change_;
     }
 
-    /// The rate above the hold that was lossy or queued, if one is known.
+    /// The rate above the hold to retry, if known: a lossy/queued rate, or the last clean rate retained
+    /// conservatively after a failed queue continuation, without measured loss assigned to it.
     std::optional<int> ceiling_kbps() const {
       return hi_;
     }
-    /// What found that ceiling: loss, or a standing queue.
+    /// Whether that ceiling belongs to the queue search rather than a loss measurement.
     bool ceiling_is_queue() const {
       return hi_is_queue_;
     }
@@ -299,7 +301,8 @@ namespace live_tuning_policy {
     int retries_ = 0;
     bool blind_step_ = false;
     bool hi_rechecked_ = false;
-    bool gentle_climb_ = false;
+    // A queue ceiling verified clean; bound the climb until its existing recheck radius is cleared.
+    std::optional<int> queue_continuation_from_;
 
     // RTT.
     std::deque<double> rtt_min_;

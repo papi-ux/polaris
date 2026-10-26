@@ -222,7 +222,7 @@ namespace live_tuning_policy {
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
     retained_queue_ceiling_.reset();
-    gentle_climb_ = false;
+    queue_continuation_from_.reset();
     if (kbps >= base_) {
       hold_failed_kbps_.reset();
     }
@@ -346,9 +346,10 @@ namespace live_tuning_policy {
         bisect_step(now_ms);
         return;
       }
-      // A queue ceiling that held clean may still be the link: a queue there builds slower than a
-      // retry can see, so the first step above it is a small one.
-      gentle_climb_ = hi_is_queue_ || retained_queue_ceiling_.has_value();
+      // A queue ceiling that held clean may still be the link. Keep completion-size steps
+      // until the climb clears its existing recheck radius.
+      queue_continuation_from_ = (hi_is_queue_ || retained_queue_ceiling_.has_value()) ?
+        std::optional<int> {target_} : std::nullopt;
       retained_queue_ceiling_.reset();
       hi_.reset();
       hi_is_queue_ = false;  // the ceiling held; climbs above it need no queue dwell
@@ -408,6 +409,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::enter_hold(std::int64_t now_ms, int kbps) {
+    queue_continuation_from_.reset();
     state_ = state_e::hold;
     reset_baseline(lo_loss_);
     set_target(kbps, "hold", now_ms);
@@ -423,9 +425,11 @@ namespace live_tuning_policy {
       to_normal(now_ms, base_, "base");
       return;
     }
-    const double step = gentle_climb_ ? BISECT_DONE :
+    if (queue_continuation_from_ && target_ >= *queue_continuation_from_ * RECHECK_CEILING) {
+      queue_continuation_from_.reset();
+    }
+    const double step = queue_continuation_from_ ? BISECT_DONE :
       static_cast<double>(target_) * 2.0 < base_ ? CLIMB_FAR : CLIMB_STEP;
-    gentle_climb_ = false;
     set_target(target_ * step, "climb", now_ms);
     const double p0 = std::max(lo_loss_, p_background());
     test_ = make_sprt(p0, p0 + CLIMB_LOSSY);
@@ -433,6 +437,18 @@ namespace live_tuning_policy {
 
   void policy_t::climb_result(bool lossy, std::int64_t now_ms) {
     if (lossy) {
+      if (queue_continuation_from_ && lo_ && *lo_ > 0) {
+        // The last clean rate is a conservative retry bound, not a measured loss point.
+        // Hold one completion step below it so the failed queue probe can drain.
+        const int clean = *lo_;
+        hi_ = clean;
+        hi_is_queue_ = true;
+        hi_loss_ = CLIMB_LOSSY;
+        hi_stats_ = {0.0, 0.0};
+        hi_rechecked_ = false;
+        enter_hold(now_ms, static_cast<int>(clean / BISECT_DONE));
+        return;
+      }
       hi_ = target_;
       hi_loss_ = test_->rate();
       hi_stats_ = {test_->frames(), test_->lost()};
@@ -766,6 +782,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::rtt_cut(std::int64_t now_ms) {
+    queue_continuation_from_.reset();
     rtt_from_ = target_;
     ++rtt_cuts_;
     rtt_cut_wait_ = RTT_DRAIN_S;
@@ -775,7 +792,7 @@ namespace live_tuning_policy {
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
     fec_revert();
     retained_queue_ceiling_.reset();
-    gentle_climb_ = false;
+    queue_continuation_from_.reset();
     hold_failed_kbps_.reset();
     const int previous = target_;
     const int next = std::clamp(kbps, std::min(floor_, base_), base_);
@@ -816,7 +833,7 @@ namespace live_tuning_policy {
   void policy_t::rebase(int base_kbps, int floor_kbps) {
     fec_revert();
     retained_queue_ceiling_.reset();
-    gentle_climb_ = false;
+    queue_continuation_from_.reset();
     base_ = std::max(1, base_kbps);
     floor_ = std::min(floor_kbps, base_);
     const int next = std::clamp(target_, floor_, base_);

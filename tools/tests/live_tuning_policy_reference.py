@@ -44,9 +44,11 @@ Queues
   floor over that floor, whichever is more, or is raised and climbing 2 ms/s for 2 s.
 - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background scan
   only raises it for about 5 s before it falls (the Deck's peak at 83 ms for 5 s). Cuts go on every 6 s until
-  the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. The
-  first promotion past that rate, once verified clean, is bounded by the existing 1.06x completion step.
-  A queue three cuts did not drain, with nothing lost meanwhile, is someone else's, and is left alone for 5 minutes.
+  the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. Once verified
+  clean, climbs use the existing 1.06x completion step while below 1.25x that rate.
+  A failed climb there holds one completion step under the last clean rate, retaining that clean rate as a
+  conservative queue ceiling without assigning it measured loss. A queue three cuts did not drain, with
+  nothing lost meanwhile, is someone else's, and is left alone for 5 minutes.
 - Heavy loss while cutting for a queue hands the stream to the loss probe.
 """
 import argparse
@@ -180,7 +182,7 @@ class Controller:
         self.retries = 0
         self.blind_step = False
         self.hi_rechecked = False
-        self.gentle_climb = False
+        self.queue_continuation_from = None
         # rtt
         self.rtt_min = deque(maxlen=self.RTT_WINDOW_S)
         self.sec = None
@@ -252,7 +254,7 @@ class Controller:
 
     def to_normal(self, now, kbps, why):
         self.retained_queue_ceiling = None
-        self.gentle_climb = False
+        self.queue_continuation_from = None
         if kbps >= self.base:
             self.hold_failed_kbps = None
         self.state = NORMAL
@@ -349,9 +351,10 @@ class Controller:
                 self.state = BISECT
                 self.bisect_step(now)
                 return
-            # A queue ceiling that held clean may still be the link: a queue there builds slower than a
-            # retry can see, so the first step above it is a small one.
-            self.gentle_climb = self.hi_kind == 'queue' or self.retained_queue_ceiling is not None
+            # A queue ceiling that held clean may still be the link. Keep completion-size steps
+            # until the climb clears its existing recheck radius.
+            self.queue_continuation_from = (self.target if self.hi_kind == 'queue' or
+                                            self.retained_queue_ceiling is not None else None)
             self.retained_queue_ceiling = None
             self.hi = None
             self.hi_kind = 'loss'   # the ceiling held; climbs above it need no queue dwell
@@ -398,6 +401,7 @@ class Controller:
             self.hold_failed_kbps = None
 
     def enter_hold(self, now, kbps):
+        self.queue_continuation_from = None
         self.state = HOLD
         self.reset_baseline(self.lo_loss)
         self.set_target(kbps, 'hold', now)
@@ -411,15 +415,26 @@ class Controller:
         if self.target >= self.base:
             self.to_normal(now, self.base, 'base')
             return
-        step = (self.BISECT_DONE if self.gentle_climb else
+        if (self.queue_continuation_from is not None and
+                self.target >= self.queue_continuation_from * self.RECHECK_CEILING):
+            self.queue_continuation_from = None
+        step = (self.BISECT_DONE if self.queue_continuation_from is not None else
                 self.CLIMB_FAR if self.target * 2 < self.base else self.CLIMB_STEP)
-        self.gentle_climb = False
         self.set_target(self.target * step, 'climb', now)
         p0 = max(self.lo_loss, self.p_background())
         self.test = self.sprt(p0, p0 + self.CLIMB_LOSSY)
 
     def climb_result(self, lossy, now):
         if lossy:
+            if self.queue_continuation_from is not None and self.lo is not None and self.lo > 0:
+                # The last clean rate is a conservative retry bound, not a measured loss point.
+                # Hold one completion step below it so the failed queue probe can drain.
+                clean = self.lo
+                self.hi, self.hi_loss, self.hi_kind = clean, self.CLIMB_LOSSY, 'queue'
+                self.hi_stats = [0, 0]
+                self.hi_rechecked = False
+                self.enter_hold(now, int(clean / self.BISECT_DONE))
+                return
             self.hi, self.hi_loss = self.target, self.test.rate()
             self.hi_stats = [self.test.frames, self.test.lost]
             self.state = BISECT
@@ -665,12 +680,15 @@ class Controller:
             self.rtt_cut(now)
 
     def rtt_cut(self, now):
+        self.queue_continuation_from = None
         self.rtt_from = self.target
         self.rtt_cuts += 1
         self.rtt_cut_wait = self.RTT_DRAIN_S
         self.set_target(self.target * self.RTT_CUT, 'rtt', now)
 
     def adopt(self, now, kbps):
+        self.retained_queue_ceiling = None
+        self.queue_continuation_from = None
         self.hold_failed_kbps = None
         previous = self.target
         kbps = max(min(self.floor, self.base), min(self.base, kbps))
@@ -697,6 +715,8 @@ class Controller:
         self.r0 = max(previous, self.target)
 
     def rebase(self, base, floor):
+        self.retained_queue_ceiling = None
+        self.queue_continuation_from = None
         self.base = max(1, base)
         self.floor = min(floor, self.base)
         target = max(self.floor, min(self.base, self.target))
