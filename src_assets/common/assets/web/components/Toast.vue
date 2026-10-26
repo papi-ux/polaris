@@ -1,7 +1,7 @@
 <template>
   <Teleport to="body">
     <div
-      class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"
+      class="fixed bottom-4 right-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col gap-2 pointer-events-none"
       aria-live="polite"
       aria-atomic="false"
     >
@@ -28,7 +28,7 @@
             </div>
             <!-- Content -->
             <div class="flex-1 min-w-0">
-              <span class="text-silver text-sm">{{ t.message }}</span>
+              <span class="text-silver text-sm [overflow-wrap:anywhere]">{{ t.message }}</span>
               <button v-if="t.action" class="ml-2 text-ice hover:text-ice/80 font-medium text-sm whitespace-nowrap" @click="t.action.handler">{{ t.action.label }}</button>
             </div>
             <button

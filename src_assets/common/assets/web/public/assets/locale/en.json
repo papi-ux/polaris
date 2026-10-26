@@ -9,6 +9,8 @@
     "cmd_val": "Command Value",
     "default": "Default",
     "default_global": "Default (Global)",
+    "device_joined": "{name} joined",
+    "device_joined_type": "{name} ({type}) joined",
     "device_name_numbered": "{name} ({number})",
     "device_name_paired": "{name} (paired {paired})",
     "disabled": "Disabled",

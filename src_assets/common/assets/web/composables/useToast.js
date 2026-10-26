@@ -10,6 +10,7 @@ export function useToast() {
     setTimeout(() => {
       dismiss(id)
     }, duration)
+    return id
   }
 
   function dismiss(id) {

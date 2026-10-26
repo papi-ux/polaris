@@ -508,6 +508,7 @@ import { getThemeMeta, onThemeChange } from '../theme.js'
 import QuickControls from '../components/QuickControls.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { useToast } from '../composables/useToast'
+import { useDeviceJoinedToast } from '../composables/useDeviceJoinedToast.js'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync, resolveStreamDisplayMode } from '../client-settings-sync'
 import { captureStatusTone } from '../capture-status-tone.js'
@@ -638,6 +639,7 @@ const readinessConfig = ref(null)
 const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
 const { toast: showToast } = useToast()
+useDeviceJoinedToast(() => streamStatsConnected.value ? stats.value : null, { t, stream: true })
 const hostPlatform = ref('')
 const { state: spacesState, loaded: spacesLoaded, loading: spacesLoading, loadError: spacesError,
   load: loadSpaces, start: refreshSpaces, stop: stopSpaces } = useSpacesSnapshot({
