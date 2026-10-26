@@ -62,6 +62,12 @@ extern "C" {
 #include <iomanip>
 
 #ifdef __linux__
+  #include <ffnvcodec/dynlink_cuda.h>
+extern "C" {
+  #include <libavutil/hwcontext_cuda.h>
+}
+  #include "nvenc/nvenc_cuda.h"
+  #include "nvenc/nvenc_utils.h"
   #include "platform/linux/encoder_auto_policy.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/vrr_clock_probe.h"
@@ -5038,6 +5044,7 @@ namespace video {
     } else if (dynamic_cast<platf::nvenc_encode_device_t *>(encode_device.get())) {
       auto nvenc_encode_device = boost::dynamic_pointer_cast<platf::nvenc_encode_device_t>(std::move(encode_device));
       session = make_nvenc_encode_session(encoder, config, std::move(nvenc_encode_device));
+      if (session) session->capture_display_owner = disp;
     }
     if (!session) invalidate_live_probe_reuse();
     return session;
@@ -5986,6 +5993,122 @@ namespace video {
     return std::nullopt;
   }
 
+#if defined(__linux__) && !defined(__ANDROID__)
+  // Own the same converter and CUDA allocation the FFmpeg path uses. Only the
+  // encoder changes: native NVENC can acknowledge a bitrate update in place.
+  class cuda_nvenc_encode_device_t final: public platf::nvenc_encode_device_t {
+  public:
+    explicit cuda_nvenc_encode_device_t(std::unique_ptr<platf::avcodec_encode_device_t> input):
+        converter(std::move(input)) {
+    }
+
+    ~cuda_nvenc_encode_device_t() override {
+      native.reset();
+      nvenc = nullptr;
+    }
+
+    bool init_encoder(const config_t &config, const sunshine_colorspace_t &space) override {
+      if (native) return true; // The factory initializes once, before selecting this device.
+      auto context = cuda_init_avcodec_hardware_input_buffer(converter.get());
+      if (context.has_right()) return false;
+      hw_device = std::move(context.left());
+      hw_frames.reset(av_hwframe_ctx_alloc(hw_device.get()));
+      if (!hw_frames) return false;
+      auto *frames = reinterpret_cast<AVHWFramesContext *>(hw_frames->data);
+      frames->format = AV_PIX_FMT_CUDA;
+      frames->sw_format = AV_PIX_FMT_NV12;
+      frames->width = config.width;
+      frames->height = config.height;
+      frames->initial_pool_size = 0;
+      converter->init_hwframes(frames);
+      if (frames->format != AV_PIX_FMT_CUDA || frames->sw_format != AV_PIX_FMT_NV12 ||
+          av_hwframe_ctx_init(hw_frames.get()) < 0) return false;
+
+      auto *frame = av_frame_alloc();
+      if (!frame) return false;
+      // set_frame takes ownership, including on failure, just as on the avcodec path.
+      if (converter->set_frame(frame, hw_frames.get())) return false;
+      converter->colorspace = space;
+      converter->apply_colorspace();
+      frame = converter->frame;
+      if (!frame || frame->format != AV_PIX_FMT_CUDA ||
+          frame->width != config.width || frame->height != config.height ||
+          !nvenc::contiguous_nv12_layout(
+            reinterpret_cast<std::uintptr_t>(frame->data[0]),
+            reinterpret_cast<std::uintptr_t>(frame->data[1]),
+            frame->linesize[0], frame->linesize[1], frame->width, frame->height)) return false;
+
+      auto *device_context = reinterpret_cast<AVHWDeviceContext *>(hw_device->data);
+      auto *cuda_context = static_cast<AVCUDADeviceContext *>(device_context->hwctx);
+      if (!cuda_context || !cuda_context->cuda_ctx) return false;
+      auto candidate = std::make_unique<nvenc::nvenc_cuda>(
+        cuda_context->cuda_ctx, frame->data[0], frame->linesize[0]);
+      if (!candidate->create_encoder(config::video.nv, config,
+                                    nvenc::nvenc_colorspace_from_sunshine_colorspace(space),
+                                    NV_ENC_BUFFER_FORMAT_NV12)) return false;
+      native = std::move(candidate);
+      nvenc = native.get();
+      return true;
+    }
+
+    int convert(platf::img_t &image) override {
+      return converter->convert(image);
+    }
+
+    platf::mem_type_e native_output_device_type() const override {
+      return converter->native_output_device_type();
+    }
+
+    void *native_output_resource() const override {
+      return converter->native_output_resource();
+    }
+
+    int native_output_fd() const override {
+      return converter->native_output_fd();
+    }
+
+    std::unique_ptr<platf::avcodec_encode_device_t> release_converter() {
+      native.reset();
+      nvenc = nullptr;
+      return std::move(converter);
+    }
+
+  private:
+    // Reverse destruction order unregisters NVENC before the frame/context go away.
+    avcodec_buffer_t hw_device;
+    avcodec_buffer_t hw_frames;
+    std::unique_ptr<platf::avcodec_encode_device_t> converter;
+    std::unique_ptr<nvenc::nvenc_cuda> native;
+  };
+
+  void try_native_cuda_fec_device(std::unique_ptr<platf::encode_device_t> &result,
+                                 const encoder_t &encoder, const config_t &config,
+                                 const sunshine_colorspace_t &colorspace) {
+    auto *input = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
+    const auto *formats = dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get());
+    if (encoder_probe_in_progress || encoder.name != "nvenc" || !input || !input->data ||
+        !formats || formats->avcodec_base_dev_type != AV_HWDEVICE_TYPE_CUDA ||
+        config.dynamicRange != 0 || config.chromaSamplingType != 0 || colorspace.bit_depth != 8 ||
+        (config.videoFormat != 0 && config.videoFormat != 1) ||
+        config::video.nv.split_encode_mode != nvenc::nvenc_split_encode_mode::disabled) return;
+    const auto state = adaptive_bitrate::get_state();
+    if (!config.session_generation || state.session_generation != config.session_generation ||
+        !state.session_exclusive || !state.configured_enabled || !state.fec_budget_available) return;
+
+    auto candidate = std::make_unique<cuda_nvenc_encode_device_t>(
+      boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(result)));
+    candidate->colorspace = colorspace;
+    candidate->prefer_8bit_encode = input->prefer_8bit_encode;
+    if (candidate->init_encoder(config, colorspace)) {
+      BOOST_LOG(info) << "Using native CUDA NVENC for in-place FEC allocation changes";
+      result = std::move(candidate);
+    } else {
+      BOOST_LOG(info) << "Native CUDA NVENC unavailable for this stream; retaining FFmpeg with fixed FEC";
+      result = candidate->release_converter();
+    }
+  }
+#endif
+
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
     std::unique_ptr<platf::encode_device_t> result;
 
@@ -6096,6 +6219,9 @@ namespace video {
         result = std::move(direct_device);
       }
     }
+#if !defined(__ANDROID__)
+    try_native_cuda_fec_device(result, encoder, config, colorspace);
+#endif
 #endif
 
     if (result) {

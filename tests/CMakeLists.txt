@@ -405,6 +405,7 @@ endif()
 
 set(TEST_VIDEO_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_lifecycle_hardware.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_nvenc_cuda.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cbs.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_media_capabilities.cpp
