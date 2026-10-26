@@ -194,8 +194,9 @@ namespace live_tuning_policy {
     void fec_applied(std::int64_t now_ms, int percentage);
 
     /// The actuator could not act on the request. The confirmed percentage holds, and nothing is asked again until
-    /// the back-off ends.
-    void fec_refused(std::int64_t now_ms);
+    /// the back-off ends. A soft evidence/ACK wait expiry may clear the
+    /// request without starting a parity-outcome backoff.
+    void fec_refused(std::int64_t now_ms, bool backoff = true);
 
   private:
     enum class after_change_e {

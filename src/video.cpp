@@ -1906,7 +1906,8 @@ namespace video {
     int minimum_in_place_bitrate_kbps() const override {
       // frame_budget() clamps to 4096 bytes. Do not trade that unchanged
       // minimum for extra parity as if the video allocation had fallen.
-      return static_cast<int>((std::int64_t {4096} * 8 * framerate + 999) / 1000);
+      return static_cast<int>(std::min<std::int64_t>(std::numeric_limits<int>::max(),
+        (std::int64_t {4096} * 8 * std::max(framerate, 1) + 999) / 1000));
     }
 
     bitrate_update_e update_bitrate(int new_bitrate_kbps) override {

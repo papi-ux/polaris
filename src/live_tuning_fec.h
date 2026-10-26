@@ -28,7 +28,7 @@ namespace live_tuning_fec {
     actuator_t &operator=(const actuator_t &) = delete;
 
     enum class phase_e { fixed, lowering_rate, raising_rate };
-    enum class confirmation_e { none, published, restored, refused };
+    enum class confirmation_e { none, published, restored, refused, stale };
 
     struct publication_t {
       std::uint64_t generation;
@@ -121,7 +121,7 @@ namespace live_tuning_fec {
         return std::nullopt;
       }
       const auto encoder = encoder_kbps(policy_kbps, wanted_percentage);
-      if (!encoder || *encoder < floor_kbps) {
+      if (!encoder || (wanted_percentage != configured_ && *encoder < floor_kbps)) {
         return std::nullopt;
       }
       if (wanted_percentage == configured_) {
@@ -153,8 +153,12 @@ namespace live_tuning_fec {
         return confirmation_e::none;
       }
       if (pending_->generation != generation ||
-          pending_->authority_revision != authority_revision ||
-          pending_->encoder_kbps != actual_encoder_kbps) {
+          pending_->authority_revision != authority_revision) {
+        pending_.reset();
+        phase_ = phase_e::fixed;
+        return confirmation_e::stale;
+      }
+      if (pending_->encoder_kbps != actual_encoder_kbps) {
         return confirmation_e::none;
       }
       if (phase_ == phase_e::raising_rate) {

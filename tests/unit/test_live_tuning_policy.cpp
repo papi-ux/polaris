@@ -821,14 +821,15 @@ TEST(LiveTuningPolicyFec, ARequestIsNotAConfirmationAndUnaskedPercentagesAreIgno
 }
 
 TEST(LiveTuningPolicyFec, ARefusalHoldsThePercentageAndSuppressesTheNextEpisode) {
-  for (const bool refuse : {true, false}) {
+  // hard refusal, no refusal, or a soft evidence/ACK wait expiry without backoff
+  for (const int refuse : {1, 0, 2}) {
     SCOPED_TRACE(refuse);
     live_tuning_policy::policy_t policy {BASE, FLOOR};
     policy.configure_fec(10);
     auto at = until_rate_independent(policy);
     ASSERT_EQ(policy.fec_request(), 15);
     if (refuse) {
-      policy.fec_refused(at);
+      policy.fec_refused(at, refuse == 1);
       EXPECT_FALSE(policy.fec_request());
       EXPECT_EQ(policy.fec_percentage(), 10);
     }
@@ -838,7 +839,7 @@ TEST(LiveTuningPolicyFec, ARefusalHoldsThePercentageAndSuppressesTheNextEpisode)
       policy.report(at, 120, 18);
     }
     ASSERT_GT(policy.background_loss(), first);
-    if (refuse) {
+    if (refuse == 1) {
       EXPECT_FALSE(policy.fec_request());  // still inside the back-off the refusal started
     } else {
       EXPECT_EQ(policy.fec_request(), 15);  // the probe dropped the unpublished raise; the new result asks again

@@ -865,14 +865,14 @@ namespace live_tuning_policy {
     }
   }
 
-  void policy_t::fec_refused(std::int64_t now_ms) {
+  void policy_t::fec_refused(std::int64_t now_ms, bool backoff) {
     (void) now_ms;
     if (!fec_configured_ || !fec_wanted_) {
       return;
     }
     // The confirmed percentage holds. Asking again waits out the back-off, which counts judged reports.
     fec_wanted_.reset();
-    fec_backoff_ = BACKOFF_REPORTS;
+    if (backoff) fec_backoff_ = BACKOFF_REPORTS;
   }
 
   void policy_t::fec_open_episode() {

@@ -102,6 +102,8 @@ namespace adaptive_bitrate {
   static int policy_target_kbps = 0;
   static std::optional<std::chrono::steady_clock::time_point> fec_partial_deficit_at;
   static std::optional<std::chrono::steady_clock::time_point> fec_media_at;
+  static std::optional<int> fec_waiting_percentage;
+  static int fec_wait_reports = 0;
   static void retire_fec_for_writer_locked();
 
   // Timing for encoder-pressure adjustments
@@ -395,12 +397,18 @@ namespace adaptive_bitrate {
     ).count();
   }
 
-  static bool fec_evidence_fresh_locked() {
+  static bool fec_media_live_locked() {
     const auto now = std::chrono::steady_clock::now();
-    const auto fresh = [now](const auto &at) {
-      return at && *at <= now && *at >= now - 2500ms;
-    };
-    return fresh(fec_partial_deficit_at) && fresh(fec_media_at);
+    return fec_media_at && *fec_media_at <= now && *fec_media_at >= now - 2500ms;
+  }
+
+  static bool fec_deficit_recent_locked() {
+    const auto now = std::chrono::steady_clock::now();
+    // Selective reports are sparse: no new deficit is not a dead client.
+    // Require bounded recent block evidence when opening the transaction;
+    // freeze that evidence there, and check only media liveness at its ACK.
+    return fec_partial_deficit_at && *fec_partial_deficit_at <= now &&
+      *fec_partial_deficit_at >= now - 30s;
   }
 
   // An outside writer owns a new F0-unit target. Publish the baseline before
@@ -413,32 +421,50 @@ namespace adaptive_bitrate {
       }
     }
     policy_target_kbps = 0;
+    fec_waiting_percentage.reset();
+    fec_wait_reports = 0;
   }
 
-  static void apply_fec_policy_locked(live_tuning_policy::policy_t &policy) {
+  static void apply_fec_policy_locked(live_tuning_policy::policy_t &policy, bool media_report = false) {
     if (!fec_actuator.configured() || fec_actuator.pending()) {
       return;
     }
     const auto wanted = policy.fec_request();
     if (!wanted) {
+      fec_waiting_percentage.reset();
+      fec_wait_reports = 0;
       return;
     }
+    if (wanted != fec_waiting_percentage) {
+      fec_waiting_percentage = wanted;
+      fec_wait_reports = 0;
+    }
     const bool restoring = *wanted == fec_actuator.configured_percentage();
-    const bool eligible = scope_exclusive && scope_generation == fec_actuator.generation() &&
+    const bool capable = scope_exclusive && scope_generation == fec_actuator.generation() &&
       enabled.load(std::memory_order_relaxed) && runtime_bitrate_in_place &&
       runtime_update_supported.load(std::memory_order_relaxed) &&
       !doctor_override_active.load(std::memory_order_relaxed) &&
       !explicit_live_override_active.load(std::memory_order_relaxed) &&
-      !pending_live_update_active.load(std::memory_order_relaxed) && fec_evidence_fresh_locked();
-    if (!restoring && !eligible) {
+      !pending_live_update_active.load(std::memory_order_relaxed);
+    if (!restoring && !capable) {
       policy.fec_refused(policy_now_ms());
+      record_history_locked("fec_unavailable", "in_place_scope_unavailable");
       return;
     }
+    const bool eligible = capable && fec_media_live_locked() && fec_deficit_recent_locked();
     const int actual_target = target_bitrate_kbps.load(std::memory_order_relaxed);
     // The rate-independent result may first restore the policy's base. Wait
     // for its real encoder acknowledgement rather than dropping that trial
     // or treating the requested base as applied.
-    if (encoder_applied_bitrate_kbps != actual_target) {
+    if ((!restoring && !eligible) || encoder_applied_bitrate_kbps != actual_target) {
+      // Bound an evidence/ACK wait by valid host media receipts, not polling
+      // frequency. It is not a failed parity trial and earns no FEC backoff.
+      if (media_report && ++fec_wait_reports >= 8) {
+        policy.fec_refused(policy_now_ms(), false);
+        record_history_locked("fec_deferred", "evidence_or_encoder_wait_expired");
+        fec_waiting_percentage.reset();
+        fec_wait_reports = 0;
+      }
       return;
     }
     const auto expected = fec_actuator.encoder_kbps(policy.target_kbps(), fec_actuator.percentage());
@@ -453,6 +479,8 @@ namespace adaptive_bitrate {
       policy.fec_refused(policy_now_ms());
       return;
     }
+    fec_waiting_percentage.reset();
+    fec_wait_reports = 0;
     policy_target_kbps = policy.target_kbps();
     // request() has already published a lower F, if this restores F0.
     if (restoring) {
@@ -469,12 +497,12 @@ namespace adaptive_bitrate {
   // backend acknowledgement. The encoder names the next not-yet-encoded frame.
   static void confirm_fec_locked(int bitrate_kbps, std::int64_t next_frame_index) {
     const auto result = fec_actuator.confirm(scope_generation, action_authority_revision,
-      bitrate_kbps, next_frame_index, runtime_bitrate_in_place, fec_evidence_fresh_locked());
+      bitrate_kbps, next_frame_index, runtime_bitrate_in_place, fec_media_live_locked());
     using result_e = live_tuning_fec::actuator_t::confirmation_e;
     if (result == result_e::published && stream_policy) {
       stream_policy->fec_applied(policy_now_ms(), fec_actuator.percentage());
       record_history_locked("fec_published", "in_place_encoder_confirmed");
-    } else if (result == result_e::refused) {
+    } else if (result == result_e::refused || result == result_e::stale) {
       // Parity was never published. Hold the known encoder rate at F0,
       // including when the backend rejected the lower-rate request. A report
       // gap must not itself request an increase or pretend one was applied.
@@ -483,13 +511,14 @@ namespace adaptive_bitrate {
         policy_target_kbps = known;
         target_bitrate_kbps.store(known, std::memory_order_relaxed);
         if (stream_policy) {
-          stream_policy->fec_refused(policy_now_ms());
+          stream_policy->fec_refused(policy_now_ms(), false);
           stream_policy->adopt(policy_now_ms(), known);
         }
       }
       ++action_authority_revision;
       ++operator_revision;
-      record_history_locked("fec_refused", "encoder_boundary_or_feedback_unavailable");
+      record_history_locked("fec_refused", result == result_e::stale ?
+        "stale_fec_authority" : "encoder_boundary_or_feedback_unavailable");
     }
   }
 
@@ -587,10 +616,11 @@ namespace adaptive_bitrate {
   // from a clean snapshot taken before it.
   static void apply_policy_locked(live_tuning_policy::policy_t &p,
                                   std::uint64_t changes_before,
-                                  live_tuning_policy::state_e state_before) {
+                                  live_tuning_policy::state_e state_before,
+                                  bool media_report = false) {
     if (p.changes() == changes_before && p.state() == state_before) {
       // Nothing decided: leave the status, which encoder load or frame pacing may have set since.
-      apply_fec_policy_locked(p);
+      apply_fec_policy_locked(p, media_report);
       return;
     }
     set_policy_status_locked(p);
@@ -607,7 +637,11 @@ namespace adaptive_bitrate {
       retire_fec_for_writer_locked();
     }
     policy_target_kbps = next;
-    const int encoder_next = fec_actuator.configured() ?
+    // A state-only decision does not undo the pending rate allocation or
+    // rotate its authority. The next exact encoder ACK can still complete it.
+    const bool keep_pending = fec_actuator.phase() == live_tuning_fec::actuator_t::phase_e::lowering_rate &&
+      p.fec_request() == fec_actuator.pending_percentage();
+    const int encoder_next = keep_pending ? current : fec_actuator.configured() ?
       fec_actuator.encoder_kbps(next, fec_actuator.percentage()).value_or(next) : next;
     if (encoder_next != current) {
       target_bitrate_kbps.store(encoder_next, std::memory_order_relaxed);
@@ -616,7 +650,7 @@ namespace adaptive_bitrate {
                        << p.last_change().why << ", " << live_tuning_policy::name(p.state()) << ')';
     }
     ++operator_revision;
-    apply_fec_policy_locked(p);
+    apply_fec_policy_locked(p, media_report);
     state_changed.notify_all();
   }
 
@@ -699,7 +733,7 @@ namespace adaptive_bitrate {
     const auto changes_before = p.changes();
     const auto state_before = p.state();
     p.report(now_ms, frames_expected, frames_lost);
-    apply_policy_locked(p, changes_before, state_before);
+    apply_policy_locked(p, changes_before, state_before, true);
   }
 
   void update_stream_health(double fps_ratio,
@@ -1466,6 +1500,10 @@ namespace adaptive_bitrate {
     policy_target_kbps = 0;
     fec_partial_deficit_at.reset();
     fec_media_at.reset();
+    fec_waiting_percentage.reset();
+    fec_wait_reports = 0;
+    fec_waiting_percentage.reset();
+    fec_wait_reports = 0;
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
     explicit_live_override_active.store(false, std::memory_order_relaxed);
