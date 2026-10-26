@@ -679,23 +679,35 @@ namespace nvenc {
       return false;
     }
 
-    auto new_bitrate_bps = new_bitrate_kbps * 1000;
-    if (new_bitrate_bps == static_cast<int>(saved_enc_config.rcParams.averageBitRate)) {
-      return true;  // No change needed
+    // The encoder keeps bits per second in 32 bits. Refuse a rate it cannot hold rather than wrap it.
+    if (new_bitrate_kbps <= 0 || static_cast<uint64_t>(new_bitrate_kbps) * 1000 > std::numeric_limits<uint32_t>::max()) {
+      BOOST_LOG(error) << "NvEnc: refusing bitrate " << new_bitrate_kbps << " kbps";
+      return false;
+    }
+    const auto new_bitrate_bps = static_cast<uint32_t>(static_cast<uint64_t>(new_bitrate_kbps) * 1000);
+    if (new_bitrate_bps == saved_enc_config.rcParams.averageBitRate) {
+      return true;  // The encoder already confirmed this rate
     }
 
-    // Update the saved config with the new bitrate
-    saved_enc_config.rcParams.averageBitRate = new_bitrate_bps;
+    // The saved configuration is the one the encoder last accepted. Build the change on a copy, so a
+    // refused reconfiguration leaves it as it was and the same rate is asked of the encoder again.
+    auto enc_config = saved_enc_config;
+    enc_config.rcParams.averageBitRate = new_bitrate_bps;
 
     // Update VBV buffer size proportionally if it was set
-    if (saved_enc_config.rcParams.vbvBufferSize > 0 && saved_init_params.frameRateNum > 0) {
-      saved_enc_config.rcParams.vbvBufferSize = static_cast<uint64_t>(new_bitrate_bps) * saved_init_params.frameRateDen / saved_init_params.frameRateNum;
+    if (enc_config.rcParams.vbvBufferSize > 0 && saved_init_params.frameRateNum > 0) {
+      const auto vbv_bits = static_cast<uint64_t>(new_bitrate_bps) * saved_init_params.frameRateDen / saved_init_params.frameRateNum;
+      if (vbv_bits > std::numeric_limits<uint32_t>::max()) {
+        BOOST_LOG(error) << "NvEnc: refusing bitrate " << new_bitrate_kbps << " kbps, its VBV buffer does not fit";
+        return false;
+      }
+      enc_config.rcParams.vbvBufferSize = static_cast<uint32_t>(vbv_bits);
     }
 
     NV_ENC_RECONFIGURE_PARAMS reconfig_params = {};
     reconfig_params.version = min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER);
     reconfig_params.reInitEncodeParams = saved_init_params;
-    reconfig_params.reInitEncodeParams.encodeConfig = &saved_enc_config;
+    reconfig_params.reInitEncodeParams.encodeConfig = &enc_config;
     reconfig_params.forceIDR = 1;
     reconfig_params.resetEncoder = 1;
 
@@ -704,6 +716,8 @@ namespace nvenc {
       return false;
     }
 
+    // saved_init_params.encodeConfig already points at saved_enc_config.
+    saved_enc_config = enc_config;
     BOOST_LOG(debug) << "NvEnc: bitrate reconfigured to " << new_bitrate_kbps << " kbps";
     return true;
   }
