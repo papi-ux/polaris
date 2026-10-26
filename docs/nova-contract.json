@@ -240,7 +240,7 @@
       }
     },
     "space_launch_mode": {
-      "$comment": "The launch_mode of a Space game, fixed to gamescope_stream; a four-field subset of launch_mode read by the same modeJson reader. Space entries deliberately omit follows_host_default, launch_as, launch_as_available and launch_as_unavailable_reason, and that shared reader defaults each one when absent: follows_host_default to true, launch_as to no app launch-as contract (it checks has() for all three launch_as fields first), launch_as_available to null and launch_as_unavailable_reason to an empty string. The cross-repo checker still lists those four reads as drift for this object, because it compares every field the shared reader names; that stays visible until known_drift or the checker records the absence.",
+      "$comment": "The launch_mode of a Space game, fixed to gamescope_stream; a four-field subset of launch_mode read by the same modeJson reader. Space entries deliberately omit follows_host_default, launch_as, launch_as_available and launch_as_unavailable_reason, and that shared reader defaults each one when absent: follows_host_default to true, launch_as to no app launch-as contract (it checks whether any of the three launch_as keys exists first), launch_as_available to null and launch_as_unavailable_reason to an empty string. The four intentional omissions and their exact reader defaults are declared in known_drift with a per-object reason.",
       "fields": [
         "allowed_modes",
         "mode_reason",
@@ -1154,6 +1154,12 @@
         "generated_at",
         "normalization_reason",
         "requested_target_fps"
+      ],
+      "space_launch_mode": [
+        "follows_host_default",
+        "launch_as",
+        "launch_as_available",
+        "launch_as_unavailable_reason"
       ]
     },
     "polaris_sends_nova_never_reads": {
@@ -1205,11 +1211,6 @@
         "preferred_codec",
         "profile_state",
         "target_bitrate_kbps"
-      ],
-      "launch_mode": [
-        "launch_as",
-        "launch_as_available",
-        "launch_as_unavailable_reason"
       ]
     },
     "$detail": {
@@ -1252,6 +1253,9 @@
         "The containment resolver serves resolved_profile directly from deterministic",
         "policy. Remaining top-level compatibility fields are informational only; Nova",
         "requires the typed resolved-profile envelope before they can affect launch."
+      ],
+      "space_launch_mode": [
+        "Space games deliberately serve only preferred_mode, allowed_modes, recommended_mode and mode_reason. Nova uses the shared modeJson adapter and tolerates the four omitted fields: follows_host_default defaults to true, launch_as is null when none of the three launch_as keys exists, launch_as_available defaults to null, and launch_as_unavailable_reason defaults to an empty string. These are declared compatibility defaults, not evidence of hardware or UI acceptance. Source recon: Polaris a44c39bf / src/nvhttp.cpp space_launch_mode_json; Nova 3f6b6908 / PolarisGameJsonAdapter.fromJson."
       ]
     }
   }
