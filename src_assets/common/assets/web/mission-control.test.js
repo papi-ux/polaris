@@ -249,13 +249,19 @@ describe('Mission Control stage helpers', () => {
       ])
       expect(liveTuningLoweredCount(history)).toBe(2)
       const recap = lastSessionRecap({ snapshot: snapshot({ stats: { live_tuning_history: history } }), lastSession: ended(), entry: entry(), t })
-      expect(recap.detail).toContain('mission_control.recap_live_tuning_lowered {"count":2}')
+      expect(recap.detail).not.toContain('recap_live_tuning')
+      expect(recap.tuningDetail).toBe('mission_control.recap_live_tuning_lowered {"count":2}')
+      const last = idleSignalCells({ lastSession: { duration: '1h 42m', recap }, t }).find(cell => cell.key === 'last')
+      expect(last.sub).toBe(recap.detail)
+      expect(last.title).toBe(recap.tuningDetail)
+      expect(last.link.description).toBe(recap.tuningDetail)
       // A history served outside the stream, cut short or malformed vouches for nothing.
       for (const partial of [undefined, { ...history, available: false, reason: 'no_stream' }, { ...history, dropped: 3, truncated: true },
         { ...history, truncated: undefined }, tuning([step('decision', 'network_feedback', null)])]) {
         expect(liveTuningLoweredCount(partial)).toBeNull()
         const unproven = lastSessionRecap({ snapshot: snapshot({ stats: { live_tuning_history: partial } }), lastSession: ended(), entry: entry(), t })
         expect(unproven.detail).not.toContain('recap_live_tuning')
+        expect(unproven.tuningDetail).toBe('')
       }
       // A complete history with no reduction is a measured zero, and is not shown either.
       expect(liveTuningLoweredCount(tuning([step('scope_started', 'initial_scope_snapshot', 30000)]))).toBe(0)

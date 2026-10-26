@@ -190,9 +190,11 @@ export function lastSessionRecap({ snapshot = null, lastSession = null, entry = 
   const detail = [
     fps > 0 ? t('mission_control.recap_fps_avg', { fps: Number(fps.toFixed(1)) }) : '',
     kbps > 0 ? t('mission_control.recap_bitrate_avg', { mbps: (kbps / 1000).toFixed(1) }) : '',
-    lowered > 0 ? t('mission_control.recap_live_tuning_lowered', { count: lowered }) : '',
   ].filter(Boolean).join(' · ')
-  return { entry, detail }
+  // The optional explanation must not grow the strip during the brief recap. Keep it available
+  // on hover and to assistive technology while the visible sub line stays a compact summary.
+  const tuningDetail = lowered > 0 ? t('mission_control.recap_live_tuning_lowered', { count: lowered }) : ''
+  return { entry, detail, tuningDetail }
 }
 
 // The idle strip summarises readiness from the checks, clients, history, config and GPU reads the
@@ -216,12 +218,13 @@ export function idleSignalCells({
       : missingCell('paired', t('mission_control.signal_paired'), t('mission_control.not_read'), { attrs: attrs('paired') }),
   ]
   if (lastSession) {
-    // While a recap holds, the same cell says the stream ended, opens the full report and puts
+    // While a recap holds, the same cell says the stream ended, opens stream details and puts
     // the stream's averages where the client and date go. It adds no row; only that text changes.
     const recap = lastSession.recap
     cells.push(cell('last', t(recap ? 'mission_control.recap_label' : 'mission_control.signal_last_session'), lastSession.duration || MISSING, {
       word: true, grade: lastSession.grade || '', tone: lastSession.tone || '', sub: recap?.detail || lastSession.detail || '', attrs: attrs('last'),
-      ...(recap ? { recap: true, link: { to: RECAP_REPORT_ROUTE, label: t('mission_control.recap_link') } } : {}),
+      ...(recap ? { recap: true, title: recap.tuningDetail || '',
+        link: { to: RECAP_REPORT_ROUTE, label: t('mission_control.recap_link'), description: recap.tuningDetail || '' } } : {}),
     }))
   }
   cells.push(modeLabel
