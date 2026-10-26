@@ -1578,6 +1578,10 @@
     "sign_out_pending": "Signing out…",
     "sign_out_error": "Polaris could not end the session. Reload and try again."
   },
+  "browser_tab": {
+    "streaming": "Streaming",
+    "streaming_to": "Streaming to {device}"
+  },
   "command_palette": {
     "placeholder": "Type a command, route, or setting...",
     "empty": "No matching commands",
@@ -1596,7 +1600,9 @@
       "launch": "Launch",
       "restart": "Restart Polaris",
       "quit": "Quit Polaris",
-      "sign_out": "Sign out"
+      "sign_out": "Sign out",
+      "spaces_manage": "Create or manage Spaces",
+      "spaces_device_access": "Spaces device access"
     }
   },
   "quick_controls": {

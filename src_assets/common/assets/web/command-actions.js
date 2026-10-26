@@ -10,6 +10,13 @@ const SETTINGS_ACTIONS = [
   { id: 'network', group: 'Settings', icon: '🌐', labelKey: 'command_palette.actions.network', fallbackLabel: 'Network access', description: 'Review pairing access, trusted subnets, and exposure.', hint: 'Network', aliases: ['network', 'subnets', 'lan', 'pairing access'], to: '/config#trusted_subnets' },
 ]
 
+// Spaces owns availability, permissions, stream locks and confirmations (including
+// the exact name required for deletion). Open that flow rather than duplicating it.
+const SPACES_ACTIONS = [
+  { id: 'spaces-manage', group: 'Spaces', icon: '＋', labelKey: 'command_palette.actions.spaces_manage', fallbackLabel: 'Create or manage Spaces', description: 'Open Spaces to create, rename, archive, restore or remove a Space with its required checks.', hint: 'Spaces', aliases: ['create space', 'new space', 'rename space', 'archive space', 'restore space', 'delete space', 'remove space'], to: '/spaces' },
+  { id: 'spaces-device-access', group: 'Spaces', icon: '→', labelKey: 'command_palette.actions.spaces_device_access', fallbackLabel: 'Spaces device access', description: 'Open Spaces to choose which Spaces a paired device can open and its Default Space.', hint: 'Device Access', aliases: ['spaces device access', 'assign space', 'default space', 'space permissions'], to: '/spaces' },
+]
+
 function translate(t, key, fallback) {
   if (typeof t !== 'function') return fallback
   const translated = t(key)
@@ -43,8 +50,8 @@ function createNavigationActions(t, router) {
   }))
 }
 
-function createSettingsActions(t, router) {
-  return SETTINGS_ACTIONS.map((action) => ({
+function createRouteActions(actions, t, router) {
+  return actions.map((action) => ({
     id: action.id,
     group: action.group,
     icon: action.icon,
@@ -125,7 +132,8 @@ function createHostActions(t, fetchImpl, toast, signOutNavigate = defaultSignOut
 export function createCommandActions({ t, router, fetchImpl = fetch, toast = () => {}, signOutNavigate = defaultSignOutNavigate }) {
   return [
     ...createNavigationActions(t, router),
-    ...createSettingsActions(t, router),
+    ...createRouteActions(SETTINGS_ACTIONS, t, router),
+    ...createRouteActions(SPACES_ACTIONS, t, router),
     ...createHostActions(t, fetchImpl, toast, signOutNavigate),
   ]
 }
