@@ -401,10 +401,12 @@ namespace {
     // and loss that ends mid-probe.
     const auto base_fx = link("link-100000", 100000);
     for (const order_t &o : {order_t {"reports", false, 0}, order_t {"ping_10hz_p5", true, 5}}) {
-      const auto unpaused = run(base_fx, o);
+      // Original 51d32f3a first four unpaused step seconds above30, identical for both orders.
+      // Freeze the pause/recovery inputs across controller changes.
+      const std::vector<int> reference_steps {32, 35, 38, 41};
       std::vector<int> starts {20, 26, 27, 28, 29, 31, 45, 70, 101, 150, 233, 300};
       int added = 0;
-      for (int s : unpaused.step_seconds) {
+      for (int s : reference_steps) {
         if (s > 30 && added < 4) {
           starts.push_back(s);
           starts.push_back(s + 1);
@@ -453,7 +455,7 @@ namespace {
         runs.push_back(run(fx, o));
       }
       int used = 0;
-      for (int s : unpaused.step_seconds) {
+      for (int s : reference_steps) {
         if (s <= 30 || used >= 3) {
           continue;
         }
@@ -575,6 +577,11 @@ namespace {
 
 TEST(LiveTuningAcceptance, TheFrozenBenchPasses22CellsAndNamesTheFourThatNeedACongestionSignalWhileReportsStop) {
   const auto runs = all_runs();
+  std::string fixture_roster;
+  for (const auto &r : runs) {
+    fixture_roster += r.scenario + ";" + r.family + ";" + r.order + "\n";
+  }
+  RecordProperty("frozen_fixture_roster", fixture_roster);
   const std::set<std::string> shrunk_families {"F1-link-100000", "F2-link-50000", "F8-link-200000", "F3-link-100000-1in120"};
   std::size_t metric = 0;
   for (const auto &r : runs) {
