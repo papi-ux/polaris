@@ -1653,7 +1653,8 @@ textarea {
   @apply grid gap-2 sm:grid-cols-3 xl:grid-cols-1;
 }
 
-.operator-console .library-health-chip {
+.operator-console .library-health-chip,
+.operator-console .library-import-metric {
   @apply flex items-center justify-between rounded-lg border border-storm/15 bg-deep/35 px-3 py-2 text-xs text-storm;
 }
 
@@ -1679,10 +1680,6 @@ textarea {
 
 .operator-console .library-import-overview {
   @apply grid gap-2 sm:grid-cols-3;
-}
-
-.operator-console .library-import-metric {
-  @apply flex items-center justify-between rounded-lg border border-storm/15 bg-deep/35 px-3 py-2 text-xs text-storm;
 }
 
 .operator-console .library-import-metric strong {
