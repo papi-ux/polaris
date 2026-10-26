@@ -322,6 +322,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_mode_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_space_launch_mode_contract.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_bitrate_units.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_response_status.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_watch_mode.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_inventory_policy.cpp
