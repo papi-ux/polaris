@@ -253,7 +253,7 @@ describe('Mission Control stage helpers', () => {
       expect(recap.tuningDetail).toBe('mission_control.recap_live_tuning_lowered {"count":2}')
       const last = idleSignalCells({ lastSession: { duration: '1h 42m', recap }, t }).find(cell => cell.key === 'last')
       expect(last.sub).toBe(recap.detail)
-      expect(last.title).toBe(recap.tuningDetail)
+      expect(last.title).toBe(`${recap.detail} · ${recap.tuningDetail}`)
       expect(last.link.description).toBe(recap.tuningDetail)
       // A history served outside the stream, cut short or malformed vouches for nothing.
       for (const partial of [undefined, { ...history, available: false, reason: 'no_stream' }, { ...history, dropped: 3, truncated: true },

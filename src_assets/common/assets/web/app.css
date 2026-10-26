@@ -2694,6 +2694,16 @@ textarea {
     transition: background-color 600ms ease, box-shadow 600ms ease;
   }
 
+  /* Keep the short client/date and recap averages in the same two-line footprint. Full text
+     remains in the DOM for assistive technology and in the cell's hover description. */
+  .mc-signal[data-idle-signal='last'] .mc-signal-sub {
+    min-block-size: 2.8em;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+
   .mc-signal.is-recap {
     position: relative;
     background: color-mix(in srgb, var(--color-accent) 10%, transparent);

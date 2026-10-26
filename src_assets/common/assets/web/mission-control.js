@@ -223,7 +223,8 @@ export function idleSignalCells({
     const recap = lastSession.recap
     cells.push(cell('last', t(recap ? 'mission_control.recap_label' : 'mission_control.signal_last_session'), lastSession.duration || MISSING, {
       word: true, grade: lastSession.grade || '', tone: lastSession.tone || '', sub: recap?.detail || lastSession.detail || '', attrs: attrs('last'),
-      ...(recap ? { recap: true, title: recap.tuningDetail || '',
+      title: recap ? [recap.detail, recap.tuningDetail].filter(Boolean).join(' · ') : lastSession.detail || '',
+      ...(recap ? { recap: true,
         link: { to: RECAP_REPORT_ROUTE, label: t('mission_control.recap_link'), description: recap.tuningDetail || '' } } : {}),
     }))
   }
