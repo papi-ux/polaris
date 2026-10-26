@@ -13389,6 +13389,59 @@ TEST(StreamStatsLiveTuningHistory, SerializesTheSnapshotsOwnScopeWithHostClockAn
   EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("live_tuning_history"), history);
   const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
   EXPECT_EQ(doctor.at("advanced_evidence").at("live_tuning_history"), history);
+
+  for (const auto &entry : entries) EXPECT_FALSE(entry.contains("fec_transition"));
+  auto with_fec = stats;
+  auto publication = live_tuning_history_entry(13, "fec_published", true, 15000);
+  publication.fec_transition = adaptive_bitrate::fec_transition_t {
+    10, 10, 15, "lowering_rate", "fixed", 15, std::nullopt, 42
+  };
+  with_fec.live_tuning_history.entries.push_back(publication);
+  auto restoring = live_tuning_history_entry(14, "fec_target", true, 15000);
+  restoring.fec_transition = adaptive_bitrate::fec_transition_t {
+    10, 15, 10, "fixed", "raising_rate", std::nullopt, 10, std::nullopt
+  };
+  with_fec.live_tuning_history.entries.push_back(restoring);
+  auto confirmed = live_tuning_history_entry(15, "fec_restored", true, 16000);
+  confirmed.fec_transition = adaptive_bitrate::fec_transition_t {
+    10, 10, 10, "raising_rate", "fixed", 10, std::nullopt, std::nullopt
+  };
+  with_fec.live_tuning_history.entries.push_back(confirmed);
+  const auto fec_history = stream_stats::live_tuning_history_json(with_fec);
+  const auto &fec_entries = fec_history.at("entries");
+  ASSERT_EQ(fec_entries.size(), 6u);
+  const auto &raised = fec_entries[3].at("fec_transition");
+  EXPECT_EQ(raised.at("configured_percentage"), 10);
+  EXPECT_EQ(raised.at("percentage_before"), 10);
+  EXPECT_EQ(raised.at("percentage_after"), 15);
+  EXPECT_EQ(raised.at("phase_before"), "lowering_rate");
+  EXPECT_EQ(raised.at("phase_after"), "fixed");
+  EXPECT_EQ(raised.at("pending_percentage_before"), 15);
+  EXPECT_TRUE(raised.at("pending_percentage_after").is_null());
+  EXPECT_EQ(raised.at("from_frame_index"), 42);
+  const auto &lowered = fec_entries[4].at("fec_transition");
+  EXPECT_EQ(lowered.at("percentage_before"), 15);
+  EXPECT_EQ(lowered.at("percentage_after"), 10);
+  EXPECT_EQ(lowered.at("phase_after"), "raising_rate");
+  EXPECT_TRUE(lowered.at("pending_percentage_before").is_null());
+  EXPECT_EQ(lowered.at("pending_percentage_after"), 10);
+  EXPECT_FALSE(lowered.contains("from_frame_index"));
+  const auto &restored = fec_entries[5].at("fec_transition");
+  EXPECT_EQ(restored.at("percentage_before"), 10);
+  EXPECT_EQ(restored.at("percentage_after"), 10);
+  EXPECT_EQ(restored.at("phase_before"), "raising_rate");
+  EXPECT_EQ(restored.at("phase_after"), "fixed");
+  EXPECT_EQ(restored.at("pending_percentage_before"), 10);
+  EXPECT_TRUE(restored.at("pending_percentage_after").is_null());
+  EXPECT_FALSE(restored.contains("from_frame_index"));
+  EXPECT_EQ(nlohmann::json::parse(with_fec.to_json()).at("live_tuning_history"), fec_history);
+  EXPECT_EQ(stream_stats::build_doctor_json(with_fec, nlohmann::json::object())
+    .at("advanced_evidence").at("live_tuning_history"), fec_history);
+  with_fec.app_session_id = "another-private-owner";
+  EXPECT_TRUE(stream_stats::live_tuning_history_json(with_fec).at("entries").empty());
+  with_fec.app_session_id = stats.app_session_id;
+  with_fec.streaming = false;
+  EXPECT_TRUE(stream_stats::live_tuning_history_json(with_fec).at("entries").empty());
 }
 
 TEST(StreamStatsLiveTuningHistory, WithholdsAnotherOwnersHistoryForTheSameGeneration) {

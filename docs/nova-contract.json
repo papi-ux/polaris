@@ -16,6 +16,78 @@
   ],
   "version": 1,
   "objects": {
+    "live_tuning_history_entry": {
+      "$comment": [
+        "One entry of live_tuning_history, bounded to 64 entries with version 1. Diagnostic kind/cause are open strings, distinct from Live Tuning status states.",
+        "fec_transition is optional allocation/encoder evidence, not delivered parity or physical FEC benefit. No Nova production reader at exact 3f6b6908 consumes history."
+      ],
+      "fields": [
+        "applied_bitrate_kbps",
+        "applied_proof",
+        "applied_revision",
+        "callback",
+        "cause",
+        "ewma_packet_loss_percent",
+        "ewma_rtt_ms",
+        "fec_transition",
+        "feedback_initialized",
+        "host_elapsed_ms",
+        "input",
+        "kind",
+        "last_host_elapsed_ms",
+        "operator_revision",
+        "reason",
+        "repeat_count",
+        "requested_bitrate_kbps",
+        "sequence",
+        "state"
+      ],
+      "optional": [
+        "callback",
+        "fec_transition",
+        "last_host_elapsed_ms"
+      ],
+      "nullable": [
+        "applied_bitrate_kbps",
+        "input"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_stats.cpp",
+        "function": "live_tuning_history_entry_json",
+        "variable": "out",
+        "style": "subscript"
+      }
+    },
+    "live_tuning_fec_transition": {
+      "$comment": [
+        "Optional history-entry fec_transition. Integers describe nominal configured/published actuator allocation; phases are fixed, lowering_rate or raising_rate.",
+        "Pending percentages are integer or explicit null (no pending transaction). A positive from_frame_index is present only for actual published raises at their accepted next-frame boundary.",
+        "For example, restoring parity from 15 to 10 precedes the higher encoder ACK; restored confirmation from 10 to 10 has no new publication boundary. Absence means unavailable, never zero."
+      ],
+      "fields": [
+        "configured_percentage",
+        "from_frame_index",
+        "pending_percentage_after",
+        "pending_percentage_before",
+        "percentage_after",
+        "percentage_before",
+        "phase_after",
+        "phase_before"
+      ],
+      "optional": [
+        "from_frame_index"
+      ],
+      "nullable": [
+        "pending_percentage_before",
+        "pending_percentage_after"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_stats.cpp",
+        "function": "fec_transition_json",
+        "variable": "out",
+        "style": "subscript"
+      }
+    },
     "spaces_snapshot": {
       "$comment": [
         "GET /polaris/v1/spaces, and the body of POST /polaris/v1/spaces/select. What one",
@@ -168,7 +240,7 @@
       }
     },
     "space_launch_mode": {
-      "$comment": "The launch_mode of a Space game, fixed to gamescope_stream; a four-field subset of launch_mode read by the same modeJson reader.",
+      "$comment": "The launch_mode of a Space game, fixed to gamescope_stream; a four-field subset of launch_mode read by the same modeJson reader. Space entries deliberately omit follows_host_default, launch_as, launch_as_available and launch_as_unavailable_reason, and that shared reader defaults each one when absent: follows_host_default to true, launch_as to no app launch-as contract (it checks has() for all three launch_as fields first), launch_as_available to null and launch_as_unavailable_reason to an empty string. The cross-repo checker still lists those four reads as drift for this object, because it compares every field the shared reader names; that stays visible until known_drift or the checker records the absence.",
       "fields": [
         "allowed_modes",
         "mode_reason",
@@ -499,7 +571,7 @@
       }
     },
     "session_encoder": {
-      "$comment": "The `encoder` object of /polaris/v1/session/status.",
+      "$comment": "The `encoder` object of /polaris/v1/session/status. encode_time_ms is the host's measured encoder work time, declared here for that endpoint's diagnostics; no Nova reader has ever consumed it, so it is informational.",
       "fields": [
         "active_backend",
         "bitrate_kbps",
@@ -528,6 +600,7 @@
       "informational_ok": [
         "active_backend",
         "effective_backend",
+        "encode_time_ms",
         "fallback_allowed",
         "requested_backend",
         "session_override",

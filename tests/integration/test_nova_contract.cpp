@@ -249,6 +249,13 @@ namespace {
 
 TEST(NovaContractTests, EveryManifestObjectMatchesWhatPolarisActuallyServes) {
   const auto contract = manifest();
+  const auto &history_entry = contract.at("objects").at("live_tuning_history_entry");
+  const auto &transition = contract.at("objects").at("live_tuning_fec_transition");
+  EXPECT_EQ(history_entry.at("optional"), nlohmann::json::array({"callback", "fec_transition", "last_host_elapsed_ms"}));
+  EXPECT_EQ(transition.at("optional"), nlohmann::json::array({"from_frame_index"}));
+  EXPECT_EQ(transition.at("nullable"), nlohmann::json::array({"pending_percentage_before", "pending_percentage_after"}));
+  EXPECT_FALSE(history_entry.contains("nova_reader"));
+  EXPECT_FALSE(transition.contains("nova_reader"));
 
   for (const auto &[name, object] : contract["objects"].items()) {
     SCOPED_TRACE(name);

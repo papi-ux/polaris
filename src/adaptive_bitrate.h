@@ -37,12 +37,25 @@ namespace adaptive_bitrate {
   /// Live Tuning history keeps at most this many entries per stream scope.
   inline constexpr std::size_t HISTORY_CAPACITY = 64;
 
+  /** Nominal actuator allocation state around a real operation, not wire delivery or FEC benefit. */
+  struct fec_transition_t {
+    int configured_percentage = 0;
+    int percentage_before = 0;
+    int percentage_after = 0;
+    std::string phase_before;
+    std::string phase_after;
+    std::optional<int> pending_percentage_before;
+    std::optional<int> pending_percentage_after;
+    /// Present only for an actual raise publication at its accepted positive next-frame boundary.
+    std::optional<std::int64_t> from_frame_index;
+  };
+
   /**
    * One observed controller or encoder transition, recorded under the controller's own lock.
    *
    * Times are host steady-clock milliseconds since the history's scope began. They are never client,
    * media or wall-clock times, and no entry says which bitrate any client media interval was encoded
-   * at. kind is one of:
+   * at. kind is an open diagnostic string. Supported events include:
    * - decision: the requested target, controller state or reason changed;
    * - encoder_applied: the encoder backend reported it applied the exact current request;
    * - encoder_update_not_applied: the backend was asked to apply the exact current request and did not;
@@ -58,7 +71,13 @@ namespace adaptive_bitrate {
    * - encoder_initialized: a new encoder reported its initial rate;
    * - applied_unknown: live updates stopped or the controller reset, so no applied rate is proven;
    * - scope_started: this history began for its stream scope. It is a snapshot of the controller as the
-   *   scope found it; nothing recorded before the scope began is kept or attributed to it.
+   *   scope found it; nothing recorded before the scope began is kept or attributed to it;
+   * - fec_target, fec_published: an allocation request, or its actual frame-boundary publication;
+   * - fec_retired, fec_cancelled: an actual percentage retirement, or cancellation without one;
+   * - fec_restored: the encoder confirmed the higher rate after F0 was already published;
+   * - fec_refused, fec_deferred, fec_unavailable: existing transaction/evidence diagnostics.
+   * Typed fec_transition evidence, when present, distinguishes allocation changes from requests and
+   * confirmations. Absence means unavailable, never a configured or published percentage of zero.
    */
   struct history_entry_t {
     std::uint64_t sequence = 0;
@@ -88,6 +107,7 @@ namespace adaptive_bitrate {
     bool input_available = false;
     double input_packet_loss_percent = 0.0;
     double input_rtt_ms = 0.0;
+    std::optional<fec_transition_t> fec_transition;
   };
 
   /** A bounded, oldest-first copy of one stream scope's history. */

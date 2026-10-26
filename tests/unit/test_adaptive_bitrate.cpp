@@ -276,6 +276,31 @@ TEST(AdaptiveBitrateFecScope, ARealPolicyEpisodePublishesAfterAckAndRetiresBefor
   EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4933, publication_frame, 77), (std::pair {10, 15}));
   EXPECT_LT(actual_encoder, adaptive_bitrate::get_state().policy_target_bitrate_kbps);
   adaptive_bitrate::set_live_bitrate(budget.encoder_kbps);
+  const auto writer_history = adaptive_bitrate::get_state_with_history().history;
+  const auto retired = std::find_if(writer_history.entries.begin(), writer_history.entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_retired" && entry.cause == "explicit_live_bitrate";
+  });
+  ASSERT_NE(retired, writer_history.entries.end());
+  ASSERT_TRUE(retired->fec_transition);
+  const auto &retirement = *retired->fec_transition;
+  EXPECT_EQ(retirement.configured_percentage, 10);
+  EXPECT_EQ(retirement.percentage_before, 15);
+  EXPECT_EQ(retirement.percentage_after, 10);
+  EXPECT_EQ(retirement.phase_before, "fixed");
+  EXPECT_EQ(retirement.phase_after, "fixed");
+  EXPECT_FALSE(retirement.pending_percentage_before);
+  EXPECT_FALSE(retirement.pending_percentage_after);
+  EXPECT_FALSE(retirement.from_frame_index);
+  EXPECT_EQ(retired->requested_bitrate_kbps, actual_encoder);  // recorded before the writer's target change
+  EXPECT_TRUE(retired->applied_known);
+  EXPECT_EQ(retired->applied_bitrate_kbps, actual_encoder);
+  EXPECT_EQ(retired->repeat_count, 1u);
+  EXPECT_EQ(std::count_if(writer_history.entries.begin(), writer_history.entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_retired";
+  }), 1);
+  EXPECT_TRUE(std::none_of(writer_history.entries.begin(), writer_history.entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_restored";
+  }));
   // The higher target has not reached the emulated encoder yet: parity is
   // already back at F0 for both queued and future frames.
   EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4933, publication_frame - 1, 77), (std::pair {10, 10}));
@@ -285,6 +310,84 @@ TEST(AdaptiveBitrateFecScope, ARealPolicyEpisodePublishesAfterAckAndRetiresBefor
   EXPECT_FALSE(adaptive_bitrate::apply_live_bitrate_request(*last_request,
     [&] { stale_sdk_called = true; return true; }, nullptr, publication_frame + 1));
   EXPECT_FALSE(stale_sdk_called);
+  // Reuse this real public policy/ACK prefix, stopping before its trial's lower-rate ACK.
+  // The two continuations distinguish an explicit writer from an actual new loss-policy decision.
+  for (const bool automatic : {false, true}) {
+    SCOPED_TRACE(automatic ? "policy cancellation" : "explicit cancellation");
+    enable_controller(budget.encoder_kbps);
+    adaptive_bitrate::set_session_scope(4933, automatic ? "fec-policy-cancel" : "fec-explicit-cancel", true);
+    adaptive_bitrate::configure_fec_budget(4933, budget, true);
+    adaptive_bitrate::set_runtime_update_supported(true, {}, budget.encoder_kbps, true, 1);
+    actual_encoder = budget.encoder_kbps;
+    std::optional<adaptive_bitrate::live_bitrate_request_t> unacknowledged;
+    for (int i = 1; i <= 100 && !unacknowledged; ++i) {
+      adaptive_bitrate::note_fec_partial_deficit(4933, std::chrono::steady_clock::now() - 5s);
+      adaptive_bitrate::update_media_report(120, 8, 3.0);
+      const auto next = adaptive_bitrate::get_live_bitrate_request();
+      ASSERT_TRUE(next);
+      if (adaptive_bitrate::get_state().fec_phase == "lowering_rate") {
+        unacknowledged = next;
+        break;
+      }
+      if (next->target_bitrate_kbps != actual_encoder) {
+        ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*next,
+          [] { return true; }, nullptr, 500 + i));
+        actual_encoder = next->target_bitrate_kbps;
+      } else {
+        adaptive_bitrate::acknowledge_live_bitrate_applied(next->revision, actual_encoder, 500 + i);
+      }
+    }
+    ASSERT_TRUE(unacknowledged);
+    const auto pending = adaptive_bitrate::get_state_with_history();
+    ASSERT_EQ(pending.fec_phase, "lowering_rate");
+    ASSERT_EQ(pending.current_fec_percentage, 10);
+    ASSERT_LT(unacknowledged->target_bitrate_kbps, pending.applied_bitrate_kbps);
+    const auto trial = std::find_if(pending.history.entries.begin(), pending.history.entries.end(), [](const auto &entry) {
+      return entry.kind == "fec_target" && entry.cause == "parity_trial";
+    });
+    ASSERT_NE(trial, pending.history.entries.end());
+    ASSERT_TRUE(trial->fec_transition);
+    ASSERT_EQ(trial->fec_transition->percentage_after, 10);
+    ASSERT_EQ(trial->fec_transition->phase_after, "lowering_rate");
+    ASSERT_EQ(trial->fec_transition->pending_percentage_after, 15);
+    ASSERT_FALSE(trial->fec_transition->from_frame_index);
+    ASSERT_TRUE(std::none_of(pending.history.entries.begin(), pending.history.entries.end(), [](const auto &entry) {
+      return entry.kind == "fec_published";
+    }));
+    if (automatic) {
+      // Fixed heavy reports start a real loss descent; no writer or lower-rate ACK substitutes for it.
+      for (int report = 0; report < 32 && adaptive_bitrate::get_state().fec_phase == "lowering_rate"; ++report) {
+        adaptive_bitrate::update_media_report(120, 120, 3.0);
+      }
+    } else {
+      adaptive_bitrate::set_live_bitrate(budget.encoder_kbps);
+    }
+    const auto cancelled = adaptive_bitrate::get_state_with_history();
+    EXPECT_EQ(cancelled.fec_phase, "fixed");
+    EXPECT_EQ(cancelled.current_fec_percentage, 10);
+    const auto event = std::find_if(cancelled.history.entries.begin(), cancelled.history.entries.end(), [&](const auto &entry) {
+      return entry.kind == "fec_cancelled" && entry.cause ==
+        (automatic ? "policy_target_changed" : "explicit_live_bitrate");
+    });
+    ASSERT_NE(event, cancelled.history.entries.end());
+    ASSERT_TRUE(event->fec_transition);
+    EXPECT_EQ(event->fec_transition->configured_percentage, 10);
+    EXPECT_EQ(event->fec_transition->percentage_before, 10);
+    EXPECT_EQ(event->fec_transition->percentage_after, 10);
+    EXPECT_EQ(event->fec_transition->phase_before, "lowering_rate");
+    EXPECT_EQ(event->fec_transition->phase_after, "fixed");
+    EXPECT_EQ(event->fec_transition->pending_percentage_before, 15);
+    EXPECT_FALSE(event->fec_transition->pending_percentage_after);
+    EXPECT_FALSE(event->fec_transition->from_frame_index);
+    EXPECT_GT(event->sequence, trial->sequence);
+    EXPECT_EQ(event->repeat_count, 1u);
+    EXPECT_EQ(std::count_if(cancelled.history.entries.begin(), cancelled.history.entries.end(), [](const auto &entry) {
+      return entry.kind == "fec_cancelled";
+    }), 1);
+    EXPECT_TRUE(std::none_of(cancelled.history.entries.begin(), cancelled.history.entries.end(), [](const auto &entry) {
+      return entry.kind == "fec_published" || entry.kind == "fec_retired" || entry.kind == "fec_restored";
+    }));
+  }
   adaptive_bitrate::reset();
   adaptive_bitrate::set_session_scope(0, {}, false);
 }
@@ -316,6 +419,23 @@ TEST(AdaptiveBitrateFecScope, AnUnhelpedTrialRestoresConfiguredParityBeforeItsHi
   }
   ASSERT_GT(publication_frame, 0);  // cannot pass unless the full controller raise actually happened
   ASSERT_EQ(adaptive_bitrate::frame_fec_allocation(4934, publication_frame, 77), (std::pair {10, 15}));
+  const auto published_history = adaptive_bitrate::get_state_with_history().history;
+  const auto published = std::find_if(published_history.entries.begin(), published_history.entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_published";
+  });
+  ASSERT_NE(published, published_history.entries.end());
+  ASSERT_TRUE(published->fec_transition);
+  EXPECT_EQ(published->fec_transition->configured_percentage, 10);
+  EXPECT_EQ(published->fec_transition->percentage_before, 10);
+  EXPECT_EQ(published->fec_transition->percentage_after, 15);
+  EXPECT_EQ(published->fec_transition->phase_before, "lowering_rate");
+  EXPECT_EQ(published->fec_transition->phase_after, "fixed");
+  EXPECT_EQ(published->fec_transition->pending_percentage_before, 15);
+  EXPECT_FALSE(published->fec_transition->pending_percentage_after);
+  EXPECT_EQ(published->fec_transition->from_frame_index, publication_frame);
+  EXPECT_EQ(published->callback_bitrate_kbps, actual_encoder);
+  EXPECT_EQ(published->callback_revision, published->applied_revision);
+  EXPECT_GT(published->callback_revision, 0u);
   const int trial_encoder = actual_encoder;
   ASSERT_EQ(adaptive_bitrate::get_state().policy_target_bitrate_kbps, budget.encoder_kbps);
   ASSERT_LT(trial_encoder, budget.encoder_kbps);
@@ -343,6 +463,20 @@ TEST(AdaptiveBitrateFecScope, AnUnhelpedTrialRestoresConfiguredParityBeforeItsHi
     adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, trial_encoder, last_frame);
   }
   ASSERT_TRUE(restore);  // the policy itself asked for the configured parity; no writer retired it
+  ASSERT_TRUE(restore->fec_transition);
+  EXPECT_EQ(restore->fec_transition->configured_percentage, 10);
+  EXPECT_EQ(restore->fec_transition->percentage_before, 15);
+  EXPECT_EQ(restore->fec_transition->percentage_after, 10);
+  EXPECT_EQ(restore->fec_transition->phase_before, "fixed");
+  EXPECT_EQ(restore->fec_transition->phase_after, "raising_rate");
+  EXPECT_FALSE(restore->fec_transition->pending_percentage_before);
+  EXPECT_EQ(restore->fec_transition->pending_percentage_after, 10);
+  EXPECT_FALSE(restore->fec_transition->from_frame_index);
+  EXPECT_GT(restore->sequence, published->sequence);
+  const auto before_restore_ack = adaptive_bitrate::get_state_with_history().history;
+  EXPECT_TRUE(std::none_of(before_restore_ack.entries.begin(), before_restore_ack.entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_restored";
+  }));
   EXPECT_EQ(restore->requested_bitrate_kbps, budget.encoder_kbps);
   EXPECT_TRUE(restore->applied_known);
   EXPECT_EQ(restore->applied_bitrate_kbps, trial_encoder);  // the higher rate is only requested
@@ -374,6 +508,35 @@ TEST(AdaptiveBitrateFecScope, AnUnhelpedTrialRestoresConfiguredParityBeforeItsHi
   EXPECT_EQ(ack->callback_bitrate_kbps, budget.encoder_kbps);
   EXPECT_EQ(ack->applied_bitrate_kbps, budget.encoder_kbps);
   EXPECT_EQ(ack->applied_revision, request->revision);
+  const auto restored = std::find_if(entries.begin(), entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_restored";
+  });
+  ASSERT_NE(restored, entries.end());
+  ASSERT_TRUE(restored->fec_transition);
+  EXPECT_EQ(restored->cause, "configured_parity_encoder_confirmed");
+  EXPECT_EQ(restored->fec_transition->configured_percentage, 10);
+  EXPECT_EQ(restored->fec_transition->percentage_before, 10);
+  EXPECT_EQ(restored->fec_transition->percentage_after, 10);
+  EXPECT_EQ(restored->fec_transition->phase_before, "raising_rate");
+  EXPECT_EQ(restored->fec_transition->phase_after, "fixed");
+  EXPECT_EQ(restored->fec_transition->pending_percentage_before, 10);
+  EXPECT_FALSE(restored->fec_transition->pending_percentage_after);
+  EXPECT_FALSE(restored->fec_transition->from_frame_index);
+  EXPECT_EQ(restored->callback_bitrate_kbps, budget.encoder_kbps);
+  EXPECT_EQ(restored->callback_revision, request->revision);
+  EXPECT_EQ(restored->applied_revision, request->revision);
+  EXPECT_GT(restored->sequence, ack->sequence);
+  EXPECT_GT(restored->sequence, restore->sequence);
+  EXPECT_EQ(std::count_if(entries.begin(), entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_restored";
+  }), 1);
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    if (entries[i].fec_transition) EXPECT_EQ(entries[i].repeat_count, 1u);
+    if (i) EXPECT_GT(entries[i].sequence, entries[i - 1].sequence);
+  }
+  EXPECT_TRUE(std::none_of(entries.begin(), entries.end(), [&](const auto &entry) {
+    return entry.kind == "fec_retired" && entry.sequence > published->sequence;
+  }));
   EXPECT_TRUE(std::none_of(entries.begin(), entries.end(), [](const auto &entry) {
     return entry.kind == "fec_refused";
   }));
@@ -381,6 +544,12 @@ TEST(AdaptiveBitrateFecScope, AnUnhelpedTrialRestoresConfiguredParityBeforeItsHi
   EXPECT_EQ(state.fec_phase, "fixed");
   EXPECT_EQ(state.applied_bitrate_kbps, budget.encoder_kbps);
   EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4934, ack_frame, 77), (std::pair {10, 10}));
+  adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, budget.encoder_kbps, ack_frame + 1);
+  const auto repeated_ack = adaptive_bitrate::get_state_with_history().history;
+  EXPECT_EQ(repeated_ack.entries.size(), entries.size());
+  EXPECT_EQ(std::count_if(repeated_ack.entries.begin(), repeated_ack.entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_restored";
+  }), 1);
   adaptive_bitrate::reset();
   adaptive_bitrate::set_session_scope(0, {}, false);
 }
@@ -1635,6 +1804,7 @@ TEST(AdaptiveBitrateHistory, RepeatedUnchangedPollsFoldInsteadOfFillingTheHistor
   const auto &last = after.entries.back();
   EXPECT_EQ(last.kind, "revision_reaffirmed");
   EXPECT_EQ(last.repeat_count, 500u);
+  EXPECT_FALSE(last.fec_transition);  // ordinary repeated observations retain their existing folding
   EXPECT_GE(last.last_host_elapsed_ms, last.host_elapsed_ms);
   EXPECT_TRUE(last.input_available);
   EXPECT_EQ(last.input_rtt_ms, 8.0);

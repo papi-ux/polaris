@@ -5300,6 +5300,52 @@ namespace stream_stats {
     return verdict.rtt_elevated ? "elevated" : "clean";
   }
 
+  static nlohmann::json fec_transition_json(const adaptive_bitrate::fec_transition_t &transition) {
+    auto out = nlohmann::json::object();
+    out["configured_percentage"] = transition.configured_percentage;
+    out["percentage_before"] = transition.percentage_before;
+    out["percentage_after"] = transition.percentage_after;
+    out["phase_before"] = transition.phase_before;
+    out["phase_after"] = transition.phase_after;
+    out["pending_percentage_before"] = transition.pending_percentage_before ?
+      nlohmann::json(*transition.pending_percentage_before) : nlohmann::json(nullptr);
+    out["pending_percentage_after"] = transition.pending_percentage_after ?
+      nlohmann::json(*transition.pending_percentage_after) : nlohmann::json(nullptr);
+    if (transition.from_frame_index && *transition.from_frame_index > 0) {
+      out["from_frame_index"] = *transition.from_frame_index;
+    }
+    return out;
+  }
+
+  static nlohmann::json live_tuning_history_entry_json(const adaptive_bitrate::history_entry_t &entry) {
+    auto out = nlohmann::json::object();
+    out["sequence"] = entry.sequence;
+    out["host_elapsed_ms"] = entry.host_elapsed_ms;
+    out["kind"] = entry.kind;
+    out["cause"] = entry.cause;
+    out["state"] = entry.state;
+    out["reason"] = entry.reason;
+    out["requested_bitrate_kbps"] = entry.requested_bitrate_kbps;
+    out["applied_proof"] = entry.applied_known ? "encoder_confirmed" : "unknown";
+    out["applied_bitrate_kbps"] = entry.applied_known ? nlohmann::json(entry.applied_bitrate_kbps) : nlohmann::json(nullptr);
+    out["operator_revision"] = entry.operator_revision;
+    out["applied_revision"] = entry.applied_revision;
+    out["repeat_count"] = entry.repeat_count;
+    out["feedback_initialized"] = entry.feedback_initialized;
+    out["ewma_packet_loss_percent"] = entry.ewma_packet_loss;
+    out["ewma_rtt_ms"] = entry.ewma_rtt_ms;
+    if (entry.repeat_count > 1) out["last_host_elapsed_ms"] = entry.last_host_elapsed_ms;
+    if (entry.callback_revision != 0 || entry.callback_bitrate_kbps != 0) {
+      out["callback"] = {{"bitrate_kbps", entry.callback_bitrate_kbps}, {"revision", entry.callback_revision}};
+    }
+    out["input"] = entry.input_available ? nlohmann::json {
+      {"packet_loss_percent", entry.input_packet_loss_percent},
+      {"rtt_ms", entry.input_rtt_ms},
+    } : nlohmann::json(nullptr);
+    if (entry.fec_transition) out["fec_transition"] = fec_transition_json(*entry.fec_transition);
+    return out;
+  }
+
   nlohmann::json live_tuning_history_json(const stats_t &stats) {
     const auto &history = stats.live_tuning_history;
     const bool same_scope = history.scoped && history.session_generation != 0 &&
@@ -5329,32 +5375,7 @@ namespace stream_stats {
         {"first_sequence", proof.first_sequence ? nlohmann::json(*proof.first_sequence) : nlohmann::json(nullptr)}};
     }
     for (const auto &entry : history.entries) {
-      nlohmann::json e = {
-        {"sequence", entry.sequence},
-        {"host_elapsed_ms", entry.host_elapsed_ms},
-        {"kind", entry.kind},
-        {"cause", entry.cause},
-        {"state", entry.state},
-        {"reason", entry.reason},
-        {"requested_bitrate_kbps", entry.requested_bitrate_kbps},
-        {"applied_proof", entry.applied_known ? "encoder_confirmed" : "unknown"},
-        {"applied_bitrate_kbps", entry.applied_known ? nlohmann::json(entry.applied_bitrate_kbps) : nlohmann::json(nullptr)},
-        {"operator_revision", entry.operator_revision},
-        {"applied_revision", entry.applied_revision},
-        {"repeat_count", entry.repeat_count},
-        {"feedback_initialized", entry.feedback_initialized},
-        {"ewma_packet_loss_percent", entry.ewma_packet_loss},
-        {"ewma_rtt_ms", entry.ewma_rtt_ms},
-      };
-      if (entry.repeat_count > 1) e["last_host_elapsed_ms"] = entry.last_host_elapsed_ms;
-      if (entry.callback_revision != 0 || entry.callback_bitrate_kbps != 0) {
-        e["callback"] = {{"bitrate_kbps", entry.callback_bitrate_kbps}, {"revision", entry.callback_revision}};
-      }
-      e["input"] = entry.input_available ? nlohmann::json {
-        {"packet_loss_percent", entry.input_packet_loss_percent},
-        {"rtt_ms", entry.input_rtt_ms},
-      } : nlohmann::json(nullptr);
-      out["entries"].push_back(std::move(e));
+      out["entries"].push_back(live_tuning_history_entry_json(entry));
     }
     return out;
   }
