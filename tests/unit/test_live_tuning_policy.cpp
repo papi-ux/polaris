@@ -737,3 +737,293 @@ TEST(LiveTuningPolicy, ANewRequestClampsTheTargetAndIsClimbedTo) {
   }
   EXPECT_EQ(policy.target_kbps(), 80000);
 }
+
+namespace {
+
+  // 8 of 120 frames lost at every rate: loss that does not depend on the rate.
+  constexpr double RATE_INDEPENDENT_LOST = 8.0;
+
+  /// A report a second, from at_ms, until the policy learns rate-independent background loss. Nothing may ask
+  /// for parity before that result. Returns the time of the next report.
+  std::int64_t until_rate_independent(live_tuning_policy::policy_t &policy, std::int64_t at_ms = 1000) {
+    for (int i = 0; i < 60 && policy.background_loss() == 0.0; ++i, at_ms += 1000) {
+      EXPECT_FALSE(policy.fec_request()) << "parity asked for before a rate-independent result, report " << i;
+      policy.report(at_ms, 120, RATE_INDEPENDENT_LOST);
+    }
+    EXPECT_GT(policy.background_loss(), 0.0);
+    return at_ms;
+  }
+
+  /// A policy at 10% FEC whose actuator has just published the raise to 15%. Returns the time of the next report.
+  std::int64_t raised(live_tuning_policy::policy_t &policy) {
+    policy.configure_fec(10);
+    auto at = until_rate_independent(policy);
+    EXPECT_EQ(policy.fec_request(), 15);
+    // The actuator takes two reports to act; the first still covers the rate before the result.
+    for (int i = 0; i < 2; ++i, at += 1000) {
+      policy.report(at, 120, RATE_INDEPENDENT_LOST);
+    }
+    policy.fec_applied(at, 15);
+    EXPECT_EQ(policy.fec_percentage(), 15);
+    EXPECT_FALSE(policy.fec_request());
+    return at;
+  }
+
+}  // namespace
+
+TEST(LiveTuningPolicyFec, OnlyARateIndependentResultAsksForParity) {
+  live_tuning_policy::policy_t steady {BASE, FLOOR};
+  steady.configure_fec(10);
+  // Clean reports, RTT readings, a 30 s report pause and loss that depends on the rate ask for nothing.
+  const auto limited = link(100000, {120, 6}, {120, 0}, 120);
+  for (int i = 0; i < 300; ++i) {
+    const std::int64_t t0 = std::int64_t {i} * 1000;
+    const auto [expected, lost] = limited(i, steady.target_kbps());
+    if (i < 60 || i >= 90) {
+      steady.report(t0 + 500, expected, lost);
+    }
+    for (int k = 0; k < 10; ++k) {
+      steady.rtt(t0 + 100 * k + 50, 3.0);
+    }
+    ASSERT_FALSE(steady.fec_request()) << "second " << i;
+  }
+  EXPECT_GT(steady.changes(), 0u);  // it did search for the link
+  EXPECT_EQ(steady.background_loss(), 0.0);
+  EXPECT_EQ(steady.fec_percentage(), 10);
+
+  live_tuning_policy::policy_t independent {BASE, FLOOR};
+  independent.configure_fec(10);
+  until_rate_independent(independent);
+  EXPECT_EQ(independent.fec_request(), 15);  // 10 + max(5, 10 / 2)
+  EXPECT_EQ(independent.fec_percentage(), 10);
+}
+
+TEST(LiveTuningPolicyFec, ARequestIsNotAConfirmationAndUnaskedPercentagesAreIgnored) {
+  live_tuning_policy::policy_t policy {BASE, FLOOR};
+  policy.configure_fec(10);
+  policy.fec_applied(0, 15);  // not asked for yet
+  EXPECT_EQ(policy.fec_percentage(), 10);
+  const auto at = until_rate_independent(policy);
+  ASSERT_EQ(policy.fec_request(), 15);
+  EXPECT_EQ(policy.fec_percentage(), 10);
+  for (const int unasked : {-1, 9, 14, 16, 22, 51, 300}) {
+    policy.fec_applied(at, unasked);
+    EXPECT_EQ(policy.fec_percentage(), 10) << unasked;
+    EXPECT_EQ(policy.fec_request(), 15) << unasked;
+  }
+  policy.fec_applied(at, 15);
+  EXPECT_EQ(policy.fec_percentage(), 15);
+  EXPECT_FALSE(policy.fec_request());
+  // The configured percentage is always taken back, asked for or not.
+  policy.fec_applied(at, 10);
+  EXPECT_EQ(policy.fec_percentage(), 10);
+  EXPECT_FALSE(policy.fec_request());
+}
+
+TEST(LiveTuningPolicyFec, ARefusalHoldsThePercentageAndSuppressesTheNextEpisode) {
+  for (const bool refuse : {true, false}) {
+    SCOPED_TRACE(refuse);
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    policy.configure_fec(10);
+    auto at = until_rate_independent(policy);
+    ASSERT_EQ(policy.fec_request(), 15);
+    if (refuse) {
+      policy.fec_refused(at);
+      EXPECT_FALSE(policy.fec_request());
+      EXPECT_EQ(policy.fec_percentage(), 10);
+    }
+    // Heavier loss at every rate: a new probe, then a second rate-independent result.
+    const double first = policy.background_loss();
+    for (int i = 0; i < 60 && policy.background_loss() == first; ++i, at += 1000) {
+      policy.report(at, 120, 18);
+    }
+    ASSERT_GT(policy.background_loss(), first);
+    if (refuse) {
+      EXPECT_FALSE(policy.fec_request());  // still inside the back-off the refusal started
+    } else {
+      EXPECT_EQ(policy.fec_request(), 15);  // the probe dropped the unpublished raise; the new result asks again
+    }
+    EXPECT_EQ(policy.fec_percentage(), 10);
+  }
+}
+
+TEST(LiveTuningPolicyFec, HelpedParityHoldsAndUnhelpedParityReverts) {
+  {
+    SCOPED_TRACE("helped");
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    auto at = raised(policy);
+    policy.report(at, 120, 0);  // still covers 10%: not judged
+    policy.report(at += 1000, 120, 0);
+    policy.report(at += 1000, 120, 0);
+    for (int i = 0; i < 30; ++i) {
+      policy.report(at += 1000, 120, 0);
+      ASSERT_FALSE(policy.fec_request()) << i;
+    }
+    EXPECT_EQ(policy.fec_percentage(), 15);
+  }
+  {
+    SCOPED_TRACE("not helped");
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    auto at = raised(policy);
+    policy.report(at, 120, RATE_INDEPENDENT_LOST);  // still covers 10%: not judged
+    policy.report(at += 1000, 120, RATE_INDEPENDENT_LOST);  // one judged report cannot decide
+    EXPECT_FALSE(policy.fec_request());
+    policy.report(at += 1000, 120, RATE_INDEPENDENT_LOST);  // no help
+    EXPECT_EQ(policy.fec_request(), 10);
+    EXPECT_EQ(policy.fec_percentage(), 15);  // asked for, not yet published
+    policy.fec_applied(at, 10);
+    EXPECT_EQ(policy.fec_percentage(), 10);
+    EXPECT_FALSE(policy.fec_request());
+  }
+}
+
+TEST(LiveTuningPolicyFec, MissingReportsAndRttHoldTheTrial) {
+  live_tuning_policy::policy_t policy {BASE, FLOOR};
+  auto at = raised(policy);
+  // Thirty seconds of RTT readings and no media report: nothing is judged and parity does not grow.
+  for (std::int64_t t = at; t < at + 30000; t += 100) {
+    policy.rtt(t, 3.0);
+    ASSERT_FALSE(policy.fec_request()) << t;
+  }
+  EXPECT_EQ(policy.fec_percentage(), 15);
+  at += 30000;
+  policy.report(at, 120, RATE_INDEPENDENT_LOST);  // after a gap: not judged
+  policy.report(at += 1000, 120, RATE_INDEPENDENT_LOST);
+  EXPECT_FALSE(policy.fec_request());
+  policy.report(at += 1000, 120, RATE_INDEPENDENT_LOST);
+  EXPECT_EQ(policy.fec_request(), 10);
+}
+
+TEST(LiveTuningPolicyFec, OutsideWritersAndRateDependentLossAskForTheConfiguredPercentage) {
+  {
+    SCOPED_TRACE("unpublished raise");
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    policy.configure_fec(10);
+    const auto at = until_rate_independent(policy);
+    ASSERT_EQ(policy.fec_request(), 15);
+    policy.adopt(at, 100000);
+    EXPECT_FALSE(policy.fec_request());
+    EXPECT_EQ(policy.fec_percentage(), 10);
+  }
+  for (const bool writer : {true, false}) {
+    SCOPED_TRACE(writer ? "outside writer" : "new request");
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    const auto at = raised(policy);
+    if (writer) {
+      policy.adopt(at, 100000);
+    } else {
+      policy.rebase(BASE / 2, FLOOR);
+    }
+    EXPECT_EQ(policy.fec_request(), 10);
+    EXPECT_EQ(policy.fec_percentage(), 15);  // only the actuator moves it
+    policy.fec_applied(at, 10);
+    EXPECT_EQ(policy.fec_percentage(), 10);
+    EXPECT_FALSE(policy.fec_request());
+  }
+  {
+    SCOPED_TRACE("rate-dependent loss after parity helped");
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    auto at = raised(policy);
+    for (int i = 0; i < 3; ++i, at += 1000) {
+      policy.report(at, 120, 0);
+    }
+    ASSERT_FALSE(policy.fec_request());
+    for (int i = 0; i < 6 && !policy.fec_request(); ++i, at += 1000) {
+      policy.report(at, 120, 60);
+    }
+    EXPECT_NE(policy.state(), live_tuning_policy::state_e::normal);
+    EXPECT_EQ(policy.fec_request(), 10);
+    EXPECT_EQ(policy.fec_percentage(), 15);
+  }
+}
+
+TEST(LiveTuningPolicyFec, HighInvalidAndNewScopeConfigurationsStayFixed) {
+  for (const int configured : {50, 255}) {
+    SCOPED_TRACE(configured);
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    policy.configure_fec(configured);
+    const auto at = until_rate_independent(policy);
+    EXPECT_FALSE(policy.fec_request());
+    for (const int other : {10, 49, 51, 60}) {
+      policy.fec_applied(at, other);
+    }
+    EXPECT_EQ(policy.fec_percentage(), configured);
+  }
+  for (const int invalid : {-1, 256}) {
+    SCOPED_TRACE(invalid);
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    policy.configure_fec(invalid);
+    const auto at = until_rate_independent(policy);
+    EXPECT_FALSE(policy.fec_request());
+    policy.fec_applied(at, 15);
+    policy.fec_refused(at);
+    EXPECT_EQ(policy.fec_percentage(), 0);
+  }
+  {
+    SCOPED_TRACE("configured zero");
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    policy.configure_fec(0);
+    until_rate_independent(policy);
+    EXPECT_EQ(policy.fec_request(), 5);
+  }
+  {
+    SCOPED_TRACE("new scope");
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    auto at = raised(policy);
+    policy.configure_fec(20);
+    EXPECT_EQ(policy.fec_percentage(), 20);
+    for (int i = 0; i < 4; ++i, at += 1000) {
+      policy.report(at, 120, RATE_INDEPENDENT_LOST);
+      EXPECT_FALSE(policy.fec_request()) << i;  // the old trial is gone with its scope
+    }
+  }
+}
+
+TEST(LiveTuningPolicyFec, ParityStateNeverChangesTheRateDecisions) {
+  struct trace_t {
+    std::vector<int> targets;
+    std::uint64_t changes;
+    live_tuning_policy::state_e state;
+    double background;
+    int highest_fec;
+  };
+  // 0: unconfigured. 1: configured, no actuator. 2: configured, the actuator publishes every request.
+  const auto replay = [](int mode) {
+    live_tuning_policy::policy_t policy {BASE, FLOOR};
+    if (mode > 0) {
+      policy.configure_fec(10);
+    }
+    trace_t trace {{}, 0, live_tuning_policy::state_e::normal, 0.0, policy.fec_percentage()};
+    for (int i = 0; i < 240; ++i) {
+      const std::int64_t t0 = std::int64_t {i} * 1000;
+      const double lost = i < 20 ? 0.0 : i < 80 ? RATE_INDEPENDENT_LOST : i < 120 ? 0.0 : i < 135 ? 60.0 : 0.0;
+      policy.report(t0 + 500, 120, lost);
+      for (int k = 0; k < 10; ++k) {
+        policy.rtt(t0 + 100 * k + 50, 3.0);
+      }
+      if (mode == 0) {
+        EXPECT_FALSE(policy.fec_request());
+      }
+      if (const auto wanted = policy.fec_request(); mode == 2 && wanted) {
+        policy.fec_applied(t0 + 999, *wanted);
+      }
+      trace.highest_fec = std::max(trace.highest_fec, policy.fec_percentage());
+      trace.targets.push_back(policy.target_kbps());
+    }
+    trace.changes = policy.changes();
+    trace.state = policy.state();
+    trace.background = policy.background_loss();
+    return trace;
+  };
+  const auto plain = replay(0);
+  EXPECT_EQ(plain.highest_fec, 0);
+  for (const int mode : {1, 2}) {
+    SCOPED_TRACE(mode);
+    const auto fec = replay(mode);
+    EXPECT_EQ(fec.targets, plain.targets);
+    EXPECT_EQ(fec.changes, plain.changes);
+    EXPECT_EQ(fec.state, plain.state);
+    EXPECT_EQ(fec.background, plain.background);
+    EXPECT_EQ(fec.highest_fec, mode == 2 ? 15 : 10);
+  }
+}

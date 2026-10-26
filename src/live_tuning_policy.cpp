@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <utility>
 
 namespace live_tuning_policy {
 
@@ -50,6 +51,8 @@ namespace live_tuning_policy {
     constexpr int RTT_MAX_CUTS = 3;
     constexpr int RTT_SUPPRESS_S = 300;
     constexpr std::size_t SEC_MEDS = 4;
+    constexpr int FEC_MAX = 50;  // the most parity the policy asks for
+    constexpr int FEC_MIN_STEP = 5;  // a raise is max(5, F/2)
 
     double llr(double expected, double lost, double p0, double p1, double dispersion) {
       return (lost * std::log(p1 / p0) - expected * (p1 - p0)) / dispersion;
@@ -235,6 +238,7 @@ namespace live_tuning_policy {
     reset_baseline(background_);
     backoff_ = BACKOFF_REPORTS;
     to_normal(now_ms, std::max(r0_, episode_start_), why);
+    fec_open_episode();
   }
 
   double policy_t::probe_rate() const {
@@ -242,6 +246,8 @@ namespace live_tuning_policy {
   }
 
   void policy_t::begin_descent(std::int64_t now_ms, std::string_view why, double l0) {
+    // Loss that depends on the rate: parity would only add load.
+    fec_revert();
     if (state_ == state_e::normal) {
       episode_start_ = target_;
     }
@@ -442,6 +448,8 @@ namespace live_tuning_policy {
     }
     const auto first = after_change_;
     after_change_ = after_change_e::none;
+    // Likewise the first report after a published FEC raise still covers the old percentage.
+    const bool fec_first = std::exchange(fec_skip_, false);
     if (gap || first != after_change_e::none) {
       // The first report after either direction still covers the previous rate. Even half of a
       // clean report can approve a retry against severe prior loss before its queue builds.
@@ -451,6 +459,7 @@ namespace live_tuning_policy {
     if (backoff_ > 0) {
       --backoff_;
     }
+    fec_report(expected, lost, fec_first);
     const auto st = state_;
     if (st == state_e::descend) {
       probe_stats_.first += expected;
@@ -744,6 +753,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
+    fec_revert();
     hold_failed_kbps_.reset();
     const int previous = target_;
     const int next = std::clamp(kbps, std::min(floor_, base_), base_);
@@ -782,6 +792,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::rebase(int base_kbps, int floor_kbps) {
+    fec_revert();
     base_ = std::max(1, base_kbps);
     floor_ = std::min(floor_kbps, base_);
     const int next = std::clamp(target_, floor_, base_);
@@ -803,6 +814,113 @@ namespace live_tuning_policy {
     }
     if (state_ == state_e::hold && hi_ && *hi_ <= target_) {
       hi_.reset();
+    }
+  }
+
+  void policy_t::configure_fec(int configured_percentage) {
+    fec_wanted_.reset();
+    fec_test_.reset();
+    fec_backoff_ = 0;
+    fec_skip_ = false;
+    if (configured_percentage < 0 || configured_percentage > 255) {
+      fec_configured_.reset();
+      fec_pct_ = 0;
+      return;
+    }
+    fec_configured_ = configured_percentage;
+    fec_pct_ = configured_percentage;
+  }
+
+  std::optional<int> policy_t::fec_request() const {
+    if (fec_wanted_ && *fec_wanted_ != fec_pct_) {
+      return fec_wanted_;
+    }
+    return std::nullopt;
+  }
+
+  void policy_t::fec_applied(std::int64_t now_ms, int percentage) {
+    (void) now_ms;
+    if (!fec_configured_) {
+      return;
+    }
+    const int configured = *fec_configured_;
+    if (percentage == configured) {
+      // Back at the configured percentage, asked for or not: whatever was on trial or held is over.
+      fec_pct_ = configured;
+      fec_wanted_.reset();
+      fec_test_.reset();
+      fec_skip_ = false;
+      return;
+    }
+    if (!fec_wanted_ || percentage != *fec_wanted_ || percentage < configured || percentage > FEC_MAX) {
+      return;  // not what the policy asked for
+    }
+    const bool raise = percentage > fec_pct_;
+    fec_pct_ = percentage;
+    fec_wanted_.reset();
+    if (raise) {
+      // Did the parity help? The same test a descent uses: H0 the learned background, H1 a third of it.
+      fec_skip_ = true;
+      fec_test_ = make_sprt(p_background(), std::max(p_background() / 3.0, MIN_LOSS), 0, 0);
+    }
+  }
+
+  void policy_t::fec_refused(std::int64_t now_ms) {
+    (void) now_ms;
+    if (!fec_configured_ || !fec_wanted_) {
+      return;
+    }
+    // The confirmed percentage holds. Asking again waits out the back-off, which counts judged reports.
+    fec_wanted_.reset();
+    fec_backoff_ = BACKOFF_REPORTS;
+  }
+
+  void policy_t::fec_open_episode() {
+    if (!fec_configured_ || fec_wanted_ || fec_test_ || fec_backoff_ > 0) {
+      return;
+    }
+    const int configured = *fec_configured_;
+    if (configured >= FEC_MAX || fec_pct_ != configured) {
+      return;
+    }
+    fec_wanted_ = std::min(FEC_MAX, fec_pct_ + std::max(FEC_MIN_STEP, fec_pct_ / 2));
+  }
+
+  void policy_t::fec_revert() {
+    if (!fec_configured_) {
+      return;
+    }
+    fec_test_.reset();
+    fec_skip_ = false;
+    if (fec_pct_ != *fec_configured_) {
+      fec_wanted_ = *fec_configured_;
+    } else {
+      fec_wanted_.reset();  // a raise not yet published is no longer wanted
+    }
+  }
+
+  void policy_t::fec_report(double expected, double lost, bool first_after_raise) {
+    if (!fec_configured_) {
+      return;
+    }
+    if (fec_test_) {
+      // Judge the parity only at a steady rate; a search judges the rate.
+      if (first_after_raise || state_ != state_e::normal) {
+        return;
+      }
+      const auto res = fec_test_->add(expected, lost, 1.0);
+      if (!res) {
+        return;
+      }
+      fec_test_.reset();
+      fec_backoff_ = BACKOFF_REPORTS;
+      if (*res != 1) {
+        fec_wanted_ = *fec_configured_;  // no clear help, undecided included: back to the configured parity
+      }
+      return;
+    }
+    if (fec_backoff_ > 0 && --fec_backoff_ == 0 && fec_pct_ != *fec_configured_ && !fec_wanted_) {
+      fec_wanted_ = *fec_configured_;  // held long enough: see whether the configured parity does again
     }
   }
 

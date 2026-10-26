@@ -47,6 +47,17 @@
  *   someone else's, and is left alone for 5 minutes.
  * - Heavy loss while cutting for a queue hands the stream to the loss probe.
  *
+ * FEC
+ * - Unconfigured by default, which leaves every other output as it was. A trusted new scope configures the
+ *   stream's FEC percentage; from 0 to 49 the policy may ask for more parity, up to 50, and 50 or more stays fixed.
+ * - Only a rate-independent result asks, once: up by max(5, F/2). The actuator publishes the percentage, or refuses;
+ *   the policy never counts a request as applied. After a raise is published, the first report is not judged, and
+ *   the descent's "did this help" test on post-FEC frames against the learned background keeps or reverts it.
+ * - Either outcome, and a refusal, starts the 1200-report back-off; a kept raise then asks for the configured
+ *   percentage again. A new probe, an outside writer or a new request asks for the configured percentage at once.
+ *   Like every loss decision, this counts reports, so RTT and a report pause change nothing. The rate decisions
+ *   never read any of it.
+ *
  * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second, and
  * tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells pass, and the
  * four that need a congestion signal while reports stop stay named as unmet.
@@ -167,6 +178,25 @@ namespace live_tuning_policy {
       return hi_is_queue_;
     }
 
+    /// A trusted new scope's configured FEC percentage. Outside 0 to 255 it leaves FEC unconfigured.
+    void configure_fec(int configured_percentage);
+
+    /// The nominal FEC percentage the policy asks the actuator to publish. Not applied until fec_applied().
+    std::optional<int> fec_request() const;
+
+    /// The last FEC percentage the actuator confirmed it published; 0 while unconfigured.
+    int fec_percentage() const {
+      return fec_pct_;
+    }
+
+    /// The actuator published this percentage at a frame boundary. A percentage the policy did not ask for is
+    /// ignored, except the configured one, which is always taken back.
+    void fec_applied(std::int64_t now_ms, int percentage);
+
+    /// The actuator could not act on the request. The confirmed percentage holds, and nothing is asked again until
+    /// the back-off ends.
+    void fec_refused(std::int64_t now_ms);
+
   private:
     enum class after_change_e {
       none,
@@ -201,6 +231,10 @@ namespace live_tuning_policy {
     bool raising() const;
     void close_second(std::int64_t now_ms);
     void rtt_cut(std::int64_t now_ms);
+
+    void fec_open_episode();
+    void fec_revert();
+    void fec_report(double expected, double lost, bool first_after_raise);
 
     int base_;
     int floor_;
@@ -276,6 +310,14 @@ namespace live_tuning_policy {
     bool rtt_cut_lossy_ = false;
     int rtt_from_;
     int rtt_start_;
+
+    // FEC, in nominal percent. Nothing here is read by the rate decisions above.
+    std::optional<int> fec_configured_;
+    int fec_pct_ = 0;
+    std::optional<int> fec_wanted_;
+    std::optional<sprt_t> fec_test_;
+    int fec_backoff_ = 0;
+    bool fec_skip_ = false;
   };
 
 }  // namespace live_tuning_policy
