@@ -6,6 +6,7 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include "generated/polaris_v1_contract.h"
 #ifdef __linux__
   #include "platform/linux/process_environment.h"
   #include "platform/linux/session_manager.h"
@@ -130,6 +131,8 @@
 #endif
 
 using namespace std::literals;
+
+namespace v1 = polaris::contract::v1;
 
 namespace nvhttp {
 
@@ -1197,10 +1200,10 @@ namespace nvhttp {
       std::string mode_reason;
 
       nlohmann::json launch_mode;
-      launch_mode["launch_as"] = app_launch_as;
-      launch_mode["launch_as_available"] = app_launch_as == "host_default" || launch_as.available;
-      launch_mode["launch_as_unavailable_reason"] =
-        launch_mode["launch_as_available"].get<bool>() ? "" : launch_as.reason;
+      launch_mode[v1::launch_mode::launch_as] = app_launch_as;
+      launch_mode[v1::launch_mode::launch_as_available] = app_launch_as == "host_default" || launch_as.available;
+      launch_mode[v1::launch_mode::launch_as_unavailable_reason] =
+        launch_mode[v1::launch_mode::launch_as_available].get<bool>() ? "" : launch_as.reason;
 
       auto allowed_modes = nlohmann::json::array();
 #ifdef __linux__
@@ -1209,10 +1212,10 @@ namespace nvhttp {
         // list would tell older Nova that every mode is allowed and invite a silent fallback.
         const auto label = stream_display_policy::label_for_selection(app_launch_as);
         const auto display_label = label.empty() ? std::string {app_launch_as} : label;
-        launch_mode["preferred_mode"] = app_launch_as;
-        launch_mode["recommended_mode"] = app_launch_as;
-        launch_mode["allowed_modes"] = nlohmann::json::array({app_launch_as});
-        launch_mode["follows_host_default"] = false;
+        launch_mode[v1::launch_mode::preferred_mode] = app_launch_as;
+        launch_mode[v1::launch_mode::recommended_mode] = app_launch_as;
+        launch_mode[v1::launch_mode::allowed_modes] = nlohmann::json::array({app_launch_as});
+        launch_mode[v1::launch_mode::follows_host_default] = false;
         auto reason = "This entry is set on the host to launch as " + display_label;
         if (launch_as.available) {
           reason += ", so every client gets " + display_label + ".";
@@ -1220,7 +1223,7 @@ namespace nvhttp {
           reason += ", which this host cannot run right now. " + launch_as.reason;
           if (!reason.empty() && reason.back() != '.') reason += '.';
         }
-        launch_mode["mode_reason"] = std::move(reason);
+        launch_mode[v1::launch_mode::mode_reason] = std::move(reason);
         return launch_mode;
       }
       preferred_mode = "headless_stream";
@@ -1268,15 +1271,15 @@ namespace nvhttp {
         mode_reason =
           "This entry streams the desktop itself, so it mirrors the host screen. Pick Host Virtual "
           "Display to be given a screen of your own instead, when this host can add one.";
-        launch_mode["preferred_mode"] = preferred_mode;
-        launch_mode["recommended_mode"] = recommended_mode;
-        launch_mode["allowed_modes"] = std::move(allowed_modes);
-        launch_mode["mode_reason"] = mode_reason;
+        launch_mode[v1::launch_mode::preferred_mode] = preferred_mode;
+        launch_mode[v1::launch_mode::recommended_mode] = recommended_mode;
+        launch_mode[v1::launch_mode::allowed_modes] = std::move(allowed_modes);
+        launch_mode[v1::launch_mode::mode_reason] = mode_reason;
         // This entry is the desktop, so mirroring it is its own answer rather than a preference
         // inherited from however this host prefers to run games. A client that took the host's
         // default here would open the desktop on a screen the host made for games, which is a
         // reasonable thing to ask for and a surprising thing to be given without asking.
-        launch_mode["follows_host_default"] = false;
+        launch_mode[v1::launch_mode::follows_host_default] = false;
         return launch_mode;
       }
 #endif
@@ -1348,12 +1351,12 @@ namespace nvhttp {
       }
 #endif
 
-      launch_mode["preferred_mode"] = preferred_mode;
-      launch_mode["recommended_mode"] = recommended_mode;
-      launch_mode["allowed_modes"] = std::move(allowed_modes);
-      launch_mode["mode_reason"] = mode_reason;
+      launch_mode[v1::launch_mode::preferred_mode] = preferred_mode;
+      launch_mode[v1::launch_mode::recommended_mode] = recommended_mode;
+      launch_mode[v1::launch_mode::allowed_modes] = std::move(allowed_modes);
+      launch_mode[v1::launch_mode::mode_reason] = mode_reason;
       // Everything else takes the host's configured display unless the player chose otherwise.
-      launch_mode["follows_host_default"] = true;
+      launch_mode[v1::launch_mode::follows_host_default] = true;
       return launch_mode;
     }
 
@@ -6115,7 +6118,7 @@ namespace nvhttp {
   // audit (tests/integration/test_nova_contract.cpp) reads its shape straight
   // from the source and docs/nova-contract.json stays honest about it.
   nlohmann::json spaces_capacity_json(const multiseat::gpu_usage_t &usage) {
-    return {{"concurrent_limit", usage.max_seats}, {"concurrent_active", usage.active_seats}};
+    return {{v1::spaces_capacity::concurrent_limit, usage.max_seats}, {v1::spaces_capacity::concurrent_active, usage.active_seats}};
   }
 
   nlohmann::json space_json(const multiseat::profile_client_space_t &space) {
@@ -6319,9 +6322,15 @@ namespace nvhttp {
   }
 
   nlohmann::json space_launch_mode_json(std::string_view where) {
-    return {{"preferred_mode", "gamescope_stream"}, {"recommended_mode", "gamescope_stream"},
-      {"allowed_modes", {"gamescope_stream"}}, {"mode_reason", "Runs in " + std::string(where)}};
+    return {{v1::launch_mode::preferred_mode, "gamescope_stream"}, {v1::launch_mode::recommended_mode, "gamescope_stream"},
+      {v1::launch_mode::allowed_modes, {"gamescope_stream"}}, {v1::launch_mode::mode_reason, "Runs in " + std::string(where)}};
   }
+
+#ifdef POLARIS_TESTS
+  nlohmann::json space_launch_mode_json_for_tests(std::string_view where) {
+    return space_launch_mode_json(where);
+  }
+#endif
 
   nlohmann::json space_library_game_json(std::string_view profile, const multiseat::profile_library_snapshot_t &snapshot,
                                          std::string_view target, std::string_view name) {

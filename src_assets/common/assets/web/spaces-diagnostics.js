@@ -1,3 +1,4 @@
+import { SPACES_CAPACITY } from './generated/polarisV1Contract.js'
 import { validSetup } from './spaces-setup.js'
 import { validSnapshot } from './spaces-access.js'
 
@@ -60,9 +61,9 @@ export function spacesDiagnostics({ setup, snapshot, setupError = '', snapshotEr
       state.activity.forEach(item => { counts[item.state] += 1 })
       activityRows.push(row('activity', 'info', text('activity'), text('activity_counts', counts)))
     }
-    if (state.capacity && state.capacity.concurrent_limit > 0) {
+    if (state.capacity && state.capacity[SPACES_CAPACITY.CONCURRENT_LIMIT] > 0) {
       activityRows.push(row('capacity', 'info', text('capacity'), text('capacity_counts', {
-        active: state.capacity.concurrent_active, limit: state.capacity.concurrent_limit,
+        active: state.capacity[SPACES_CAPACITY.CONCURRENT_ACTIVE], limit: state.capacity[SPACES_CAPACITY.CONCURRENT_LIMIT],
       })))
     }
   }

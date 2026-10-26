@@ -9,7 +9,7 @@
       <div v-if="state.enabled" class="flex flex-wrap items-center gap-2">
         <span class="meta-pill">{{ countLabel }}</span>
         <span v-if="state.capacity" class="control-chip" data-spaces-capacity>
-          {{ $t('spaces.capacity', { active: state.capacity.concurrent_active, limit: state.capacity.concurrent_limit }) }}
+          {{ $t('spaces.capacity', { active: state.capacity[SPACES_CAPACITY.CONCURRENT_ACTIVE], limit: state.capacity[SPACES_CAPACITY.CONCURRENT_LIMIT] }) }}
         </span>
       </div>
     </div>
@@ -43,6 +43,7 @@
 </template>
 
 <script setup>
+import { SPACES_CAPACITY } from '../generated/polarisV1Contract.js'
 import { computed, inject, onMounted, ref } from 'vue'
 import Button from './Button.vue'
 import SpacesList from './SpacesList.vue'

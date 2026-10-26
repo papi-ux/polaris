@@ -12,9 +12,11 @@
     "checkout. Adding a field to a response means adding it here in the same commit.",
     "",
     "Drift found when this manifest was introduced, on 2026-08-06, is recorded under",
-    "known_drift so it is tracked rather than rediscovered."
+    "known_drift so it is tracked rather than rediscovered.",
+    "",
+    "Schema format 2 is additive: ordered fields and legacy nova_reader entries remain. Only generated:true objects use generated names in S1a; wire object versions are unchanged."
   ],
-  "version": 1,
+  "version": 2,
   "objects": {
     "live_tuning_history_entry": {
       "$comment": [
@@ -134,11 +136,75 @@
         "concurrent_active",
         "concurrent_limit"
       ],
-      "polaris_emitter": {
-        "file": "src/nvhttp.cpp",
-        "function": "spaces_capacity_json",
-        "declaration": "return {",
-        "style": "initializer_list"
+      "polaris_emitter": [
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "spaces_capacity_json",
+          "declaration": "return {",
+          "style": "initializer_list"
+        },
+        {
+          "file": "src/confighttp.cpp",
+          "function": "getMultiseatProfiles",
+          "declaration": "output[\"capacity\"] = {",
+          "style": "initializer_list"
+        }
+      ],
+      "generated": true,
+      "required_present": [
+        "concurrent_active",
+        "concurrent_limit"
+      ],
+      "types": {
+        "concurrent_active": "integer",
+        "concurrent_limit": "integer"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisSpaces.kt",
+          "function": "parse",
+          "receiver": "raw",
+          "style": "kotlin_org_json",
+          "reads": [
+            "concurrent_active",
+            "concurrent_limit"
+          ]
+        },
+        "polaris_web": [
+          {
+            "file": "src_assets/common/assets/web/spaces-access.js",
+            "function": "validSnapshot",
+            "receiver": "next.capacity",
+            "style": "javascript",
+            "reads": [
+              "concurrent_active",
+              "concurrent_limit"
+            ],
+            "scope_start": "export function validSnapshot(",
+            "scope_end": "export function "
+          },
+          {
+            "file": "src_assets/common/assets/web/spaces-diagnostics.js",
+            "function": "spacesDiagnostics",
+            "receiver": "state.capacity",
+            "style": "javascript",
+            "reads": [
+              "concurrent_active",
+              "concurrent_limit"
+            ]
+          },
+          {
+            "file": "src_assets/common/assets/web/components/MultiseatAssignments.vue",
+            "style": "javascript",
+            "receiver": "state.capacity",
+            "scope_start": "<template>",
+            "scope_end": "</template>",
+            "reads": [
+              "concurrent_active",
+              "concurrent_limit"
+            ]
+          }
+        ]
       }
     },
     "space": {
@@ -240,7 +306,7 @@
       }
     },
     "space_launch_mode": {
-      "$comment": "The launch_mode of a Space game, fixed to gamescope_stream; a four-field subset of launch_mode read by the same modeJson reader. Space entries deliberately omit follows_host_default, launch_as, launch_as_available and launch_as_unavailable_reason, and that shared reader defaults each one when absent: follows_host_default to true, launch_as to no app launch-as contract (it checks whether any of the three launch_as keys exists first), launch_as_available to null and launch_as_unavailable_reason to an empty string. The four intentional omissions and their exact reader defaults are declared in known_drift with a per-object reason.",
+      "$comment": "The launch_mode of a Space game, fixed to gamescope_stream; a four-field subset of launch_mode read by the same modeJson reader. Space entries deliberately omit follows_host_default, launch_as, launch_as_available and launch_as_unavailable_reason, and that shared reader defaults each one when absent: follows_host_default to true, launch_as to no app launch-as contract (it checks whether any of the three launch_as keys exists first), launch_as_available to null and launch_as_unavailable_reason to an empty string. The four intentional omissions and their exact reader defaults are declared in known_drift with a per-object reason. Format 2 records these same intentional omissions and exact reader defaults under subset_of/omitted; known_drift.$detail preserves the prior source-reconciliation reason.",
       "fields": [
         "allowed_modes",
         "mode_reason",
@@ -257,6 +323,107 @@
         "function": "space_launch_mode_json",
         "declaration": "return {",
         "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "allowed_modes",
+        "mode_reason",
+        "preferred_mode",
+        "recommended_mode"
+      ],
+      "types": {
+        "allowed_modes": "array<string>",
+        "mode_reason": "string",
+        "preferred_mode": "string",
+        "recommended_mode": "string"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+          "function": "fromJson",
+          "receiver": "modeJson",
+          "style": "kotlin_org_json",
+          "reads": [
+            "allowed_modes",
+            "follows_host_default",
+            "launch_as",
+            "launch_as_available",
+            "launch_as_unavailable_reason",
+            "mode_reason",
+            "preferred_mode",
+            "recommended_mode"
+          ]
+        },
+        "nova_shared": {
+          "file": "shared/polaris/model/src/commonMain/kotlin/com/papi/nova/shared/polaris/model/PolarisGame.kt",
+          "style": "kotlin_serial_name",
+          "scope_start": "data class LaunchModeContract(",
+          "scope_end": ") {",
+          "reads": [
+            "allowed_modes",
+            "follows_host_default",
+            "launch_as",
+            "launch_as_available",
+            "launch_as_unavailable_reason",
+            "mode_reason",
+            "preferred_mode",
+            "recommended_mode"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+          "function": "parseGame",
+          "receiver": "launchMode",
+          "style": "qt_json",
+          "reads": [
+            "allowed_modes",
+            "follows_host_default",
+            "launch_as",
+            "launch_as_available",
+            "launch_as_unavailable_reason",
+            "mode_reason",
+            "preferred_mode",
+            "recommended_mode"
+          ]
+        }
+      },
+      "subset_of": "launch_mode",
+      "omitted": {
+        "follows_host_default": {
+          "reason": "Space mode is fixed to gamescope_stream and the legacy readers take an absent follows_host_default as true. This preserves current UI behavior; changing its meaning is a separate owner decision.",
+          "reader_defaults": {
+            "nova_android": true,
+            "nova_shared": true,
+            "nova_deck": true
+          }
+        },
+        "launch_as": {
+          "reason": "None of the three per-app Launch As keys is served, so all readers use the older-host path rather than inventing a per-app Launch As contract.",
+          "reader_defaults": {
+            "nova_android": null,
+            "nova_shared": null,
+            "nova_deck": {
+              "launch_as_present": false,
+              "launch_as": ""
+            }
+          }
+        },
+        "launch_as_available": {
+          "reason": "No per-app Launch As availability is declared for this Space entry.",
+          "reader_defaults": {
+            "nova_android": null,
+            "nova_shared": null,
+            "nova_deck": null
+          }
+        },
+        "launch_as_unavailable_reason": {
+          "reason": "With no per-app Launch As contract, the old reader default is the empty string.",
+          "reader_defaults": {
+            "nova_android": "",
+            "nova_shared": "",
+            "nova_deck": ""
+          }
+        }
       }
     },
     "space_legacy_game": {
@@ -371,6 +538,77 @@
         "function": "build_launch_mode_contract",
         "variable": "launch_mode",
         "style": "subscript"
+      },
+      "generated": true,
+      "required_present": [
+        "allowed_modes",
+        "follows_host_default",
+        "launch_as",
+        "launch_as_available",
+        "launch_as_unavailable_reason",
+        "mode_reason",
+        "preferred_mode",
+        "recommended_mode"
+      ],
+      "types": {
+        "allowed_modes": "array<string>",
+        "follows_host_default": "boolean",
+        "launch_as": "string",
+        "launch_as_available": "boolean",
+        "launch_as_unavailable_reason": "string",
+        "mode_reason": "string",
+        "preferred_mode": "string",
+        "recommended_mode": "string"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+          "function": "fromJson",
+          "receiver": "modeJson",
+          "style": "kotlin_org_json",
+          "reads": [
+            "allowed_modes",
+            "follows_host_default",
+            "launch_as",
+            "launch_as_available",
+            "launch_as_unavailable_reason",
+            "mode_reason",
+            "preferred_mode",
+            "recommended_mode"
+          ]
+        },
+        "nova_shared": {
+          "file": "shared/polaris/model/src/commonMain/kotlin/com/papi/nova/shared/polaris/model/PolarisGame.kt",
+          "style": "kotlin_serial_name",
+          "scope_start": "data class LaunchModeContract(",
+          "scope_end": ") {",
+          "reads": [
+            "allowed_modes",
+            "follows_host_default",
+            "launch_as",
+            "launch_as_available",
+            "launch_as_unavailable_reason",
+            "mode_reason",
+            "preferred_mode",
+            "recommended_mode"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+          "function": "parseGame",
+          "receiver": "launchMode",
+          "style": "qt_json",
+          "reads": [
+            "allowed_modes",
+            "follows_host_default",
+            "launch_as",
+            "launch_as_available",
+            "launch_as_unavailable_reason",
+            "mode_reason",
+            "preferred_mode",
+            "recommended_mode"
+          ]
+        }
       }
     },
     "steam_launch": {
@@ -1128,6 +1366,80 @@
         "function": "bitrate_units_json",
         "style": "initializer_list",
         "declaration": "return {"
+      },
+      "generated": true,
+      "required_present": [
+        "audio_kbps",
+        "cap_kbps",
+        "cap_source",
+        "encoder_kbps",
+        "fec_percentage",
+        "formula",
+        "live_encoder_kbps",
+        "requested_kbps",
+        "split_kbps",
+        "version",
+        "warp_factor"
+      ],
+      "nullable": [
+        "cap_kbps",
+        "cap_source",
+        "split_kbps"
+      ],
+      "types": {
+        "audio_kbps": "integer",
+        "cap_kbps": "integer",
+        "cap_source": "string",
+        "encoder_kbps": "integer",
+        "fec_percentage": "integer",
+        "formula": "string",
+        "live_encoder_kbps": "integer",
+        "requested_kbps": "integer",
+        "split_kbps": "integer",
+        "version": "integer",
+        "warp_factor": "integer"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisBitrateUnits.kt",
+          "function": "parse",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "audio_kbps",
+            "cap_kbps",
+            "cap_source",
+            "encoder_kbps",
+            "fec_percentage",
+            "formula",
+            "live_encoder_kbps",
+            "requested_kbps",
+            "split_kbps",
+            "version",
+            "warp_factor"
+          ],
+          "literal_key_list_helper": "integer"
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_bitrate_advice.cpp",
+          "function": "parseBitrateUnits",
+          "receiver": "o",
+          "style": "qt_json",
+          "reads": [
+            "audio_kbps",
+            "cap_kbps",
+            "cap_source",
+            "encoder_kbps",
+            "fec_percentage",
+            "formula",
+            "live_encoder_kbps",
+            "requested_kbps",
+            "split_kbps",
+            "version",
+            "warp_factor"
+          ],
+          "literal_key_list": true
+        }
       }
     }
   },
@@ -1147,19 +1459,10 @@
         "space"
       ],
       "optimization": [
-        "ai_recommended_mode",
-        "consecutive_poor_outcomes",
-        "effective_profile",
         "effective_target_fps",
         "generated_at",
         "normalization_reason",
         "requested_target_fps"
-      ],
-      "space_launch_mode": [
-        "follows_host_default",
-        "launch_as",
-        "launch_as_available",
-        "launch_as_unavailable_reason"
       ]
     },
     "polaris_sends_nova_never_reads": {
@@ -1177,18 +1480,13 @@
       "spaces_snapshot": [
         "available",
         "can_switch",
-        "capacity",
         "default_space_id",
         "enabled",
         "switch_blocked_reason",
         "unavailable_reason"
       ],
       "space": [
-        "blocked_reason",
-        "can_open",
-        "id",
-        "name",
-        "state"
+        "blocked_reason"
       ],
       "space_library": [
         "library_available",
@@ -1215,18 +1513,11 @@
     },
     "$detail": {
       "spaces_snapshot": [
-        "enabled, available and can_switch are read, through PolarisSpaces.parse's flag()",
-        "helper that takes the key as a variable, which the accessor scan cannot see; the same",
-        "goes for id, name and state on space, read through listOf(...).all { entry.opt(it) }.",
-        "capacity, default_space_id, unavailable_reason, switch_blocked_reason, can_open and",
-        "blocked_reason are served ahead of their Nova consumer (the reasons Nova shows in",
-        "place of a bare disabled control) and are optional on schema 1. library_available,",
-        "space_name and total on space_library are informational; Nova checks status and",
-        "space_id and reads the games. worker_profile on the legacy entry is never read:",
-        "NovaSpaceUiState.singleSpace keys on the fixed id. serverinfo's PolarisSpacesAvailable",
-        "is XML written through the property tree, outside what this manifest can extract.",
-        "game.space is read by the shared adapter and served only on space_library_game, where",
-        "it is declared; the ordinary library never carries it."
+        "At Nova 3f6b6908, enabled, available and can_switch are read through PolarisSpaces.parse flag(), whose variable key this accessor scan cannot see.",
+        "Space id, name and state are read explicitly with getString; can_open uses has/opt/getBoolean, and the top-level capacity is read with json.opt. The eight-entry stale-declaration cleanup removes these five from known unread fields.",
+        "default_space_id, unavailable_reason, switch_blocked_reason and blocked_reason are read through optionalWord, which this scan does not resolve. Their remaining known entries describe a scanner limitation, not absent runtime consumers.",
+        "library_available, space_name and total on space_library are informational; Nova checks status and space_id and reads the games. worker_profile on the legacy entry is never read: NovaSpaceUiState.singleSpace keys on the fixed id.",
+        "game.space is read by the shared adapter and served only on space_library_game, where it is declared; the ordinary library never carries it. serverinfo PolarisSpacesAvailable is XML written through the property tree, outside this manifest extraction."
       ],
       "session_capture": [
         "Corrected. Nova reads gpu_native_succeeded and cross_gpu_dmabuf_risk from the",
@@ -1256,6 +1547,9 @@
       ],
       "space_launch_mode": [
         "Space games deliberately serve only preferred_mode, allowed_modes, recommended_mode and mode_reason. Nova uses the shared modeJson adapter and tolerates the four omitted fields: follows_host_default defaults to true, launch_as is null when none of the three launch_as keys exists, launch_as_available defaults to null, and launch_as_unavailable_reason defaults to an empty string. These are declared compatibility defaults, not evidence of hardware or UI acceptance. Source recon: Polaris a44c39bf / src/nvhttp.cpp space_launch_mode_json; Nova 3f6b6908 / PolarisGameJsonAdapter.fromJson."
+      ],
+      "stale_entries_removed_2026_10_26": [
+        "The format-2 actual-reader audit against immutable Nova 3f6b6908 found eight obsolete declarations. spaces_snapshot.capacity and space.can_open/id/name/state are consumed; optimization.ai_recommended_mode/consecutive_poor_outcomes/effective_profile are no longer read in the scoped reader. Their entries were removed, not exempted. The historical Spaces notes above describe why older scans missed reads; this correction changes no wire field, fallback or runtime behavior."
       ]
     }
   }

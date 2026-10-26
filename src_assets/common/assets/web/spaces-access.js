@@ -1,8 +1,9 @@
+import { SPACES_CAPACITY } from './generated/polarisV1Contract.js'
 // Shared read-only validation for space assignment summaries.
 export function validSnapshot(next) {
   if (!next || (next.schema !== undefined && next.schema !== 1) ||
       (next.capacity !== undefined && (!next.capacity || typeof next.capacity !== 'object' ||
-        ['concurrent_limit', 'concurrent_active'].some(key => !Number.isInteger(next.capacity[key]) || next.capacity[key] < 0))) ||
+        [SPACES_CAPACITY.CONCURRENT_LIMIT, SPACES_CAPACITY.CONCURRENT_ACTIVE].some(key => !Number.isInteger(next.capacity[key]) || next.capacity[key] < 0))) ||
       ['enabled', 'available', 'changing', 'failed'].some(key => typeof next[key] !== 'boolean') ||
       !Array.isArray(next.profiles) || ['creation_available', 'management_available', 'access_available', 'removal_available'].some(key => next[key] !== undefined && typeof next[key] !== 'boolean')) return false
   if (next.desktop_clients !== undefined && (!Array.isArray(next.desktop_clients) ||

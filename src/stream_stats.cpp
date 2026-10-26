@@ -6,6 +6,7 @@
  */
 
 // standard includes
+#include "generated/polaris_v1_contract.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -37,6 +38,8 @@
 #include "verified_action.h"
 #include "vrr_clock_proof.h"
 #include "vrr_source_time.h"
+
+namespace v1 = polaris::contract::v1;
 
 namespace video {
   std::string active_encoder_name();
@@ -4803,17 +4806,17 @@ namespace stream_stats {
     // Doctor changed it. The encoder opens at the negotiated rate, which stands in until that report.
     const int live_encoder_kbps = client->bitrate_kbps > 0 ? client->bitrate_kbps : request.encoder_kbps;
     return {
-      {"version", 1},
-      {"requested_kbps", request.client_kbps},
-      {"warp_factor", request.warp_factor},
-      {"cap_kbps", cap_kbps},
-      {"cap_source", cap_source},
-      {"split_kbps", split_kbps},
-      {"encoder_kbps", request.encoder_kbps},
-      {"live_encoder_kbps", live_encoder_kbps},
-      {"audio_kbps", request.audio_kbps},
-      {"fec_percentage", request.fec_percentage},
-      {"formula", stream_bitrate::k_formula},
+      {v1::bitrate_units::version, 1},
+      {v1::bitrate_units::requested_kbps, request.client_kbps},
+      {v1::bitrate_units::warp_factor, request.warp_factor},
+      {v1::bitrate_units::cap_kbps, cap_kbps},
+      {v1::bitrate_units::cap_source, cap_source},
+      {v1::bitrate_units::split_kbps, split_kbps},
+      {v1::bitrate_units::encoder_kbps, request.encoder_kbps},
+      {v1::bitrate_units::live_encoder_kbps, live_encoder_kbps},
+      {v1::bitrate_units::audio_kbps, request.audio_kbps},
+      {v1::bitrate_units::fec_percentage, request.fec_percentage},
+      {v1::bitrate_units::formula, stream_bitrate::k_formula},
     };
   }
 

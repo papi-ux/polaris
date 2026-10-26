@@ -223,7 +223,6 @@ endif()
 set(TEST_AUDIT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/integration/test_config_consistency.cpp
     ${CMAKE_SOURCE_DIR}/tests/integration/test_locale_consistency.cpp
-    ${CMAKE_SOURCE_DIR}/tests/integration/test_nova_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_virtual_input_udev_contract.cpp
 )
 
@@ -312,6 +311,7 @@ set(TEST_PAIRING_SOURCES
 )
 
 set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/integration/test_nova_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_async_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_status_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_continuous_http.cpp
@@ -321,6 +321,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_mode_contract.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_space_launch_mode_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_response_status.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_watch_mode.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_display_inventory_policy.cpp

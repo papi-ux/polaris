@@ -7,6 +7,7 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include "generated/polaris_v1_contract.h"
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -135,6 +136,8 @@
 #endif
 
 using namespace std::literals;
+
+namespace v1 = polaris::contract::v1;
 
 namespace confighttp {
   namespace fs = std::filesystem;
@@ -4929,7 +4932,7 @@ namespace confighttp {
       output["desktop_default_clients"] = state.desktop_default_clients;
       output["desktop_by_default"] = state.desktop_by_default;
       if (state.capacity)
-        output["capacity"] = {{"concurrent_limit", state.capacity->max_seats}, {"concurrent_active", state.capacity->active_seats}};
+        output["capacity"] = {{v1::spaces_capacity::concurrent_limit, state.capacity->max_seats}, {v1::spaces_capacity::concurrent_active, state.capacity->active_seats}};
       for (const auto &activity : state.activity)
         output["activity"].push_back({{"profile_id", activity.profile}, {"client_id", activity.client}, {"state", activity.state}});
       // What each Space's runtime was built for against the NVIDIA driver loaded now, and the

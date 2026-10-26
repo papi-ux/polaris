@@ -660,6 +660,7 @@ namespace nvhttp {
                                                       bool host_prefers_headless,
                                                       const proc::launch_as_availability_t &launch_as = {});
 #if defined(__linux__)
+  nlohmann::json space_launch_mode_json_for_tests(std::string_view where);
   proc::launch_selection_request_t optimize_launch_selection_request_for_tests(const args_t &args, bool paired_always_virtual);
   std::string accepted_session_stream_mode_for_tests(const std::string &requested);
   bool apply_stream_display_mode_selection_for_tests(

@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -209,20 +210,75 @@ namespace {
     return keys;
   }
 
-  std::set<std::string> emitted_fields_from_one(const nlohmann::json &emitter) {
-    const auto source = read_source_file(emitter.at("file").get<std::string>());
-    const auto scope = emitter.contains("function") ?
-                         function_body(source, emitter.at("function").get<std::string>()) :
-                         source;
-
-    if (emitter.at("style") == "initializer_list") {
-      // The declaration only, so sibling objects built in the same function —
-      // configuration_warnings entries, for instance — stay out of it.
-      const auto decl = scope.find(emitter.at("declaration").get<std::string>());
-      return decl == std::string::npos ? std::set<std::string> {} : initializer_keys(scope.substr(decl));
+  // Resolve only symbols found in an actual emitter scope. The header supplies
+  // their string values, never a replacement for inspecting the emitter itself.
+  std::string resolve_generated_keys(const std::string &scope) {
+    const auto header = read_source_file("src/generated/polaris_v1_contract.h");
+    const std::regex symbol {R"(\bv1::([a-z][a-z0-9_]*)::([a-z][a-z0-9_]*)\b)"};
+    std::string resolved;
+    std::size_t previous = 0;
+    for (auto it = std::sregex_iterator(scope.begin(), scope.end(), symbol); it != std::sregex_iterator(); ++it) {
+      const auto &match = *it;
+      resolved.append(scope, previous, match.position() - previous);
+      const auto ns = "namespace polaris::contract::v1::" + match[1].str() + " {";
+      const auto begin = header.find(ns);
+      const auto end = begin == std::string::npos ? begin : header.find('}', begin);
+      const auto declaration = "inline constexpr char " + match[2].str() + "[] = ";
+      const auto field = begin == std::string::npos ? begin : header.find(declaration, begin);
+      if (field == std::string::npos || end == std::string::npos || field >= end) {
+        ADD_FAILURE() << "undefined generated key in actual emitter: " << match.str();
+        resolved += "\"undefined_generated_key\"";
+      } else {
+        const auto quote = header.find('"', field + declaration.size());
+        const auto close = quote == std::string::npos ? quote : header.find('"', quote + 1);
+        if (close == std::string::npos || close >= end) {
+          ADD_FAILURE() << "invalid generated key definition: " << match.str();
+          resolved += "\"invalid_generated_key\"";
+        } else {
+          resolved.append(header, quote, close - quote + 1);
+        }
+      }
+      previous = match.position() + match.length();
     }
+    resolved.append(scope, previous, std::string::npos);
+    return resolved;
+  }
 
-    return subscript_keys(scope, emitter.at("variable").get<std::string>());
+  std::string initializer_scope(const std::string &scope, const std::string &declaration) {
+    const auto at = scope.find(declaration);
+    const auto open = at == std::string::npos ? at : scope.find('{', at);
+    if (open == std::string::npos) return {};
+    for (auto close = open; close < scope.size(); ++close) {
+      if (scope[close] == '}' && brace_depth(scope, open, close + 1) == 0) {
+        return scope.substr(open, close - open + 1);
+      }
+    }
+    return {};
+  }
+
+  std::string emitter_scope(const nlohmann::json &emitter, bool generated) {
+    const auto source = read_source_file(emitter.at("file").get<std::string>());
+    auto scope = emitter.contains("function") ?
+                   function_body(source, emitter.at("function").get<std::string>()) : source;
+    if (emitter.at("style") == "initializer_list") {
+      const auto declaration = emitter.at("declaration").get<std::string>();
+      if (scope.find("v1::") != std::string::npos) {
+        // Migrated objects can share a function with unrelated later objects
+        // (the console capacity emitter does). Bound that actual initializer.
+        scope = initializer_scope(scope, declaration);
+      } else {
+        // Keep the existing extraction range for unmigrated literal objects.
+        const auto at = scope.find(declaration);
+        scope = at == std::string::npos ? std::string {} : scope.substr(at);
+      }
+    }
+    return generated ? resolve_generated_keys(scope) : scope;
+  }
+
+  std::set<std::string> emitted_fields_from_one(const nlohmann::json &emitter) {
+    const auto scope = emitter_scope(emitter, true);
+    return emitter.at("style") == "initializer_list" ? initializer_keys(scope) :
+      subscript_keys(scope, emitter.at("variable").get<std::string>());
   }
 
   /// An object may be assembled in more than one place. `game` is: nvhttp.cpp writes most of it by
@@ -268,6 +324,15 @@ TEST(NovaContractTests, EveryManifestObjectMatchesWhatPolarisActuallyServes) {
       << "derived no fields for [" << name << "]; the extractor is broken, not the contract";
     for (const auto &one : object["polaris_emitter"].is_array() ?
                              object["polaris_emitter"] : nlohmann::json::array({object["polaris_emitter"]})) {
+      if (object.value("generated", false)) {
+        std::set<std::string> expected;
+        for (const auto &field : one.value("fields", object.at("fields"))) expected.insert(field.get<std::string>());
+        EXPECT_EQ(emitted_fields_from_one(one), expected) << one.dump();
+        const auto original = emitter_scope(one, false);
+        const auto literals = one.at("style") == "initializer_list" ? initializer_keys(original) :
+          subscript_keys(original, one.at("variable").get<std::string>());
+        EXPECT_TRUE(literals.empty()) << "migrated emitter still spells literal keys: " << one.dump();
+      }
       // A listed emitter that derives nothing is a silent hole: the union still looks healthy while
       // one of its halves has stopped matching the source it names.
       ASSERT_FALSE(emitted_fields_from_one(one).empty())
@@ -490,5 +555,30 @@ TEST(NovaContractTests, EveryObjectNamesTheFunctionScopingItsNovaReads) {
     EXPECT_TRUE(object["nova_reader"].contains("function"))
       << "nova_reader must name a function; Nova gives several functions in the same file "
          "a parameter called `json`, so file or receiver scoping silently mixes objects";
+  }
+}
+
+TEST(NovaContractTests, FormatTwoKeepsSubsetAndRequiredNullablePresenceExplicit) {
+  const auto contract = manifest();
+  EXPECT_EQ(contract.at("version"), 2);
+  EXPECT_EQ(contract.at("objects").size(), 33);
+  const auto &space = contract.at("objects").at("space_launch_mode");
+  const auto &parent = contract.at("objects").at(space.at("subset_of").get<std::string>());
+  std::set<std::string> served, omitted, parent_fields;
+  for (const auto &field : space.at("fields")) served.insert(field.get<std::string>());
+  for (const auto &[field, reason] : space.at("omitted").items()) {
+    omitted.insert(field);
+    EXPECT_FALSE(reason.at("reason").get<std::string>().empty());
+    EXPECT_EQ(reason.at("reader_defaults").size(), 3);
+  }
+  for (const auto &field : parent.at("fields")) parent_fields.insert(field.get<std::string>());
+  served.insert(omitted.begin(), omitted.end());
+  EXPECT_EQ(served, parent_fields);
+  const auto &units = contract.at("objects").at("bitrate_units");
+  const auto nullable = units.at("nullable");
+  for (const auto *field : {"cap_kbps", "cap_source", "split_kbps"}) {
+    EXPECT_NE(std::find(nullable.begin(), nullable.end(), field), nullable.end());
+    const auto required = units.at("required_present");
+    EXPECT_NE(std::find(required.begin(), required.end(), field), required.end());
   }
 }
