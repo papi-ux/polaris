@@ -294,6 +294,108 @@ namespace {
 
 }  // namespace
 
+TEST(LiveTuningPolicy, QueueCeilingSurvivesLowerHoldLossAndBoundsItsFirstPromotion) {
+  constexpr std::int64_t origin = 700000;
+  constexpr int hold_kbps = 14088;
+  constexpr int queue_kbps = 14775;
+  live_tuning_policy::policy_t policy {34988, FLOOR};
+  // Component setup, not an exact native replay: adopt seeds the two adjacent observed rates,
+  // without asserting that an outside writer existed. The fixed clean 90-frame prefix supplies
+  // the observed nominal cadence and 2 ms floor; no input depends on the policy's target.
+  for (int second = 84; second <= 103; ++second) {
+    policy.report(origin + second * 1000, 90, 0);
+    policy.rtt(origin + second * 1000 + 1, 2);
+  }
+  policy.adopt(origin + 104000, queue_kbps);
+  policy.adopt(origin + 104000, hold_kbps);
+  for (int second = 105; second <= 125; ++second) {
+    policy.report(origin + second * 1000, 90, 0);
+    policy.rtt(origin + second * 1000 + 1, 2);
+  }
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  ASSERT_EQ(policy.target_kbps(), queue_kbps);
+  // Observed rising RTT values reject that public retry and establish real queue provenance.
+  policy.rtt(origin + 125100, 19);
+  policy.rtt(origin + 125200, 27);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  ASSERT_EQ(policy.target_kbps(), hold_kbps);
+  ASSERT_EQ(policy.ceiling_kbps(), queue_kbps);
+  ASSERT_TRUE(policy.ceiling_is_queue());
+  const auto queue_hold = policy;
+
+  // Actual epoch 4 intervals 105..115 from DECK-CAP976-228-FIRST/STATS.jsonl,
+  // SHA256 ea99d3faf30496630ce785b8e66db31473970ac232a3ed0177be7a1708e31cc8.
+  // Receipt times are sampler request-end minus host_receipt_age_ms, rounded to ms.
+  // RTT values/times are the retained 1 Hz observations, not all subsecond ENet polls.
+  struct row_t {
+    int receipt_ms;
+    int expected;
+    int lost;
+    int rtt_at_ms;
+    int rtt_ms;
+  };
+  const std::vector<row_t> rows {
+    {126207, 84, 33, 126360, 48},
+    {127202, 102, 19, 127365, 52},
+    {128199, 90, 0, 128373, 54},
+    {129196, 94, 73, 129377, 62},
+    {130210, 104, 29, 130385, 47},
+    {131211, 90, 0, 131391, 36},
+    {132230, 90, 0, 132400, 28},
+    {133204, 90, 0, 133404, 21},
+    {134218, 90, 0, 134413, 16},
+    {135235, 90, 0, 135420, 12},
+    {136230, 90, 0, 136430, 9},
+  };
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    const auto &row = rows[i];
+    SCOPED_TRACE(row.receipt_ms);
+    policy.report(origin + row.receipt_ms, row.expected, row.lost);
+    policy.rtt(origin + row.rtt_at_ms, row.rtt_ms);
+    if (i == 3) {
+      ASSERT_EQ(policy.state(), live_tuning_policy::state_e::descend);
+      ASSERT_EQ(policy.target_kbps(), 8452);
+      // The descent's temporary ceiling is distinct from the saved higher queue bound.
+      ASSERT_EQ(policy.ceiling_kbps(), hold_kbps);
+      ASSERT_FALSE(policy.ceiling_is_queue());
+    }
+    if (i >= 5 && i < 10) {
+      // Interval 111 is mixed; intervals 112..114 are only three clean judged reports.
+      ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+      ASSERT_EQ(policy.target_kbps(), hold_kbps);
+      ASSERT_EQ(policy.ceiling_kbps(), hold_kbps);
+    }
+  }
+  // The fourth clean judged interval verifies 14088, not the un-retested 14775 queue ceiling.
+  // Exact 976 instead retires both bounds and climbs to 21132 here.
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_EQ(policy.target_kbps(), hold_kbps);
+  EXPECT_EQ(policy.ceiling_kbps(), queue_kbps);
+  EXPECT_TRUE(policy.ceiling_is_queue());
+
+  // Independent sequence in this same component case: once the known queue rate itself passes
+  // its four-report dwell, its first completion probe is <=1.06x, rather than the old 1.1x.
+  // This fixed clean continuation is a unit input, not another captured native observation.
+  auto promotion = queue_hold;
+  for (int second = 126; second <= 146; ++second) {
+    promotion.report(origin + second * 1000, 90, 0);
+    promotion.rtt(origin + second * 1000 + 1, 2);
+  }
+  ASSERT_EQ(promotion.state(), live_tuning_policy::state_e::verify_hi);
+  ASSERT_EQ(promotion.target_kbps(), queue_kbps);
+  ASSERT_EQ(promotion.ceiling_kbps(), queue_kbps);
+  ASSERT_TRUE(promotion.ceiling_is_queue());
+  for (int second = 147; second <= 150; ++second) {
+    promotion.report(origin + second * 1000, 90, 0);  // Mixed, then three judged reports.
+    ASSERT_EQ(promotion.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(promotion.target_kbps(), queue_kbps);
+  }
+  promotion.report(origin + 151000, 90, 0);
+  EXPECT_EQ(promotion.state(), live_tuning_policy::state_e::climb);
+  EXPECT_GT(promotion.target_kbps(), queue_kbps);
+  EXPECT_LE(std::int64_t {promotion.target_kbps()} * 100, std::int64_t {queue_kbps} * 106);
+}
+
 TEST(LiveTuningPolicy, Rp6S2FailedHoldWaitsForDelayedLossBeforePromotion) {
   const auto descent = rp6_s2_failed_hold_window(59294);
   ASSERT_EQ(descent.state(), live_tuning_policy::state_e::descend);

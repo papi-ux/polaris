@@ -34,7 +34,9 @@
  *   clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
  *   than real loss at the rate above it, the loss is rate-independent after all.
  *   After a hold fails, clean verify/bisect promotions need the existing four-report queue dwell until
- *   a rate at or above that failed hold passes. Ordinary climbs keep their frame test without this dwell.
+ *   a rate at or above that failed hold passes. A higher queue ceiling survives a loss descent from its
+ *   lower hold: verifying the lower rate resumes that queue bracket instead of retiring the higher bound.
+ *   Ordinary climbs keep their frame test without this dwell.
  *
  * Queues
  * - A raise fails when the smoothed RTT rises at two changes in a row to a raised level, 10 ms or half the
@@ -42,7 +44,8 @@
  * - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background
  *   scan only raises it for about 5 s before it falls: a Steam Deck's scans peak at 83 ms for 5 s, every
  *   306.9 s. Cuts go on every 6 s until the queue starts to drain, at most three; the rate that queued is then
- *   the ceiling above the hold, and the first step past it, once it holds clean, is 1.1x: a queue at the link
+ *   the ceiling above the hold, and the first step past it, once it holds clean, is at most the existing
+ *   1.06x bracket-completion step: a queue at the link
  *   builds slower than a retry can see. A queue three cuts did not drain, with nothing lost meanwhile, is
  *   someone else's, and is left alone for 5 minutes.
  * - Heavy loss while cutting for a queue hands the stream to the loss probe.
@@ -281,6 +284,8 @@ namespace live_tuning_policy {
     std::optional<int> lo_;
     // A failed hold must survive a full upward dwell before it can erase its loss ceiling.
     std::optional<int> hold_failed_kbps_;
+    // A queue ceiling displaced by a loss probe; proving its lower hold clean cannot retire it.
+    std::optional<int> retained_queue_ceiling_;
     double hi_loss_ = 0.0;
     double lo_loss_ = 0.0;
     bool hi_is_queue_ = false;

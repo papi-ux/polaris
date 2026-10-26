@@ -25,7 +25,6 @@ namespace live_tuning_policy {
     constexpr double RECHECK_CEILING = 1.25;  // a clean step this close under the ceiling rechecks the ceiling
     constexpr double CLIMB_STEP = 1.25;
     constexpr double CLIMB_FAR = 1.5;
-    constexpr double CLIMB_PAST_QUEUE = 1.1;  // the first step above a queue ceiling that just held clean
     constexpr int RETRY_REPORTS = 20;
     constexpr int FIRST_RETRY_REPORTS = 8;  // the first retry after a hold begins, for a link that recovered meanwhile
     constexpr double LOSSY_MIN = 0.03;  // loss under 3% never starts a probe: the bench's line for background loss
@@ -222,6 +221,8 @@ namespace live_tuning_policy {
   }
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
+    retained_queue_ceiling_.reset();
+    gentle_climb_ = false;
     if (kbps >= base_) {
       hold_failed_kbps_.reset();
     }
@@ -253,6 +254,12 @@ namespace live_tuning_policy {
     }
     if (state_ == state_e::hold) {
       hold_failed_kbps_ = target_;
+      // The loss probe needs its own verification ceiling. Keep the higher queue bound separate:
+      // four clean reports at this lower hold do not test the rate that previously queued.
+      if (hi_is_queue_ && hi_ && *hi_ > target_ &&
+          (!retained_queue_ceiling_ || *hi_ < *retained_queue_ceiling_)) {
+        retained_queue_ceiling_ = hi_;
+      }
     }
     r0_ = target_;
     l0_ = l0;
@@ -327,9 +334,22 @@ namespace live_tuning_policy {
     if (!lossy) {
       clean_promotion();
       lo_ = target_;
+      if (retained_queue_ceiling_ && target_ < *retained_queue_ceiling_) {
+        // This only verified the lower rate. Resume the still-unverified queue bracket, with
+        // no invented loss samples; any failed-hold dwell keeps its own existing lifetime.
+        hi_ = std::exchange(retained_queue_ceiling_, std::nullopt);
+        hi_is_queue_ = true;
+        hi_loss_ = CLIMB_LOSSY;
+        hi_stats_ = {0.0, 0.0};
+        hi_rechecked_ = false;
+        state_ = state_e::bisect;
+        bisect_step(now_ms);
+        return;
+      }
       // A queue ceiling that held clean may still be the link: a queue there builds slower than a
       // retry can see, so the first step above it is a small one.
-      gentle_climb_ = hi_is_queue_;
+      gentle_climb_ = hi_is_queue_ || retained_queue_ceiling_.has_value();
+      retained_queue_ceiling_.reset();
       hi_.reset();
       hi_is_queue_ = false;  // the ceiling held; climbs above it need no queue dwell
       state_ = state_e::climb;
@@ -403,7 +423,7 @@ namespace live_tuning_policy {
       to_normal(now_ms, base_, "base");
       return;
     }
-    const double step = gentle_climb_ ? CLIMB_PAST_QUEUE :
+    const double step = gentle_climb_ ? BISECT_DONE :
       static_cast<double>(target_) * 2.0 < base_ ? CLIMB_FAR : CLIMB_STEP;
     gentle_climb_ = false;
     set_target(target_ * step, "climb", now_ms);
@@ -754,6 +774,8 @@ namespace live_tuning_policy {
 
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
     fec_revert();
+    retained_queue_ceiling_.reset();
+    gentle_climb_ = false;
     hold_failed_kbps_.reset();
     const int previous = target_;
     const int next = std::clamp(kbps, std::min(floor_, base_), base_);
@@ -793,6 +815,8 @@ namespace live_tuning_policy {
 
   void policy_t::rebase(int base_kbps, int floor_kbps) {
     fec_revert();
+    retained_queue_ceiling_.reset();
+    gentle_climb_ = false;
     base_ = std::max(1, base_kbps);
     floor_ = std::min(floor_kbps, base_);
     const int next = std::clamp(target_, floor_, base_);

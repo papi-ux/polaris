@@ -289,6 +289,102 @@ TEST(AdaptiveBitrateFecScope, ARealPolicyEpisodePublishesAfterAckAndRetiresBefor
   adaptive_bitrate::set_session_scope(0, {}, false);
 }
 
+TEST(AdaptiveBitrateFecScope, AnUnhelpedTrialRestoresConfiguredParityBeforeItsHigherRateAck) {
+  const auto budget = fec_budget();
+  enable_controller(budget.encoder_kbps);
+  adaptive_bitrate::set_session_scope(4934, "fec-named-restore", true);
+  adaptive_bitrate::configure_fec_budget(4934, budget, true);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, budget.encoder_kbps, true, 1);
+  int actual_encoder = budget.encoder_kbps;
+  std::int64_t publication_frame = 0;
+  // The same real policy episode as above: its rate-independent result asks for 15, and the
+  // lowered rate's exact ACK publishes it.
+  for (int i = 1; i <= 100 && !publication_frame; ++i) {
+    adaptive_bitrate::note_fec_partial_deficit(4934, std::chrono::steady_clock::now() - 5s);
+    adaptive_bitrate::update_media_report(120, 8, 3.0);
+    const auto request = adaptive_bitrate::get_live_bitrate_request();
+    ASSERT_TRUE(request);
+    const std::int64_t next_frame = 200 + i;
+    if (request->target_bitrate_kbps != actual_encoder) {
+      ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*request,
+        [] { return true; }, nullptr, next_frame));
+      actual_encoder = request->target_bitrate_kbps;
+    } else {
+      adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, actual_encoder, next_frame);
+    }
+    if (adaptive_bitrate::get_state().current_fec_percentage == 15) publication_frame = next_frame;
+  }
+  ASSERT_GT(publication_frame, 0);  // cannot pass unless the full controller raise actually happened
+  ASSERT_EQ(adaptive_bitrate::frame_fec_allocation(4934, publication_frame, 77), (std::pair {10, 15}));
+  const int trial_encoder = actual_encoder;
+  ASSERT_EQ(adaptive_bitrate::get_state().policy_target_bitrate_kbps, budget.encoder_kbps);
+  ASSERT_LT(trial_encoder, budget.encoder_kbps);
+
+  // Post-FEC reports at the learned background loss: the parity did not help. The first report
+  // after the raise is not judged, and the policy's "did it help" test decides within its bounded
+  // report count, an undecided test counting as no help. Until then nothing moves the trial.
+  std::optional<adaptive_bitrate::history_entry_t> restore;
+  std::int64_t last_frame = publication_frame;
+  for (int i = 1; i <= 32; ++i) {
+    adaptive_bitrate::update_media_report(120, 8, 3.0);
+    const auto entries = adaptive_bitrate::get_state_with_history().history.entries;
+    const auto named = std::find_if(entries.begin(), entries.end(), [](const auto &entry) {
+      return entry.kind == "fec_target" && entry.cause == "restore_configured_parity";
+    });
+    if (named != entries.end()) {
+      restore = *named;
+      break;
+    }
+    ASSERT_EQ(adaptive_bitrate::get_state().current_fec_percentage, 15);
+    const auto request = adaptive_bitrate::get_live_bitrate_request();
+    ASSERT_TRUE(request);
+    ASSERT_EQ(request->target_bitrate_kbps, trial_encoder);
+    last_frame = publication_frame + i;
+    adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, trial_encoder, last_frame);
+  }
+  ASSERT_TRUE(restore);  // the policy itself asked for the configured parity; no writer retired it
+  EXPECT_EQ(restore->requested_bitrate_kbps, budget.encoder_kbps);
+  EXPECT_TRUE(restore->applied_known);
+  EXPECT_EQ(restore->applied_bitrate_kbps, trial_encoder);  // the higher rate is only requested
+  auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.current_fec_percentage, 10);
+  EXPECT_EQ(state.fec_phase, "raising_rate");
+  EXPECT_EQ(state.target_bitrate_kbps, budget.encoder_kbps);
+  EXPECT_EQ(state.applied_bitrate_kbps, trial_encoder);
+  // Before the higher rate's ACK, frames queued at the trial rate and every future frame use F0.
+  const std::int64_t ack_frame = last_frame + 1;
+  for (const std::int64_t frame : {publication_frame, last_frame, ack_frame, ack_frame + 1000}) {
+    EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4934, frame, 77), (std::pair {10, 10})) << frame;
+  }
+
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  ASSERT_EQ(request->target_bitrate_kbps, budget.encoder_kbps);
+  EXPECT_EQ(request->revision, restore->operator_revision);
+  ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*request,
+    [] { return true; }, nullptr, ack_frame));
+  state = adaptive_bitrate::get_state_with_history();
+  const auto &entries = state.history.entries;
+  const auto ack = std::find_if(entries.begin(), entries.end(), [&](const auto &entry) {
+    return entry.kind == "encoder_applied" && entry.callback_revision == request->revision;
+  });
+  ASSERT_NE(ack, entries.end());
+  EXPECT_EQ(ack->cause, "runtime_update");
+  EXPECT_GT(ack->sequence, restore->sequence);
+  EXPECT_EQ(ack->callback_bitrate_kbps, budget.encoder_kbps);
+  EXPECT_EQ(ack->applied_bitrate_kbps, budget.encoder_kbps);
+  EXPECT_EQ(ack->applied_revision, request->revision);
+  EXPECT_TRUE(std::none_of(entries.begin(), entries.end(), [](const auto &entry) {
+    return entry.kind == "fec_refused";
+  }));
+  EXPECT_EQ(state.current_fec_percentage, 10);
+  EXPECT_EQ(state.fec_phase, "fixed");
+  EXPECT_EQ(state.applied_bitrate_kbps, budget.encoder_kbps);
+  EXPECT_EQ(adaptive_bitrate::frame_fec_allocation(4934, ack_frame, 77), (std::pair {10, 10}));
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_session_scope(0, {}, false);
+}
+
 TEST(AdaptiveBitrateController, OneLossyReportNeverCuts) {
   // A single burst, such as one second of Wi-Fi interference, is not a change in the stream's loss.
   enable_controller();

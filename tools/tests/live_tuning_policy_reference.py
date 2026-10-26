@@ -35,15 +35,18 @@ Loss
   clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
   than real loss at the rate above it, the loss is rate-independent after all.
   After a hold fails, clean verify/bisect promotions need the existing four-report queue dwell until
-  a rate at or above that failed hold passes. Ordinary climbs keep their frame test without this dwell.
+  a rate at or above that failed hold passes. A higher queue ceiling survives a loss descent from its
+  lower hold: verifying the lower rate resumes that queue bracket instead of retiring the higher bound.
+  Ordinary climbs keep their frame test without this dwell.
 
 Queues
 - A raise fails when the smoothed RTT rises at two changes in a row to a raised level, 10 ms or half the minute's
   floor over that floor, whichever is more, or is raised and climbing 2 ms/s for 2 s.
 - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background scan
   only raises it for about 5 s before it falls (the Deck's peak at 83 ms for 5 s). Cuts go on every 6 s until
-  the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. A queue
-  three cuts did not drain, with nothing lost meanwhile, is someone else's, and is left alone for 5 minutes.
+  the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. The
+  first promotion past that rate, once verified clean, is bounded by the existing 1.06x completion step.
+  A queue three cuts did not drain, with nothing lost meanwhile, is someone else's, and is left alone for 5 minutes.
 - Heavy loss while cutting for a queue hands the stream to the loss probe.
 """
 import argparse
@@ -114,7 +117,6 @@ class Controller:
     PROBE_DEPTH = 8
     BISECT_DONE = 1.06
     CLIMB_STEP, CLIMB_FAR = 1.25, 1.5
-    CLIMB_PAST_QUEUE = 1.1    # the first step above a queue ceiling that just held clean
     RETRY_REPORTS = 20
     FIRST_RETRY_REPORTS = 8   # the first retry after a hold begins, for a link that recovered meanwhile
     LOSSY_MIN = 0.03          # loss under 3% never starts a probe
@@ -164,6 +166,8 @@ class Controller:
         self.phase = 'first'
         self.hi = self.lo = None
         self.hold_failed_kbps = None
+        # A queue ceiling displaced by a loss probe; its lower hold cannot retire it.
+        self.retained_queue_ceiling = None
         self.hi_loss = self.lo_loss = 0.0
         self.hi_kind = 'loss'
         self.hi_stats = [0, 0]
@@ -247,6 +251,8 @@ class Controller:
         self.target = kbps
 
     def to_normal(self, now, kbps, why):
+        self.retained_queue_ceiling = None
+        self.gentle_climb = False
         if kbps >= self.base:
             self.hold_failed_kbps = None
         self.state = NORMAL
@@ -272,6 +278,10 @@ class Controller:
             self.episode_start = self.target
         if self.state == HOLD:
             self.hold_failed_kbps = self.target
+            # Keep the higher queue bound separate from this loss probe's verification ceiling.
+            if (self.hi_kind == 'queue' and self.hi is not None and self.hi > self.target
+                    and (self.retained_queue_ceiling is None or self.hi < self.retained_queue_ceiling)):
+                self.retained_queue_ceiling = self.hi
         self.r0, self.l0 = self.target, l0
         self.phase = 'first'
         self.blind_step = False
@@ -327,10 +337,23 @@ class Controller:
     def verify_hi_result(self, lossy, now):
         if not lossy:
             self.clean_promotion()
+            self.lo = self.target
+            if self.retained_queue_ceiling is not None and self.target < self.retained_queue_ceiling:
+                # Resume the still-unverified queue bracket without inventing loss samples.
+                # The failed-hold dwell keeps its own existing lifetime.
+                self.hi, self.retained_queue_ceiling = self.retained_queue_ceiling, None
+                self.hi_kind = 'queue'
+                self.hi_loss = self.CLIMB_LOSSY
+                self.hi_stats = [0, 0]
+                self.hi_rechecked = False
+                self.state = BISECT
+                self.bisect_step(now)
+                return
             # A queue ceiling that held clean may still be the link: a queue there builds slower than a
             # retry can see, so the first step above it is a small one.
-            self.gentle_climb = self.hi_kind == 'queue'
-            self.lo, self.hi = self.target, None
+            self.gentle_climb = self.hi_kind == 'queue' or self.retained_queue_ceiling is not None
+            self.retained_queue_ceiling = None
+            self.hi = None
             self.hi_kind = 'loss'   # the ceiling held; climbs above it need no queue dwell
             self.state = CLIMB
             self.climb_step(now)
@@ -388,7 +411,7 @@ class Controller:
         if self.target >= self.base:
             self.to_normal(now, self.base, 'base')
             return
-        step = (self.CLIMB_PAST_QUEUE if self.gentle_climb else
+        step = (self.BISECT_DONE if self.gentle_climb else
                 self.CLIMB_FAR if self.target * 2 < self.base else self.CLIMB_STEP)
         self.gentle_climb = False
         self.set_target(self.target * step, 'climb', now)
