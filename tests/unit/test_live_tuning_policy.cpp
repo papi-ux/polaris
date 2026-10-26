@@ -252,7 +252,158 @@ namespace {
     return clean_reports;
   }
 
+  live_tuning_policy::policy_t rp6_s2_failed_hold_window(int through_ms) {
+    // Warm clean prefix with its observed 3 ms RTT floor. Adopt artificially seeds the captured
+    // 9946 hold; this does not assert an outside writer existed or replay the preceding cap cycle.
+    auto policy = rp6_s2_prefix(-1);
+    policy.adopt(700000 + 55858, 9946);
+    // Literal report receipts/counts and RTT samples from CLAUDE-CAP-SETTLING-SOURCE-DISPOSITION/
+    // FACTS.json (SHA256 f32fcaed8e48b21c5f8e7704d97da2626f6fc72cc19a8d40a306a75ec70961d8).
+    struct report_t {
+      int at;
+      int expected;
+      int lost;
+    };
+    const std::vector<report_t> reports {
+      {56943, 190, 180}, {58175, 202, 192}, {59294, 181, 171}, {60303, 142, 39},
+      {61309, 121, 0}, {62313, 118, 0}, {63316, 120, 0}, {64344, 126, 81},
+    };
+    const std::vector<std::pair<int, double>> rtts {
+      {56978, 84}, {57987, 86}, {58992, 92}, {59999, 84},
+      {61003, 65}, {62010, 50}, {63014, 38}, {64022, 38},
+    };
+    std::size_t report = 0;
+    std::size_t rtt = 0;
+    while (report < reports.size() || rtt < rtts.size()) {
+      if (report < reports.size() && (rtt == rtts.size() || reports[report].at < rtts[rtt].first)) {
+        const auto &row = reports[report++];
+        if (row.at > through_ms) {
+          break;
+        }
+        policy.report(700000 + row.at, row.expected, row.lost);
+      } else {
+        const auto &[at, ms] = rtts[rtt++];
+        if (at > through_ms) {
+          break;
+        }
+        policy.rtt(700000 + at, ms);
+      }
+    }
+    return policy;
+  }
+
 }  // namespace
+
+TEST(LiveTuningPolicy, Rp6S2FailedHoldWaitsForDelayedLossBeforePromotion) {
+  const auto descent = rp6_s2_failed_hold_window(59294);
+  ASSERT_EQ(descent.state(), live_tuning_policy::state_e::descend);
+  ASSERT_EQ(descent.target_kbps(), 5967);
+  const auto retry = rp6_s2_failed_hold_window(61309);
+  ASSERT_EQ(retry.state(), live_tuning_policy::state_e::verify_hi);
+  ASSERT_EQ(retry.target_kbps(), 9946);
+  auto policy = rp6_s2_failed_hold_window(63316);
+  // 53c prematurely erased the ceiling and climbed to 14919 on this first counted clean report.
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  ASSERT_EQ(policy.target_kbps(), 9946);
+  ASSERT_EQ(policy.ceiling_kbps(), 9946);
+  policy.rtt(700000 + 64022, 38);
+  policy.report(700000 + 64344, 126, 81);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::bisect);
+  EXPECT_EQ(policy.ceiling_kbps(), 9946);
+  EXPECT_EQ(policy.target_kbps(), 7703);
+}
+
+TEST(LiveTuningPolicy, FailedHoldDwellCountsNeitherMixedNorGapReports) {
+  auto policy = rp6_s2_failed_hold_window(62313);  // First report after the verify raise was mixed.
+  policy.report(700000 + 66316, 120, 0);  // A >2.5 s gap cannot count as a clean dwell report.
+  for (int i = 1; i <= 3; ++i) {
+    policy.report(700000 + 66316 + i * 1000, 120, 0);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    EXPECT_EQ(policy.target_kbps(), 9946);
+  }
+  policy.report(700000 + 70316, 120, 0);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::climb);
+  EXPECT_EQ(policy.target_kbps(), 14919);
+  // Ordinary climbs keep their existing frame test, with no extra report dwell.
+  policy.report(700000 + 71316, 240, 0);  // Mixed after the climb.
+  policy.report(700000 + 72316, 240, 0);
+  EXPECT_EQ(policy.target_kbps(), 18648);
+}
+
+TEST(LiveTuningPolicy, CleanFailedRatePromotionReleasesTheLaterBisectDwell) {
+  auto policy = rp6_s2_failed_hold_window(63316);
+  for (int i = 1; i <= 3; ++i) {
+    policy.report(700000 + 63316 + i * 1000, 120, 0);
+  }
+  ASSERT_EQ(policy.target_kbps(), 14919);  // Four judged reports have now proved 9946 clean.
+  policy.report(700000 + 67316, 120, 120);  // Mixed after the climb.
+  policy.report(700000 + 68316, 120, 120);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::bisect);
+  policy.report(700000 + 69316, 120, 0);  // Mixed after the bisect cut.
+  policy.report(700000 + 70316, 120, 0);
+  // One sufficient clean report can again recheck the ceiling, rather than waiting on the old failure.
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  EXPECT_EQ(policy.target_kbps(), 14919);
+  EXPECT_EQ(policy.last_change().why, "recheck_ceiling");
+}
+
+TEST(LiveTuningPolicy, CleanBisectBelowAFailedHoldKeepsTheLaterDwell) {
+  auto policy = rp6_s2_failed_hold_window(64344);
+  ASSERT_EQ(policy.target_kbps(), 7703);
+  policy.report(700000 + 65344, 120, 0);  // Mixed after the cut.
+  for (int i = 1; i <= 3; ++i) {
+    policy.report(700000 + 65344 + i * 1000, 120, 0);
+    EXPECT_EQ(policy.target_kbps(), 7703);
+  }
+  policy.report(700000 + 69344, 120, 0);
+  ASSERT_EQ(policy.target_kbps(), 8752);
+  policy.report(700000 + 70344, 120, 0);  // Mixed after the raise.
+  policy.report(700000 + 71344, 120, 0);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::bisect);
+  EXPECT_EQ(policy.target_kbps(), 8752);  // Proving 7703 clean did not rehabilitate failed 9946.
+}
+
+TEST(LiveTuningPolicy, NoOpOutsideAdoptionClearsTheFailedHoldDwell) {
+  auto policy = rp6_s2_failed_hold_window(63316);
+  const auto changes = policy.changes();
+  policy.adopt(700000 + 63317, 9946);
+  ASSERT_EQ(policy.changes(), changes);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  ASSERT_FALSE(policy.ceiling_kbps());
+  for (int i = 1; i <= 20; ++i) {
+    policy.report(700000 + 63316 + i * 1000, 120, 0);
+  }
+  ASSERT_EQ(policy.target_kbps(), 14919);
+  policy.report(700000 + 84316, 120, 120);
+  policy.report(700000 + 85316, 120, 120);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::bisect);
+  policy.report(700000 + 86316, 120, 0);
+  policy.report(700000 + 87316, 120, 0);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  EXPECT_EQ(policy.target_kbps(), 14919);
+}
+
+TEST(LiveTuningPolicy, RebaseClearsFailedHoldDwellOnlyWhenItChangesTheTarget) {
+  for (const bool changes_target : {false, true}) {
+    SCOPED_TRACE(changes_target);
+    auto policy = rp6_s2_failed_hold_window(63316);
+    policy.rebase(changes_target ? 9945 : 27000, FLOOR);
+    policy.report(700000 + 64344, 126, 81);
+    if (changes_target) {
+      ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);  // Mixed after the clamp.
+      policy.report(700000 + 65344, 126, 81);
+    }
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::bisect);
+    ASSERT_EQ(policy.target_kbps(), 7703);
+    policy.report(700000 + 66344, 120, 0);  // Mixed after the bisect cut.
+    policy.report(700000 + 67344, 120, 0);
+    if (changes_target) {
+      EXPECT_GT(policy.target_kbps(), 7703);
+    } else {
+      EXPECT_EQ(policy.target_kbps(), 7703);
+    }
+  }
+}
 
 TEST(LiveTuningPolicy, Rp6S2DoesNotApproveARetryFromItsFirstMixedReport) {
   auto policy = rp6_s2_prefix(21411);

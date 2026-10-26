@@ -33,6 +33,8 @@
  * - A hold retries the rate above it after 8 reports, then every 20, and climbs from there when it is clean. A
  *   clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
  *   than real loss at the rate above it, the loss is rate-independent after all.
+ *   After a hold fails, clean verify/bisect promotions need the existing four-report queue dwell until
+ *   a rate at or above that failed hold passes. Ordinary climbs keep their frame test without this dwell.
  *
  * Queues
  * - A raise fails when the smoothed RTT rises at two changes in a row to a raised level, 10 ms or half the
@@ -189,6 +191,7 @@ namespace live_tuning_policy {
     void verify_hi_result(bool lossy, std::int64_t now_ms);
     void bisect_step(std::int64_t now_ms);
     void bisect_result(bool lossy, std::int64_t now_ms);
+    void clean_promotion();
     void enter_hold(std::int64_t now_ms, int kbps);
     void climb_step(std::int64_t now_ms);
     void climb_result(bool lossy, std::int64_t now_ms);
@@ -241,6 +244,8 @@ namespace live_tuning_policy {
     } phase_ = phase_e::first;
     std::optional<int> hi_;
     std::optional<int> lo_;
+    // A failed hold must survive a full upward dwell before it can erase its loss ceiling.
+    std::optional<int> hold_failed_kbps_;
     double hi_loss_ = 0.0;
     double lo_loss_ = 0.0;
     bool hi_is_queue_ = false;

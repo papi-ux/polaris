@@ -155,8 +155,8 @@ namespace live_tuning_policy {
   }
 
   int policy_t::upward_min() const {
-    // A queue ceiling needs a few seconds for a queue to show in ENet's smoothed RTT.
-    return hi_is_queue_ ? QUEUE_RETRY_REPORTS : 0;
+    // A queue or a just-failed hold can appear clean before its queue refills and loss arrives.
+    return hi_is_queue_ || hold_failed_kbps_ ? QUEUE_RETRY_REPORTS : 0;
   }
 
   double policy_t::p_background() const {
@@ -219,6 +219,9 @@ namespace live_tuning_policy {
   }
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
+    if (kbps >= base_) {
+      hold_failed_kbps_.reset();
+    }
     state_ = state_e::normal;
     hi_.reset();
     lo_.reset();
@@ -227,6 +230,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::rate_independent(double rate, std::int64_t now_ms, std::string_view why) {
+    hold_failed_kbps_.reset();
     background_ = std::max(background_, rate);
     reset_baseline(background_);
     backoff_ = BACKOFF_REPORTS;
@@ -240,6 +244,9 @@ namespace live_tuning_policy {
   void policy_t::begin_descent(std::int64_t now_ms, std::string_view why, double l0) {
     if (state_ == state_e::normal) {
       episode_start_ = target_;
+    }
+    if (state_ == state_e::hold) {
+      hold_failed_kbps_ = target_;
     }
     r0_ = target_;
     l0_ = l0;
@@ -312,6 +319,7 @@ namespace live_tuning_policy {
 
   void policy_t::verify_hi_result(bool lossy, std::int64_t now_ms) {
     if (!lossy) {
+      clean_promotion();
       lo_ = target_;
       // A queue ceiling that held clean may still be the link: a queue there builds slower than a
       // retry can see, so the first step above it is a small one.
@@ -339,7 +347,8 @@ namespace live_tuning_policy {
       return;
     }
     set_target(std::sqrt(static_cast<double>(*lo_) * *hi_), "bisect", now_ms);
-    test_ = make_sprt(std::max(lo_loss_, p_background()), std::max(hi_loss_ * 0.6, lo_loss_ + CLIMB_LOSSY));
+    // Keep queue-only bisects unchanged; only a failed hold requires this extra loss-onset dwell.
+    test_ = make_sprt(std::max(lo_loss_, p_background()), std::max(hi_loss_ * 0.6, lo_loss_ + CLIMB_LOSSY), hold_failed_kbps_ ? QUEUE_RETRY_REPORTS : 0);
   }
 
   void policy_t::bisect_result(bool lossy, std::int64_t now_ms) {
@@ -349,6 +358,7 @@ namespace live_tuning_policy {
       hi_stats_ = {test_->frames(), test_->lost()};
       hi_rechecked_ = false;
     } else {
+      clean_promotion();
       lo_ = target_;
       if (hi_ && !hi_rechecked_ && static_cast<double>(*hi_) / *lo_ < RECHECK_CEILING &&
           static_cast<double>(*hi_) / *lo_ > BISECT_DONE) {
@@ -361,6 +371,14 @@ namespace live_tuning_policy {
       }
     }
     bisect_step(now_ms);
+  }
+
+  void policy_t::clean_promotion() {
+    // Called only by clean verify/bisect tests, which require the full dwell while this is set.
+    // A clean lower rate does not prove the failed rate safe, and ordinary climbs add no dwell.
+    if (hold_failed_kbps_ && target_ >= *hold_failed_kbps_) {
+      hold_failed_kbps_.reset();
+    }
   }
 
   void policy_t::enter_hold(std::int64_t now_ms, int kbps) {
@@ -726,6 +744,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
+    hold_failed_kbps_.reset();
     const int previous = target_;
     const int next = std::clamp(kbps, std::min(floor_, base_), base_);
     // Use the clamped rate, including a no-op adoption which resolves the run without a cut.
@@ -767,6 +786,7 @@ namespace live_tuning_policy {
     floor_ = std::min(floor_kbps, base_);
     const int next = std::clamp(target_, floor_, base_);
     if (next != target_) {
+      hold_failed_kbps_.reset();
       clear_loss_run(next < target_);
       after_change_ = next > target_ ? after_change_e::up : after_change_e::down;
       if (next < target_) {

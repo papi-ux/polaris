@@ -34,6 +34,8 @@ Loss
 - A hold retries the rate above it after 8 reports, then every 20, and climbs from there when it is clean. A
   clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
   than real loss at the rate above it, the loss is rate-independent after all.
+  After a hold fails, clean verify/bisect promotions need the existing four-report queue dwell until
+  a rate at or above that failed hold passes. Ordinary climbs keep their frame test without this dwell.
 
 Queues
 - A raise fails when the smoothed RTT rises at two changes in a row to a raised level, 10 ms or half the minute's
@@ -161,6 +163,7 @@ class Controller:
         self.l0 = 0.0
         self.phase = 'first'
         self.hi = self.lo = None
+        self.hold_failed_kbps = None
         self.hi_loss = self.lo_loss = 0.0
         self.hi_kind = 'loss'
         self.hi_stats = [0, 0]
@@ -196,8 +199,8 @@ class Controller:
         return Sprt(p0, p1, max(2.0, self.disp()), min_reports, undecided)
 
     def upward_min(self):
-        # A queue ceiling needs a few seconds for a queue to show in ENet's smoothed RTT.
-        return self.QUEUE_RETRY_REPORTS if self.hi_kind == 'queue' else 0
+        # A queue or a just-failed hold can appear clean before its queue refills and loss arrives.
+        return self.QUEUE_RETRY_REPORTS if self.hi_kind == 'queue' or self.hold_failed_kbps is not None else 0
 
     def p_background(self):
         return max(self.background, self.MIN_LOSS)
@@ -244,12 +247,15 @@ class Controller:
         self.target = kbps
 
     def to_normal(self, now, kbps, why):
+        if kbps >= self.base:
+            self.hold_failed_kbps = None
         self.state = NORMAL
         self.hi = self.lo = None
         self.test = None
         self.set_target(kbps, why, now)
 
     def rate_independent(self, rate, now, why):
+        self.hold_failed_kbps = None
         self.background = max(self.background, rate)
         self.reset_baseline(self.background)
         self.backoff = self.BACKOFF_REPORTS
@@ -264,6 +270,8 @@ class Controller:
     def begin_descent(self, now, why, l0):
         if self.state == NORMAL:
             self.episode_start = self.target
+        if self.state == HOLD:
+            self.hold_failed_kbps = self.target
         self.r0, self.l0 = self.target, l0
         self.phase = 'first'
         self.blind_step = False
@@ -318,6 +326,7 @@ class Controller:
 
     def verify_hi_result(self, lossy, now):
         if not lossy:
+            self.clean_promotion()
             # A queue ceiling that held clean may still be the link: a queue there builds slower than a
             # retry can see, so the first step above it is a small one.
             self.gentle_climb = self.hi_kind == 'queue'
@@ -338,7 +347,8 @@ class Controller:
             return
         self.set_target(math.sqrt(self.lo * self.hi), 'bisect', now)
         self.test = self.sprt(max(self.lo_loss, self.p_background()),
-                              max(self.hi_loss * 0.6, self.lo_loss + self.CLIMB_LOSSY))
+                              max(self.hi_loss * 0.6, self.lo_loss + self.CLIMB_LOSSY),
+                              self.QUEUE_RETRY_REPORTS if self.hold_failed_kbps is not None else 0)
 
     def bisect_result(self, lossy, now):
         if lossy:
@@ -346,6 +356,7 @@ class Controller:
             self.hi_stats = [self.test.frames, self.test.lost]
             self.hi_rechecked = False
         else:
+            self.clean_promotion()
             self.lo = self.target
             if (self.hi is not None and not self.hi_rechecked
                     and self.BISECT_DONE < self.hi / self.lo < self.RECHECK_CEILING):
@@ -357,6 +368,11 @@ class Controller:
                                       max(self.hi_loss * 0.6, self.lo_loss + self.CLIMB_LOSSY), self.upward_min())
                 return
         self.bisect_step(now)
+
+    def clean_promotion(self):
+        # Clean verify/bisect tests require the full dwell while this is set. Lower rates cannot clear it.
+        if self.hold_failed_kbps is not None and self.target >= self.hold_failed_kbps:
+            self.hold_failed_kbps = None
 
     def enter_hold(self, now, kbps):
         self.state = HOLD
@@ -630,6 +646,51 @@ class Controller:
         self.rtt_cuts += 1
         self.rtt_cut_wait = self.RTT_DRAIN_S
         self.set_target(self.target * self.RTT_CUT, 'rtt', now)
+
+    def adopt(self, now, kbps):
+        self.hold_failed_kbps = None
+        previous = self.target
+        kbps = max(min(self.floor, self.base), min(self.base, kbps))
+        self.clear_loss_run(kbps < self.target)
+        if kbps != self.target:
+            self.after_change = 'up' if kbps > self.target else 'down'
+            self.target = kbps
+        self.test = None
+        self.standing_run = self.building_run = 0
+        if self.target >= self.base:
+            self.state = NORMAL
+            self.hi = self.lo = None
+            return
+        self.state = HOLD
+        self.lo = self.target
+        self.lo_loss = max(self.lo_loss, self.p_background())
+        self.hi = previous if previous > self.target else None
+        self.hi_kind = 'loss'
+        self.hi_stats = [0, 0]
+        self.reset_baseline(self.lo_loss)
+        self.retry_wait = self.RETRY_REPORTS
+        self.hold_stats = [0, 0]
+        self.hold_reports = 0
+        self.r0 = max(previous, self.target)
+
+    def rebase(self, base, floor):
+        self.base = max(1, base)
+        self.floor = min(floor, self.base)
+        target = max(self.floor, min(self.base, self.target))
+        if target != self.target:
+            self.hold_failed_kbps = None
+            self.clear_loss_run(target < self.target)
+            self.after_change = 'up' if target > self.target else 'down'
+            if target < self.target:
+                self.standing_run = self.building_run = 0
+            self.target = target
+        self.episode_start = min(self.episode_start, self.base)
+        self.r0 = min(self.r0, self.base)
+        self.rtt_start = min(self.rtt_start, self.base)
+        if self.hi is not None and self.hi > self.base:
+            self.hi = self.base
+        if self.state == HOLD and self.hi is not None and self.hi <= self.target:
+            self.hi = None
 
 
 # ---------------------------------------------------------------- replays
