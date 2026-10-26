@@ -6067,12 +6067,6 @@ namespace video {
       return converter->native_output_fd();
     }
 
-    std::unique_ptr<platf::avcodec_encode_device_t> release_converter() {
-      native.reset();
-      nvenc = nullptr;
-      return std::move(converter);
-    }
-
   private:
     // Reverse destruction order unregisters NVENC before the frame/context go away.
     avcodec_buffer_t hw_device;
@@ -6082,7 +6076,7 @@ namespace video {
   };
 
   void try_native_cuda_fec_device(std::unique_ptr<platf::encode_device_t> &result,
-                                 const encoder_t &encoder, const config_t &config,
+                                 platf::display_t &display, const encoder_t &encoder, const config_t &config,
                                  const sunshine_colorspace_t &colorspace) {
     auto *input = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
     const auto *formats = dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get());
@@ -6095,16 +6089,27 @@ namespace video {
     if (!config.session_generation || state.session_generation != config.session_generation ||
         !state.session_exclusive || !state.configured_enabled || !state.fec_budget_available) return;
 
+    const bool prefer_8bit = input->prefer_8bit_encode;
     auto candidate = std::make_unique<cuda_nvenc_encode_device_t>(
       boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(result)));
     candidate->colorspace = colorspace;
-    candidate->prefer_8bit_encode = input->prefer_8bit_encode;
+    candidate->prefer_8bit_encode = prefer_8bit;
     if (candidate->init_encoder(config, colorspace)) {
       BOOST_LOG(info) << "Using native CUDA NVENC for in-place FEC allocation changes";
       result = std::move(candidate);
     } else {
       BOOST_LOG(info) << "Native CUDA NVENC unavailable for this stream; retaining FFmpeg with fixed FEC";
-      result = candidate->release_converter();
+      // set_frame may have registered GL/CUDA or Vulkan resources. Those
+      // converters are single-initialization objects: destroy the attempted
+      // one before asking the same display for a fresh FFmpeg converter.
+      candidate.reset();
+      result = display.make_avcodec_encode_device(platf::pix_fmt_e::nv12);
+      if (auto *fallback = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
+          fallback && !fallback->data && labwc_gpu_native_override_active()) {
+        auto direct = make_direct_linux_gpu_native_encode_device(encoder, config);
+        if (direct && direct->data) result = std::move(direct);
+      }
+      if (result) result->prefer_8bit_encode = prefer_8bit;
     }
   }
 #endif
@@ -6220,7 +6225,7 @@ namespace video {
       }
     }
 #if !defined(__ANDROID__)
-    try_native_cuda_fec_device(result, encoder, config, colorspace);
+    try_native_cuda_fec_device(result, disp, encoder, config, colorspace);
 #endif
 #endif
 

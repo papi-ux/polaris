@@ -694,9 +694,13 @@ namespace nvenc {
     auto enc_config = saved_enc_config;
     enc_config.rcParams.averageBitRate = new_bitrate_bps;
 
-    // Update VBV buffer size proportionally if it was set
-    if (enc_config.rcParams.vbvBufferSize > 0 && saved_init_params.frameRateNum > 0) {
-      const auto vbv_bits = static_cast<uint64_t>(new_bitrate_bps) * saved_init_params.frameRateDen / saved_init_params.frameRateNum;
+    // Preserve the configured VBV increase and round to the nearest bit, so
+    // an in-place rate change doesn't silently discard the user's setting.
+    if (enc_config.rcParams.vbvBufferSize > 0) {
+      const auto confirmed_bps = saved_enc_config.rcParams.averageBitRate;
+      if (!confirmed_bps) return false;
+      const auto vbv_bits = (static_cast<uint64_t>(enc_config.rcParams.vbvBufferSize) * new_bitrate_bps +
+                             confirmed_bps / 2) / confirmed_bps;
       if (vbv_bits > std::numeric_limits<uint32_t>::max()) {
         BOOST_LOG(error) << "NvEnc: refusing bitrate " << new_bitrate_kbps << " kbps, its VBV buffer does not fit";
         return false;

@@ -22,6 +22,7 @@
 #include <fstream>
 #include <sstream>
 #ifdef __linux__
+#include <src/nvenc/nvenc_cuda.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <src/platform/linux/graphics.h>
@@ -562,6 +563,10 @@ namespace {
   struct fake_nvenc_driver_t {
     std::vector<NVENCSTATUS> reconfigure_results;  // in order, then success
     std::vector<fake_nvenc_reconfigure_t> reconfigures;
+    std::vector<std::string> events;
+    NV_ENC_REGISTER_RESOURCE registration {};
+    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS opened {};
+    std::uint64_t last_frame = 0;
   };
 
   fake_nvenc_driver_t *fake_nvenc_driver = nullptr;
@@ -569,7 +574,8 @@ namespace {
   int fake_nvenc_bitstream = 0;
   int fake_nvenc_input = 0;
 
-  NVENCSTATUS NVENCAPI fake_nvenc_open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS *, void **encoder) {
+  NVENCSTATUS NVENCAPI fake_nvenc_open(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS *params, void **encoder) {
+    fake_nvenc_driver->opened = *params;
     *encoder = &fake_nvenc_session;
     return NV_ENC_SUCCESS;
   }
@@ -622,20 +628,39 @@ namespace {
   }
 
   NVENCSTATUS NVENCAPI fake_nvenc_unregister(void *, NV_ENC_REGISTERED_PTR) {
+    fake_nvenc_driver->events.emplace_back("unregister");
     return NV_ENC_SUCCESS;
   }
 
   NVENCSTATUS NVENCAPI fake_nvenc_destroy(void *) {
+    fake_nvenc_driver->events.emplace_back("destroy");
     return NV_ENC_SUCCESS;
   }
 
   NVENCSTATUS NVENCAPI fake_nvenc_reconfigure(void *, NV_ENC_RECONFIGURE_PARAMS *params) {
     auto &driver = *fake_nvenc_driver;
+    driver.events.emplace_back("reconfigure");
     const auto &rc = params->reInitEncodeParams.encodeConfig->rcParams;
     driver.reconfigures.push_back({rc.averageBitRate, rc.vbvBufferSize, params->reInitEncodeParams.encodeWidth,
       params->reInitEncodeParams.frameRateNum, params->forceIDR == 1, params->resetEncoder == 1});
     const auto index = driver.reconfigures.size() - 1;
     return index < driver.reconfigure_results.size() ? driver.reconfigure_results[index] : NV_ENC_SUCCESS;
+  }
+
+  std::shared_ptr<NV_ENCODE_API_FUNCTION_LIST> fake_nvenc_functions() {
+    auto functions = std::make_shared<NV_ENCODE_API_FUNCTION_LIST>();
+    functions->nvEncOpenEncodeSessionEx = fake_nvenc_open;
+    functions->nvEncGetEncodeGUIDCount = fake_nvenc_guid_count;
+    functions->nvEncGetEncodeGUIDs = fake_nvenc_guids;
+    functions->nvEncGetEncodeCaps = fake_nvenc_caps;
+    functions->nvEncGetEncodePresetConfigEx = fake_nvenc_preset;
+    functions->nvEncInitializeEncoder = fake_nvenc_initialize;
+    functions->nvEncCreateBitstreamBuffer = fake_nvenc_create_bitstream;
+    functions->nvEncDestroyBitstreamBuffer = fake_nvenc_destroy_bitstream;
+    functions->nvEncUnregisterResource = fake_nvenc_unregister;
+    functions->nvEncDestroyEncoder = fake_nvenc_destroy;
+    functions->nvEncReconfigureEncoder = fake_nvenc_reconfigure;
+    return functions;
   }
 
   class fake_nvenc_t final: public nvenc::nvenc_base {
@@ -652,19 +677,7 @@ namespace {
 
   protected:
     bool init_library() override {
-      auto functions = std::make_shared<NV_ENCODE_API_FUNCTION_LIST>();
-      functions->nvEncOpenEncodeSessionEx = fake_nvenc_open;
-      functions->nvEncGetEncodeGUIDCount = fake_nvenc_guid_count;
-      functions->nvEncGetEncodeGUIDs = fake_nvenc_guids;
-      functions->nvEncGetEncodeCaps = fake_nvenc_caps;
-      functions->nvEncGetEncodePresetConfigEx = fake_nvenc_preset;
-      functions->nvEncInitializeEncoder = fake_nvenc_initialize;
-      functions->nvEncCreateBitstreamBuffer = fake_nvenc_create_bitstream;
-      functions->nvEncDestroyBitstreamBuffer = fake_nvenc_destroy_bitstream;
-      functions->nvEncUnregisterResource = fake_nvenc_unregister;
-      functions->nvEncDestroyEncoder = fake_nvenc_destroy;
-      functions->nvEncReconfigureEncoder = fake_nvenc_reconfigure;
-      nvenc = std::move(functions);
+      nvenc = fake_nvenc_functions();
       return true;
     }
 
@@ -675,7 +688,7 @@ namespace {
   };
 
   // A 1080p60 HEVC stream at 20 Mbps, created through the real create_encoder().
-  bool create_fake_nvenc(fake_nvenc_t &encoder) {
+  bool create_fake_nvenc(nvenc::nvenc_base &encoder, int vbv_increase = 0) {
     video::config_t client_config {};
     client_config.width = 1920;
     client_config.height = 1080;
@@ -689,9 +702,78 @@ namespace {
       NV_ENC_VUI_MATRIX_COEFFS_BT709,
       false
     };
-    return encoder.create_encoder(nvenc::nvenc_config {}, client_config, colorspace, NV_ENC_BUFFER_FORMAT_NV12);
+    nvenc::nvenc_config settings;
+    settings.vbv_percentage_increase = vbv_increase;
+    return encoder.create_encoder(settings, client_config, colorspace, NV_ENC_BUFFER_FORMAT_NV12);
   }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+  class fake_cuda_nvenc_t final: public nvenc::nvenc_cuda {
+  public:
+    explicit fake_cuda_nvenc_t(fake_nvenc_driver_t &driver):
+        nvenc_cuda(&fake_nvenc_session, &fake_nvenc_input, 2048) {
+      fake_nvenc_driver = &driver;
+    }
+    ~fake_cuda_nvenc_t() override {
+      destroy_encoder();
+      fake_nvenc_driver = nullptr;
+    }
+  protected:
+    bool init_library() override {
+      nvenc = fake_nvenc_functions();
+      nvenc->nvEncRegisterResource = [](void *, NV_ENC_REGISTER_RESOURCE *resource) -> NVENCSTATUS {
+        fake_nvenc_driver->registration = *resource;
+        fake_nvenc_driver->events.emplace_back("register");
+        resource->registeredResource = &fake_nvenc_input;
+        return NV_ENC_SUCCESS;
+      };
+      nvenc->nvEncMapInputResource = [](void *, NV_ENC_MAP_INPUT_RESOURCE *resource) -> NVENCSTATUS {
+        resource->mappedResource = &fake_nvenc_input;
+        resource->mappedBufferFmt = NV_ENC_BUFFER_FORMAT_NV12;
+        return NV_ENC_SUCCESS;
+      };
+      nvenc->nvEncUnmapInputResource = [](void *, NV_ENC_INPUT_PTR) -> NVENCSTATUS { return NV_ENC_SUCCESS; };
+      nvenc->nvEncEncodePicture = [](void *, NV_ENC_PIC_PARAMS *picture) -> NVENCSTATUS {
+        fake_nvenc_driver->last_frame = picture->inputTimeStamp;
+        fake_nvenc_driver->events.emplace_back("encode" + std::to_string(picture->inputTimeStamp));
+        return NV_ENC_SUCCESS;
+      };
+      nvenc->nvEncLockBitstream = [](void *, NV_ENC_LOCK_BITSTREAM *stream) -> NVENCSTATUS {
+        stream->bitstreamBufferPtr = &fake_nvenc_bitstream;
+        stream->bitstreamSizeInBytes = sizeof(fake_nvenc_bitstream);
+        stream->outputTimeStamp = fake_nvenc_driver->last_frame;
+        return NV_ENC_SUCCESS;
+      };
+      nvenc->nvEncUnlockBitstream = [](void *, NV_ENC_OUTPUT_PTR) -> NVENCSTATUS { return NV_ENC_SUCCESS; };
+      return true;
+    }
+  };
+#endif
 }  // namespace
+
+#if defined(__linux__) && !defined(__ANDROID__)
+TEST(VideoNvencCudaTests, RegistersTheConverterOnceAndReconfiguresBetweenFrames) {
+  fake_nvenc_driver_t driver;
+  {
+    fake_cuda_nvenc_t encoder {driver};
+    ASSERT_TRUE(create_fake_nvenc(encoder));
+    EXPECT_EQ(driver.opened.deviceType, NV_ENC_DEVICE_TYPE_CUDA);
+    EXPECT_EQ(driver.opened.device, &fake_nvenc_session);
+    EXPECT_EQ(driver.registration.resourceType, NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR);
+    EXPECT_EQ(driver.registration.resourceToRegister, &fake_nvenc_input);
+    EXPECT_EQ(driver.registration.width, 1920u);
+    EXPECT_EQ(driver.registration.height, 1080u);
+    EXPECT_EQ(driver.registration.pitch, 2048u);
+    EXPECT_EQ(driver.registration.bufferFormat, NV_ENC_BUFFER_FORMAT_NV12);
+    EXPECT_EQ(encoder.encode_frame(41, false).frame_index, 41u);
+    EXPECT_TRUE(encoder.update_bitrate(15000));
+    EXPECT_EQ(encoder.encode_frame(42, false).frame_index, 42u);
+  }
+  EXPECT_EQ(driver.events, (std::vector<std::string> {
+    "register", "encode41", "reconfigure", "encode42", "unregister", "destroy"
+  }));
+}
+#endif
 
 TEST(VideoNvencBitrateTests, ARefusedRateIsAskedAgainAndOnlyAConfirmedRateSkipsTheEncoder) {
   fake_nvenc_driver_t driver;
@@ -748,6 +830,20 @@ TEST(VideoNvencBitrateTests, RefusesRatesTheEncoderCannotHoldWithoutCallingIt) {
   EXPECT_TRUE(encoder.update_bitrate(4294967));
   ASSERT_EQ(driver.reconfigures.size(), 1u);
   EXPECT_EQ(driver.reconfigures[0].average_bitrate, 4294967000u);
+}
+
+TEST(VideoNvencBitrateTests, PreservesTheConfiguredVbvIncreaseAcrossRefusalAndRestore) {
+  fake_nvenc_driver_t driver;
+  driver.reconfigure_results = {NV_ENC_ERR_INVALID_PARAM, NV_ENC_SUCCESS};
+  fake_nvenc_t encoder {driver};
+  ASSERT_TRUE(create_fake_nvenc(encoder, 100));
+  EXPECT_FALSE(encoder.update_bitrate(15000));
+  EXPECT_TRUE(encoder.update_bitrate(15000));
+  EXPECT_TRUE(encoder.update_bitrate(20000));
+  ASSERT_EQ(driver.reconfigures.size(), 3u);
+  EXPECT_EQ(driver.reconfigures[0].vbv_buffer_size, 500000u);
+  EXPECT_EQ(driver.reconfigures[1].vbv_buffer_size, 500000u);
+  EXPECT_EQ(driver.reconfigures[2].vbv_buffer_size, 666667u);
 }
 
 TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopologyMismatch) {
