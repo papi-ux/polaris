@@ -1097,6 +1097,60 @@ namespace stream_stats {
       return session;
     }
 
+    nlohmann::json client_fec_feedback_json(const client_stats_t &client) {
+      namespace fs = stream::fec_status;
+      constexpr auto max_age = std::chrono::milliseconds {2500};
+      const auto now = fs::clock::now();
+      const auto &feedback = client.fec_feedback;
+      const auto snapshot = feedback.tracker.snapshot(client.session_generation, now, max_age);
+      const auto availability = [&] {
+        switch (snapshot.availability) {
+          case fs::availability_e::fresh_report: return "fresh_report";
+          case fs::availability_e::capability_unavailable: return "capability_unavailable";
+          case fs::availability_e::no_report: return "no_report";
+          case fs::availability_e::stale_report: return "stale_report";
+          default: return "unavailable";
+        }
+      }();
+      nlohmann::json result {
+        {"scope", "selective_reported_blocks"},
+        {"advertised_support", feedback.advertised_support ? nlohmann::json(*feedback.advertised_support) : nlohmann::json(nullptr)},
+        {"availability", availability},
+        {"max_age_ms", max_age.count()},
+        {"accepted_reports", feedback.accepted_reports},
+        {"rejected_reports", feedback.rejected_reports},
+        {"duplicate_reports", feedback.duplicate_reports},
+        {"reported_deficit_blocks", feedback.reported_deficit_blocks},
+        {"reported_sufficient_shard_blocks", feedback.reported_sufficient_shard_blocks},
+        {"last_report", nullptr}
+      };
+      if (snapshot.sample) {
+        const auto &block = snapshot.sample->block;
+        result["last_report"] = {
+          {"age_ms", std::chrono::duration_cast<std::chrono::milliseconds>(now - snapshot.sample->received_at).count()},
+          {"frame_index", block.frame_index},
+          {"block_index", block.block_index},
+          {"block_count", block.block_count},
+          {"total_data_packets", block.total_data_packets},
+          {"total_parity_packets", block.total_parity_packets},
+          {"received_data_packets", block.received_data_packets},
+          {"received_parity_packets", block.received_parity_packets},
+          {"missing_packets_before_highest_received", block.missing_packets_before_highest_received},
+          {"reported_fec_percentage", block.fec_percentage},
+          {"absent_data_shards", block.absent_data_shards()},
+          {"rank_deficit_shards", block.rank_deficit_shards()}
+        };
+      }
+      return result;
+    }
+
+    nlohmann::json stream_fec_feedback_json(const std::vector<client_stats_t> &clients) {
+      if (clients.size() == 1) {
+        return client_fec_feedback_json(clients.front());
+      }
+      return {{"scope", "selective_reported_blocks"}, {"availability", clients.empty() ? "no_stream" : "multiple_streams"}, {"last_report", nullptr}};
+    }
+
     nlohmann::json fec_protection_json(const fec_protection_stats_t &stats) {
       return {
         {"oversized_frames_total", stats.oversized_frames_total},
@@ -1265,6 +1319,7 @@ namespace stream_stats {
     j["width"] = width;
     j["height"] = height;
     j["fec_protection"] = fec_protection_json(fec_protection);
+    j["fec_feedback"] = stream_fec_feedback_json(clients);
     j["latency_ms"] = latency_ms;
     j["packet_loss"] = packet_loss;
     j["packet_loss_available"] = packet_loss_available;
@@ -1378,6 +1433,7 @@ namespace stream_stats {
       cj["control_channel_packet_loss"] = c.control_channel_packet_loss;
       cj["bytes_sent"] = c.bytes_sent;
       cj["fec_protection"] = fec_protection_json(c.fec_protection);
+      cj["fec_feedback"] = client_fec_feedback_json(c);
       cj["adaptive_target_bitrate_kbps"] = c.adaptive_target_bitrate_kbps;
       clients_json.push_back(cj);
     }
@@ -3783,10 +3839,11 @@ namespace stream_stats {
     );
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_source", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak", "fec_protection"});
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_source", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak", "fec_protection", "fec_feedback"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["fec_protection"] = fec_protection_json(stats.fec_protection);
+    advanced["fec_feedback"] = stream_fec_feedback_json(stats.clients);
     advanced["controller_input"] = {
       {"host_controller_isolation", stats.input_host_controller_isolation},
       {"steam_input_status", stats.input_steam_input_status},
@@ -4880,6 +4937,55 @@ namespace stream_stats {
     if (client == current_stats.clients.begin()) {
       current_stats.fec_protection = client->fec_protection;
     }
+  }
+
+  bool configure_client_fec_feedback(std::uint64_t generation, std::uint32_t client_features) {
+    if (generation == 0) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [generation](const client_stats_t &c) { return c.session_generation == generation; });
+    if (client == current_stats.clients.end()) {
+      return false;
+    }
+    client->fec_feedback = {};
+    client->fec_feedback.advertised_support = (client_features & stream::fec_status::client_feature_flag) != 0;
+    client->fec_feedback.tracker.reset(generation, client_features);
+    return true;
+  }
+
+  std::optional<stream::fec_status::refusal_e> record_client_fec_feedback(
+    std::uint64_t generation, std::string_view payload, std::chrono::steady_clock::time_point received_at
+  ) {
+    if (generation == 0) {
+      return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [generation](const client_stats_t &c) { return c.session_generation == generation; });
+    if (client == current_stats.clients.end()) {
+      return std::nullopt;
+    }
+    auto &feedback = client->fec_feedback;
+    const auto result = feedback.tracker.observe(generation, payload, received_at);
+    if (result != stream::fec_status::refusal_e::none) {
+      ++feedback.rejected_reports;
+      if (result == stream::fec_status::refusal_e::duplicate_block) {
+        ++feedback.duplicate_reports;
+      }
+      return result;
+    }
+    ++feedback.accepted_reports;
+    const auto snapshot = feedback.tracker.snapshot(generation, received_at, std::chrono::steady_clock::duration::zero());
+    const auto &block = snapshot.sample->block;
+    if (block.rank_deficit_shards() > 0) {
+      ++feedback.reported_deficit_blocks;
+      feedback.last_deficit_received_at = received_at;
+    } else if (block.absent_data_shards() > 0) {
+      ++feedback.reported_sufficient_shard_blocks;
+    }
+    return result;
   }
 
   double packet_loss_percent(uint64_t scaled_loss, uint64_t scale) {

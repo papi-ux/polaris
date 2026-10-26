@@ -30,6 +30,7 @@
 #include "pyrowave_advice.h"
 #include "stream_bitrate.h"
 #include "stream_fec.h"
+#include "stream_fec_status.h"
 #include "vrr_session_policy.h"
 #include "vrr_pacing_receipt.h"
 #include "vrr_trace.h"
@@ -97,6 +98,18 @@ namespace stream_stats {
     int fec_percentage = 0;
     int packet_size = 0;
     std::string largest_frame_type;
+  };
+
+  /** Selective client-reported block facts, never a stream-wide loss census. */
+  struct client_fec_feedback_t {
+    std::optional<bool> advertised_support;
+    stream::fec_status::tracker_t tracker;
+    std::uint64_t accepted_reports = 0;
+    std::uint64_t rejected_reports = 0;
+    std::uint64_t duplicate_reports = 0;
+    std::uint64_t reported_deficit_blocks = 0;
+    std::uint64_t reported_sufficient_shard_blocks = 0;
+    std::optional<std::chrono::steady_clock::time_point> last_deficit_received_at;
   };
 
   struct capture_source_t {
@@ -241,6 +254,7 @@ namespace stream_stats {
 
     // Adaptive bitrate
     int adaptive_target_bitrate_kbps = 0;
+    client_fec_feedback_t fec_feedback;
   };
 
   /**
@@ -1238,6 +1252,19 @@ namespace stream_stats {
                                   int fec_percentage,
                                   int packet_size,
                                   std::string_view frame_type);
+
+  /** Bind feedback capability from trusted RTSP setup, not an incoming report. */
+  bool configure_client_fec_feedback(std::uint64_t session_generation, std::uint32_t client_features);
+
+  /**
+   * Validate and record one decrypted inbound payload under the stats lock.
+   * nullopt denotes a retired/unknown generation. No bitrate or parity action.
+   */
+  std::optional<stream::fec_status::refusal_e> record_client_fec_feedback(
+    std::uint64_t session_generation,
+    std::string_view payload,
+    std::chrono::steady_clock::time_point received_at = std::chrono::steady_clock::now()
+  );
 
   /**
    * @brief Update network statistics.

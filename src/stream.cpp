@@ -45,6 +45,7 @@ extern "C" {
 #include "pyrowave_advice.h"
 #include "stream.h"
 #include "stream_fec.h"
+#include "stream_fec_status.h"
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
 #include "stream_stats.h"
@@ -106,6 +107,7 @@ using asio::ip::udp;
 using namespace std::literals;
 
 namespace stream {
+  static_assert(RS8_DATA_SHARDS_MAX == 255, "Frame FEC fitting assumes the RS8 wire envelope");
   namespace session {
     extern std::atomic_uint running_sessions;
     extern std::atomic_uint running_host_sessions;
@@ -1442,6 +1444,16 @@ namespace stream {
       if (adaptive_bitrate::is_enabled() && t.count() > 0 && session->control.peer) {
         adaptive_bitrate::update_rtt(rtt_ms);
       }
+    });
+
+    // Client -> host 0x5502 is selective FEC feedback; the same numeric ID in
+    // the opposite direction remains Set RGB LED. Both dispatch paths strip
+    // their control header before this callback, retaining existing auth/GCM.
+    server->map(fec_status::packet_type, [](session_t *session, const std::string_view &payload) {
+      if (!(session->config.mlFeatureFlags & fec_status::client_feature_flag)) {
+        return;
+      }
+      stream_stats::record_client_fec_feedback(session->session_generation, payload);
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
@@ -3377,6 +3389,7 @@ namespace stream {
         addr_string, session.device_name, session.session_generation,
         stream_stats::client_family_for_stream(session.client_family)
       );
+      stream_stats::configure_client_fec_feedback(session.session_generation, session.config.mlFeatureFlags);
       // Frozen in alloc(); recorded once against this generation's own entry.
       stream_stats::record_vrr_session(session.vrr);
       stream_stats::start_session_timing(

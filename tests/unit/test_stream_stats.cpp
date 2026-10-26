@@ -2084,6 +2084,94 @@ TEST(StreamStatsFecProtectionTests, RoutesEvidenceBySessionGeneration) {
   );
 }
 
+namespace {
+  std::array<char, 21> client_fec_feedback_payload() {
+    return {0, 0, 0, 1, 0, 110, 0, 99, 0, 11, 0, 100, 0, 10, 0, 89, 0, 10, 10, 0, 1};
+  }
+}
+
+TEST(StreamStatsFecFeedbackTests, RoutesByTrustedGenerationAndRefusesRetiredWrites) {
+  namespace fs = stream::fec_status;
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client("198.51.100.45", "Old", 7501);
+  stream_stats::add_client("198.51.100.45", "Replacement", 7502);
+  ASSERT_TRUE(stream_stats::configure_client_fec_feedback(7501, fs::client_feature_flag));
+  ASSERT_TRUE(stream_stats::configure_client_fec_feedback(7502, fs::client_feature_flag));
+  EXPECT_FALSE(stream_stats::configure_client_fec_feedback(0, 1));
+  EXPECT_FALSE(stream_stats::configure_client_fec_feedback(9999, 1));
+  const auto wire = client_fec_feedback_payload();
+  EXPECT_EQ(stream_stats::record_client_fec_feedback(7502, {wire.data(), wire.size()}), fs::refusal_e::none);
+  auto stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 2);
+  EXPECT_EQ(stats.clients.at(0).fec_feedback.accepted_reports, 0);
+  EXPECT_EQ(stats.clients.at(1).fec_feedback.accepted_reports, 1);
+  const auto multiple = nlohmann::json::parse(stats.to_json()).at("fec_feedback");
+  EXPECT_EQ(multiple.at("availability"), "multiple_streams");
+  EXPECT_TRUE(multiple.at("last_report").is_null());
+  stream_stats::remove_client("198.51.100.45", 7501);
+  EXPECT_FALSE(stream_stats::record_client_fec_feedback(7501, {wire.data(), wire.size()}));
+  EXPECT_FALSE(stream_stats::record_client_fec_feedback(0, {wire.data(), wire.size()}));
+  stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 1);
+  EXPECT_EQ(stats.clients.front().fec_feedback.accepted_reports, 1);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsFecFeedbackTests, CountsSelectiveBlockFactsWithoutChangingVideoLossOrController) {
+  namespace fs = stream::fec_status;
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client("198.51.100.46", "Nova", 7511);
+  ASSERT_TRUE(stream_stats::configure_client_fec_feedback(7511, fs::client_feature_flag));
+  const auto target_before = adaptive_bitrate::get_state().target_bitrate_kbps;
+  auto wire = client_fec_feedback_payload();
+  EXPECT_EQ(stream_stats::record_client_fec_feedback(7511, {wire.data(), wire.size()}), fs::refusal_e::none);
+  EXPECT_EQ(stream_stats::record_client_fec_feedback(7511, {wire.data(), wire.size()}), fs::refusal_e::duplicate_block);
+  EXPECT_EQ(stream_stats::record_client_fec_feedback(7511, {wire.data(), wire.size() - 1}), fs::refusal_e::invalid_size);
+  wire[3] = 2;
+  wire[9] = 10;
+  wire[15] = 90;  // Ten absent data shards, ten parity: enough, not a recovery-success flag.
+  EXPECT_EQ(stream_stats::record_client_fec_feedback(7511, {wire.data(), wire.size()}), fs::refusal_e::none);
+  const auto stats = stream_stats::get_current();
+  const auto json = nlohmann::json::parse(stats.to_json());
+  const auto &feedback = json.at("clients").at(0).at("fec_feedback");
+  EXPECT_EQ(feedback.at("scope"), "selective_reported_blocks");
+  EXPECT_EQ(feedback.at("accepted_reports"), 2);
+  EXPECT_EQ(feedback.at("rejected_reports"), 2);
+  EXPECT_EQ(feedback.at("duplicate_reports"), 1);
+  EXPECT_EQ(feedback.at("reported_deficit_blocks"), 1);
+  EXPECT_EQ(feedback.at("reported_sufficient_shard_blocks"), 1);
+  EXPECT_EQ(feedback.at("last_report").at("rank_deficit_shards"), 0);
+  EXPECT_FALSE(feedback.contains("packet_loss"));
+  EXPECT_FALSE(stats.packet_loss_available);
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, target_before);
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+  EXPECT_EQ(doctor.at("advanced_evidence").at("fec_feedback").at("accepted_reports"), 2);
+  stream_stats::update_stream_active(false);
+}
+
+TEST(StreamStatsFecFeedbackTests, MissingStaleAndUnsupportedReportsNeverBecomeCleanEvidence) {
+  namespace fs = stream::fec_status;
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client("198.51.100.47", "Moonlight", 7521);
+  ASSERT_TRUE(stream_stats::configure_client_fec_feedback(7521, 0));
+  const auto wire = client_fec_feedback_payload();
+  EXPECT_EQ(stream_stats::record_client_fec_feedback(7521, {wire.data(), wire.size()}), fs::refusal_e::capability_unavailable);
+  auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("fec_feedback").at("availability"), "capability_unavailable");
+  EXPECT_EQ(json.at("fec_feedback").at("advertised_support"), false);
+  ASSERT_TRUE(stream_stats::configure_client_fec_feedback(7521, 1));
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("fec_feedback").at("availability"), "no_report");
+  EXPECT_EQ(stream_stats::record_client_fec_feedback(7521, {wire.data(), wire.size()}, fs::clock::now() - std::chrono::seconds(10)), fs::refusal_e::none);
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("fec_feedback").at("availability"), "stale_report");
+  EXPECT_TRUE(json.at("fec_feedback").at("last_report").is_null());
+  EXPECT_EQ(json.at("fec_feedback").at("accepted_reports"), 1);
+  stream_stats::update_stream_active(false);
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("fec_feedback").at("availability"), "no_stream");
+}
+
 TEST(StreamStatsDoctorTests, ReportsAHostWithNoCaptureBackendAsFailed) {
   // Polaris logs this fatally at startup and then serves anyway, so the host pairs, accepts
   // launches and advertises H.264 as the only codec it has while Doctor reads clean. See #677.
