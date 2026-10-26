@@ -487,11 +487,12 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
+import { ref, shallowRef, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
 import { useLiveTuning } from '../composables/useLiveTuning'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
 import { useSessionHistory, formatDuration } from '../composables/useSessionHistory'
+import { usePostSessionReport } from '../composables/usePostSessionReport'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { useFavicon } from '../composables/useFavicon'
 import Skeleton from '../components/Skeleton.vue'
@@ -534,8 +535,10 @@ import {
   featuredLibraryApp,
   formatReportAge,
   idleSignalCells,
+  lastSessionRecap,
   liveSignalCells,
   missionStageMode,
+  RECAP_HOLD_MS,
   reading,
   relativeDay,
   streamFormatLabel,
@@ -1813,8 +1816,42 @@ const newSessionModeLabel = computed(() => {
   return headlessEnabled.value ? t('dashboard.headless') : t('dashboard.windowed')
 })
 
+// ── Last session recap ──
+// A stream this page watched end in the host's matching idle report is recapped in the Last
+// session cell for a moment. An idle first load, a dropped feed or a restarted host never
+// completes a report, so none of them is announced as a stream that just finished.
+const lastSessionRecapState = shallowRef(null)
+let recapTimer = null
+function clearLastSessionRecap() {
+  clearTimeout(recapTimer)
+  recapTimer = null
+  lastSessionRecapState.value = null
+}
+// The recap never pulls its link from under a pointer or keyboard focus.
+function settleLastSessionRecap() {
+  const recapCell = missionStage.value?.$el?.querySelector?.('[data-idle-signal="last"]')
+  if (recapCell && (recapCell.matches(':hover') || recapCell.contains(document.activeElement))) {
+    recapTimer = setTimeout(settleLastSessionRecap, RECAP_HOLD_MS)
+    return
+  }
+  clearLastSessionRecap()
+}
+usePostSessionReport(stats, computed(() => streamStatsConnected?.value === true), ref(''), {
+  onCompleted: (snapshot, idle) => {
+    const lastSession = idle?.last_session
+    // useSessionHistory writes its entry for the same report; read it once both have run.
+    nextTick(() => {
+      clearLastSessionRecap()
+      lastSessionRecapState.value = lastSessionRecap({ snapshot, lastSession, entry: sessions.value[0], t })
+      if (lastSessionRecapState.value) recapTimer = setTimeout(settleLastSessionRecap, RECAP_HOLD_MS)
+    })
+  },
+})
+watch(() => stats.value?.streaming, streaming => { if (streaming) clearLastSessionRecap() })
+
 const idleCells = computed(() => {
   const last = sessions.value[0]
+  const recap = lastSessionRecapState.value
   return idleSignalCells({
     readiness: {
       label: readinessLabel.value, tone: readinessTone.value,
@@ -1826,6 +1863,7 @@ const idleCells = computed(() => {
       duration: Number.isFinite(last.duration_s) ? formatDuration(last.duration_s) : '',
       grade: last.quality_grade || '', tone: last.quality_grade ? gradeColor(last.quality_grade) : '',
       detail: [last.client_name, last.started_at ? formatSessionDate(last.started_at) : ''].filter(Boolean).join(' · '),
+      recap: recap?.entry === last ? recap : null,
     } : null,
     modeLabel: newSessionModeLabel.value,
     gpu: gpu.value,
@@ -2111,6 +2149,7 @@ onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleStatusVisibility)
   if (statusClock) { clearInterval(statusClock); statusClock = null }
   if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
+  clearTimeout(recapTimer)
   unsubscribeThemeChange?.()
   unsubscribeThemeChange = null
   reducedMotionQuery?.removeEventListener?.('change', updateReducedMotionPreference)

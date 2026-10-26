@@ -132,8 +132,12 @@ onUnmounted(() => {
 <template>
   <div class="mc-signals-wrap" role="group">
     <dl ref="root" class="mc-signals">
-      <div v-for="cell in cells" :key="cell.key" class="mc-signal" :class="{ 'is-missing': cell.missing }" v-bind="cell.attrs" :title="cell.title || undefined">
-        <dt class="mc-signal-label">{{ cell.label }}</dt>
+      <div v-for="cell in cells" :key="cell.key" class="mc-signal" :class="{ 'is-missing': cell.missing, 'is-recap': cell.recap }" v-bind="cell.attrs" :title="cell.title || undefined">
+        <!-- A linked cell opens from its label, and the link's hit area covers the whole cell. -->
+        <dt class="mc-signal-label">
+          <router-link v-if="cell.link" :to="cell.link.to" class="focus-ring mc-signal-link" :aria-label="cell.link.label">{{ cell.label }}<span aria-hidden="true"> ›</span></router-link>
+          <template v-else>{{ cell.label }}</template>
+        </dt>
         <dd class="mc-signal-value" :class="[cell.missing ? 'text-storm' : cell.tone, { 'is-word': cell.word }]">
           <span v-if="cell.grade" class="dashboard-grade-badge mc-signal-grade" :class="cell.tone">{{ cell.grade }}</span>
           <span class="mc-signal-number">{{ cell.value }}</span><span v-if="cell.unit" class="mc-signal-unit">{{ cell.unit }}</span>

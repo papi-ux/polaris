@@ -2689,6 +2689,33 @@ textarea {
     margin: 0.45rem 0 0;
   }
 
+  /* A recap tints the Last session cell once and fades back as it settles; no geometry changes. */
+  .mc-signal[data-idle-signal='last'] {
+    transition: background-color 600ms ease, box-shadow 600ms ease;
+  }
+
+  .mc-signal.is-recap {
+    position: relative;
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    box-shadow: inset 0 2px 0 var(--color-accent);
+  }
+
+  .mc-signal-link {
+    font-weight: 700;
+    color: var(--color-ice);
+  }
+
+  .mc-signal-link::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+
+  .mc-signal.is-recap:hover .mc-signal-link {
+    text-decoration: underline;
+    text-underline-offset: 0.25em;
+  }
+
   /* The deck: the Doctor note or the recent titles, then Diagnostics, with controls beside. */
   .mc-deck {
     display: flex;
