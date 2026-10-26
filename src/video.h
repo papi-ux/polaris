@@ -82,6 +82,9 @@ namespace video {
     // the host's private opt-in and the client's request. Default: ineligible, so pacing is unchanged.
     vrr_policy::pacing_intent_t vrr_pacing;
     vrr_trace::session_policy_t trace_display_policy;
+    // Frozen from the paired launching device, not the shared FEC feature flag:
+    // stock Moonlight has that flag too, but no Nova post-FEC media reports.
+    bool client_media_feedback_expected = false;
   };
 
   inline AVRational framerate_to_rational(const config_t &config) {

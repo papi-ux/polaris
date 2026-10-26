@@ -6080,7 +6080,8 @@ namespace video {
                                  const sunshine_colorspace_t &colorspace) {
     auto *input = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
     const auto *formats = dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get());
-    if (encoder_probe_in_progress || encoder.name != "nvenc" || !input || !input->data ||
+    if (encoder_probe_in_progress || !config.client_media_feedback_expected ||
+        encoder.name != "nvenc" || !input || !input->data ||
         !formats || formats->avcodec_base_dev_type != AV_HWDEVICE_TYPE_CUDA ||
         config.dynamicRange != 0 || config.chromaSamplingType != 0 || colorspace.bit_depth != 8 ||
         (config.videoFormat != 0 && config.videoFormat != 1) ||
@@ -6110,6 +6111,7 @@ namespace video {
         if (direct && direct->data) result = std::move(direct);
       }
       if (result) result->prefer_8bit_encode = prefer_8bit;
+      else BOOST_LOG(error) << "Native CUDA NVENC initialization failed and the display could not create a fresh FFmpeg converter";
     }
   }
 #endif

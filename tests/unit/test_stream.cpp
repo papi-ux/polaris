@@ -1031,6 +1031,28 @@ TEST(NvhttpSessionHealthTests, EffectiveEncoderUsesNegotiatedPyrowaveBeforeFirst
   EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "nvenc");
 }
 
+TEST(StreamNativeFecAdmissionTests, SharedFecCapabilityDoesNotOptStockClientsIntoNativeNvenc) {
+  stream::config_t cfg {};
+  cfg.mlFeatureFlags = 1; // Modern stock clients advertise FEC feedback too.
+  cfg.monitor.client_media_feedback_expected = true; // Allocation must replace caller state.
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 1; launch.gcm_key.resize(16); launch.iv.resize(16);
+  launch.unique_id = "native-fec-admission";
+  const auto stock = stream::session::alloc(cfg, launch);
+  ASSERT_TRUE(stock);
+  EXPECT_FALSE(stream::session::frozen_video_config_for_tests(*stock).client_media_feedback_expected);
+  launch.client_family = "nova";
+  const auto nova = stream::session::alloc(cfg, launch);
+  ASSERT_TRUE(nova);
+  const auto &frozen = stream::session::frozen_video_config_for_tests(*nova);
+  EXPECT_TRUE(frozen.client_media_feedback_expected);
+  launch.client_family.clear();
+  const auto unknown = stream::session::alloc(cfg, launch);
+  ASSERT_TRUE(unknown);
+  EXPECT_FALSE(stream::session::frozen_video_config_for_tests(*unknown).client_media_feedback_expected);
+  EXPECT_TRUE(frozen.client_media_feedback_expected) << "an existing generation retains its admitted client";
+}
+
 TEST(StreamVrrAdmissionTests, HostOptInAndAuthenticatedIntentAreFrozenByActualSessionAllocation) {
   const bool previous = config::video.vrr_source_pacing;
   auto restore = util::fail_guard([&] { config::video.vrr_source_pacing = previous; });
