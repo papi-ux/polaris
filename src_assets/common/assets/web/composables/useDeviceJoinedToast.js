@@ -6,9 +6,10 @@ import { useToast } from './useToast.js'
 // Observe only the reads the current page already owns. A missing snapshot means unavailable,
 // not disconnected; the first valid read on a page or after a gap is always silent.
 export function useDeviceJoinedToast(source, { t, stream = false }) {
-  const { toast, dismiss, toasts } = useToast()
+  const { toast, dismiss } = useToast()
   let previous = null
-  let notices = []
+  // Keep ownership through leave animations, even after the notice leaves the queue.
+  const notices = []
 
   function reset() { previous = null }
 
@@ -37,7 +38,6 @@ export function useDeviceJoinedToast(source, { t, stream = false }) {
         if (!name) continue
         // Unknown family stays unknown; a device name is never a hardware-type heuristic.
         const type = streamClientFamilyLabel(client.client_family)
-        notices = notices.filter(id => toasts.value.some(notice => notice.id === id))
         notices.push(toast(t(type ? '_common.device_joined_type' : '_common.device_joined', { name, type }), 'info'))
       }
     }
@@ -49,6 +49,6 @@ export function useDeviceJoinedToast(source, { t, stream = false }) {
   onScopeDispose(() => {
     document.removeEventListener('visibilitychange', reset)
     // The page's notice must not follow navigation into the browser player or auth screens.
-    notices.forEach(dismiss)
+    notices.forEach(id => dismiss(id, { immediate: true }))
   })
 }

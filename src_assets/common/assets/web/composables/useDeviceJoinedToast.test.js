@@ -16,7 +16,7 @@ describe('device joined notices from existing feeds', () => {
   let scopes
   let wrappers
   let t
-  const { toasts, dismiss } = useToast()
+  const { toasts, toast, dismiss, immediateDismissals } = useToast()
 
   function observe(source, options = {}) {
     const scope = effectScope()
@@ -232,6 +232,54 @@ describe('device joined notices from existing feeds', () => {
     await nextTick()
     expect(toasts.value).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(3000)
+    expect(toasts.value).toHaveLength(0)
+  })
+
+  it('hides only disposed notices before the next frame while Vue owns their leave', async () => {
+    wrappers.push(mount(Toast, { attachTo: document.body, global: { stubs: { transition: false, 'transition-group': false } } }))
+    const snapshot = ref([])
+    const scope = observe(snapshot)
+    snapshot.value = [deck]
+    await nextTick()
+    const ownedId = toasts.value[0].id
+    const otherId = toast('Unrelated notification')
+    await nextTick()
+    const owned = document.querySelector(`[data-toast-id="${ownedId}"]`)
+    const other = document.querySelector(`[data-toast-id="${otherId}"]`)
+
+    scope.stop()
+    expect(immediateDismissals.value.has(ownedId)).toBe(true)
+    await nextTick()
+    expect(toasts.value.map(notice => notice.id)).toEqual([otherId])
+    expect(owned.isConnected).toBe(true)
+    expect(owned.classList.contains('toast-leave-active')).toBe(true)
+    expect(owned.style.display).toBe('none')
+    expect(other.style.display).toBe('')
+    expect(immediateDismissals.value.size).toBe(0)
+  })
+
+  it('preserves ordinary dismiss and timeout leaves, including a notice already leaving on disposal', async () => {
+    wrappers.push(mount(Toast, { attachTo: document.body, global: { stubs: { transition: false, 'transition-group': false } } }))
+    const snapshot = ref([])
+    const scope = observe(snapshot)
+    snapshot.value = [deck]
+    await nextTick()
+    const ownedId = toasts.value[0].id
+    const owned = document.querySelector(`[data-toast-id="${ownedId}"]`)
+    dismiss(ownedId)
+    await nextTick()
+    expect(owned.classList.contains('toast-leave-active')).toBe(true)
+    expect(owned.style.display).toBe('')
+    scope.stop()
+    expect(owned.style.display).toBe('none')
+    await nextTick()
+
+    const timedId = toast('Ordinary timeout')
+    await nextTick()
+    const timed = document.querySelector(`[data-toast-id="${timedId}"]`)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(timed.classList.contains('toast-leave-active')).toBe(true)
+    expect(timed.style.display).toBe('')
     expect(toasts.value).toHaveLength(0)
   })
 })
