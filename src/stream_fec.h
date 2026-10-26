@@ -14,6 +14,37 @@ namespace stream {
   // The wire header dedicates two bits to the FEC block count.
   inline constexpr std::size_t MAX_VIDEO_FEC_BLOCKS = 4;
 
+  struct fec_frame_fit_t {
+    int fec_percentage;
+    // The envelope used for the existing oversized-frame warning. When parity
+    // is skipped this is still the configured percentage, not zero.
+    int envelope_percentage;
+    std::size_t required_blocks;
+    std::size_t block_count;
+    std::size_t protected_payload_limit_bytes;
+  };
+
+  /**
+   * Fit a session's requested parity to this packetized frame, before splitting
+   * it into blocks. A raised target may step down as far as the configured
+   * percentage; it must not strip parity from a frame the configured value fits.
+   *
+   * Uses stream.cpp's nominal block sizing, alignment and minimum-parity rule.
+   * A configured value >= 50 stays fixed. An oversized configured envelope
+   * keeps the existing zero-parity/four-block fallback and warning inputs.
+   * nullopt means invalid arithmetic or an unsafe protected minimum-parity
+   * envelope; the caller must not activate an adaptive target from that result.
+   * This does not validate the unprotected frame's packet-index limit, prove a
+   * wire bitrate, or authorize an encoder change.
+   */
+  std::optional<fec_frame_fit_t> fit_frame_fec(
+    std::size_t packetized_bytes,
+    std::size_t block_bytes,
+    int configured_percentage,
+    int requested_percentage,
+    int minimum_parity_packets
+  );
+
   enum class fec_frame_type_e {
     delta,
     idr,

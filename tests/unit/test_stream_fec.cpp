@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <limits>
 
 namespace {
   stream::oversized_fec_frame_observation_t observation(
@@ -407,4 +408,90 @@ TEST(StreamFecStatusTrackerTests, BoundsFreshnessAtExtremeClockValuesWithoutSign
     tracker.snapshot(11, fs::clock::time_point::max(), fs::clock::duration::max()).availability,
     fs::availability_e::stale_report
   );
+}
+
+TEST(StreamFecFrameFitTests, KeepsTheLargestTargetAtTheFourBlockBoundary) {
+  constexpr std::size_t block = 1024;
+  const auto exact = stream::fit_frame_fec(4 * 170 * block, block, 10, 50, 2);
+  ASSERT_TRUE(exact);
+  EXPECT_EQ(exact->fec_percentage, 50);
+  EXPECT_EQ(exact->required_blocks, 4);
+  EXPECT_EQ(exact->block_count, 4);
+  const auto next_byte = stream::fit_frame_fec(4 * 170 * block + 1, block, 10, 50, 2);
+  ASSERT_TRUE(next_byte);
+  EXPECT_EQ(next_byte->fec_percentage, 49);
+  EXPECT_EQ(next_byte->block_count, 4);
+}
+
+TEST(StreamFecFrameFitTests, StepsDownRaisedParityWithoutRemovingConfiguredProtection) {
+  const auto fit = stream::fit_frame_fec(800 * 1024, 1024, 10, 50, 2);
+  ASSERT_TRUE(fit);
+  EXPECT_EQ(fit->fec_percentage, 27);  // 200 data + 54 parity per block.
+  EXPECT_EQ(fit->envelope_percentage, 27);
+  EXPECT_EQ(fit->required_blocks, 4);
+  const auto at_base_limit = stream::fit_frame_fec(924 * 1024, 1024, 10, 50, 2);
+  ASSERT_TRUE(at_base_limit);
+  EXPECT_EQ(at_base_limit->fec_percentage, 10);
+}
+
+TEST(StreamFecFrameFitTests, KeepsOriginalOversizedWarningEnvelopeAndUnprotectedFallback) {
+  const auto fit = stream::fit_frame_fec(925 * 1024, 1024, 10, 50, 2);
+  ASSERT_TRUE(fit);
+  EXPECT_EQ(fit->fec_percentage, 0);
+  EXPECT_EQ(fit->envelope_percentage, 10);
+  EXPECT_EQ(fit->required_blocks, 5);
+  EXPECT_EQ(fit->block_count, 4);
+  EXPECT_EQ(fit->protected_payload_limit_bytes, 924 * 1024);
+  const auto fixed = stream::fit_frame_fec(925 * 1024, 1024, 10, 10, 2);
+  ASSERT_TRUE(fixed);
+  EXPECT_EQ(fixed->fec_percentage, fit->fec_percentage);
+  EXPECT_EQ(fixed->required_blocks, fit->required_blocks);
+  EXPECT_EQ(fixed->protected_payload_limit_bytes, fit->protected_payload_limit_bytes);
+}
+
+TEST(StreamFecFrameFitTests, ChecksActualMinimumParityAndEffectiveHeaderRange) {
+  const auto small = stream::fit_frame_fec(100, 1024, 10, 50, 2);
+  ASSERT_TRUE(small);
+  // This remains the policy target. The existing encoder raises wire F to
+  // 200 for one data plus two parity shards; neither number is capped at 50.
+  EXPECT_EQ(small->fec_percentage, 50);
+  EXPECT_FALSE(stream::fit_frame_fec(100, 1024, 10, 50, 3));  // Wire F=300 does not fit eight bits.
+  EXPECT_FALSE(stream::fit_frame_fec(231 * 1024, 1024, 10, 10, 25));  // 231+25 exceeds RS8.
+  const auto split = stream::fit_frame_fec(231 * 1024, 1024, 10, 11, 25);
+  ASSERT_TRUE(split);
+  EXPECT_EQ(split->fec_percentage, 11);
+  EXPECT_EQ(split->block_count, 2);  // Both aligned blocks fit the minimum parity.
+}
+
+TEST(StreamFecFrameFitTests, KeepsFixedHighAndZeroSettingsAndBoundsRequestedGrowth) {
+  for (const int configured : {50, 60, 255}) {
+    const auto fixed = stream::fit_frame_fec(100, 1024, configured, 70, 2);
+    ASSERT_TRUE(fixed);
+    EXPECT_EQ(fixed->fec_percentage, configured);
+  }
+  const auto zero = stream::fit_frame_fec(100, 1024, 0, 0, 255);
+  ASSERT_TRUE(zero);
+  EXPECT_EQ(zero->fec_percentage, 0);  // A minimum does not turn disabled parity on.
+  const auto lower = stream::fit_frame_fec(100, 1024, 20, 10, 2);
+  ASSERT_TRUE(lower);
+  EXPECT_EQ(lower->fec_percentage, 20);
+  const auto capped = stream::fit_frame_fec(100, 1024, 10, 80, 2);
+  ASSERT_TRUE(capped);
+  EXPECT_EQ(capped->fec_percentage, 50);
+}
+
+TEST(StreamFecFrameFitTests, RejectsInvalidDimensionsAndAvoidsSizeOverflow) {
+  EXPECT_FALSE(stream::fit_frame_fec(0, 1024, 10, 20, 2));
+  EXPECT_FALSE(stream::fit_frame_fec(100, 0, 10, 20, 2));
+  EXPECT_FALSE(stream::fit_frame_fec(100, 1024, -1, 20, 2));
+  EXPECT_FALSE(stream::fit_frame_fec(100, 1024, 10, 256, 2));
+  EXPECT_FALSE(stream::fit_frame_fec(100, 1024, 10, 20, -1));
+  EXPECT_FALSE(stream::fit_frame_fec(100, 1024, 10, 20, 256));
+  constexpr auto largest = std::numeric_limits<std::size_t>::max();
+  EXPECT_FALSE(stream::fit_frame_fec(100, largest, 10, 20, 2));
+  const auto huge = stream::fit_frame_fec(largest, 1, 10, 50, 2);
+  ASSERT_TRUE(huge);
+  EXPECT_EQ(huge->fec_percentage, 0);
+  EXPECT_EQ(huge->required_blocks, largest / 231 + (largest % 231 != 0));
+  // This models the existing FEC fallback only, not a valid 10-bit wire frame.
 }
