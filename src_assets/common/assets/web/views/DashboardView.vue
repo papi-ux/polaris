@@ -517,7 +517,7 @@ import StreamPacingReadout from '../components/StreamPacingReadout.vue'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { doctorIsWaitingForStream } from '../doctor-observation.js'
-import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
+import { buildReadyCheckDisplay, isIdleVirtualDisplayCheck } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import { readConfigOrNull } from '../config-cache.js'
 import { liveClientFamilyLabel, streamClientFamilyLabel } from '../client-family.js'
@@ -748,8 +748,11 @@ const readyChecks = computed(() => {
     // Host Virtual Display creates its own output when a stream starts, so an idle host reporting none,
     // as one with no monitor does, has nothing to fix. Mirror Desktop streams a monitor that has to be
     // there, and a live stream or a reported output is judged as before.
-    const virtualDisplayIdle = configured && source === 'ready' && item.key === 'display' && !item.ok &&
-      !stats.value?.streaming && resolveStreamDisplayMode(readinessConfig.value) === 'host_virtual_display'
+    const virtualDisplayIdle = isIdleVirtualDisplayCheck({
+      configured, source, key: item.key, ok: item.ok,
+      mode: configured ? resolveStreamDisplayMode(readinessConfig.value) : null,
+      stats: stats.value, connected: streamStatsConnected.value, receivedAt: streamStatsReceivedAt.value,
+    })
     if (configured && ((item.key === 'display' && resolveStreamDisplayMode(readinessConfig.value) === 'headless_stream') ||
         virtualDisplayIdle ||
         (item.key === 'audio' && readinessConfig.value.stream_audio === 'disabled') ||

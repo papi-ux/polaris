@@ -1,12 +1,17 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { buildReadyCheckDisplay } from './dashboard-ready-checks.js'
+import { buildReadyCheckDisplay, isIdleVirtualDisplayCheck } from './dashboard-ready-checks.js'
 import { captureStatusTone } from './capture-status-tone.js'
 import { launchModeReadout } from './launch-mode-readout.js'
 import { streamPacingReadouts } from './stream-pacing-readout.js'
 
 describe('Polaris status evidence', () => {
+  const idleDisplayCheck = {
+    configured: true, source: 'ready', key: 'display', ok: false,
+    mode: 'host_virtual_display', stats: { streaming: false }, connected: true, receivedAt: 1000,
+  }
+
   it('does not count unmeasured or inapplicable checks as failures or ready', () => {
     const result = buildReadyCheckDisplay([
       { key: 'clients', status: 'ready' }, { key: 'audio', status: 'not_checked' },
@@ -15,18 +20,30 @@ describe('Polaris status evidence', () => {
     expect(result).toMatchObject({ total: 2, passing: 1, attention: 0, unknown: 1, notApplicable: 1, allPassing: false, primaryIssue: null })
     expect(result.visibleChecks.map(row => row.key)).toEqual(['audio'])
   })
-  it('reads an idle Host Virtual Display host with no monitor as not needed, and only that host', () => {
-    // A headless KDE host warned "No active display path" although Host Virtual Display makes its own
-    // output when a stream starts (#519). Mirror Desktop, a live stream and a reported output are unchanged.
+  it('requires an observed, connected idle sample before making a missing virtual display expected', () => {
+    expect(isIdleVirtualDisplayCheck(idleDisplayCheck)).toBe(true)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, stats: null })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, stats: {} })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, stats: { streaming: 'false' } })).toBe(false)
+    // The transport retains this false sample on disconnect, so the value alone proves nothing.
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, connected: false })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, receivedAt: 0 })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, stats: { streaming: true } })).toBe(false)
+  })
+  it('keeps the idle exception limited to loaded config and ready, empty Host Virtual Display outputs', () => {
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, configured: false })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, source: 'pending' })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, source: 'unavailable' })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, ok: true })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, mode: 'desktop_display' })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, key: 'audio' })).toBe(false)
+  })
+  it('uses the observed-idle predicate for the dashboard exception and its existing explanation', () => {
     const dashboard = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/DashboardView.vue'), 'utf8')
-    const start = dashboard.indexOf('const virtualDisplayIdle')
-    const rule = dashboard.slice(start, dashboard.indexOf("status = 'not_applicable'", start))
-    expect(start).toBeGreaterThan(0)
-    expect(rule).toContain("source === 'ready' && item.key === 'display' && !item.ok")
-    expect(rule).toContain('!stats.value?.streaming')
-    expect(rule).toContain("resolveStreamDisplayMode(readinessConfig.value) === 'host_virtual_display'")
-    expect(rule).toContain('virtualDisplayIdle ||')
-    expect(rule).not.toContain('desktop_display')
+    expect(dashboard).toContain('const virtualDisplayIdle = isIdleVirtualDisplayCheck({')
+    expect(dashboard).toContain('mode: configured ? resolveStreamDisplayMode(readinessConfig.value) : null')
+    expect(dashboard).toContain('stats: stats.value, connected: streamStatsConnected.value, receivedAt: streamStatsReceivedAt.value')
+    expect(dashboard).toContain('virtualDisplayIdle ||')
     expect(dashboard).toContain("virtualDisplayIdle ? t('dashboard.check_display_virtual_idle') : item.detail")
     const en = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
     expect(en.dashboard.check_display_virtual_idle).toContain('Host Virtual Display creates its display when a stream starts')

@@ -980,6 +980,34 @@ TEST(KmsEnableTests, AFailedGroupCopyRefusesWithTheCommandsToRunByHand) {
   EXPECT_FALSE(fs::exists(fake.parked()));
 }
 
+TEST(KmsEnableTests, AFailedJoinAfterCopyKeepsTheSummaryAndDoesNotAskForAnotherAppend) {
+  fake_host_t fake;
+  fake.install_helper();
+  fake.account.name = "image-streamer";
+  fake.member = false;
+  fake.session = ke::session_group_e::not_live;
+  fake.image_only_group = true;
+  fake.failing.push_back("usermod");
+
+  const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+
+  EXPECT_EQ(outcome.result, ke::result_e::failed);
+  ASSERT_EQ(fake.commands.size(), 2u);
+  EXPECT_EQ(fake.commands[0], "sh -c 'grep ^polaris-kms: /usr/lib/group >> /etc/group'");
+  EXPECT_EQ(fake.commands[1], R"(usermod -aG "polaris-kms" "image-streamer")");
+  EXPECT_FALSE(fake.member);
+  EXPECT_NE(outcome.summary.find("Copied the polaris-kms group definition from /usr/lib/group into /etc/group"), std::string::npos);
+  EXPECT_EQ(outcome.summary.find("Added image-streamer"), std::string::npos);
+  EXPECT_NE(ke::failure_report(outcome).find("Before that, host setup had already done this:\n" + outcome.summary), std::string::npos);
+  EXPECT_NE(outcome.refusal.find("  sudo usermod -aG \"polaris-kms\" \"image-streamer\"\n"
+                               "and then sudo -H polaris --setup-host --enable-kms again.\n"),
+            std::string::npos);
+  EXPECT_EQ(outcome.refusal.find("grep"), std::string::npos);
+  EXPECT_EQ(outcome.refusal.find(">>"), std::string::npos);
+  EXPECT_FALSE(fs::exists(fake.active()));
+  EXPECT_FALSE(fs::exists(fake.parked()));
+}
+
 TEST(KmsEnableTests, OnlyAGroupTheImageAloneDefinesNeedsCopying) {
   const std::optional<std::string> etc {"root:x:0:\nwheel:x:10:papi\n"};
   const std::optional<std::string> image {"root:x:0:\npolaris-kms:x:957:\n"};

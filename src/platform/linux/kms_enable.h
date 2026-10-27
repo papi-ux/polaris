@@ -759,6 +759,7 @@ namespace platf::kms_enable {
 
     auto membership = membership_e::member;
     if (!host.in_group(account)) {
+      bool group_copied = false;
       // On an ostree image such as Bazzite the package can define the group in /usr/lib/group alone,
       // which usermod does not write, so usermod would refuse it. Copy that one definition first.
       if (host.group_only_in_image && host.group_only_in_image(group)) {
@@ -773,11 +774,18 @@ namespace platf::kms_enable {
         }
         out.summary += "Copied the " + group + " group definition from /usr/lib/group into /etc/group, so usermod could\n"
                        "add " + account.name + " to it.\n";
+        group_copied = true;
       }
       // Only members may execute the helper, so a capability here is not a capability for every
       // local account, which is what marking /usr/bin/polaris used to mean.
-      if (!host.run("add " + account.name + " to the " + group + " group", std::format(R"(usermod -aG "{}" "{}")", group, account.name))) {
+      const auto join_command = std::format(R"(usermod -aG "{}" "{}")", group, account.name);
+      if (!host.run("add " + account.name + " to the " + group + " group", join_command)) {
         out.refusal = "Could not add " + account.name + " to the " + group + " group, so DRM/KMS capture was left as it was.\n";
+        if (group_copied) {
+          // The definition is already in /etc/group; only the join remains, not another append.
+          out.refusal += "Run:\n  sudo " + join_command + "\n"
+                         "and then " + std::string {finish_command} + " again.\n";
+        }
         return out;
       }
       out.summary += "Added " + account.name + " to the " + group + " group.\n";

@@ -1,3 +1,11 @@
+// The channel clears connected/receivedAt when it stops, but retains its last
+// stats sample. Only an observed, currently connected idle sample can make a
+// missing Host Virtual Display output expected.
+export function isIdleVirtualDisplayCheck({ configured, source, key, ok, mode, stats, connected, receivedAt } = {}) {
+  return configured === true && source === 'ready' && key === 'display' && ok === false &&
+    mode === 'host_virtual_display' && connected === true && receivedAt > 0 && stats?.streaming === false
+}
+
 export function buildReadyCheckDisplay(checks = []) {
   const normalized = checks.filter(Boolean).map(check => ({
     ...check,
