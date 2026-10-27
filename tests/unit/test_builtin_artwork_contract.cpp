@@ -24,6 +24,20 @@ namespace {
     return read_source("src/nvhttp.cpp");
   }
 
+  std::string game_artwork_access() {
+    // Pin the wire name independently of the generated identifier used by the source below.
+    const auto header = read_source("src/generated/polaris_v1_contract.h");
+    const auto start = header.find("namespace polaris::contract::v1::game {");
+    EXPECT_NE(start, std::string::npos);
+    if (start == std::string::npos) return {};
+    const auto end = header.find("\n}", start);
+    EXPECT_NE(end, std::string::npos);
+    if (end == std::string::npos) return {};
+    EXPECT_NE(header.substr(start, end - start).find("inline constexpr char artwork[] = \"artwork\";"),
+              std::string::npos);
+    return "game[v1::game::artwork]";
+  }
+
   /**
    * The rule itself lives beside the uuids it names, in process.cpp, and nvhttp asks it. It used to
    * be a copy of its own inside nvhttp.cpp, which the console's cover sweep would have had to copy
@@ -106,7 +120,7 @@ TEST(BuiltinArtworkContract, UtilityEntriesNeverAdvertiseOrServeAnAutomaticMatch
   ASSERT_FALSE(manifest.empty());
   EXPECT_NE(manifest.find("proc::uses_bundled_utility_artwork(app)"), std::string::npos);
   EXPECT_NE(manifest.find("asset.source == game_artwork::source_e::steamgriddb"), std::string::npos);
-  EXPECT_NE(source.find("game[\"artwork\"] = artwork_manifest_for(platf::appdata(), app);"), std::string::npos);
+  EXPECT_NE(source.find(game_artwork_access() + " = artwork_manifest_for(platf::appdata(), app);"), std::string::npos);
 
   const auto handler = source.find("auto polarisGameArtwork =");
   ASSERT_NE(handler, std::string::npos);
@@ -123,10 +137,11 @@ TEST(BuiltinArtworkContract, OnlyOneParticularGameIsGivenACompletionTime) {
   const auto source = read_nvhttp_source();
   const auto guard = source.find("if (!proc::uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {");
   ASSERT_NE(guard, std::string::npos);
-  const auto call = source.find("beat_time_for_app(app, game[\"artwork\"])");
+  const auto lookup = "beat_time_for_app(app, " + game_artwork_access() + ")";
+  const auto call = source.find(lookup);
   ASSERT_NE(call, std::string::npos);
   // The lookup is the first statement inside that guard, and the library asks nowhere else.
   EXPECT_GT(call, guard);
   EXPECT_LT(call - guard, 200U);
-  EXPECT_EQ(source.find("beat_time_for_app(app, game[\"artwork\"])", call + 1), std::string::npos);
+  EXPECT_EQ(source.find(lookup, call + 1), std::string::npos);
 }
