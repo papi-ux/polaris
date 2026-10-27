@@ -25,6 +25,8 @@ describe('Polaris status evidence', () => {
     expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, stats: null })).toBe(false)
     expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, stats: {} })).toBe(false)
     expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, stats: { streaming: 'false' } })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, connected: undefined })).toBe(false)
+    expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, receivedAt: undefined })).toBe(false)
     // The transport retains this false sample on disconnect, so the value alone proves nothing.
     expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, connected: false })).toBe(false)
     expect(isIdleVirtualDisplayCheck({ ...idleDisplayCheck, receivedAt: 0 })).toBe(false)
@@ -42,7 +44,7 @@ describe('Polaris status evidence', () => {
     const dashboard = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/DashboardView.vue'), 'utf8')
     expect(dashboard).toContain('const virtualDisplayIdle = isIdleVirtualDisplayCheck({')
     expect(dashboard).toContain('mode: configured ? resolveStreamDisplayMode(readinessConfig.value) : null')
-    expect(dashboard).toContain('stats: stats.value, connected: streamStatsConnected.value, receivedAt: streamStatsReceivedAt.value')
+    expect(dashboard).toContain('stats: stats.value, connected: streamStatsConnected?.value, receivedAt: streamStatsReceivedAt?.value')
     expect(dashboard).toContain('virtualDisplayIdle ||')
     expect(dashboard).toContain("virtualDisplayIdle ? t('dashboard.check_display_virtual_idle') : item.detail")
     const en = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))

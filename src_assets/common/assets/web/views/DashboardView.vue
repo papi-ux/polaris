@@ -751,7 +751,7 @@ const readyChecks = computed(() => {
     const virtualDisplayIdle = isIdleVirtualDisplayCheck({
       configured, source, key: item.key, ok: item.ok,
       mode: configured ? resolveStreamDisplayMode(readinessConfig.value) : null,
-      stats: stats.value, connected: streamStatsConnected.value, receivedAt: streamStatsReceivedAt.value,
+      stats: stats.value, connected: streamStatsConnected?.value, receivedAt: streamStatsReceivedAt?.value,
     })
     if (configured && ((item.key === 'display' && resolveStreamDisplayMode(readinessConfig.value) === 'headless_stream') ||
         virtualDisplayIdle ||
