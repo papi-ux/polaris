@@ -2686,6 +2686,17 @@ textarea {
     margin: 0.45rem 0 0;
   }
 
+  /* Live Tuning's newest recorded change: one quiet line under the readings, wrapping on narrow stages. */
+  .mc-signals-note {
+    margin: 0;
+    padding: 0.55rem 1.1rem 0.65rem;
+    border-top: 1px solid var(--edge-card);
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
   /* A recap tints the Last session cell once and fades back as it settles; no geometry changes. */
   .mc-signal[data-idle-signal='last'] {
     transition: background-color 600ms ease, box-shadow 600ms ease;

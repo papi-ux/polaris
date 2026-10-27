@@ -1,6 +1,7 @@
 <script setup>
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onThemeTokensChange, readThemeTokens, withAlpha } from '../theme-bridge.js'
+import { drawTuningMarkers } from '../live-tuning-timeline.js'
 
 // The stage's lower edge: one reading per cell, from Mission Control's helpers. The live cells
 // carry sparklines of the dashboard's rolling history. uPlot loads only when a sparkline is shown,
@@ -11,6 +12,10 @@ const props = defineProps({
   prefersReducedMotion: { type: Boolean, default: false },
   history: { type: Object, default: () => ({ timestamps: [], series: {} }) },
   historyRevision: { type: Number, default: 0 },
+  // Live Tuning's recorded changes, per sparkline, on the history's time axis, and one quiet line
+  // telling the newest. Both come from live-tuning-timeline.js; with none, nothing is drawn or said.
+  markers: { type: Object, default: () => ({}) },
+  note: { type: String, default: '' },
 })
 
 const SPARK_HEIGHT = 32
@@ -31,12 +36,13 @@ async function loadUPlot() {
   return uPlotLib
 }
 
-function chartOptions(width) {
-  const tokens = readThemeTokens(['silver'])
+function chartOptions(key, width) {
+  const tokens = readThemeTokens(['silver', 'ice'])
   const color = tokens.silver
   return {
     width,
     height: SPARK_HEIGHT,
+    hooks: { draw: [u => drawTuningMarkers(u, props.markers?.[key], tokens.ice || color, uPlotLib?.pxRatio || 1)] },
     cursor: { show: false },
     legend: { show: false },
     axes: [{ show: false }, { show: false }],
@@ -95,7 +101,7 @@ async function syncCharts() {
   for (const [key, el] of Object.entries(sparkEls)) {
     const width = Math.floor(el.clientWidth)
     if (!el.isConnected || width <= 0) continue
-    if (!charts[key]) charts[key] = new lib(chartOptions(width), [[], []], el)
+    if (!charts[key]) charts[key] = new lib(chartOptions(key, width), [[], []], el)
     else if (charts[key].width !== width) charts[key].setSize({ width, height: SPARK_HEIGHT })
   }
   pushData()
@@ -149,5 +155,6 @@ onUnmounted(() => {
         </dd>
       </div>
     </dl>
+    <p v-if="note" class="mc-signals-note" data-live-tuning-note>{{ note }}</p>
   </div>
 </template>

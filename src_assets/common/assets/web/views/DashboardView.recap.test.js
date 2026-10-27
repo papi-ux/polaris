@@ -108,3 +108,36 @@ describe('Mission Control Last session recap', () => {
     expect(lastCell().classes()).not.toContain('is-recap')
   })
 })
+
+describe('Mission Control Live Tuning changes', () => {
+  const tuning = (entries, extra = {}) => ({ version: 1, clock: 'host_steady_ms', available: true, reason: 'recorded', session_generation: 4,
+    dropped: 0, truncated: false, host_elapsed_ms_at_snapshot: 60000, entries, ...extra })
+  const step = (sequence, kind, cause, at, requested, applied = null) => ({ sequence, kind, cause, host_elapsed_ms: at,
+    requested_bitrate_kbps: requested, applied_proof: applied ? 'encoder_confirmed' : 'unknown', applied_bitrate_kbps: applied })
+  const started = step(1, 'scope_started', 'initial_scope_snapshot', 0, 20000, 20000)
+  const note = () => wrapper.find('[data-live-tuning-note]')
+
+  it('tells only the newest recorded change, quietly, and keeps it readable without the sparklines', async () => {
+    await render({ streaming: false })
+    await receive({ ...live(), live_tuning_history: tuning([started]) }, { at: 0 })
+    expect(note().exists()).toBe(false)
+    // Requested but not yet applied: the line says so instead of claiming the new rate.
+    await receive({ ...live(), live_tuning_history: tuning([started, step(2, 'decision', 'network_feedback', 45000, 14000, 20000)]) }, { at: 1 })
+    expect(note().text()).toBe('Live Tuning eased the rate to 14.0 Mbps on network feedback · not confirmed by the encoder yet · 15 s ago')
+    await receive({ ...live(), live_tuning_history: tuning([started, step(2, 'decision', 'network_feedback', 45000, 14000, 20000),
+      step(3, 'encoder_acknowledged', 'encoder_running_at_rate', 45400, 14000, 14000)], { host_elapsed_ms_at_snapshot: 61000 }) }, { at: 2 })
+    expect(note().text()).toBe('Live Tuning eased the rate to 14.0 Mbps on network feedback · confirmed by the encoder · 16 s ago')
+    // Not a live region and not a toast: assistive technology reads it in place, and only one line exists.
+    expect(note().attributes('aria-live')).toBeUndefined()
+    expect(note().attributes('role')).toBeUndefined()
+    expect(wrapper.findAll('[data-live-tuning-note]')).toHaveLength(1)
+    // This suite prefers reduced motion: no sparkline is drawn, so no marker either, but the account stays.
+    expect(wrapper.find('.mc-signal-spark').exists()).toBe(false)
+    // A history that is not this live stream's own says nothing, and neither does an ended stream.
+    await receive({ ...live(), live_tuning_history: tuning([started, step(2, 'decision', 'network_feedback', 45000, 14000, 20000)],
+      { available: false, reason: 'session_scope_unavailable' }) }, { at: 3 })
+    expect(note().exists()).toBe(false)
+    await receive({ streaming: false, live_tuning_history: tuning([started], { available: false, reason: 'no_stream' }) }, { at: 4 })
+    expect(note().exists()).toBe(false)
+  })
+})
