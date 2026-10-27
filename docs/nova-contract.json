@@ -58,6 +58,46 @@
         "function": "live_tuning_history_entry_json",
         "variable": "out",
         "style": "subscript"
+      },
+      "generated": true,
+      "required_present": [
+        "applied_bitrate_kbps",
+        "applied_proof",
+        "applied_revision",
+        "cause",
+        "ewma_packet_loss_percent",
+        "ewma_rtt_ms",
+        "feedback_initialized",
+        "host_elapsed_ms",
+        "input",
+        "kind",
+        "operator_revision",
+        "reason",
+        "repeat_count",
+        "requested_bitrate_kbps",
+        "sequence",
+        "state"
+      ],
+      "types": {
+        "applied_bitrate_kbps": "integer",
+        "applied_proof": "string",
+        "applied_revision": "integer",
+        "callback": "object",
+        "cause": "string",
+        "ewma_packet_loss_percent": "number",
+        "ewma_rtt_ms": "number",
+        "fec_transition": "object",
+        "feedback_initialized": "boolean",
+        "host_elapsed_ms": "integer",
+        "input": "object",
+        "kind": "string",
+        "last_host_elapsed_ms": "integer",
+        "operator_revision": "integer",
+        "reason": "string",
+        "repeat_count": "integer",
+        "requested_bitrate_kbps": "integer",
+        "sequence": "integer",
+        "state": "string"
       }
     },
     "live_tuning_fec_transition": {
@@ -88,6 +128,26 @@
         "function": "fec_transition_json",
         "variable": "out",
         "style": "subscript"
+      },
+      "generated": true,
+      "required_present": [
+        "configured_percentage",
+        "pending_percentage_after",
+        "pending_percentage_before",
+        "percentage_after",
+        "percentage_before",
+        "phase_after",
+        "phase_before"
+      ],
+      "types": {
+        "configured_percentage": "integer",
+        "from_frame_index": "integer",
+        "pending_percentage_after": "integer",
+        "pending_percentage_before": "integer",
+        "percentage_after": "integer",
+        "percentage_before": "integer",
+        "phase_after": "string",
+        "phase_before": "string"
       }
     },
     "spaces_snapshot": {
@@ -455,20 +515,32 @@
             "status"
           ]
         },
-        "nova_deck": {
-          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
-          "function": "fetchSpaceLibrary",
-          "receiver": "o",
-          "style": "qt_json",
-          "scope_start": "DeckPolarisResult<std::vector<DeckPolarisGame>> DeckPolarisClient::fetchSpaceLibrary(",
-          "scope_end": "DeckPolarisResult<DeckPolarisCapabilities> DeckPolarisClient::fetchCapabilities()",
-          "reads": [
-            "games",
-            "schema",
-            "space_id",
-            "status"
-          ]
-        }
+        "nova_deck": [
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "fetchSpaceLibrary",
+            "receiver": "o",
+            "style": "qt_json",
+            "scope_start": "DeckPolarisResult<std::vector<DeckPolarisGame>> DeckPolarisClient::fetchSpaceLibrary(",
+            "scope_end": "DeckPolarisResult<DeckPolarisCapabilities> DeckPolarisClient::fetchCapabilities()",
+            "reads": [
+              "games",
+              "schema",
+              "space_id",
+              "status"
+            ]
+          },
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseGamesPage",
+            "style": "qt_json",
+            "receiver": "object",
+            "reads": [
+              "games",
+              "total"
+            ]
+          }
+        ]
       }
     },
     "space_library_game": {
@@ -679,16 +751,27 @@
             "target"
           ]
         },
-        "nova_deck": {
-          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
-          "function": "parseGame",
-          "receiver": "context",
-          "style": "qt_json",
-          "reads": [
-            "id",
-            "name"
-          ]
-        }
+        "nova_deck": [
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseGame",
+            "receiver": "context",
+            "style": "qt_json",
+            "reads": [
+              "id",
+              "name"
+            ]
+          },
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseGamesPage",
+            "style": "qt_json",
+            "receiver": "context",
+            "reads": [
+              "target"
+            ]
+          }
+        ]
       }
     },
     "space_launch_mode": {
@@ -1421,6 +1504,43 @@
         "function": "artwork_choices_json",
         "declaration": "nlohmann::json body {",
         "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "choices",
+        "kind",
+        "status"
+      ],
+      "types": {
+        "choices": "array<object>",
+        "kind": "string",
+        "status": "boolean"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseArtworkChoices",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "choices",
+            "kind",
+            "status"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_game_tools.cpp",
+          "function": "gameToolReply",
+          "receiver": "o",
+          "style": "qt_json",
+          "scope_start": "} else if (action == \"choices\") {\n        const auto kind = v.value(\"kind\").toString();",
+          "scope_end": "} else if (action == \"plan\") {",
+          "reads": [
+            "choices",
+            "kind",
+            "status"
+          ]
+        }
       }
     },
     "artwork_choice": {
@@ -1445,6 +1565,43 @@
         "function": "artwork_choice_json",
         "declaration": "nlohmann::json body {",
         "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "expires_at",
+        "preview",
+        "selection_token"
+      ],
+      "types": {
+        "expires_at": "integer",
+        "preview": "string",
+        "selection_token": "string"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseArtworkChoices",
+          "receiver": "item",
+          "style": "kotlin_org_json",
+          "reads": [
+            "expires_at",
+            "preview",
+            "selection_token"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_game_tools.cpp",
+          "function": "gameToolReply",
+          "receiver": "c",
+          "style": "qt_json",
+          "scope_start": "} else if (action == \"choices\") {\n        const auto kind = v.value(\"kind\").toString();",
+          "scope_end": "} else if (action == \"plan\") {",
+          "reads": [
+            "expires_at",
+            "preview",
+            "selection_token"
+          ]
+        }
       }
     },
     "display_planner": {
@@ -1750,14 +1907,12 @@
         "transport"
       ],
       "informational_ok": [
-        "backend",
         "cpu_copy",
         "device",
         "effective_headless",
         "encoder_adapter",
         "reason_message",
         "requested_headless",
-        "resolution",
         "cross_gpu_dmabuf_risk",
         "gpu_native",
         "gpu_native_override_active"
@@ -1855,13 +2010,11 @@
         "target_residency"
       ],
       "informational_ok": [
-        "active_backend",
         "effective_backend",
         "encode_time_ms",
         "fallback_allowed",
         "requested_backend",
-        "session_override",
-        "selection"
+        "session_override"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
@@ -2078,15 +2231,10 @@
       ],
       "informational_ok": [
         "adapter_matches_wayland_main_device",
-        "adapter_pairing_device",
-        "adapter_pairing_device_source",
-        "adapter_pairing_status",
         "capture_forecast",
         "compositor_render_device",
-        "configuration_warnings",
         "encoder_adapter_effective",
-        "encoder_adapter_source",
-        "wayland_main_device"
+        "encoder_adapter_source"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
@@ -2098,6 +2246,113 @@
         "function": "linux_gpu_profile_json",
         "declaration": "nlohmann::json profile = {",
         "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "adapter_matches_capture_device",
+        "adapter_matches_wayland_main_device",
+        "adapter_pairing_device",
+        "adapter_pairing_device_source",
+        "adapter_pairing_status",
+        "capture_device",
+        "capture_forecast",
+        "compositor_render_device",
+        "configuration_warnings",
+        "cross_gpu_dmabuf_risk",
+        "encoder_adapter",
+        "encoder_adapter_effective",
+        "encoder_adapter_source",
+        "encoder_api",
+        "gpu_native_attempted",
+        "gpu_native_requested",
+        "gpu_native_succeeded",
+        "vaapi_vendor",
+        "wayland_main_device"
+      ],
+      "nullable": [
+        "adapter_matches_capture_device",
+        "adapter_matches_wayland_main_device",
+        "capture_forecast"
+      ],
+      "types": {
+        "adapter_matches_capture_device": "boolean",
+        "adapter_matches_wayland_main_device": "boolean",
+        "adapter_pairing_device": "string",
+        "adapter_pairing_device_source": "string",
+        "adapter_pairing_status": "string",
+        "capture_device": "string",
+        "capture_forecast": "object",
+        "compositor_render_device": "string",
+        "configuration_warnings": "array<object>",
+        "cross_gpu_dmabuf_risk": "boolean",
+        "encoder_adapter": "string",
+        "encoder_adapter_effective": "string",
+        "encoder_adapter_source": "string",
+        "encoder_api": "string",
+        "gpu_native_attempted": "boolean",
+        "gpu_native_requested": "boolean",
+        "gpu_native_succeeded": "boolean",
+        "vaapi_vendor": "string",
+        "wayland_main_device": "string"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseLinuxGpuProfile",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "adapter_matches_capture_device",
+            "capture_device",
+            "cross_gpu_dmabuf_risk",
+            "encoder_adapter",
+            "encoder_api",
+            "gpu_native_attempted",
+            "gpu_native_requested",
+            "gpu_native_succeeded",
+            "vaapi_vendor"
+          ]
+        },
+        "polaris_web": [
+          {
+            "file": "src_assets/common/assets/web/diagnostics-export.js",
+            "style": "javascript",
+            "scope_start": "function gpuNativeCaptureState(stats = {}) {",
+            "scope_end": "function streamTargetFps(",
+            "receiver": "profile",
+            "reads": [
+              "gpu_native_requested",
+              "gpu_native_succeeded"
+            ]
+          },
+          {
+            "file": "src_assets/common/assets/web/diagnostics-export.js",
+            "style": "javascript",
+            "scope_start": "function linuxConfigurationWarnings(stats = {}) {",
+            "scope_end": "function displayModeOverrideItem(",
+            "receiver": "profile",
+            "reads": [
+              "configuration_warnings"
+            ]
+          },
+          {
+            "file": "src_assets/common/assets/web/diagnostics-export.js",
+            "style": "javascript",
+            "function": "describeLinuxGpuProfile",
+            "receiver": "profile",
+            "reads": [
+              "adapter_matches_capture_device",
+              "adapter_pairing_device",
+              "adapter_pairing_device_source",
+              "adapter_pairing_status",
+              "capture_device",
+              "encoder_adapter",
+              "encoder_api",
+              "vaapi_vendor",
+              "wayland_main_device"
+            ]
+          }
+        ]
       }
     },
     "session_timing": {
@@ -2157,7 +2412,8 @@
         "validator accepts exactly the ids this catalog can advertise as",
         "available - stream_display_policy::selection_valid is the shared truth.",
         "group/unavailable_reason and the runtime/capture/topology vocabulary",
-        "ship ahead of their Nova consumer - see known_drift."
+        "ship ahead of their Nova consumer - see known_drift.",
+        "The non-Linux catalog has no session_overridable, so it is optional."
       ],
       "fields": [
         "available",
@@ -2178,11 +2434,120 @@
         "function": "parseModeOptions",
         "receiver": "mode"
       },
-      "polaris_emitter": {
-        "file": "src/settings_metadata.cpp",
-        "function": "stream_display_mode_options_json",
-        "style": "initializer_list",
-        "declaration": "modes.push_back({"
+      "polaris_emitter": [
+        {
+          "file": "src/settings_metadata.cpp",
+          "function": "stream_display_mode_options_json",
+          "style": "initializer_list",
+          "declaration": "modes.push_back({"
+        },
+        {
+          "file": "src/settings_metadata.cpp",
+          "function": "stream_display_mode_options_json",
+          "style": "initializer_list",
+          "declaration": "\"Advanced\";\n      modes.push_back({",
+          "fields": [
+            "available",
+            "badge",
+            "capture",
+            "group",
+            "label",
+            "reason",
+            "restart_required",
+            "runtime",
+            "topology",
+            "unavailable_reason",
+            "value"
+          ]
+        }
+      ],
+      "generated": true,
+      "optional": [
+        "session_overridable"
+      ],
+      "required_present": [
+        "available",
+        "badge",
+        "capture",
+        "group",
+        "label",
+        "reason",
+        "restart_required",
+        "runtime",
+        "topology",
+        "unavailable_reason",
+        "value"
+      ],
+      "types": {
+        "available": "boolean",
+        "badge": "string",
+        "capture": "string",
+        "group": "string",
+        "label": "string",
+        "reason": "string",
+        "restart_required": "boolean",
+        "runtime": "string",
+        "session_overridable": "boolean",
+        "topology": "string",
+        "unavailable_reason": "string",
+        "value": "string"
+      },
+      "consumers": {
+        "nova_android": [
+          {
+            "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+            "function": "parseModeOptions",
+            "receiver": "mode",
+            "style": "kotlin_org_json",
+            "reads": [
+              "available",
+              "group",
+              "label",
+              "reason",
+              "restart_required",
+              "session_overridable",
+              "unavailable_reason",
+              "value"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+            "function": "hasTypedLaunchModeAuthority",
+            "receiver": "mode",
+            "style": "kotlin_org_json",
+            "reads": [
+              "available",
+              "session_overridable",
+              "value"
+            ]
+          }
+        ],
+        "nova_deck": [
+          {
+            "file": "clients/deck/src/polaris/deck_host_settings.cpp",
+            "function": "parseHostSettings",
+            "receiver": "m",
+            "style": "qt_json",
+            "reads": [
+              "available",
+              "label",
+              "reason",
+              "unavailable_reason",
+              "value"
+            ]
+          },
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseLaunchModeCatalog",
+            "receiver": "mode",
+            "style": "qt_json",
+            "reads": [
+              "available",
+              "session_overridable",
+              "value"
+            ]
+          }
+        ]
       }
     },
     "client_settings_encoder_option": {
@@ -2307,7 +2672,6 @@
         "color_range",
         "encoder_backend",
         "encoder_options",
-        "encoder_resolution",
         "hdr",
         "limiting_factor",
         "nvenc_tune",
@@ -2315,8 +2679,7 @@
         "reasoning_summary",
         "recommendation_version",
         "recovery_policy",
-        "signals_used",
-        "topology_resolution"
+        "signals_used"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/ui/NovaGameDetailActivity.kt",
@@ -2974,8 +3337,8 @@
         "stream the cap or max_bitrate holds below advice_far_kbps. starved is the host's verdict:",
         "request_kbps is below 90% of raise_goal_kbps. assumes names the FEC share and audio cost the",
         "requests were grossed up for: the stream's own, as its bitrate_units carry them, and the",
-        "host's FEC share with stereo in high quality until its handshake is recorded. No",
-        "nova_reader yet: Nova builds against it for 1.5.0."
+        "host's FEC share with stereo in high quality until its handshake is recorded. Its advice",
+        "names are pyrowave_advice's (names_from); Android and Deck read both with one parser each."
       ],
       "fields": [
         "advice_far_kbps",
@@ -3006,15 +3369,161 @@
           "file": "src/pyrowave_advice.cpp",
           "function": "advice_json",
           "style": "initializer_list",
-          "declaration": "return {"
+          "declaration": "return {",
+          "fields": [
+            "advice_far_kbps",
+            "advice_near_kbps",
+            "cap_kbps",
+            "chroma",
+            "far_target_db",
+            "fps",
+            "height",
+            "model",
+            "raise_goal_kbps",
+            "raise_goal_limited_by",
+            "rule",
+            "target_db",
+            "version",
+            "width"
+          ]
         },
         {
           "file": "src/stream_stats.cpp",
           "function": "pyrowave_bitrate_json",
           "variable": "value",
-          "style": "subscript"
+          "style": "subscript",
+          "fields": [
+            "assumes",
+            "cap_set_aside",
+            "ceiling_frame_share",
+            "encoder_kbps",
+            "live_tuning_floor_encoder_kbps",
+            "request_cap",
+            "request_kbps",
+            "starved"
+          ]
         }
-      ]
+      ],
+      "names_from": "pyrowave_advice",
+      "generated": true,
+      "required_present": [
+        "advice_far_kbps",
+        "advice_near_kbps",
+        "assumes",
+        "cap_kbps",
+        "cap_set_aside",
+        "ceiling_frame_share",
+        "chroma",
+        "encoder_kbps",
+        "far_target_db",
+        "fps",
+        "height",
+        "live_tuning_floor_encoder_kbps",
+        "model",
+        "raise_goal_kbps",
+        "raise_goal_limited_by",
+        "request_cap",
+        "request_kbps",
+        "rule",
+        "starved",
+        "target_db",
+        "version",
+        "width"
+      ],
+      "nullable": [
+        "cap_set_aside",
+        "ceiling_frame_share",
+        "live_tuning_floor_encoder_kbps",
+        "request_cap"
+      ],
+      "types": {
+        "advice_far_kbps": "integer",
+        "advice_near_kbps": "integer",
+        "assumes": "object",
+        "cap_kbps": "integer",
+        "cap_set_aside": "object",
+        "ceiling_frame_share": "number",
+        "chroma": "string",
+        "encoder_kbps": "integer",
+        "far_target_db": "integer",
+        "fps": "integer",
+        "height": "integer",
+        "live_tuning_floor_encoder_kbps": "integer",
+        "model": "string",
+        "raise_goal_kbps": "integer",
+        "raise_goal_limited_by": "string",
+        "request_cap": "object",
+        "request_kbps": "integer",
+        "rule": "string",
+        "starved": "boolean",
+        "target_db": "integer",
+        "version": "integer",
+        "width": "integer"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisPyrowaveAdvice.kt",
+          "function": "parse",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "literal_key_list_helper": "positive",
+          "reads": [
+            "assumes",
+            "available",
+            "cap_kbps",
+            "fps",
+            "height",
+            "raise_goal_kbps",
+            "raise_goal_limited_by",
+            "version",
+            "width"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_bitrate_advice.cpp",
+          "function": "parsePyrowaveAdvice",
+          "receiver": "o",
+          "style": "qt_json",
+          "reads": [
+            "assumes",
+            "available",
+            "cap_kbps",
+            "fps",
+            "height",
+            "raise_goal_kbps",
+            "raise_goal_limited_by",
+            "version",
+            "width"
+          ]
+        },
+        "polaris_web": {
+          "file": "src_assets/common/assets/web/codec-support-readout.js",
+          "style": "javascript",
+          "function": "describePyroWaveStream",
+          "receiver": "advice",
+          "reads": [
+            "advice_far_kbps",
+            "advice_near_kbps",
+            "assumes",
+            "cap_kbps",
+            "cap_set_aside",
+            "ceiling_frame_share",
+            "chroma",
+            "encoder_kbps",
+            "far_target_db",
+            "fps",
+            "height",
+            "raise_goal_kbps",
+            "raise_goal_limited_by",
+            "request_cap",
+            "request_kbps",
+            "rule",
+            "starved",
+            "target_db",
+            "width"
+          ]
+        }
+      }
     },
     "pyrowave_advice": {
       "$comment": [
@@ -3025,8 +3534,8 @@
         "message when the host cannot serve PyroWave: not_built carries no figures, no_vulkan_device",
         "still carries them. assumes names the FEC share and audio cost the requests were grossed up",
         "for: the asking client's own stream's, as its bitrate_units carry them, when it streams",
-        "here, and the host's FEC share with stereo in high quality when it does not. No nova_reader",
-        "yet."
+        "here, and the host's FEC share with stereo in high quality when it does not. The 400",
+        "invalid_query body is an error, not this object."
       ],
       "fields": [
         "advice_far_kbps",
@@ -3053,15 +3562,129 @@
           "file": "src/pyrowave_advice.cpp",
           "function": "advice_json",
           "style": "initializer_list",
-          "declaration": "return {"
+          "declaration": "return {",
+          "fields": [
+            "advice_far_kbps",
+            "advice_near_kbps",
+            "cap_kbps",
+            "chroma",
+            "far_target_db",
+            "fps",
+            "height",
+            "model",
+            "raise_goal_kbps",
+            "raise_goal_limited_by",
+            "rule",
+            "target_db",
+            "version",
+            "width"
+          ]
         },
         {
           "file": "src/pyrowave_advice.cpp",
           "function": "advice_reply",
           "variable": "reply",
-          "style": "subscript"
+          "style": "subscript",
+          "fields": [
+            "assumes",
+            "available",
+            "message",
+            "reason"
+          ]
+        },
+        {
+          "file": "src/pyrowave_advice.cpp",
+          "function": "advice_reply",
+          "style": "initializer_list",
+          "declaration": "http_status = 200;\n    if (!host.built || !model_available()) {\n      return {",
+          "fields": [
+            "available",
+            "message",
+            "reason",
+            "version"
+          ]
         }
-      ]
+      ],
+      "generated": true,
+      "optional": [
+        "advice_far_kbps",
+        "advice_near_kbps",
+        "assumes",
+        "cap_kbps",
+        "chroma",
+        "far_target_db",
+        "fps",
+        "height",
+        "message",
+        "model",
+        "raise_goal_kbps",
+        "raise_goal_limited_by",
+        "reason",
+        "rule",
+        "target_db",
+        "width"
+      ],
+      "required_present": [
+        "available",
+        "version"
+      ],
+      "types": {
+        "advice_far_kbps": "integer",
+        "advice_near_kbps": "integer",
+        "assumes": "object",
+        "available": "boolean",
+        "cap_kbps": "integer",
+        "chroma": "string",
+        "far_target_db": "integer",
+        "fps": "integer",
+        "height": "integer",
+        "message": "string",
+        "model": "string",
+        "raise_goal_kbps": "integer",
+        "raise_goal_limited_by": "string",
+        "reason": "string",
+        "rule": "string",
+        "target_db": "integer",
+        "version": "integer",
+        "width": "integer"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisPyrowaveAdvice.kt",
+          "function": "parse",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "literal_key_list_helper": "positive",
+          "reads": [
+            "assumes",
+            "available",
+            "cap_kbps",
+            "fps",
+            "height",
+            "raise_goal_kbps",
+            "raise_goal_limited_by",
+            "version",
+            "width"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_bitrate_advice.cpp",
+          "function": "parsePyrowaveAdvice",
+          "receiver": "o",
+          "style": "qt_json",
+          "reads": [
+            "assumes",
+            "available",
+            "cap_kbps",
+            "fps",
+            "height",
+            "raise_goal_kbps",
+            "raise_goal_limited_by",
+            "version",
+            "width"
+          ]
+        }
+      }
     },
     "bitrate_units": {
       "$comment": [
@@ -3241,6 +3864,9 @@
         "steam_big_picture",
         "steam_launch",
         "steam_lifecycle"
+      ],
+      "pyrowave_bitrate": [
+        "available"
       ]
     },
     "polaris_sends_nova_never_reads": {
@@ -3257,8 +3883,7 @@
       ],
       "space_library": [
         "library_available",
-        "space_name",
-        "total"
+        "space_name"
       ],
       "space_legacy_game": [
         "worker_profile"
@@ -3274,6 +3899,21 @@
         "display_mode",
         "preferred_codec",
         "target_bitrate_kbps"
+      ],
+      "pyrowave_bitrate": [
+        "live_tuning_floor_encoder_kbps",
+        "model"
+      ],
+      "pyrowave_advice": [
+        "advice_far_kbps",
+        "advice_near_kbps",
+        "chroma",
+        "far_target_db",
+        "message",
+        "model",
+        "reason",
+        "rule",
+        "target_db"
       ]
     },
     "$detail": {
@@ -3322,6 +3962,18 @@
         "Newly declared StreamSyncManager legacy preflight readers ask for preference (auto), preference_applied (preference == auto), and preference_blocked_reason (none). Those top-level keys are never served; nested profile_state is separate. Session timing has no Nova reader.",
         "Hand-built console mode options and encoder selection remain outside the /polaris/v1 contract. Deck host settings mode-option and artwork readers belong to P2; variable-key mode validation is a retained extraction gap for that batch, not coverage claimed here.",
         "WorkerLaunchContract reads the Space-worker outer envelope, which is not optimization; only its resolved-field metadata is modelled. NovaLaunchStreamOverride composes envelope metadata but does not read a resolved-field receiver; parseProfileState reads a different nested object."
+      ],
+      "p2_consumer_corrections": [
+        "Pinned Nova 3569a9ff: Deck parseGamesPage, which fetchSpaceLibrary calls on the same body, reads space_library games and",
+        "total (total is parsed and then discarded, still a syntactic read) and validates each entry space.target. Those Deck",
+        "readers are declared and the stale total unread entry is removed. Six informational_ok exemptions for fields declared",
+        "readers already read are removed (capture backend/resolution, encoder active_backend/selection, optimization",
+        "encoder_resolution/topology_resolution), as are the five linux_gpu_profile ones the web diagnostics reader now reads.",
+        "Android and Deck parse pyrowave_bitrate and pyrowave_advice with one parser each; both read available, which",
+        "pyrowave_bitrate never serves (absent reads as available). Deck parseHostSettings also type-checks restart_required",
+        "and session_overridable through a variable key list the source audit cannot see; only its literal reads are declared.",
+        "The not_built advice reply and the non-Linux mode catalog are existing emitters, now declared. Live Tuning history",
+        "and session_timing still have no Nova reader."
       ]
     }
   }

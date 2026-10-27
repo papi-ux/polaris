@@ -2307,25 +2307,25 @@ namespace stream_stats {
     }
 
     nlohmann::json profile = {
-      {"encoder_api", stats.encode_target_device},
-      {"encoder_adapter", config::video.adapter_name},
-      {"encoder_adapter_effective", effective_adapter},
-      {"encoder_adapter_source", encoder_adapter_source},
-      {"capture_device", stats.capture_device},
-      {"wayland_main_device", stats.wayland_main_device},
-      {"compositor_render_device", compositor_device},
-      {"adapter_matches_capture_device", adapter_matches_capture_device},
-      {"adapter_matches_wayland_main_device", adapter_matches_wayland_main_device},
-      {"adapter_pairing_status", adapter_pairing_status},
-      {"adapter_pairing_device", adapter_pairing_device},
-      {"adapter_pairing_device_source", adapter_pairing_device_source},
-      {"vaapi_vendor", stats.vaapi_vendor},
-      {"capture_forecast", std::move(capture_forecast)},
-      {"cross_gpu_dmabuf_risk", capture_path_has_cross_gpu_dmabuf_risk(stats)},
-      {"gpu_native_requested", gpu_native_requested},
-      {"gpu_native_attempted", stats.gpu_native_probe.headless_extcopy.attempted || stats.gpu_native_probe.windowed.attempted || (gpu_native_requested && capture_metadata_reported)},
-      {"gpu_native_succeeded", capture_path_is_gpu_native(stats)},
-      {"configuration_warnings", std::move(configuration_warnings)}
+      {v1::linux_gpu_profile::encoder_api, stats.encode_target_device},
+      {v1::linux_gpu_profile::encoder_adapter, config::video.adapter_name},
+      {v1::linux_gpu_profile::encoder_adapter_effective, effective_adapter},
+      {v1::linux_gpu_profile::encoder_adapter_source, encoder_adapter_source},
+      {v1::linux_gpu_profile::capture_device, stats.capture_device},
+      {v1::linux_gpu_profile::wayland_main_device, stats.wayland_main_device},
+      {v1::linux_gpu_profile::compositor_render_device, compositor_device},
+      {v1::linux_gpu_profile::adapter_matches_capture_device, adapter_matches_capture_device},
+      {v1::linux_gpu_profile::adapter_matches_wayland_main_device, adapter_matches_wayland_main_device},
+      {v1::linux_gpu_profile::adapter_pairing_status, adapter_pairing_status},
+      {v1::linux_gpu_profile::adapter_pairing_device, adapter_pairing_device},
+      {v1::linux_gpu_profile::adapter_pairing_device_source, adapter_pairing_device_source},
+      {v1::linux_gpu_profile::vaapi_vendor, stats.vaapi_vendor},
+      {v1::linux_gpu_profile::capture_forecast, std::move(capture_forecast)},
+      {v1::linux_gpu_profile::cross_gpu_dmabuf_risk, capture_path_has_cross_gpu_dmabuf_risk(stats)},
+      {v1::linux_gpu_profile::gpu_native_requested, gpu_native_requested},
+      {v1::linux_gpu_profile::gpu_native_attempted, stats.gpu_native_probe.headless_extcopy.attempted || stats.gpu_native_probe.windowed.attempted || (gpu_native_requested && capture_metadata_reported)},
+      {v1::linux_gpu_profile::gpu_native_succeeded, capture_path_is_gpu_native(stats)},
+      {v1::linux_gpu_profile::configuration_warnings, std::move(configuration_warnings)}
     };
 
     return profile;
@@ -4742,23 +4742,23 @@ namespace stream_stats {
     // What the requests were grossed up for, named the way the pre-launch advice names it. A reader
     // cannot take it from fec_protection, which records a percentage only once a frame outgrows FEC
     // and reads 0 on a healthy stream.
-    value["assumes"] = {{"fec_percentage", pyrowave.link.fec_percentage}, {"audio_kbps", pyrowave.link.audio_kbps}};
-    value["encoder_kbps"] = pyrowave.encoder_kbps;
+    value[v1::pyrowave_advice::assumes] = {{"fec_percentage", pyrowave.link.fec_percentage}, {"audio_kbps", pyrowave.link.audio_kbps}};
+    value[v1::pyrowave_bitrate::encoder_kbps] = pyrowave.encoder_kbps;
     // The same rate as a request, the figure starved compares with raise_goal_kbps, so a reader compares
     // like with like instead of an encoder rate with a request.
-    value["request_kbps"] = pyrowave.request_kbps;
-    value["ceiling_frame_share"] = pyrowave.ceiling_frame_share ?
+    value[v1::pyrowave_bitrate::request_kbps] = pyrowave.request_kbps;
+    value[v1::pyrowave_bitrate::ceiling_frame_share] = pyrowave.ceiling_frame_share ?
       nlohmann::json(std::round(*pyrowave.ceiling_frame_share * 1000.0) / 1000.0) : nlohmann::json(nullptr);
     // Starved as Doctor judges it: on the rate the stream is set to while Live Tuning owns the bitrate.
     // Judged on the live target, the console's starved line came and went with every Live Tuning cut
     // while Doctor's headline held.
-    value["starved"] = evaluate_pyrowave_bitrate(stats, pyrowave_judged_encoder_kbps(stats)).starved;
-    value["live_tuning_floor_encoder_kbps"] = pyrowave.floor_encoder_kbps > 0 ?
+    value[v1::pyrowave_bitrate::starved] = evaluate_pyrowave_bitrate(stats, pyrowave_judged_encoder_kbps(stats)).starved;
+    value[v1::pyrowave_bitrate::live_tuning_floor_encoder_kbps] = pyrowave.floor_encoder_kbps > 0 ?
       nlohmann::json(pyrowave.floor_encoder_kbps) : nlohmann::json(nullptr);
     const auto &request = stats.bitrate_request;
-    value["request_cap"] = request.cap_kbps > 0 ?
+    value[v1::pyrowave_bitrate::request_cap] = request.cap_kbps > 0 ?
       nlohmann::json {{"kbps", request.cap_kbps}, {"source", request.cap_source}} : nlohmann::json(nullptr);
-    value["cap_set_aside"] = request.set_aside_kbps > 0 ?
+    value[v1::pyrowave_bitrate::cap_set_aside] = request.set_aside_kbps > 0 ?
       nlohmann::json {{"kbps", request.set_aside_kbps}, {"source", request.set_aside_source}} :
       nlohmann::json(nullptr);
     return value;
@@ -5305,47 +5305,47 @@ namespace stream_stats {
 
   static nlohmann::json fec_transition_json(const adaptive_bitrate::fec_transition_t &transition) {
     auto out = nlohmann::json::object();
-    out["configured_percentage"] = transition.configured_percentage;
-    out["percentage_before"] = transition.percentage_before;
-    out["percentage_after"] = transition.percentage_after;
-    out["phase_before"] = transition.phase_before;
-    out["phase_after"] = transition.phase_after;
-    out["pending_percentage_before"] = transition.pending_percentage_before ?
+    out[v1::live_tuning_fec_transition::configured_percentage] = transition.configured_percentage;
+    out[v1::live_tuning_fec_transition::percentage_before] = transition.percentage_before;
+    out[v1::live_tuning_fec_transition::percentage_after] = transition.percentage_after;
+    out[v1::live_tuning_fec_transition::phase_before] = transition.phase_before;
+    out[v1::live_tuning_fec_transition::phase_after] = transition.phase_after;
+    out[v1::live_tuning_fec_transition::pending_percentage_before] = transition.pending_percentage_before ?
       nlohmann::json(*transition.pending_percentage_before) : nlohmann::json(nullptr);
-    out["pending_percentage_after"] = transition.pending_percentage_after ?
+    out[v1::live_tuning_fec_transition::pending_percentage_after] = transition.pending_percentage_after ?
       nlohmann::json(*transition.pending_percentage_after) : nlohmann::json(nullptr);
     if (transition.from_frame_index && *transition.from_frame_index > 0) {
-      out["from_frame_index"] = *transition.from_frame_index;
+      out[v1::live_tuning_fec_transition::from_frame_index] = *transition.from_frame_index;
     }
     return out;
   }
 
   static nlohmann::json live_tuning_history_entry_json(const adaptive_bitrate::history_entry_t &entry) {
     auto out = nlohmann::json::object();
-    out["sequence"] = entry.sequence;
-    out["host_elapsed_ms"] = entry.host_elapsed_ms;
-    out["kind"] = entry.kind;
-    out["cause"] = entry.cause;
-    out["state"] = entry.state;
-    out["reason"] = entry.reason;
-    out["requested_bitrate_kbps"] = entry.requested_bitrate_kbps;
-    out["applied_proof"] = entry.applied_known ? "encoder_confirmed" : "unknown";
-    out["applied_bitrate_kbps"] = entry.applied_known ? nlohmann::json(entry.applied_bitrate_kbps) : nlohmann::json(nullptr);
-    out["operator_revision"] = entry.operator_revision;
-    out["applied_revision"] = entry.applied_revision;
-    out["repeat_count"] = entry.repeat_count;
-    out["feedback_initialized"] = entry.feedback_initialized;
-    out["ewma_packet_loss_percent"] = entry.ewma_packet_loss;
-    out["ewma_rtt_ms"] = entry.ewma_rtt_ms;
-    if (entry.repeat_count > 1) out["last_host_elapsed_ms"] = entry.last_host_elapsed_ms;
+    out[v1::live_tuning_history_entry::sequence] = entry.sequence;
+    out[v1::live_tuning_history_entry::host_elapsed_ms] = entry.host_elapsed_ms;
+    out[v1::live_tuning_history_entry::kind] = entry.kind;
+    out[v1::live_tuning_history_entry::cause] = entry.cause;
+    out[v1::live_tuning_history_entry::state] = entry.state;
+    out[v1::live_tuning_history_entry::reason] = entry.reason;
+    out[v1::live_tuning_history_entry::requested_bitrate_kbps] = entry.requested_bitrate_kbps;
+    out[v1::live_tuning_history_entry::applied_proof] = entry.applied_known ? "encoder_confirmed" : "unknown";
+    out[v1::live_tuning_history_entry::applied_bitrate_kbps] = entry.applied_known ? nlohmann::json(entry.applied_bitrate_kbps) : nlohmann::json(nullptr);
+    out[v1::live_tuning_history_entry::operator_revision] = entry.operator_revision;
+    out[v1::live_tuning_history_entry::applied_revision] = entry.applied_revision;
+    out[v1::live_tuning_history_entry::repeat_count] = entry.repeat_count;
+    out[v1::live_tuning_history_entry::feedback_initialized] = entry.feedback_initialized;
+    out[v1::live_tuning_history_entry::ewma_packet_loss_percent] = entry.ewma_packet_loss;
+    out[v1::live_tuning_history_entry::ewma_rtt_ms] = entry.ewma_rtt_ms;
+    if (entry.repeat_count > 1) out[v1::live_tuning_history_entry::last_host_elapsed_ms] = entry.last_host_elapsed_ms;
     if (entry.callback_revision != 0 || entry.callback_bitrate_kbps != 0) {
-      out["callback"] = {{"bitrate_kbps", entry.callback_bitrate_kbps}, {"revision", entry.callback_revision}};
+      out[v1::live_tuning_history_entry::callback] = {{"bitrate_kbps", entry.callback_bitrate_kbps}, {"revision", entry.callback_revision}};
     }
-    out["input"] = entry.input_available ? nlohmann::json {
+    out[v1::live_tuning_history_entry::input] = entry.input_available ? nlohmann::json {
       {"packet_loss_percent", entry.input_packet_loss_percent},
       {"rtt_ms", entry.input_rtt_ms},
     } : nlohmann::json(nullptr);
-    if (entry.fec_transition) out["fec_transition"] = fec_transition_json(*entry.fec_transition);
+    if (entry.fec_transition) out[v1::live_tuning_history_entry::fec_transition] = fec_transition_json(*entry.fec_transition);
     return out;
   }
 

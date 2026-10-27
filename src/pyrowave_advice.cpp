@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 // local includes
+#include "generated/polaris_v1_contract.h"
 #include "stream_bitrate.h"
 
 #ifdef POLARIS_BUILD_PYROWAVE
@@ -25,6 +26,8 @@
   #include <pyrowave_regression_results.h>
   #pragma GCC diagnostic pop
 #endif
+
+namespace v1 = polaris::contract::v1;
 
 namespace pyrowave_advice {
   namespace {
@@ -223,20 +226,20 @@ namespace pyrowave_advice {
 
   nlohmann::json advice_json(const advice_t &advice) {
     return {
-      {"version", 1},
-      {"model", k_model},
-      {"target_db", k_target_db},
-      {"far_target_db", k_far_target_db},
-      {"width", advice.width},
-      {"height", advice.height},
-      {"fps", advice.fps},
-      {"chroma", advice.chroma444 ? "444" : "420"},
-      {"advice_far_kbps", advice.advice_far_kbps},
-      {"advice_near_kbps", advice.advice_near_kbps},
-      {"raise_goal_kbps", advice.raise_goal_kbps},
-      {"cap_kbps", advice.cap_kbps},
-      {"rule", rule_name(advice.rule)},
-      {"raise_goal_limited_by", advice.raise_goal_limited_by},
+      {v1::pyrowave_advice::version, 1},
+      {v1::pyrowave_advice::model, k_model},
+      {v1::pyrowave_advice::target_db, k_target_db},
+      {v1::pyrowave_advice::far_target_db, k_far_target_db},
+      {v1::pyrowave_advice::width, advice.width},
+      {v1::pyrowave_advice::height, advice.height},
+      {v1::pyrowave_advice::fps, advice.fps},
+      {v1::pyrowave_advice::chroma, advice.chroma444 ? "444" : "420"},
+      {v1::pyrowave_advice::advice_far_kbps, advice.advice_far_kbps},
+      {v1::pyrowave_advice::advice_near_kbps, advice.advice_near_kbps},
+      {v1::pyrowave_advice::raise_goal_kbps, advice.raise_goal_kbps},
+      {v1::pyrowave_advice::cap_kbps, advice.cap_kbps},
+      {v1::pyrowave_advice::rule, rule_name(advice.rule)},
+      {v1::pyrowave_advice::raise_goal_limited_by, advice.raise_goal_limited_by},
     };
   }
 
@@ -256,22 +259,22 @@ namespace pyrowave_advice {
     http_status = 200;
     if (!host.built || !model_available()) {
       return {
-        {"version", 1},
-        {"available", false},
-        {"reason", "not_built"},
-        {"message", "This Polaris was built without PyroWave, so it has no PyroWave advice to give."}
+        {v1::pyrowave_advice::version, 1},
+        {v1::pyrowave_advice::available, false},
+        {v1::pyrowave_advice::reason, "not_built"},
+        {v1::pyrowave_advice::message, "This Polaris was built without PyroWave, so it has no PyroWave advice to give."}
       };
     }
     const auto advice = advise(*parsed_width, *parsed_height, *parsed_fps, chroma == "444",
                                {host.fec_percentage, host.audio_kbps}, host.max_bitrate_kbps);
     auto reply = advice_json(advice);
-    reply["available"] = host.device_available;
+    reply[v1::pyrowave_advice::available] = host.device_available;
     if (!host.device_available) {
-      reply["reason"] = "no_vulkan_device";
-      reply["message"] = "No GPU on this PC can run PyroWave, so it cannot stream it. The figures are what the "
+      reply[v1::pyrowave_advice::reason] = "no_vulkan_device";
+      reply[v1::pyrowave_advice::message] = "No GPU on this PC can run PyroWave, so it cannot stream it. The figures are what the "
                          "codec would need.";
     }
-    reply["assumes"] = {{"fec_percentage", host.fec_percentage}, {"audio_kbps", host.audio_kbps}};
+    reply[v1::pyrowave_advice::assumes] = {{"fec_percentage", host.fec_percentage}, {"audio_kbps", host.audio_kbps}};
     return reply;
   }
 

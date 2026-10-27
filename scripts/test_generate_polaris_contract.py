@@ -87,22 +87,16 @@ class ContractGeneratorTests(unittest.TestCase):
         self.assertEqual(len(schema['objects']), 33)
         self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 356)
         migrated = {name for name, obj in schema['objects'].items() if obj.get('generated')}
-        self.assertEqual(migrated, {'launch_mode', 'space_launch_mode', 'spaces_capacity', 'bitrate_units',
-                                    'game', 'steam_launch', 'display_planner', 'display_planner_choice',
-                                    'display_planner_scale_choice', 'spaces_snapshot', 'space',
-                                    'space_library', 'space_library_game', 'space_ref', 'space_legacy_game',
-                                    'session_capture', 'session_encoder', 'session_encoder_selection',
-                                    'session_timing', 'client_settings_encoder_option', 'host_power',
-                                    'optimization', 'optimization_encoder_resolution',
-                                    'optimization_topology_resolution', 'optimization_resolved_field'})
+        self.assertEqual(migrated, set(schema['objects']))
         outputs = generator.render(schema, raw, Path(generator.__file__).read_bytes())
         definitions = generator.generated_values(outputs[generator.CPP].decode())
-        self.assertEqual(len(definitions), 230)
+        self.assertEqual(len(definitions), 319)
         generator.audit_emitters(ROOT, schema, definitions)
         self.assertNotIn(b'::space_launch_mode {', outputs[generator.CPP])
         self.assertNotIn(b'LIVE_TUNING', outputs[generator.JS])
         self.assertEqual(set(re.findall(rb'export const (\w+)', outputs[generator.JS])),
-                         {b'SPACES_CAPACITY', b'HOST_POWER', b'SESSION_ENCODER_SELECTION'})
+                         {b'SPACES_CAPACITY', b'HOST_POWER', b'SESSION_ENCODER_SELECTION', b'LINUX_GPU_PROFILE',
+                          b'PYROWAVE_BITRATE'})
         for reader in schema['objects']['spaces_capacity']['consumers']['polaris_web']:
             source = (ROOT / reader['file']).read_text()
             self.assertIn('import { SPACES_CAPACITY }', source)

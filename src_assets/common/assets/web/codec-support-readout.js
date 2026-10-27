@@ -1,3 +1,5 @@
+import { PYROWAVE_BITRATE } from './generated/polarisV1Contract.js'
+
 // What the codec readout says about 4:4:4 and PyroWave. The host decides every fact: the yuv444 and
 // pyrowave objects in encoder_codec_support on GET /api/config, and, while a PyroWave stream runs,
 // pyrowave_bitrate and each client's pyrowave_route in the stream stats. This only words them.
@@ -190,10 +192,10 @@ export function describePyroWaveStream(t, stats) {
   }
 
   const advice = stats.pyrowave_bitrate && typeof stats.pyrowave_bitrate === 'object' ? stats.pyrowave_bitrate : null
-  const width = positive(advice?.width) || positive(stats.width)
-  const height = positive(advice?.height) || positive(stats.height)
-  const fps = positive(advice?.fps) || Math.round(positive(stats.encode_target_fps) || positive(stats.session_target_fps))
-  const chroma = text(advice?.chroma) || text(stats.stream_chroma)
+  const width = positive(advice?.[PYROWAVE_BITRATE.WIDTH]) || positive(stats.width)
+  const height = positive(advice?.[PYROWAVE_BITRATE.HEIGHT]) || positive(stats.height)
+  const fps = positive(advice?.[PYROWAVE_BITRATE.FPS]) || Math.round(positive(stats.encode_target_fps) || positive(stats.session_target_fps))
+  const chroma = text(advice?.[PYROWAVE_BITRATE.CHROMA]) || text(stats.stream_chroma)
   const heading = width && height && fps ?
     t('config.codec_support_pyrowave_streaming', { width, height, fps, chroma: chromaLabel(t, chroma) }) :
     t('config.codec_support_pyrowave_streaming_unknown')
@@ -206,62 +208,62 @@ export function describePyroWaveStream(t, stats) {
   values.push({
     id: 'requested',
     label: t('config.pyrowave_card_requested_bitrate'),
-    value: positive(advice?.request_kbps) ? t('config.pyrowave_card_mbps', { mbps: mbps(advice.request_kbps) }) : notReported,
+    value: positive(advice?.[PYROWAVE_BITRATE.REQUEST_KBPS]) ? t('config.pyrowave_card_mbps', { mbps: mbps(advice[PYROWAVE_BITRATE.REQUEST_KBPS]) }) : notReported,
   })
   values.push({
     id: 'encoded',
     label: t('config.pyrowave_card_encoded_bitrate'),
-    value: positive(advice?.encoder_kbps) ? t('config.pyrowave_card_mbps', { mbps: mbps(advice.encoder_kbps) }) : notReported,
+    value: positive(advice?.[PYROWAVE_BITRATE.ENCODER_KBPS]) ? t('config.pyrowave_card_mbps', { mbps: mbps(advice[PYROWAVE_BITRATE.ENCODER_KBPS]) }) : notReported,
   })
   values.push(...routeValues(t, pyrowaveClients))
 
   const lines = [t('config.codec_support_pyrowave_route_note')]
   const details = routeSentences(t, pyrowaveClients)
   const result = { running: true, idle: false, heading, clients: pyrowaveClients.map((client) => clientName(t, client)), values, lines, details }
-  if (!advice || !positive(advice.advice_far_kbps) || !positive(advice.advice_near_kbps)) {
+  if (!advice || !positive(advice[PYROWAVE_BITRATE.ADVICE_FAR_KBPS]) || !positive(advice[PYROWAVE_BITRATE.ADVICE_NEAR_KBPS])) {
     lines.push(t('config.codec_support_pyrowave_no_advice'))
     return result
   }
 
   lines.push(t('config.codec_support_pyrowave_advice', {
-    far: mbps(advice.advice_far_kbps, { up: true }),
-    near: mbps(advice.advice_near_kbps, { up: true }),
+    far: mbps(advice[PYROWAVE_BITRATE.ADVICE_FAR_KBPS], { up: true }),
+    near: mbps(advice[PYROWAVE_BITRATE.ADVICE_NEAR_KBPS], { up: true }),
   }))
-  if (advice.starved === true) {
+  if (advice[PYROWAVE_BITRATE.STARVED] === true) {
     lines.push(t('config.codec_support_pyrowave_starved'))
   }
   // The FEC share the host grossed the advice up for. Not fec_protection.fec_percentage: that records
   // a percentage only once a frame outgrows FEC, so it reads 0 on a healthy stream.
-  const fec = advice.assumes?.fec_percentage
+  const fec = advice[PYROWAVE_BITRATE.ASSUMES]?.fec_percentage
   // The own screen figure aims for its calibrated quality and the television figure for the author's
   // default. The host serving this console computed the advice and sends both; the fallbacks are its own
   // two targets, so a missing field never pairs the Retroid Pocket 6 calibration with 35 dB.
-  const db = positive(advice.target_db) || 35
-  const farDb = positive(advice.far_target_db) || 31
+  const db = positive(advice[PYROWAVE_BITRATE.TARGET_DB]) || 35
+  const farDb = positive(advice[PYROWAVE_BITRATE.FAR_TARGET_DB]) || 31
   details.push(Number.isFinite(fec) && fec >= 0 ?
     t('config.codec_support_pyrowave_advice_conditions', { fec, db, far_db: farDb }) :
     t('config.codec_support_pyrowave_advice_conditions_no_fec', { db, far_db: farDb }))
   // The figures above are the model's readouts and are not capped. Past what Polaris recommends on its
   // own, the visible lines say so, so a television figure of 594 Mbps does not read as advice to set it.
-  const recommendedMost = positive(advice.cap_kbps)
-  if (recommendedMost && (advice.advice_far_kbps > recommendedMost || advice.advice_near_kbps > recommendedMost)) {
+  const recommendedMost = positive(advice[PYROWAVE_BITRATE.CAP_KBPS])
+  if (recommendedMost && (advice[PYROWAVE_BITRATE.ADVICE_FAR_KBPS] > recommendedMost || advice[PYROWAVE_BITRATE.ADVICE_NEAR_KBPS] > recommendedMost)) {
     lines.push(t('config.codec_support_pyrowave_above_cap', { cap: mbps(recommendedMost) }))
   }
-  if (RULES.has(text(advice.rule))) {
-    details.push(t(`config.codec_support_pyrowave_rule_${text(advice.rule)}`))
+  if (RULES.has(text(advice[PYROWAVE_BITRATE.RULE]))) {
+    details.push(t(`config.codec_support_pyrowave_rule_${text(advice[PYROWAVE_BITRATE.RULE])}`))
   }
-  if (Number.isFinite(advice.ceiling_frame_share)) {
-    details.push(t('config.codec_support_pyrowave_ceiling_share', { share: Math.round(advice.ceiling_frame_share * 100) }))
+  if (Number.isFinite(advice[PYROWAVE_BITRATE.CEILING_FRAME_SHARE])) {
+    details.push(t('config.codec_support_pyrowave_ceiling_share', { share: Math.round(advice[PYROWAVE_BITRATE.CEILING_FRAME_SHARE] * 100) }))
   }
-  const limit = text(advice.raise_goal_limited_by)
-  if (positive(advice.raise_goal_kbps) && RAISE_LIMITS.has(limit)) {
-    details.push(t(`config.codec_support_pyrowave_raise_goal_${limit}`, { goal: mbps(advice.raise_goal_kbps, { up: true }) }))
+  const limit = text(advice[PYROWAVE_BITRATE.RAISE_GOAL_LIMITED_BY])
+  if (positive(advice[PYROWAVE_BITRATE.RAISE_GOAL_KBPS]) && RAISE_LIMITS.has(limit)) {
+    details.push(t(`config.codec_support_pyrowave_raise_goal_${limit}`, { goal: mbps(advice[PYROWAVE_BITRATE.RAISE_GOAL_KBPS], { up: true }) }))
   }
-  const cap = advice.request_cap
+  const cap = advice[PYROWAVE_BITRATE.REQUEST_CAP]
   if (cap && positive(cap.kbps)) {
     details.push(t('config.codec_support_pyrowave_request_cap', { mbps: mbps(cap.kbps), source: text(cap.source) }))
   }
-  const setAside = advice.cap_set_aside
+  const setAside = advice[PYROWAVE_BITRATE.CAP_SET_ASIDE]
   if (setAside && positive(setAside.kbps)) {
     details.push(t('config.codec_support_pyrowave_cap_set_aside', { mbps: mbps(setAside.kbps), source: text(setAside.source) }))
   }

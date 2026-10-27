@@ -1,3 +1,4 @@
+import { LINUX_GPU_PROFILE } from './generated/polarisV1Contract.js'
 import { NetworkAddressBook, pseudonymizeNetworkAddresses } from './network-address-pseudonyms.js'
 import { doctorIsWaitingForStream } from './doctor-observation.js'
 import { safeTailscalePeerSnapshot, tailscalePeerSummary } from './tailscale-connection-readout.js'
@@ -413,11 +414,11 @@ function gpuNativeCaptureState(stats = {}) {
   const probe = stats?.gpu_native_probe || stats?.gpuNativeProbe || {}
   return {
     requested: Boolean(
-      profile.gpu_native_requested || profile.gpuNativeRequested ||
+      profile[LINUX_GPU_PROFILE.GPU_NATIVE_REQUESTED] || profile.gpuNativeRequested ||
       probe.requested || stats?.runtime_gpu_native_override_active
     ),
     succeeded: Boolean(
-      profile.gpu_native_succeeded || profile.gpuNativeSucceeded ||
+      profile[LINUX_GPU_PROFILE.GPU_NATIVE_SUCCEEDED] || profile.gpuNativeSucceeded ||
       stats?.capture_gpu_native || stats?.capture?.gpu_native
     ),
   }
@@ -474,7 +475,7 @@ function capturePressureActive(stats = {}) {
 
 function linuxConfigurationWarnings(stats = {}) {
   const profile = linuxGpuProfile(stats)
-  if (Array.isArray(profile.configuration_warnings)) return profile.configuration_warnings
+  if (Array.isArray(profile[LINUX_GPU_PROFILE.CONFIGURATION_WARNINGS])) return profile[LINUX_GPU_PROFILE.CONFIGURATION_WARNINGS]
   if (Array.isArray(profile.configurationWarnings)) return profile.configurationWarnings
   return []
 }
@@ -544,19 +545,19 @@ function hostConfigurationWarningItems(stats = {}) {
 
 export function describeLinuxGpuProfile(stats = {}) {
   const profile = linuxGpuProfile(stats)
-  const encoderApi = lower(profile.encoder_api || profile.encoderApi || stats?.encode_target_device)
-  const vaapiVendor = lower(profile.vaapi_vendor || profile.vaapiVendor)
+  const encoderApi = lower(profile[LINUX_GPU_PROFILE.ENCODER_API] || profile.encoderApi || stats?.encode_target_device)
+  const vaapiVendor = lower(profile[LINUX_GPU_PROFILE.VAAPI_VENDOR] || profile.vaapiVendor)
   const vaapiLabel = /amd|radeon|radeonsi/.test(vaapiVendor) ? 'AMD/VAAPI' : 'VA-API'
   const captureReason = lower(stats?.capture_path_reason || stats?.capture?.reason)
   const capturePath = lower(stats?.capture_path || stats?.capture?.path || stats?.capture_transport)
   const { requested: gpuNativeRequested, succeeded: gpuNativeSucceeded } = gpuNativeCaptureState(stats)
-  const adapterMatchesCaptureDevice = profile.adapter_matches_capture_device ?? profile.adapterMatchesCaptureDevice
-  const adapterPairingStatus = lower(profile.adapter_pairing_status || profile.adapterPairingStatus)
-  const adapterPairingSource = lower(profile.adapter_pairing_device_source || profile.adapterPairingDeviceSource)
-  const encoderAdapter = profile.encoder_adapter || profile.encoderAdapter || ''
-  const captureDevice = profile.capture_device || profile.captureDevice || ''
-  const waylandMainDevice = profile.wayland_main_device || profile.waylandMainDevice || ''
-  const pairingDevice = profile.adapter_pairing_device || profile.adapterPairingDevice ||
+  const adapterMatchesCaptureDevice = profile[LINUX_GPU_PROFILE.ADAPTER_MATCHES_CAPTURE_DEVICE] ?? profile.adapterMatchesCaptureDevice
+  const adapterPairingStatus = lower(profile[LINUX_GPU_PROFILE.ADAPTER_PAIRING_STATUS] || profile.adapterPairingStatus)
+  const adapterPairingSource = lower(profile[LINUX_GPU_PROFILE.ADAPTER_PAIRING_DEVICE_SOURCE] || profile.adapterPairingDeviceSource)
+  const encoderAdapter = profile[LINUX_GPU_PROFILE.ENCODER_ADAPTER] || profile.encoderAdapter || ''
+  const captureDevice = profile[LINUX_GPU_PROFILE.CAPTURE_DEVICE] || profile.captureDevice || ''
+  const waylandMainDevice = profile[LINUX_GPU_PROFILE.WAYLAND_MAIN_DEVICE] || profile.waylandMainDevice || ''
+  const pairingDevice = profile[LINUX_GPU_PROFILE.ADAPTER_PAIRING_DEVICE] || profile.adapterPairingDevice ||
     (adapterPairingSource === 'capture_device' ? captureDevice : adapterPairingSource === 'wayland_main_device' ? waylandMainDevice : captureDevice || waylandMainDevice)
   const pairingMismatch = Boolean(encoderAdapter && pairingDevice && (
     adapterPairingStatus ? adapterPairingStatus === 'mismatched' : adapterMatchesCaptureDevice === false
