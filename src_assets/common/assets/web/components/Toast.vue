@@ -1,14 +1,15 @@
 <template>
   <Teleport to="body">
     <div
-      class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"
+      class="fixed bottom-4 right-4 z-50 flex max-w-[calc(100vw-2rem)] flex-col gap-2 pointer-events-none"
       aria-live="polite"
       aria-atomic="false"
     >
-      <TransitionGroup name="toast">
+      <TransitionGroup name="toast" @before-leave="beforeLeave" @after-leave="finishLeave" @leave-cancelled="finishLeave">
         <div
           v-for="t in toasts"
           :key="t.id"
+          :data-toast-id="t.id"
           class="glass max-w-sm overflow-hidden rounded-xl shadow-lg pointer-events-auto"
           :class="{
             'border-success/40': t.type === 'success',
@@ -28,7 +29,7 @@
             </div>
             <!-- Content -->
             <div class="flex-1 min-w-0">
-              <span class="text-silver text-sm">{{ t.message }}</span>
+              <span class="text-silver text-sm [overflow-wrap:anywhere]">{{ t.message }}</span>
               <button v-if="t.action" class="ml-2 text-ice hover:text-ice/80 font-medium text-sm whitespace-nowrap" @click="t.action.handler">{{ t.action.label }}</button>
             </div>
             <button
@@ -58,8 +59,29 @@
 </template>
 
 <script setup>
+import { watch } from 'vue'
 import { useToast } from '../composables/useToast'
-const { toasts, dismiss } = useToast()
+const { toasts, dismiss, immediateDismissals } = useToast()
+const leaving = new Map()
+
+function hideImmediateLeaves() {
+  for (const [id, element] of leaving) {
+    if (immediateDismissals.value.has(id)) element.style.display = 'none'
+  }
+}
+
+function beforeLeave(element) {
+  leaving.set(Number(element.dataset.toastId), element)
+  hideImmediateLeaves()
+}
+
+function finishLeave(element) {
+  leaving.delete(Number(element.dataset.toastId))
+}
+
+// Also hide an owned notice whose ordinary leave animation already began. Vue retains
+// ownership of the node and finishes removing it through the normal transition hooks.
+watch(immediateDismissals, hideImmediateLeaves, { flush: 'sync' })
 </script>
 
 <style>

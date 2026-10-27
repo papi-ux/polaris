@@ -1,21 +1,33 @@
-import { mount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MissionStage from './MissionStage.vue'
+import { ambienceStylesReady } from '../artwork-tint.js'
 import { applyTheme } from '../theme.js'
+
+// The glow's styles load on demand. By default the real loader runs (Vitest hands back the
+// stylesheet at once); a test can hold it pending or have it fail.
+vi.mock('../artwork-tint.js', async importOriginal => {
+  const actual = await importOriginal()
+  return { ...actual, ambienceStylesReady: vi.fn(actual.ambienceStylesReady) }
+})
 
 const cover = './api/covers/image?name=Control'
 const hero = './api/apps/control/artwork/hero'
 const logo = './api/apps/control/artwork/logo'
 
-// jsdom has no 2D canvas. The logo check reads its pixels from this stand-in: `pixel(index, count)`
-// gives each pixel's [r, g, b, a].
+// jsdom has no 2D canvas. The logo check and the cover's tint read their pixels from this stand-in:
+// `pixel(index, count)` gives each pixel's [r, g, b, a].
 function logoCanvas(pixel) {
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-    drawImage() {},
+  const drawImage = vi.fn()
+  const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    drawImage,
     getImageData: (x, y, width, height) => ({
       data: Uint8ClampedArray.from({ length: width * height * 4 }, (_, i) => pixel(Math.floor(i / 4), width * height)[i % 4]),
     }),
   })
+  return { drawImage, getContext }
 }
 const solid = rgba => logoCanvas(() => rgba)
 // Each theme's scrim colour is its --color-void token.
@@ -258,5 +270,177 @@ describe('MissionStage artwork', () => {
     expect(view.find('[data-stage-logo]').exists()).toBe(false)
     expect(view.find('.mc-stage-backdrop').exists()).toBe(false)
     view.unmount()
+  })
+})
+
+describe('MissionStage ambience', () => {
+  // Tints are kept per cover across stages, so each test features covers of its own.
+  const coverOf = name => `./api/covers/image?name=${encodeURIComponent(name)}`
+  const live = (props = {}) => stage({ mode: 'live', heroSrc: '', logoSrc: '', ...props })
+  const loadCover = view => view.get('[data-stage-artwork] img').trigger('load')
+  const glows = view => view.get('[data-mission-stage]').classes().includes('has-ambience')
+  const glowsOnceReady = view => vi.waitFor(() => expect(glows(view)).toBe(true))
+  const ambienceShown = view => view.find('[data-stage-ambience]').exists() ||
+    (view.get('[data-mission-stage]').attributes('style') ?? '').includes('--mc-ambience')
+
+  it('glows live in the cover\'s own colour, read once from the cover already on screen', async () => {
+    const { drawImage, getContext } = logoCanvas(() => [200, 60, 40, 255])
+    const ember = coverOf('Ember')
+    const view = live({ artSrc: ember })
+    expect(glows(view)).toBe(false)
+    expect(view.find('[data-stage-ambience]').exists()).toBe(false)
+    const keyart = view.get('[data-stage-artwork] img').element
+    await loadCover(view)
+    await glowsOnceReady(view)
+    // The hue is kept and the brightest channel set to 150.
+    expect(view.get('[data-mission-stage]').attributes('style')).toContain('--mc-ambience: #962d1e')
+    expect(view.find('[data-stage-ambience]').exists()).toBe(true)
+    // The pixels come from the key art on screen: the image is not requested a second time.
+    expect(drawImage).toHaveBeenCalledTimes(1)
+    expect(drawImage.mock.calls[0][0]).toBe(keyart)
+    // Featured again, the cover's tint comes from the cache.
+    await view.setProps({ artSrc: coverOf('Ember elsewhere') })
+    await view.setProps({ artSrc: ember })
+    await loadCover(view)
+    expect(getContext).toHaveBeenCalledTimes(1)
+    await glowsOnceReady(view)
+    view.unmount()
+  })
+
+  it('takes the cover\'s strongest colour rather than a muddy mean of all of them', async () => {
+    // Seven pixels in ten deep blue, three a brighter orange: the blue carries more colour overall.
+    logoCanvas((index, count) => (index < count * 0.7 ? [30, 50, 140, 255] : [230, 120, 20, 255]))
+    const view = live({ artSrc: coverOf('Dusk') })
+    await loadCover(view)
+    expect(view.get('[data-mission-stage]').attributes('style')).toContain('--mc-ambience: #203696')
+    view.unmount()
+  })
+
+  it.each([
+    ['a grey cover', () => logoCanvas(() => [128, 128, 128, 255])],
+    ['a transparent cover', () => logoCanvas(() => [200, 60, 40, 0])],
+    ['no 2D context', () => vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)],
+    ['pixels the browser will not share', () => vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      drawImage() {}, getImageData() { throw new DOMException('tainted', 'SecurityError') },
+    })],
+  ])('keeps the plain stage for %s', async (label, arrange) => {
+    arrange()
+    const view = live({ artSrc: coverOf(`Plain ${label}`) })
+    await loadCover(view)
+    await flushPromises()
+    expect(glows(view)).toBe(false)
+    expect(view.find('[data-stage-ambience]').exists()).toBe(false)
+    expect(view.get('[data-mission-stage]').attributes('style') ?? '').not.toContain('--mc-ambience')
+    view.unmount()
+  })
+
+  it('glows only live, beside the cover it was read from, and never behind the preview', async () => {
+    logoCanvas(() => [200, 60, 40, 255])
+    vi.mocked(ambienceStylesReady).mockClear()
+    const view = stage({ artSrc: coverOf('Fence one'), heroSrc: '', logoSrc: '' })
+    await loadCover(view)
+    // Idle, the stage features a title from the library; only the title on stream glows, and the
+    // glow's styles are not asked for until then. A cover loaded while idle glows once live.
+    await flushPromises()
+    expect(glows(view)).toBe(false)
+    expect(ambienceStylesReady).not.toHaveBeenCalled()
+    await view.setProps({ mode: 'live' })
+    await glowsOnceReady(view)
+    // A late load from the previous title's cover settles nothing for the new one.
+    const previous = view.get('[data-stage-artwork] img').element
+    await view.setProps({ artSrc: coverOf('Fence two') })
+    expect(glows(view)).toBe(false)
+    previous.dispatchEvent(new Event('load'))
+    await view.vm.$nextTick()
+    expect(glows(view)).toBe(false)
+    await loadCover(view)
+    await glowsOnceReady(view)
+    // The live preview takes the art's place, and the glow goes with it.
+    await view.setProps({ hideArt: true })
+    expect(glows(view)).toBe(false)
+    view.unmount()
+  })
+
+  it('keeps a bounded number of tints, reading an evicted cover again', async () => {
+    const { getContext } = logoCanvas(() => [200, 60, 40, 255])
+    const view = live({ artSrc: coverOf('Shelf 0') })
+    for (let n = 0; n < 40; n++) {
+      await view.setProps({ artSrc: coverOf(`Shelf ${n}`) })
+      await loadCover(view)
+    }
+    expect(getContext).toHaveBeenCalledTimes(40)
+    // A recent cover comes from the cache; the earliest has made way and is read again.
+    await view.setProps({ artSrc: coverOf('Shelf 38') })
+    await loadCover(view)
+    expect(getContext).toHaveBeenCalledTimes(40)
+    await view.setProps({ artSrc: coverOf('Shelf 0') })
+    await loadCover(view)
+    expect(getContext).toHaveBeenCalledTimes(41)
+    view.unmount()
+  })
+
+  it('keeps the plain stage while the glow\'s styles load, and for good when they cannot', async () => {
+    logoCanvas(() => [200, 60, 40, 255])
+    let finish
+    vi.mocked(ambienceStylesReady).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const view = live({ artSrc: coverOf('Lazy one') })
+    await loadCover(view)
+    // Nothing of the glow is drawn before its styles apply.
+    expect(glows(view)).toBe(false)
+    expect(ambienceShown(view)).toBe(false)
+    // The cover changes while they load; when they arrive, the new cover has no tint yet.
+    await view.setProps({ artSrc: coverOf('Lazy two') })
+    finish(true)
+    await flushPromises()
+    expect(glows(view)).toBe(false)
+    await loadCover(view)
+    expect(glows(view)).toBe(true)
+    // Styles that arrive after the stream ends, or after the stage has gone, show nothing.
+    const ended = live({ artSrc: coverOf('Lazy three') })
+    vi.mocked(ambienceStylesReady).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    await loadCover(ended)
+    await ended.setProps({ mode: 'idle' })
+    finish(true)
+    await flushPromises()
+    expect(glows(ended)).toBe(false)
+    const gone = live({ artSrc: coverOf('Lazy four') })
+    vi.mocked(ambienceStylesReady).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    await loadCover(gone)
+    gone.unmount()
+    finish(true)
+    await flushPromises()
+    // Styles that cannot load leave the stage plain.
+    vi.mocked(ambienceStylesReady).mockResolvedValueOnce(false)
+    const failed = live({ artSrc: coverOf('Lazy five') })
+    await loadCover(failed)
+    await flushPromises()
+    expect(glows(failed)).toBe(false)
+    expect(ambienceShown(failed)).toBe(false)
+    view.unmount(); ended.unmount(); failed.unmount()
+  })
+
+  it('asks for the glow\'s styles once, and settles a failed load as no glow without retrying', async () => {
+    vi.resetModules()
+    vi.doMock('../artwork-ambience.css', () => { throw new Error('offline') })
+    const { ambienceStylesReady: load } = await vi.importActual('../artwork-tint.js')
+    const first = load()
+    expect(load()).toBe(first)
+    await expect(first).resolves.toBe(false)
+    expect(load()).toBe(first)
+    vi.doUnmock('../artwork-ambience.css')
+  })
+
+  it('keeps the glow\'s styles out of the startup stylesheet, still, and off for reduced motion, High Contrast and Director', () => {
+    const web = name => readFileSync(join(process.cwd(), 'src_assets/common/assets/web', name), 'utf8')
+    expect(web('app.css')).not.toContain('ambience')
+    const css = web('artwork-ambience.css')
+    expect(css).not.toContain('infinite')
+    const wash = css.slice(css.indexOf('.mc-stage-ambience {'))
+    expect(wash.slice(0, wash.indexOf('}'))).not.toContain('animation')
+    // Every rule that shows the glow sits behind one motion and theme gate.
+    const gate = css.slice(css.indexOf('@media (prefers-reduced-motion: no-preference)'))
+    const shown = gate.slice(0, gate.indexOf('\n  }\n'))
+    expect(shown).toContain(':root:not([data-theme="high-contrast"], [data-theme="director"]) .mc-stage.has-ambience .mc-stage-ambience')
+    expect(css.split('.has-ambience').length).toBe(shown.split('.has-ambience').length)
   })
 })

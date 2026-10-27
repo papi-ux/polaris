@@ -1653,7 +1653,8 @@ textarea {
   @apply grid gap-2 sm:grid-cols-3 xl:grid-cols-1;
 }
 
-.operator-console .library-health-chip {
+.operator-console .library-health-chip,
+.operator-console .library-import-metric {
   @apply flex items-center justify-between rounded-lg border border-storm/15 bg-deep/35 px-3 py-2 text-xs text-storm;
 }
 
@@ -1679,10 +1680,6 @@ textarea {
 
 .operator-console .library-import-overview {
   @apply grid gap-2 sm:grid-cols-3;
-}
-
-.operator-console .library-import-metric {
-  @apply flex items-center justify-between rounded-lg border border-storm/15 bg-deep/35 px-3 py-2 text-xs text-storm;
 }
 
 .operator-console .library-import-metric strong {
@@ -2687,6 +2684,43 @@ textarea {
 
   .mc-signal-spark {
     margin: 0.45rem 0 0;
+  }
+
+  /* A recap tints the Last session cell once and fades back as it settles; no geometry changes. */
+  .mc-signal[data-idle-signal='last'] {
+    transition: background-color 600ms ease, box-shadow 600ms ease;
+  }
+
+  /* Keep the short client/date and recap averages in the same two-line footprint. Full text
+     remains in the DOM for assistive technology and in the cell's hover description. */
+  .mc-signal[data-idle-signal='last'] .mc-signal-sub {
+    min-block-size: 2.8em;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+
+  .mc-signal.is-recap {
+    position: relative;
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    box-shadow: inset 0 2px 0 var(--color-accent);
+  }
+
+  .mc-signal-link {
+    font-weight: 700;
+    color: var(--color-ice);
+  }
+
+  .mc-signal-link::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+
+  .mc-signal.is-recap:hover .mc-signal-link {
+    text-decoration: underline;
+    text-underline-offset: 0.25em;
   }
 
   /* The deck: the Doctor note or the recent titles, then Diagnostics, with controls beside. */

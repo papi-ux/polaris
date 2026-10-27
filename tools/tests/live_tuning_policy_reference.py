@@ -31,9 +31,10 @@ Loss
   When reports stop before the first step is judged, the probe takes its deep sample after 1.5 s, once.
 - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
   the measured burstiness. An undecided descent test counts as not having helped.
-- A hold retries the rate above it after 8 reports, then every 20, and climbs from there when it is clean. A
-  clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
-  than real loss at the rate above it, the loss is rate-independent after all.
+- A hold retries the rate above it after 8 reports, then every 20. Loss ceilings climb from there when
+  clean; queue ceilings use the staircase below. A clean step within 25% under that rate retries it at once.
+  While a hold's loss is not significantly lower than real loss at the rate above it, the loss is
+  rate-independent after all.
   After a hold fails, clean verify/bisect promotions need the existing four-report queue dwell until
   a rate at or above that failed hold passes. A higher queue ceiling survives a loss descent from its
   lower hold: verifying the lower rate resumes that queue bracket instead of retiring the higher bound.
@@ -44,11 +45,13 @@ Queues
   floor over that floor, whichever is more, or is raised and climbing 2 ms/s for 2 s.
 - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background scan
   only raises it for about 5 s before it falls (the Deck's peak at 83 ms for 5 s). Cuts go on every 6 s until
-  the queue starts to drain, at most three; then the rate that queued is the ceiling above the hold. Once verified
-  clean, climbs use the existing 1.06x completion step while below 1.25x that rate.
-  A failed climb there holds one completion step under the last clean rate, retaining that clean rate as a
-  conservative queue ceiling without assigning it measured loss. A queue three cuts did not drain, with
-  nothing lost meanwhile, is someone else's, and is left alone for 5 minutes.
+  the queue starts to drain, at most three; then the rate that queued is the retried ceiling above the hold,
+  capped at one existing 1.06x completion step. A queue ceiling verified clean becomes a real hold before
+  the next completion-size probe, while below 1.25x the first verified queue rate. Consecutive failed retries
+  in a closed queue bracket wait 20, then 40 reports, doubling up to the existing 1200-report back-off.
+  Clean verification, a new descent, a cut or an outside writer resets that queue-only back-off.
+  A queue three cuts did not drain, with nothing lost meanwhile, is someone else's, and is left alone
+  for 5 minutes.
 - Heavy loss while cutting for a queue hands the stream to the loss probe.
 """
 import argparse
@@ -170,6 +173,8 @@ class Controller:
         self.hold_failed_kbps = None
         # A queue ceiling displaced by a loss probe; its lower hold cannot retire it.
         self.retained_queue_ceiling = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
         self.hi_loss = self.lo_loss = 0.0
         self.hi_kind = 'loss'
         self.hi_stats = [0, 0]
@@ -180,6 +185,7 @@ class Controller:
         self.test = None
         self.retry_wait = 0
         self.retries = 0
+        self.queue_retry_fails = 0
         self.blind_step = False
         self.hi_rechecked = False
         self.queue_continuation_from = None
@@ -255,6 +261,9 @@ class Controller:
     def to_normal(self, now, kbps, why):
         self.retained_queue_ceiling = None
         self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
+        self.queue_retry_fails = 0
         if kbps >= self.base:
             self.hold_failed_kbps = None
         self.state = NORMAL
@@ -280,6 +289,10 @@ class Controller:
             self.episode_start = self.target
         if self.state == HOLD:
             self.hold_failed_kbps = self.target
+            if self.hi_kind == 'queue' and self.queue_hold_below is not None and self.queue_hold_below < self.target:
+                rec = self.failed_queue_hold
+                losses = min(rec['losses'], self.BACKOFF_REPORTS - 1) + 1 if rec and rec['failed'] == self.target else 1
+                self.failed_queue_hold = dict(failed=self.target, fallback=self.queue_hold_below, losses=losses, verifying=True)
             # Keep the higher queue bound separate from this loss probe's verification ceiling.
             if (self.hi_kind == 'queue' and self.hi is not None and self.hi > self.target
                     and (self.retained_queue_ceiling is None or self.hi < self.retained_queue_ceiling)):
@@ -288,6 +301,9 @@ class Controller:
         self.phase = 'first'
         self.blind_step = False
         self.retries = 0
+        self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.queue_retry_fails = 0
         self.hi, self.hi_loss, self.hi_kind = self.target, l0, 'loss'
         self.probe_stats = [0, 0]
         self.hi_stats = [sum(e for e, _ in self.run), sum(l for _, l in self.run)]
@@ -337,30 +353,55 @@ class Controller:
         self.test = self.sprt(self.hi_loss, max(self.hi_loss / 3, self.MIN_LOSS), undecided=0)
 
     def verify_hi_result(self, lossy, now):
+        rec = self.failed_queue_hold
+        loss_probe_verify = rec is not None and rec['verifying']
+        if rec is not None:
+            rec['verifying'] = False
         if not lossy:
+            previous_queue_hold = self.lo if self.hi_kind == 'queue' else None
             self.clean_promotion()
+            if loss_probe_verify and rec is not None and self.target == rec['failed'] and rec['fallback'] < self.target:
+                # A short verify cannot rehabilitate the queue hold that just failed on loss.
+                self.retained_queue_ceiling = None
+                self.hi, self.hi_kind, self.hi_loss = rec['failed'], 'queue', self.CLIMB_LOSSY
+                self.hi_stats = [0, 0]
+                self.hi_rechecked = False
+                self.queue_retry_fails = min(rec['losses'], self.BACKOFF_REPORTS)
+                self.enter_hold(now, rec['fallback'])
+                return
             self.lo = self.target
             if self.retained_queue_ceiling is not None and self.target < self.retained_queue_ceiling:
-                # Resume the still-unverified queue bracket without inventing loss samples.
+                # Preserve queue provenance without reopening unrestricted discovery.
                 # The failed-hold dwell keeps its own existing lifetime.
                 self.hi, self.retained_queue_ceiling = self.retained_queue_ceiling, None
                 self.hi_kind = 'queue'
                 self.hi_loss = self.CLIMB_LOSSY
                 self.hi_stats = [0, 0]
                 self.hi_rechecked = False
-                self.state = BISECT
-                self.bisect_step(now)
-                return
-            # A queue ceiling that held clean may still be the link. Keep completion-size steps
-            # until the climb clears its existing recheck radius.
-            self.queue_continuation_from = (self.target if self.hi_kind == 'queue' or
-                                            self.retained_queue_ceiling is not None else None)
+                if self.hi / self.lo <= self.BISECT_DONE:
+                    # Keep a closed bracket's tighter ceiling; wider bounds use the staircase below.
+                    self.enter_hold(now, self.target)
+                    return
+            # A clean queue ceiling becomes a real hold before the next completion-size probe.
+            # Keep the staircase's original anchor until its existing recheck radius is cleared.
+            if self.hi_kind == 'queue' or self.retained_queue_ceiling is not None:
+                if self.queue_continuation_from is None:
+                    self.queue_continuation_from = self.target
+                if self.target < self.base and self.target < self.queue_continuation_from * self.RECHECK_CEILING:
+                    self.retained_queue_ceiling = None
+                    self.queue_hold_below = previous_queue_hold if previous_queue_hold is not None and previous_queue_hold < self.target else None
+                    self.queue_hold(now, self.target)
+                    return
+            self.queue_continuation_from = None
             self.retained_queue_ceiling = None
             self.hi = None
             self.hi_kind = 'loss'   # the ceiling held; climbs above it need no queue dwell
             self.state = CLIMB
             self.climb_step(now)
             return
+        if (self.hi_kind == 'queue' and self.hi is not None and self.lo is not None
+                and self.hi / self.lo <= self.BISECT_DONE and self.queue_retry_fails < self.BACKOFF_REPORTS):
+            self.queue_retry_fails += 1
         self.hi_loss = max(self.test.rate(), self.hi_loss)
         self.hi_stats = [self.hi_stats[0] + self.test.frames, self.hi_stats[1] + self.test.lost]
         self.hi_rechecked = True
@@ -396,17 +437,31 @@ class Controller:
         self.bisect_step(now)
 
     def clean_promotion(self):
+        self.queue_retry_fails = 0
         # Clean verify/bisect tests require the full dwell while this is set. Lower rates cannot clear it.
         if self.hold_failed_kbps is not None and self.target >= self.hold_failed_kbps:
             self.hold_failed_kbps = None
 
+    def queue_hold(self, now, kbps):
+        self.hi, self.hi_loss, self.hi_kind = int(kbps * self.BISECT_DONE), self.CLIMB_LOSSY, 'queue'
+        self.hi_stats = [0, 0]
+        self.hi_rechecked = False
+        self.enter_hold(now, kbps)
+
     def enter_hold(self, now, kbps):
-        self.queue_continuation_from = None
         self.state = HOLD
         self.reset_baseline(self.lo_loss)
         self.set_target(kbps, 'hold', now)
         self.lo = self.target
         self.retry_wait = self.FIRST_RETRY_REPORTS if self.retries == 0 else self.RETRY_REPORTS
+        if self.hi_kind == 'queue' and self.queue_retry_fails > 0:
+            self.retry_wait = self.RETRY_REPORTS
+            failure = 1
+            while failure < self.queue_retry_fails and self.retry_wait < self.BACKOFF_REPORTS:
+                # Match the native cap check before doubling.
+                self.retry_wait = (self.BACKOFF_REPORTS if self.retry_wait >= self.BACKOFF_REPORTS - self.retry_wait
+                                   else self.retry_wait * 2)
+                failure += 1
         self.hold_stats = [0, 0]
         self.hold_reports = 0
         self.test = None
@@ -415,26 +470,13 @@ class Controller:
         if self.target >= self.base:
             self.to_normal(now, self.base, 'base')
             return
-        if (self.queue_continuation_from is not None and
-                self.target >= self.queue_continuation_from * self.RECHECK_CEILING):
-            self.queue_continuation_from = None
-        step = (self.BISECT_DONE if self.queue_continuation_from is not None else
-                self.CLIMB_FAR if self.target * 2 < self.base else self.CLIMB_STEP)
+        step = self.CLIMB_FAR if self.target * 2 < self.base else self.CLIMB_STEP
         self.set_target(self.target * step, 'climb', now)
         p0 = max(self.lo_loss, self.p_background())
         self.test = self.sprt(p0, p0 + self.CLIMB_LOSSY)
 
     def climb_result(self, lossy, now):
         if lossy:
-            if self.queue_continuation_from is not None and self.lo is not None and self.lo > 0:
-                # The last clean rate is a conservative retry bound, not a measured loss point.
-                # Hold one completion step below it so the failed queue probe can drain.
-                clean = self.lo
-                self.hi, self.hi_loss, self.hi_kind = clean, self.CLIMB_LOSSY, 'queue'
-                self.hi_stats = [0, 0]
-                self.hi_rechecked = False
-                self.enter_hold(now, int(clean / self.BISECT_DONE))
-                return
             self.hi, self.hi_loss = self.target, self.test.rate()
             self.hi_stats = [self.test.frames, self.test.lost]
             self.state = BISECT
@@ -568,6 +610,8 @@ class Controller:
             if self.retry_wait > 0:
                 self.retry_wait -= 1
             if self.retry_wait == 0 and not probe_deferred:
+                if self.failed_queue_hold is not None and self.lo is not None and self.lo >= self.failed_queue_hold['failed']:
+                    self.failed_queue_hold = None
                 self.retries += 1
                 self.state = VERIFY_HI
                 self.set_target(self.hi, 'retry', t_ms)
@@ -653,7 +697,8 @@ class Controller:
             if not standing:
                 # The queue is draining: the rate before the cut was over the link.
                 self.lo, self.lo_loss = self.target, max(self.lo_loss, self.p_background())
-                self.hi, self.hi_loss, self.hi_kind = self.rtt_from, self.CLIMB_LOSSY, 'queue'
+                self.hi = min(self.rtt_from, int(self.target * self.BISECT_DONE))
+                self.hi_loss, self.hi_kind = self.CLIMB_LOSSY, 'queue'
                 self.hi_stats = [0, 0]
                 self.enter_hold(now, self.target)
                 return
@@ -681,6 +726,8 @@ class Controller:
 
     def rtt_cut(self, now):
         self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.queue_retry_fails = 0
         self.rtt_from = self.target
         self.rtt_cuts += 1
         self.rtt_cut_wait = self.RTT_DRAIN_S
@@ -689,6 +736,9 @@ class Controller:
     def adopt(self, now, kbps):
         self.retained_queue_ceiling = None
         self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
+        self.queue_retry_fails = 0
         self.hold_failed_kbps = None
         previous = self.target
         kbps = max(min(self.floor, self.base), min(self.base, kbps))
@@ -717,6 +767,9 @@ class Controller:
     def rebase(self, base, floor):
         self.retained_queue_ceiling = None
         self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
+        self.queue_retry_fails = 0
         self.base = max(1, base)
         self.floor = min(floor, self.base)
         target = max(self.floor, min(self.base, self.target))

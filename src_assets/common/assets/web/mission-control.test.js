@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   MISSING, STATUS_GRACE_MS, appArtworkSrc, appCoverSrc, reading, dynamicRangeLabel, featuredLibraryApp, formatReportAge,
-  graphemeCount, idleSignalCells, liveSignalCells, missionStageMode, streamFormatLabel,
-  streamStatusUnavailable, titleStep, unavailableSignalCells,
+  graphemeCount, idleSignalCells, lastSessionRecap, liveSignalCells, liveTuningLoweredCount, missionStageMode,
+  RECAP_REPORT_ROUTE, streamFormatLabel, streamStatusUnavailable, titleStep, unavailableSignalCells,
 } from './mission-control.js'
 import { buildLiveSummary, buildQualityGrade, buildQualityScore } from './dashboard-summary.js'
 
@@ -187,5 +187,85 @@ describe('Mission Control stage helpers', () => {
     // A pick that left the shelf falls back to the most recent title.
     expect(featuredLibraryApp(shelf, 'gone')).toMatchObject({ app: { uuid: 'a' }, chosen: false })
     expect(featuredLibraryApp(shelf)).toMatchObject({ app: { uuid: 'a' }, chosen: false })
+  })
+
+  describe('Last session recap', () => {
+    const id = 'process-a:7'
+    const tuning = entries => ({ version: 1, available: true, reason: 'recorded', dropped: 0, truncated: false, entries })
+    const step = (kind, cause, requested) => ({ kind, cause, requested_bitrate_kbps: requested })
+    const snapshot = (extra = {}) => ({ origin: 'completed', streamId: id, capturedAt: '2026-10-26T20:00:00.000Z',
+      stats: { streaming: true, live_tuning_history: tuning([step('scope_started', 'initial_scope_snapshot', 30000)]) }, ...extra })
+    // The host's whole-second record of the same stream: 102 minutes.
+    const ended = (extra = {}) => ({ state: 'ended', stream_instance_id: id, started_at: '2026-10-26T18:18:00Z', ended_at: '2026-10-26T20:00:01Z', ...extra })
+    const entry = (extra = {}) => ({ duration_s: 6120, ended_at: Date.parse('2026-10-26T20:00:01.200Z'), avg_fps: 118.4, avg_bitrate_kbps: 21400, quality_grade: 'A', ...extra })
+
+    it('recaps a matched stream from its own history averages and links the full report', () => {
+      const recap = lastSessionRecap({ snapshot: snapshot(), lastSession: ended(), entry: entry(), t })
+      expect(recap.detail).toBe('mission_control.recap_fps_avg {"fps":118.4} · mission_control.recap_bitrate_avg {"mbps":"21.4"}')
+      const last = idleSignalCells({ lastSession: { duration: '1h 42m', grade: 'A', detail: 'Pixel · 20:00', recap }, t })
+        .find(cell => cell.key === 'last')
+      expect(last).toMatchObject({ label: 'mission_control.recap_label', value: '1h 42m', grade: 'A', sub: recap.detail, recap: true,
+        link: { to: RECAP_REPORT_ROUTE, label: 'mission_control.recap_link' } })
+      // Settled, the same cell is the ordinary Last session again.
+      const settled = idleSignalCells({ lastSession: { duration: '1h 42m', grade: 'A', detail: 'Pixel · 20:00' }, t }).find(cell => cell.key === 'last')
+      expect(settled).toMatchObject({ label: 'mission_control.signal_last_session', sub: 'Pixel · 20:00' })
+      expect(settled.recap).toBeUndefined()
+      expect(settled.link).toBeUndefined()
+    })
+
+    it('stays silent unless the completion, the host record and this browser entry are one stream', () => {
+      const silent = [
+        {},
+        { snapshot: null, lastSession: ended(), entry: entry() },
+        { snapshot: snapshot({ origin: 'live-sample' }), lastSession: ended(), entry: entry() },
+        { snapshot: snapshot(), lastSession: ended({ stream_instance_id: 'process-a:8' }), entry: entry() },
+        { snapshot: snapshot(), lastSession: ended({ started_at: undefined }), entry: entry() },
+        // An entry written before the last live report belongs to an earlier stream.
+        { snapshot: snapshot(), lastSession: ended(), entry: entry({ ended_at: Date.parse('2026-10-26T19:59:59Z') }) },
+        // A page that joined late, or an entry merged across a feed gap, does not span the stream.
+        { snapshot: snapshot(), lastSession: ended(), entry: entry({ duration_s: 600 }) },
+        { snapshot: snapshot(), lastSession: ended(), entry: entry({ duration_s: 6200 }) },
+        { snapshot: snapshot(), lastSession: ended(), entry: undefined },
+      ]
+      for (const input of silent) expect(lastSessionRecap({ ...input, t })).toBeNull()
+    })
+
+    it('leaves out averages the entry lacks instead of showing zeros', () => {
+      const recap = lastSessionRecap({ snapshot: snapshot(), lastSession: ended(), entry: entry({ avg_fps: 0, avg_bitrate_kbps: '21400' }), t })
+      expect(recap.detail).toBe('')
+      const last = idleSignalCells({ lastSession: { duration: '1h 42m', detail: 'Pixel · 20:00', recap }, t }).find(cell => cell.key === 'last')
+      expect(last.sub).toBe('Pixel · 20:00')
+      expect(last.label).toBe('mission_control.recap_label')
+    })
+
+    it('counts only Live Tuning reductions a complete captured history proves', () => {
+      const history = tuning([
+        step('scope_started', 'initial_scope_snapshot', 30000),
+        step('decision', 'network_feedback', 26000),
+        step('encoder_applied', 'runtime_update', 26000),
+        step('decision', 'doctor_action', 20000),
+        step('decision', 'stream_health', 18000),
+        step('decision', 'network_feedback', 24000),
+      ])
+      expect(liveTuningLoweredCount(history)).toBe(2)
+      const recap = lastSessionRecap({ snapshot: snapshot({ stats: { live_tuning_history: history } }), lastSession: ended(), entry: entry(), t })
+      expect(recap.detail).not.toContain('recap_live_tuning')
+      expect(recap.tuningDetail).toBe('mission_control.recap_live_tuning_lowered {"count":2}')
+      const last = idleSignalCells({ lastSession: { duration: '1h 42m', recap }, t }).find(cell => cell.key === 'last')
+      expect(last.sub).toBe(recap.detail)
+      expect(last.title).toBe(`${recap.detail} · ${recap.tuningDetail}`)
+      expect(last.link.description).toBe(recap.tuningDetail)
+      // A history served outside the stream, cut short or malformed vouches for nothing.
+      for (const partial of [undefined, { ...history, available: false, reason: 'no_stream' }, { ...history, dropped: 3, truncated: true },
+        { ...history, truncated: undefined }, tuning([step('decision', 'network_feedback', null)])]) {
+        expect(liveTuningLoweredCount(partial)).toBeNull()
+        const unproven = lastSessionRecap({ snapshot: snapshot({ stats: { live_tuning_history: partial } }), lastSession: ended(), entry: entry(), t })
+        expect(unproven.detail).not.toContain('recap_live_tuning')
+        expect(unproven.tuningDetail).toBe('')
+      }
+      // A complete history with no reduction is a measured zero, and is not shown either.
+      expect(liveTuningLoweredCount(tuning([step('scope_started', 'initial_scope_snapshot', 30000)]))).toBe(0)
+      expect(lastSessionRecap({ snapshot: snapshot(), lastSession: ended(), entry: entry(), t }).detail).not.toContain('recap_live_tuning')
+    })
   })
 })

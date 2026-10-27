@@ -2,7 +2,7 @@
   <Teleport to="body">
     <div
       v-if="modelValue"
-      class="fixed inset-0 z-50 flex items-start justify-center px-4 pt-[10vh] sm:px-6"
+      class="palette-overlay fixed inset-0 z-50 flex items-start justify-center px-4 sm:px-6"
       @click.self="close"
     >
       <div class="fixed inset-0 bg-void/80 backdrop-blur-sm"></div>
@@ -34,14 +34,14 @@
               :placeholder="t('command_palette.placeholder')"
               class="flex-1 bg-transparent text-silver outline-none placeholder-storm"
               @keydown.escape="close"
-              @keydown.enter="executeSelected"
+              @keydown.enter.prevent="executeSelected"
               @keydown.up.prevent="selectedIndex = Math.max(0, selectedIndex - 1)"
               @keydown.down.prevent="selectedIndex = Math.max(0, Math.min(filteredActions.length - 1, selectedIndex + 1))"
             >
             <kbd class="rounded-lg border border-storm/20 bg-deep/70 px-2 py-1 text-[11px] text-storm">↵</kbd>
           </div>
         </div>
-        <div v-if="filteredActions.length" class="max-h-[26rem] overflow-auto px-3 py-3 sm:px-4">
+        <div v-if="filteredActions.length" class="palette-results overflow-auto px-3 py-3 sm:px-4">
           <div
             v-for="group in groupedActions"
             :key="group.label"
@@ -57,7 +57,7 @@
                 :aria-selected="selectedAction?.id === action.id"
                 class="cursor-pointer rounded-xl border px-3 py-3 transition-[background-color,border-color,color,box-shadow] duration-150"
                 :class="selectedAction?.id === action.id
-                  ? 'border-ice/30 bg-twilight/65 text-ice shadow-[0_12px_30px_rgba(0,0,0,0.2)]'
+                  ? 'palette-selected border-ice/30 bg-twilight/65 text-ice'
                   : 'border-transparent text-silver hover:border-storm/25 hover:bg-twilight/40'"
                 role="option"
                 @click="execute(action)"
@@ -158,7 +158,7 @@ watch(() => props.modelValue, async (open) => {
   } catch {
     recentGames.value = []
   }
-})
+}, { immediate: true })
 
 const actions = computed(() => [
   ...createCommandActions({ t, router, fetchImpl: fetch, toast }),
@@ -187,7 +187,7 @@ watch(() => props.modelValue, (val) => {
       searchInput.value?.focus()
     })
   }
-})
+}, { immediate: true })
 
 watch(query, () => {
   selectedIndex.value = 0
@@ -247,3 +247,17 @@ function executeSelected() {
   }
 }
 </script>
+
+<style scoped>
+/* Palette-only values travel with this cold component, rather than initial utilities. */
+.palette-overlay {
+  padding-top: 10vh;
+}
+.palette-results {
+  max-height: 26rem;
+}
+.palette-selected {
+  --tw-shadow: 0 12px 30px var(--tw-shadow-color, rgb(0 0 0 / 0.2));
+  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+}
+</style>
