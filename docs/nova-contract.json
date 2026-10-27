@@ -2900,15 +2900,21 @@
             "reads": [
               "display_mode",
               "effective_profile",
+              "effective_target_fps",
               "preference",
               "preference_applied",
               "preference_blocked_reason",
               "preference_requested_profile",
+              "preference_requested_target_fps",
               "profile_state",
               "reasoning",
               "requested_profile",
+              "requested_target_fps",
               "source",
               "trial_profile"
+            ],
+            "read_helpers": [
+              "strictFiniteNumber"
             ]
           },
           {
@@ -3898,6 +3904,7 @@
         "preference_applied",
         "preference_blocked_reason",
         "preference_requested_profile",
+        "preference_requested_target_fps",
         "requested_profile",
         "requested_target_fps",
         "trial_profile"
