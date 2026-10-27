@@ -18,6 +18,7 @@
 #include <src/thread_safe.h>
 #include <src/utility.h>
 #include <src/video.h>
+#include <src/vrr_trace.h>
 #include <src/vrr_epoch_authority.h>
 #include <src/vrr_source_pacing.h>
 #include <src/vrr_source_time.h>
@@ -89,8 +90,17 @@ TEST(SourcePacingPolicyTests, ALowerGameFrameRateIsNotEncoderPressureButASlowEnc
 
   #include <algorithm>
   #include <atomic>
+  #include <cstdlib>
+  #include <filesystem>
+  #include <fstream>
   #include <functional>
+  #include <iostream>
+  #include <iterator>
+  #include <map>
   #include <memory>
+  #include <openssl/evp.h>
+  #include <set>
+  #include <sstream>
   #include <stdexcept>
   #include <string>
   #include <thread>
@@ -251,13 +261,18 @@ namespace {
   class paced_stream_t {
   public:
     paced_stream_t(const pinned_compositor_t &compositor, video::config_t config, bool source_route = true,
-                   std::function<void()> after_convert = {}, int peer_fd = k_display_peer):
+                   std::function<void()> after_convert = {}, int peer_fd = k_display_peer,
+                   bool bind_owner_generation = false):
         display_ {std::make_shared<paced_display_t>(peer_fd == k_display_peer ? compositor.peer.get() : peer_fd,
                                                     compositor.lease, source_route)},
         session_ {make_session()},
         generation_ {config.session_generation},
         client_ip_ {"10.0.9." + std::to_string(config.session_generation % 250)},
         after_convert_ {std::move(after_convert)} {
+      if (bind_owner_generation) {
+        generation_ = config.session_generation = stream::session::generation(*session_);
+        client_ip_ = "10.0.9." + std::to_string(generation_ % 250);
+      }
       stream::session::set_state_for_tests(*session_, stream::session::state_e::RUNNING);
       mail_ = stream::session::mail_for_tests(*session_);
       // The diagnostics accept pacing events only for this registered, frozen generation.
@@ -307,6 +322,9 @@ namespace {
     video::packet_t next_packet(std::chrono::milliseconds timeout) {
       return mail_->queue<video::packet_t>(mail::video_packets)->pop(timeout);
     }
+
+    stream::session_t &measurement_owner() const { return *session_; }
+    video::packet_queue_t measurement_queue() const { return mail_->queue<video::packet_t>(mail::video_packets); }
 
     std::vector<video::packet_t> drain(std::chrono::milliseconds window) {
       std::vector<video::packet_t> packets;
@@ -513,6 +531,215 @@ namespace {
   #define REQUIRE_PRODUCTION_FIXTURE(compositor) \
     ASSERT_TRUE((compositor).ready()) << "the controlled compositor fixture could not start"
 }  // namespace
+
+TEST(SourcePacingProductionTests, AConsumerPauseMeasuresTheEncodedVideoQueue) {
+  using json = nlohmann::json;
+  const auto began = std::chrono::steady_clock::now();
+  const auto case_deadline = began + 10s;
+  json observation {{"scope", "encoded_queue_component_handoff_not_wire_or_decoder"}, {"complete", false},
+    {"prediction_only", {{"baseline_survivors", 1}, {"candidate_survivors", 32}, {"candidate_evictions", 33}}}};
+  auto publish = util::fail_guard([&] {
+    ::testing::Test::RecordProperty("queue508_observation", observation.dump());
+    std::cout << "[queue508] " << observation.dump() << '\n';
+  });
+
+  // Initialise the ordinary observer before temporarily selecting the existing test recorder.
+  // Keep this case's raw evidence even on failure, in CI's working directory or beside the explicit trace.
+  vrr_trace::start_from_environment();
+  const auto *requested = std::getenv("POLARIS_VRR_TRACE_V2");
+  const auto path = requested && *requested ? std::filesystem::path(std::string(requested) + ".queue508.jsonl") :
+    std::filesystem::absolute("queue508-" + std::to_string(::getpid()) + ".jsonl");
+  observation["trace"] = path.string();
+  observation["close_receipt"] = path.string() + ".close.json";
+  ASSERT_TRUE(path.is_absolute());
+  auto recorder = vrr_trace::recorder_t::open(path.string());
+  ASSERT_TRUE(recorder);
+  auto close_trace = util::fail_guard([&] { recorder->stop(); });
+  ASSERT_EQ(recorder->status(), vrr_trace::status_e::running);
+
+  std::int64_t pressure_start = 0, pressure_end = 0, producer_closed = 0;
+  std::uint64_t generation = 0;
+  json owner_snapshot;
+  observation["survivor_columns"] = {"packet", "frame", "idr", "bytes", "source_ns", "encode_done_ns", "pop_ns", "handoff_age_ns"};
+  observation["survivors"] = json::array();
+  auto &survivors = observation["survivors"];  // Preserve actual pops even if a later evidence check fails.
+  bool drained = false;
+  {
+    vrr_trace::test_recorder_scope_t trace_scope {recorder.get()};
+    pinned_compositor_t compositor;
+    REQUIRE_PRODUCTION_FIXTURE(compositor);
+    with_h264([&] {
+      paced_stream_t stream {compositor, stream_config(120, opted_in(), 0), true, {}, k_display_peer, true};
+      generation = stream::session::generation(stream.measurement_owner());
+      ASSERT_NE(generation, 0u);
+      observation["owner_generation"] = generation;
+      // Keep the actual mail queue alive across encoder stop/join, which otherwise releases its last handle.
+      const auto queue = stream.measurement_queue();
+      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
+      ASSERT_TRUE(epoch.opened().proof && epoch.opened().proof->clock_domain_verified);
+      ASSERT_FALSE(stream.drain(150ms).empty()) << "missing encoded readiness";
+      ASSERT_FALSE(queue->peek()) << "readiness did not leave an empty starting queue";
+      ASSERT_TRUE(queue->running());
+      ASSERT_EQ(stream.count(event_e::accepted_source), 0u);
+      pressure_start = steady_ns(std::chrono::steady_clock::now());
+      observation["pressure_start_ns"] = pressure_start;
+      const auto pressure_deadline = std::min(case_deadline, std::chrono::steady_clock::now() + 3s);
+      for (std::uint64_t index = 1; index <= 65; ++index) {
+        std::this_thread::sleep_for(12ms);
+        ASSERT_LT(std::chrono::steady_clock::now(), pressure_deadline);
+        auto image = stamped_frame(epoch, monotonic_now_ns());
+        ASSERT_EQ(image->provenance.source_time.result, vrr_clock::source_time_e::mapped);
+        stream.raise(image);  // The pressure actuator is NO consumer pop, not a blocked encoder.
+        const auto wait = std::min(100ms, std::chrono::duration_cast<std::chrono::milliseconds>(
+          pressure_deadline - std::chrono::steady_clock::now()));
+        ASSERT_GT(wait.count(), 0);
+        // Progress only. Completed enqueues require the closed trace's output/enqueue/encode_result join below.
+        ASSERT_EQ(stream.count_reaching(event_e::accepted_source, index, wait), index);
+      }
+      pressure_end = steady_ns(std::chrono::steady_clock::now());
+      observation["pressure_end_ns"] = pressure_end;
+      ASSERT_LE(pressure_end - pressure_start, 3'000'000'000LL);
+      ASSERT_EQ(stream::session::state(stream.measurement_owner()), stream::session::state_e::RUNNING);
+      const auto stats = stream_stats::get_current();
+      const auto served = json::parse(stats.to_json());
+      for (std::size_t i = 0; i < stats.clients.size(); ++i) {
+        if (stats.clients[i].session_generation == generation) owner_snapshot = served.at("clients").at(i);
+      }
+      ASSERT_FALSE(owner_snapshot.is_null()) << "actual owner generation is not registered";
+      observation["live_owner_snapshot"] = owner_snapshot;
+      stream.stop();  // No new producer output is possible after this join; the retained queue is still running.
+      producer_closed = steady_ns(std::chrono::steady_clock::now());
+      observation["producer_closed_ns"] = producer_closed;
+      ASSERT_TRUE(queue->running());
+      const auto drain_start = std::chrono::steady_clock::now();
+      observation["drain_start_ns"] = steady_ns(drain_start);
+      while (auto packet = queue->pop(0ms)) {
+        const auto popped = std::chrono::steady_clock::now();
+        ASSERT_LT(survivors.size(), 32u);
+        ASSERT_NE(packet->trace_packet, 0u);
+        ASSERT_TRUE(packet->frame_timestamp && packet->encode_done_timestamp);
+        ASSERT_GT(packet->data_size(), 0u);
+        const auto at = steady_ns(popped), done = steady_ns(*packet->encode_done_timestamp);
+        ASSERT_GE(at, done);
+        survivors.push_back(json::array({packet->trace_packet, packet->frame_index(), packet->is_idr(),
+          packet->data_size(), steady_ns(*packet->frame_timestamp), done, at, at - done}));
+        ASSERT_LT(popped, drain_start + 100ms);
+      }
+      ASSERT_FALSE(queue->peek());
+      ASSERT_FALSE(survivors.empty());
+      ASSERT_LT(std::chrono::steady_clock::now(), drain_start + 100ms);
+      ASSERT_LE(steady_ns(std::chrono::steady_clock::now()) - pressure_end, 100'000'000LL);
+      observation["drain_end_ns"] = steady_ns(std::chrono::steady_clock::now());
+      drained = true;
+    });
+  }
+  recorder->stop();
+  ASSERT_TRUE(drained);
+
+  // Read the existing raw format; no trace event is invented and no retirement reason is reclassified.
+  std::ifstream input(path, std::ios::binary);
+  ASSERT_TRUE(input.good());
+  const std::string raw {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  ASSERT_FALSE(raw.empty());
+  ASSERT_EQ(raw.back(), '\n');
+  std::istringstream lines(raw);
+  std::vector<json> rows;
+  for (std::string line; std::getline(lines, line);) rows.push_back(json::parse(line));
+  ASSERT_GE(rows.size(), 2u);
+  ASSERT_EQ(rows.front().at("type"), "header");
+  const auto &footer = rows.back();
+  ASSERT_EQ(footer.at("type"), "footer");
+  ASSERT_TRUE(footer.at("producer_complete").get<bool>());
+  ASSERT_EQ(footer.at("event_rows").get<std::size_t>(), rows.size() - 2);
+  const auto digest = [](std::string_view bytes) {
+    unsigned char result[EVP_MAX_MD_SIZE]; unsigned size = 0;
+    if (EVP_Digest(bytes.data(), bytes.size(), result, &size, EVP_sha256(), nullptr) != 1 || size != 32) {
+      throw std::runtime_error("queue measurement trace digest failed");
+    }
+    std::string hex;
+    for (unsigned i = 0; i < size; ++i) {
+      hex += "0123456789abcdef"[result[i] >> 4]; hex += "0123456789abcdef"[result[i] & 15];
+    }
+    return hex;
+  };
+  const auto prefix = footer.at("bytes_before_footer").get<std::size_t>();
+  ASSERT_LT(prefix, raw.size());
+  ASSERT_EQ(footer.at("content_sha256"), digest(std::string_view(raw).substr(0, prefix)));
+  std::ifstream receipt_file(path.string() + ".close.json");
+  ASSERT_TRUE(receipt_file.good());
+  const auto receipt = json::parse(receipt_file);
+  ASSERT_TRUE(receipt.at("footer_written").get<bool>());
+  ASSERT_EQ(receipt.at("write_errno"), 0);
+  ASSERT_EQ(receipt.at("main_close_errno"), 0);
+  ASSERT_EQ(receipt.at("main_bytes"), raw.size());
+  ASSERT_EQ(receipt.at("main_sha256"), digest(raw));
+
+  std::vector<json> outputs;
+  std::map<std::uint64_t, json> enqueues, returns;
+  for (const auto &row : rows) {
+    if (!row.contains("observed_steady_ns")) continue;
+    const auto at = row.at("observed_steady_ns").get<std::int64_t>();
+    if (at < pressure_start) continue;
+    const auto type = row.at("type").get<std::string>();
+    if (type != "encoder_output" && type != "packet_enqueue" && type != "encode_result") continue;
+    ASSERT_EQ(row.at("session_generation"), generation);
+    ASSERT_LE(at, pressure_end) << "late output crosses the 65-completion boundary";
+    if (type == "encoder_output") {
+      outputs.push_back(row);
+    } else if (type == "packet_enqueue") {
+      ASSERT_TRUE(enqueues.emplace(row.at("packet").get<std::uint64_t>(), row).second);
+    } else {
+      ASSERT_TRUE(returns.emplace(row.at("submission").get<std::uint64_t>(), row).second);
+    }
+  }
+  ASSERT_EQ(outputs.size(), 65u);
+  ASSERT_EQ(enqueues.size(), outputs.size());
+  ASSERT_EQ(returns.size(), outputs.size());
+  observation["enqueues"] = json::array();
+  std::set<std::uint64_t> packet_ids, submission_ids;
+  for (const auto &output : outputs) {
+    const auto packet = output.at("packet").get<std::uint64_t>();
+    const auto submission = output.at("submission").get<std::uint64_t>();
+    ASSERT_NE(packet, 0u); ASSERT_NE(submission, 0u);
+    ASSERT_TRUE(packet_ids.insert(packet).second); ASSERT_TRUE(submission_ids.insert(submission).second);
+    ASSERT_EQ(enqueues.count(packet), 1u); ASSERT_EQ(returns.count(submission), 1u);
+    const auto &enqueue = enqueues.at(packet), &returned = returns.at(submission);
+    ASSERT_EQ(output.at("delayed"), 0);
+    ASSERT_EQ(output.at("output_pts"), output.at("current_call_pts"));
+    ASSERT_EQ(returned.at("pts"), output.at("output_pts"));
+    ASSERT_EQ(enqueue.at("encoder"), output.at("encoder"));
+    ASSERT_EQ(returned.at("encoder"), output.at("encoder"));
+    ASSERT_EQ(returned.at("returned"), 1); ASSERT_EQ(returned.at("result"), 0);
+    ASSERT_FALSE(output.at("frame_timestamp_ns").is_null()); ASSERT_FALSE(output.at("encode_done_ns").is_null());
+    ASSERT_GT(output.at("bytes").get<std::uint64_t>(), 0u);
+    ASSERT_LE(output.at("encode_done_ns").get<std::int64_t>(), enqueue.at("observed_steady_ns").get<std::int64_t>());
+    ASSERT_LT(output.at("order").get<std::uint64_t>(), enqueue.at("order").get<std::uint64_t>());
+    ASSERT_LT(enqueue.at("order").get<std::uint64_t>(), returned.at("order").get<std::uint64_t>());
+    observation["enqueues"].push_back(json::array({packet, submission, output.at("output_pts"),
+      output.at("encode_done_ns"), enqueue.at("observed_steady_ns"), output.at("bytes"), output.at("actual_idr")}));
+  }
+  for (std::size_t i = 0; i < survivors.size(); ++i) {
+    const auto &output = outputs.at(outputs.size() - survivors.size() + i);
+    ASSERT_EQ(survivors[i][0], output.at("packet"));
+    ASSERT_EQ(survivors[i][1], output.at("output_pts"));
+    ASSERT_EQ(survivors[i][4], output.at("frame_timestamp_ns"));
+    ASSERT_EQ(survivors[i][5], output.at("encode_done_ns"));
+  }
+  const bool counter_available = owner_snapshot.contains("video_queue");
+  if (counter_available) {
+    ASSERT_TRUE(owner_snapshot.at("video_queue").is_object());
+    ASSERT_TRUE(owner_snapshot.at("video_queue").at("evicted_frames").is_number_unsigned());
+  }
+  observation["counter_available"] = counter_available;
+  observation["evicted_frames"] = counter_available ? owner_snapshot.at("video_queue").at("evicted_frames") : json(nullptr);
+  if (counter_available) {
+    ASSERT_EQ(observation["evicted_frames"], outputs.size() - survivors.size());
+  }
+  observation["enqueue_columns"] = {"packet", "submission", "frame", "encode_done_ns", "enqueue_ns", "bytes", "idr"};
+  observation["trace_sha256"] = digest(raw);
+  ASSERT_LT(std::chrono::steady_clock::now(), case_deadline);
+  observation["complete"] = true;
+}
 
 TEST(SourcePacingProductionTests, UnevenSourceFramesAreEncodedAtExactlyTheirMappedSourceTimes) {
   pinned_compositor_t compositor;
