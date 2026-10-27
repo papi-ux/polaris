@@ -2351,6 +2351,20 @@
               "vaapi_vendor",
               "wayland_main_device"
             ]
+          },
+          {
+            "file": "src_assets/common/assets/web/diagnostics-export.js",
+            "style": "javascript",
+            "function": "buildGithubIssueDraft",
+            "receiver": "gpuProfile",
+            "reads": [
+              "adapter_pairing_device",
+              "adapter_pairing_device_source",
+              "adapter_pairing_status",
+              "capture_device",
+              "encoder_adapter",
+              "wayland_main_device"
+            ]
           }
         ]
       }
@@ -2675,7 +2689,6 @@
         "hdr",
         "limiting_factor",
         "nvenc_tune",
-        "preset",
         "reasoning_summary",
         "recommendation_version",
         "recovery_policy",
@@ -2867,6 +2880,17 @@
             "style": "kotlin_org_json",
             "reads": [
               "resolved_profile"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaLaunchProfileSummary.kt",
+            "function": "buildDeterministicLaunchPresetSummary",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "preset",
+              "resolved_profile",
+              "topology_resolution"
             ]
           }
         ],
@@ -3496,33 +3520,45 @@
             "width"
           ]
         },
-        "polaris_web": {
-          "file": "src_assets/common/assets/web/codec-support-readout.js",
-          "style": "javascript",
-          "function": "describePyroWaveStream",
-          "receiver": "advice",
-          "reads": [
-            "advice_far_kbps",
-            "advice_near_kbps",
-            "assumes",
-            "cap_kbps",
-            "cap_set_aside",
-            "ceiling_frame_share",
-            "chroma",
-            "encoder_kbps",
-            "far_target_db",
-            "fps",
-            "height",
-            "raise_goal_kbps",
-            "raise_goal_limited_by",
-            "request_cap",
-            "request_kbps",
-            "rule",
-            "starved",
-            "target_db",
-            "width"
-          ]
-        }
+        "polaris_web": [
+          {
+            "file": "src_assets/common/assets/web/codec-support-readout.js",
+            "style": "javascript",
+            "function": "describePyroWaveStream",
+            "receiver": "advice",
+            "reads": [
+              "advice_far_kbps",
+              "advice_near_kbps",
+              "assumes",
+              "cap_kbps",
+              "cap_set_aside",
+              "ceiling_frame_share",
+              "chroma",
+              "encoder_kbps",
+              "far_target_db",
+              "fps",
+              "height",
+              "raise_goal_kbps",
+              "raise_goal_limited_by",
+              "request_cap",
+              "request_kbps",
+              "rule",
+              "starved",
+              "target_db",
+              "width"
+            ]
+          },
+          {
+            "file": "src_assets/common/assets/web/diagnostics-export.js",
+            "style": "javascript",
+            "function": "buildPostSessionStreamReport",
+            "receiver": "pyrowave",
+            "reads": [
+              "ceiling_frame_share",
+              "starved"
+            ]
+          }
+        ]
       }
     },
     "pyrowave_advice": {

@@ -1,4 +1,4 @@
-import { LINUX_GPU_PROFILE } from './generated/polarisV1Contract.js'
+import { LINUX_GPU_PROFILE, PYROWAVE_BITRATE } from './generated/polarisV1Contract.js'
 import { NetworkAddressBook, pseudonymizeNetworkAddresses } from './network-address-pseudonyms.js'
 import { doctorIsWaitingForStream } from './doctor-observation.js'
 import { safeTailscalePeerSnapshot, tailscalePeerSummary } from './tailscale-connection-readout.js'
@@ -1036,13 +1036,13 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
   const gpuNativeProbe = stats.gpu_native_probe || stats.gpuNativeProbe || {}
   const probeSummary = formatGpuNativeProbe(gpuNativeProbe)
   const gpuDiagnosticLines = []
-  const encoderAdapter = firstNonEmpty(gpuProfile.encoder_adapter, gpuProfile.encoderAdapter)
-  const captureDevice = firstNonEmpty(gpuProfile.capture_device, gpuProfile.captureDevice)
-  const waylandMainDevice = firstNonEmpty(gpuProfile.wayland_main_device, gpuProfile.waylandMainDevice)
-  const adapterPairing = firstNonEmpty(gpuProfile.adapter_pairing_status, gpuProfile.adapterPairingStatus)
-  const adapterPairingSource = lower(gpuProfile.adapter_pairing_device_source || gpuProfile.adapterPairingDeviceSource)
+  const encoderAdapter = firstNonEmpty(gpuProfile[LINUX_GPU_PROFILE.ENCODER_ADAPTER], gpuProfile.encoderAdapter)
+  const captureDevice = firstNonEmpty(gpuProfile[LINUX_GPU_PROFILE.CAPTURE_DEVICE], gpuProfile.captureDevice)
+  const waylandMainDevice = firstNonEmpty(gpuProfile[LINUX_GPU_PROFILE.WAYLAND_MAIN_DEVICE], gpuProfile.waylandMainDevice)
+  const adapterPairing = firstNonEmpty(gpuProfile[LINUX_GPU_PROFILE.ADAPTER_PAIRING_STATUS], gpuProfile.adapterPairingStatus)
+  const adapterPairingSource = lower(gpuProfile[LINUX_GPU_PROFILE.ADAPTER_PAIRING_DEVICE_SOURCE] || gpuProfile.adapterPairingDeviceSource)
   const adapterPairingDevice = firstNonEmpty(
-    gpuProfile.adapter_pairing_device,
+    gpuProfile[LINUX_GPU_PROFILE.ADAPTER_PAIRING_DEVICE],
     gpuProfile.adapterPairingDevice,
     adapterPairingSource === 'capture_device' ? captureDevice : '',
     adapterPairingSource === 'wayland_main_device' ? waylandMainDevice : '',
@@ -1492,9 +1492,9 @@ export function buildPostSessionStreamReport({ snapshot = null, lastSession = nu
   // The host's calibrated starvation verdict and an observed recent byte-budget
   // share are independent of media loss. Saturation alone is not starvation.
   const pyrowave = stats.pyrowave_bitrate
-  const budgetShare = pyrowave?.ceiling_frame_share
+  const budgetShare = pyrowave?.[PYROWAVE_BITRATE.CEILING_FRAME_SHARE]
   const starvedAtBudget = completed?.availability?.video === true && stats.streaming === true && stats.codec === 'pyrowave' &&
-    pyrowave?.starved === true && typeof budgetShare === 'number' &&
+    pyrowave?.[PYROWAVE_BITRATE.STARVED] === true && typeof budgetShare === 'number' &&
     Number.isFinite(budgetShare) && budgetShare > 0.85 && budgetShare <= 1
   if (starvedAtBudget) {
     const budgetIssue = `PyroWave was bitrate-starved for this resolution and frame rate; ${Math.round(budgetShare * 100)}% of recent encoded frames reached their frame-byte budget.`
