@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { ambienceStylesReady, artworkTint } from '../artwork-tint.js'
 import { titleStep } from '../mission-control.js'
 import { onThemeTokensChange, readThemeTokens } from '../theme-bridge.js'
 
@@ -41,6 +42,27 @@ const backdropLayers = computed(() => {
   return showArt.value ? [{ kind: 'poster', src: props.artSrc }] : []
 })
 const keyartLayers = computed(() => (showArt.value ? [props.artSrc] : []))
+// Live, the stage glows faintly in its cover's colour, read once from the key art already on
+// screen (artwork-tint.js). A tint belongs to the cover it was read from: a load from a cover that
+// has left the stage settles nothing, and the glow shows only while that cover is framed. The last
+// colour stays set, so the glow fades out in it rather than vanishing.
+const tint = ref({ src: '', color: '' })
+const glowColor = ref('')
+function keyartLoaded(src, img) {
+  loadedArt.add(src)
+  if (src !== props.artSrc) return
+  tint.value = { src, color: artworkTint(img, src) }
+  if (tint.value.color) glowColor.value = tint.value.color
+}
+const glowWanted = computed(() => props.mode === 'live' && showArt.value && tint.value.src === props.artSrc && Boolean(tint.value.color))
+// The glow's styles load the first time a live cover has a tint. Until they apply, and for good if
+// they cannot load, the stage stays plain; whatever is framed when they arrive decides the glow.
+const stylesReady = ref(false)
+watch(glowWanted, wanted => {
+  if (wanted && !stylesReady.value) ambienceStylesReady().then(ready => { stylesReady.value = ready })
+}, { immediate: true })
+const glowing = computed(() => glowWanted.value && stylesReady.value)
+const ambienceShown = computed(() => Boolean(glowColor.value) && stylesReady.value)
 // The logo stands in for the title text once it has loaded and passed the screen below; the text
 // stays the heading for assistive technology. Until then, and whenever the logo fails the screen
 // or the screen cannot run, the text title stays visible.
@@ -120,12 +142,13 @@ const metaItems = computed(() => props.meta.filter(Boolean))
 </script>
 
 <template>
-  <section class="mc-stage" :class="[`is-${mode}`, { 'has-art': showArt }]" :aria-labelledby="titleId" :aria-busy="mode === 'loading' ? 'true' : undefined" data-mission-stage :data-stage-mode="mode">
+  <section class="mc-stage" :class="[`is-${mode}`, { 'has-art': showArt, 'has-ambience': glowing }]" :style="ambienceShown ? { '--mc-ambience': glowColor } : undefined" :aria-labelledby="titleId" :aria-busy="mode === 'loading' ? 'true' : undefined" data-mission-stage :data-stage-mode="mode">
     <div class="mc-stage-art" aria-hidden="true">
       <TransitionGroup name="mc-xfade">
         <img v-for="layer in backdropLayers" :key="layer.src" class="mc-stage-backdrop" :class="{ 'is-loaded': loadedArt.has(layer.src), 'is-hero': layer.kind === 'hero' }"
           :src="layer.src" alt="" :data-stage-hero="layer.kind === 'hero' ? '' : undefined" @load="loadedArt.add(layer.src)" @error="failedArt.add(layer.src)" />
       </TransitionGroup>
+      <div v-if="ambienceShown" class="mc-stage-ambience" data-stage-ambience></div>
     </div>
     <div class="mc-stage-scrim" aria-hidden="true"></div>
 
@@ -138,7 +161,7 @@ const metaItems = computed(() => props.meta.filter(Boolean))
       <div v-if="showArt" class="mc-keyart" aria-hidden="true" data-stage-artwork>
         <TransitionGroup name="mc-xfade">
           <img v-for="src in keyartLayers" :key="src" :class="{ 'is-loaded': loadedArt.has(src) }" :src="src" alt=""
-            @load="loadedArt.add(src)" @error="failedArt.add(src)" />
+            @load="keyartLoaded(src, $event.target)" @error="failedArt.add(src)" />
         </TransitionGroup>
       </div>
       <!-- The opted-in preview sits where the key art was, whole and uncropped, inside the composition. -->
