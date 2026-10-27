@@ -292,6 +292,16 @@ namespace live_tuning_policy {
     std::optional<int> hold_failed_kbps_;
     // A queue ceiling displaced by a loss probe; proving its lower hold clean cannot retire it.
     std::optional<int> retained_queue_ceiling_;
+    // The validated lower queue hold from which this staircase hold was promoted.
+    std::optional<int> queue_hold_below_;
+    struct failed_queue_hold_t {
+      int failed;
+      int fallback;
+      int losses;
+      bool verifying;
+    };
+    // A measured hold failure survives its loss probe's short same-rate verification.
+    std::optional<failed_queue_hold_t> failed_queue_hold_;
     double hi_loss_ = 0.0;
     double lo_loss_ = 0.0;
     bool hi_is_queue_ = false;

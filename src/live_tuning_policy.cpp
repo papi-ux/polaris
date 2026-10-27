@@ -223,6 +223,8 @@ namespace live_tuning_policy {
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
+    queue_hold_below_.reset();
+    failed_queue_hold_.reset();
     queue_retry_fails_ = 0;
     if (kbps >= base_) {
       hold_failed_kbps_.reset();
@@ -255,6 +257,12 @@ namespace live_tuning_policy {
     }
     if (state_ == state_e::hold) {
       hold_failed_kbps_ = target_;
+      if (hi_is_queue_ && queue_hold_below_ && *queue_hold_below_ < target_) {
+        const int losses = failed_queue_hold_ && failed_queue_hold_->failed == target_ ?
+                             std::min(failed_queue_hold_->losses, BACKOFF_REPORTS - 1) + 1 :
+                             1;
+        failed_queue_hold_ = failed_queue_hold_t {target_, *queue_hold_below_, losses, true};
+      }
       // The loss probe needs its own verification ceiling. Keep the higher queue bound separate:
       // four clean reports at this lower hold do not test the rate that previously queued.
       if (hi_is_queue_ && hi_ && *hi_ > target_ &&
@@ -268,6 +276,7 @@ namespace live_tuning_policy {
     blind_step_ = false;
     retries_ = 0;
     queue_continuation_from_.reset();
+    queue_hold_below_.reset();
     queue_retry_fails_ = 0;
     hi_ = target_;
     hi_loss_ = l0;
@@ -334,8 +343,23 @@ namespace live_tuning_policy {
   }
 
   void policy_t::verify_hi_result(bool lossy, std::int64_t now_ms) {
+    const bool loss_probe_verify = failed_queue_hold_ && std::exchange(failed_queue_hold_->verifying, false);
     if (!lossy) {
+      const auto previous_queue_hold = hi_is_queue_ ? lo_ : std::nullopt;
       clean_promotion();
+      if (loss_probe_verify && failed_queue_hold_ && target_ == failed_queue_hold_->failed &&
+          failed_queue_hold_->fallback < target_) {
+        // A short verify cannot rehabilitate the queue hold that just failed on loss.
+        retained_queue_ceiling_.reset();
+        hi_ = failed_queue_hold_->failed;
+        hi_is_queue_ = true;
+        hi_loss_ = CLIMB_LOSSY;
+        hi_stats_ = {0.0, 0.0};
+        hi_rechecked_ = false;
+        queue_retry_fails_ = std::min(failed_queue_hold_->losses, BACKOFF_REPORTS);
+        enter_hold(now_ms, failed_queue_hold_->fallback);
+        return;
+      }
       lo_ = target_;
       if (retained_queue_ceiling_ && target_ < *retained_queue_ceiling_) {
         // This only verified the lower rate. Preserve the queue provenance without reopening
@@ -359,6 +383,7 @@ namespace live_tuning_policy {
         }
         if (target_ < base_ && target_ < *queue_continuation_from_ * RECHECK_CEILING) {
           retained_queue_ceiling_.reset();
+          queue_hold_below_ = previous_queue_hold && *previous_queue_hold < target_ ? previous_queue_hold : std::nullopt;
           queue_hold(now_ms, target_);
           return;
         }
@@ -653,6 +678,9 @@ namespace live_tuning_policy {
       }
       // Judge the existing loss window before a due probe commits an isolated burst.
       if (retry_wait_ == 0 && !probe_deferred) {
+        if (failed_queue_hold_ && lo_ && *lo_ >= failed_queue_hold_->failed) {
+          failed_queue_hold_.reset();
+        }
         ++retries_;
         state_ = state_e::verify_hi;
         set_target(*hi_, "retry", now_ms);
@@ -801,6 +829,7 @@ namespace live_tuning_policy {
 
   void policy_t::rtt_cut(std::int64_t now_ms) {
     queue_continuation_from_.reset();
+    queue_hold_below_.reset();
     queue_retry_fails_ = 0;
     rtt_from_ = target_;
     ++rtt_cuts_;
@@ -812,6 +841,8 @@ namespace live_tuning_policy {
     fec_revert();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
+    queue_hold_below_.reset();
+    failed_queue_hold_.reset();
     queue_retry_fails_ = 0;
     hold_failed_kbps_.reset();
     const int previous = target_;
@@ -854,6 +885,8 @@ namespace live_tuning_policy {
     fec_revert();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
+    queue_hold_below_.reset();
+    failed_queue_hold_.reset();
     queue_retry_fails_ = 0;
     base_ = std::max(1, base_kbps);
     floor_ = std::min(floor_kbps, base_);

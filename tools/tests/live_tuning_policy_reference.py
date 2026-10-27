@@ -173,6 +173,8 @@ class Controller:
         self.hold_failed_kbps = None
         # A queue ceiling displaced by a loss probe; its lower hold cannot retire it.
         self.retained_queue_ceiling = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
         self.hi_loss = self.lo_loss = 0.0
         self.hi_kind = 'loss'
         self.hi_stats = [0, 0]
@@ -259,6 +261,8 @@ class Controller:
     def to_normal(self, now, kbps, why):
         self.retained_queue_ceiling = None
         self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
         self.queue_retry_fails = 0
         if kbps >= self.base:
             self.hold_failed_kbps = None
@@ -285,6 +289,10 @@ class Controller:
             self.episode_start = self.target
         if self.state == HOLD:
             self.hold_failed_kbps = self.target
+            if self.hi_kind == 'queue' and self.queue_hold_below is not None and self.queue_hold_below < self.target:
+                rec = self.failed_queue_hold
+                losses = min(rec['losses'], self.BACKOFF_REPORTS - 1) + 1 if rec and rec['failed'] == self.target else 1
+                self.failed_queue_hold = dict(failed=self.target, fallback=self.queue_hold_below, losses=losses, verifying=True)
             # Keep the higher queue bound separate from this loss probe's verification ceiling.
             if (self.hi_kind == 'queue' and self.hi is not None and self.hi > self.target
                     and (self.retained_queue_ceiling is None or self.hi < self.retained_queue_ceiling)):
@@ -294,6 +302,7 @@ class Controller:
         self.blind_step = False
         self.retries = 0
         self.queue_continuation_from = None
+        self.queue_hold_below = None
         self.queue_retry_fails = 0
         self.hi, self.hi_loss, self.hi_kind = self.target, l0, 'loss'
         self.probe_stats = [0, 0]
@@ -344,8 +353,22 @@ class Controller:
         self.test = self.sprt(self.hi_loss, max(self.hi_loss / 3, self.MIN_LOSS), undecided=0)
 
     def verify_hi_result(self, lossy, now):
+        rec = self.failed_queue_hold
+        loss_probe_verify = rec is not None and rec['verifying']
+        if rec is not None:
+            rec['verifying'] = False
         if not lossy:
+            previous_queue_hold = self.lo if self.hi_kind == 'queue' else None
             self.clean_promotion()
+            if loss_probe_verify and rec is not None and self.target == rec['failed'] and rec['fallback'] < self.target:
+                # A short verify cannot rehabilitate the queue hold that just failed on loss.
+                self.retained_queue_ceiling = None
+                self.hi, self.hi_kind, self.hi_loss = rec['failed'], 'queue', self.CLIMB_LOSSY
+                self.hi_stats = [0, 0]
+                self.hi_rechecked = False
+                self.queue_retry_fails = min(rec['losses'], self.BACKOFF_REPORTS)
+                self.enter_hold(now, rec['fallback'])
+                return
             self.lo = self.target
             if self.retained_queue_ceiling is not None and self.target < self.retained_queue_ceiling:
                 # Preserve queue provenance without reopening unrestricted discovery.
@@ -366,6 +389,7 @@ class Controller:
                     self.queue_continuation_from = self.target
                 if self.target < self.base and self.target < self.queue_continuation_from * self.RECHECK_CEILING:
                     self.retained_queue_ceiling = None
+                    self.queue_hold_below = previous_queue_hold if previous_queue_hold is not None and previous_queue_hold < self.target else None
                     self.queue_hold(now, self.target)
                     return
             self.queue_continuation_from = None
@@ -586,6 +610,8 @@ class Controller:
             if self.retry_wait > 0:
                 self.retry_wait -= 1
             if self.retry_wait == 0 and not probe_deferred:
+                if self.failed_queue_hold is not None and self.lo is not None and self.lo >= self.failed_queue_hold['failed']:
+                    self.failed_queue_hold = None
                 self.retries += 1
                 self.state = VERIFY_HI
                 self.set_target(self.hi, 'retry', t_ms)
@@ -700,6 +726,7 @@ class Controller:
 
     def rtt_cut(self, now):
         self.queue_continuation_from = None
+        self.queue_hold_below = None
         self.queue_retry_fails = 0
         self.rtt_from = self.target
         self.rtt_cuts += 1
@@ -709,6 +736,8 @@ class Controller:
     def adopt(self, now, kbps):
         self.retained_queue_ceiling = None
         self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
         self.queue_retry_fails = 0
         self.hold_failed_kbps = None
         previous = self.target
@@ -738,6 +767,8 @@ class Controller:
     def rebase(self, base, floor):
         self.retained_queue_ceiling = None
         self.queue_continuation_from = None
+        self.queue_hold_below = None
+        self.failed_queue_hold = None
         self.queue_retry_fails = 0
         self.base = max(1, base)
         self.floor = min(floor, self.base)

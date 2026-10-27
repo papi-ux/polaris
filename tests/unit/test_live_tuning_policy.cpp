@@ -292,7 +292,153 @@ namespace {
     return policy;
   }
 
+  void promoted_queue_hold(live_tuning_policy::policy_t &policy) {
+    constexpr std::int64_t origin = 700000;
+    // Reuse the WideRetainedQueueCeiling prefix through its 14546 promotion from 13952.
+    // These are fixed public-API component inputs, not a native replay or queue model.
+    for (int second = 84; second <= 103; ++second) {
+      policy.report(origin + second * 1000, 90, 0);
+      policy.rtt(origin + second * 1000 + 1, 2);
+    }
+    for (int second = 104; second <= 112; ++second) {
+      policy.rtt(origin + second * 1000 + 1, 19);
+    }
+    policy.rtt(origin + 113001, 2);
+    policy.rtt(origin + 114001, 2);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    ASSERT_EQ(policy.target_kbps(), 29739);
+    ASSERT_EQ(policy.ceiling_kbps(), 31523);
+    ASSERT_TRUE(policy.ceiling_is_queue());
+    for (int second = 115; second <= 123; ++second) {
+      policy.rtt(origin + second * 1000 + 1, 85);
+    }
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::rtt_cut);
+    ASSERT_EQ(policy.target_kbps(), 25278);
+    for (int second = 124; second <= 127; ++second) {
+      policy.report(origin + second * 1000, 100, 100);
+    }
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::descend);
+    ASSERT_EQ(policy.target_kbps(), 4000);
+    ASSERT_EQ(policy.ceiling_kbps(), 15166);
+    ASSERT_FALSE(policy.ceiling_is_queue());
+    policy.report(origin + 128000, 90, 0);
+    policy.report(origin + 129000, 90, 0);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(policy.target_kbps(), 15166);
+    policy.rtt(origin + 129001, 2);
+    policy.rtt(origin + 129100, 19);
+    policy.rtt(origin + 129200, 27);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::bisect);
+    ASSERT_EQ(policy.target_kbps(), 7788);
+    for (int second = 130; second <= 149; ++second) {
+      policy.report(origin + second * 1000, 90, 0);
+      policy.rtt(origin + second * 1000 + 1, 2);
+    }
+    ASSERT_EQ(policy.target_kbps(), 14546);
+    policy.rtt(origin + 149100, 19);
+    policy.rtt(origin + 149200, 27);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    ASSERT_EQ(policy.target_kbps(), 13952);
+    ASSERT_EQ(policy.ceiling_kbps(), 14546);
+    ASSERT_TRUE(policy.ceiling_is_queue());
+    for (int second = 150; second <= 158; ++second) {
+      policy.report(origin + second * 1000, 90, 0);
+      policy.rtt(origin + second * 1000 + 1, 2);
+    }
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(policy.target_kbps(), 14546);
+    for (int second = 159; second <= 163; ++second) {
+      policy.report(origin + second * 1000, 90, 0);
+      policy.rtt(origin + second * 1000 + 1, 2);
+    }
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    ASSERT_EQ(policy.target_kbps(), 14546);
+    ASSERT_EQ(policy.ceiling_kbps(), 15418);
+    ASSERT_TRUE(policy.ceiling_is_queue());
+  }
+
+  void queue_hold_report(live_tuning_policy::policy_t &policy, int &second, int expected = 90, int lost = 0) {
+    policy.report(700000 + ++second * 1000, expected, lost);
+    policy.rtt(700000 + second * 1000 + 1, 2);
+  }
+
+  void fail_promoted_queue_hold(live_tuning_policy::policy_t &policy, int &second) {
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    ASSERT_EQ(policy.target_kbps(), 14546);
+    ASSERT_EQ(policy.ceiling_kbps(), 15418);
+    ASSERT_TRUE(policy.ceiling_is_queue());
+    queue_hold_report(policy, second, 100, 100);
+    queue_hold_report(policy, second, 100, 100);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::descend);
+    ASSERT_EQ(policy.target_kbps(), 8727);  // floor(0.6 * 14546).
+    ASSERT_EQ(policy.ceiling_kbps(), 14546);
+    ASSERT_FALSE(policy.ceiling_is_queue());
+    queue_hold_report(policy, second);  // Mixed after the cut.
+    queue_hold_report(policy, second);  // Clean descent rechecks the failed hold itself.
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(policy.target_kbps(), 14546);
+    for (int report = 0; report < 4; ++report) {
+      queue_hold_report(policy, second);  // Mixed, then only three judged verification reports.
+      ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+      ASSERT_EQ(policy.target_kbps(), 14546);
+    }
+    queue_hold_report(policy, second);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    ASSERT_EQ(policy.target_kbps(), 13952);  // The lower validated queue hold remains the fallback.
+    ASSERT_EQ(policy.ceiling_kbps(), 14546);  // Measured failure, not the synthetic 15418 rung.
+    ASSERT_TRUE(policy.ceiling_is_queue());
+  }
+
+  void retry_failed_queue_hold(live_tuning_policy::policy_t &policy, int &second, int wait) {
+    queue_hold_report(policy, second);  // Mixed after falling back from 14546 to 13952.
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    ASSERT_EQ(policy.target_kbps(), 13952);
+    for (int judged = 1; judged < wait; ++judged) {
+      queue_hold_report(policy, second);
+      ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold) << judged;
+      ASSERT_EQ(policy.target_kbps(), 13952) << judged;
+      ASSERT_EQ(policy.ceiling_kbps(), 14546);
+      ASSERT_TRUE(policy.ceiling_is_queue());
+    }
+    queue_hold_report(policy, second);  // The existing backoff expires on this judged report.
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(policy.target_kbps(), 14546);
+    ASSERT_EQ(policy.ceiling_kbps(), 14546);
+    ASSERT_TRUE(policy.ceiling_is_queue());
+    ASSERT_EQ(policy.last_change().why, "retry");
+  }
+
 }  // namespace
+
+TEST(LiveTuningPolicy, FailedQueueHoldSameRateVerifyRestoresLowerHoldAndWaitsTwentyReports) {
+  live_tuning_policy::policy_t policy {34988, FLOOR};
+  ASSERT_NO_FATAL_FAILURE(promoted_queue_hold(policy));
+  int second = 163;
+  ASSERT_NO_FATAL_FAILURE(fail_promoted_queue_hold(policy, second));
+  // The short same-rate verify must neither re-hold 14546 nor retry its synthetic 15418 ceiling.
+  ASSERT_NO_FATAL_FAILURE(retry_failed_queue_hold(policy, second, 20));
+}
+
+TEST(LiveTuningPolicy, FailedQueueHoldCanBeReprovedAndItsRepeatLossWaitsFortyReports) {
+  live_tuning_policy::policy_t policy {34988, FLOOR};
+  ASSERT_NO_FATAL_FAILURE(promoted_queue_hold(policy));
+  int second = 163;
+  ASSERT_NO_FATAL_FAILURE(fail_promoted_queue_hold(policy, second));
+  ASSERT_NO_FATAL_FAILURE(retry_failed_queue_hold(policy, second, 20));
+  for (int report = 0; report < 4; ++report) {
+    queue_hold_report(policy, second);  // Mixed, then only three judged retry verification reports.
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(policy.target_kbps(), 14546);
+  }
+  queue_hold_report(policy, second);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  ASSERT_EQ(policy.target_kbps(), 14546);  // A later hold retry can prove the staircase hold again.
+  ASSERT_EQ(policy.ceiling_kbps(), 15418);
+  ASSERT_TRUE(policy.ceiling_is_queue());
+  // Fail before that re-proved hold survives a full retry wait: retain the prior loss count.
+  ASSERT_NO_FATAL_FAILURE(fail_promoted_queue_hold(policy, second));
+  ASSERT_NO_FATAL_FAILURE(retry_failed_queue_hold(policy, second, 40));
+}
 
 TEST(LiveTuningPolicy, QueueCeilingSurvivesLowerHoldLossAndBoundsItsFirstPromotion) {
   constexpr std::int64_t origin = 700000;
