@@ -293,6 +293,16 @@ restart it. Headless boot turns lingering on, and other user services can too;
 readable only by the `polaris-kms` group, `--enable-kms` adds you to it, and a
 session picks up its groups when it starts. Running the command again is safe.
 
+Bazzite can define the `polaris-kms` group in `/usr/lib/group` alone, where
+`usermod` cannot add anyone to it. `--enable-kms` then first copies that
+group's exact `polaris-kms:` line into `/etc/group`. If it cannot, it stops
+and prints the two commands to run by hand:
+
+```bash
+sudo sh -c 'grep ^polaris-kms: /usr/lib/group >> /etc/group'
+sudo usermod -aG polaris-kms "$USER"
+```
+
 That is the whole recipe now. Updates and rollbacks leave it alone, because the
 package owns the file that carries the capability.
 

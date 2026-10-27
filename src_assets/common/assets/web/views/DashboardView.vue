@@ -745,7 +745,13 @@ const readyChecks = computed(() => {
           : readinessSources.value.config
     let status = source === 'ready' ? (item.ok ? 'ready' : 'attention') : 'not_checked'
     const configured = readinessSources.value.config === 'ready'
+    // Host Virtual Display creates its own output when a stream starts, so an idle host reporting none,
+    // as one with no monitor does, has nothing to fix. Mirror Desktop streams a monitor that has to be
+    // there, and a live stream or a reported output is judged as before.
+    const virtualDisplayIdle = configured && source === 'ready' && item.key === 'display' && !item.ok &&
+      !stats.value?.streaming && resolveStreamDisplayMode(readinessConfig.value) === 'host_virtual_display'
     if (configured && ((item.key === 'display' && resolveStreamDisplayMode(readinessConfig.value) === 'headless_stream') ||
+        virtualDisplayIdle ||
         (item.key === 'audio' && readinessConfig.value.stream_audio === 'disabled') ||
         (item.key === 'discovery' && !discoveryEnabled.value) ||
         (item.key === 'pairing' && !pairingEnabled.value && readinessSources.value.clients === 'ready' && pairedClients.value > 0))) status = 'not_applicable'
@@ -756,7 +762,8 @@ const readyChecks = computed(() => {
     return {
       ...item, status,
       state: t(`dashboard.check_state_${status}`),
-      detail: status === 'not_checked' ? t(source === 'unavailable' ? 'dashboard.check_read_failed' : 'dashboard.check_waiting') : item.detail,
+      detail: status === 'not_checked' ? t(source === 'unavailable' ? 'dashboard.check_read_failed' : 'dashboard.check_waiting')
+        : virtualDisplayIdle ? t('dashboard.check_display_virtual_idle') : item.detail,
       cardClass: attention ? 'border-warning/15 bg-warning/5 hover:border-warning/30' : ready ? 'border-success/15 bg-success/5' : 'border-storm/25 bg-deep/30',
       badgeClass: attention ? 'bg-warning/10 text-warning-bright' : ready ? 'bg-success/10 text-success' : 'bg-storm/10 text-storm',
     }

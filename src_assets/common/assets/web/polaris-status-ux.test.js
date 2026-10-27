@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildReadyCheckDisplay } from './dashboard-ready-checks.js'
 import { captureStatusTone } from './capture-status-tone.js'
@@ -12,6 +14,23 @@ describe('Polaris status evidence', () => {
     ])
     expect(result).toMatchObject({ total: 2, passing: 1, attention: 0, unknown: 1, notApplicable: 1, allPassing: false, primaryIssue: null })
     expect(result.visibleChecks.map(row => row.key)).toEqual(['audio'])
+  })
+  it('reads an idle Host Virtual Display host with no monitor as not needed, and only that host', () => {
+    // A headless KDE host warned "No active display path" although Host Virtual Display makes its own
+    // output when a stream starts (#519). Mirror Desktop, a live stream and a reported output are unchanged.
+    const dashboard = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/DashboardView.vue'), 'utf8')
+    const start = dashboard.indexOf('const virtualDisplayIdle')
+    const rule = dashboard.slice(start, dashboard.indexOf("status = 'not_applicable'", start))
+    expect(start).toBeGreaterThan(0)
+    expect(rule).toContain("source === 'ready' && item.key === 'display' && !item.ok")
+    expect(rule).toContain('!stats.value?.streaming')
+    expect(rule).toContain("resolveStreamDisplayMode(readinessConfig.value) === 'host_virtual_display'")
+    expect(rule).toContain('virtualDisplayIdle ||')
+    expect(rule).not.toContain('desktop_display')
+    expect(dashboard).toContain("virtualDisplayIdle ? t('dashboard.check_display_virtual_idle') : item.detail")
+    const en = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
+    expect(en.dashboard.check_display_virtual_idle).toContain('Host Virtual Display creates its display when a stream starts')
+    expect(en.dashboard.check_display_missing).toBe('No active display path is being reported yet.')
   })
   it('selects an actual issue before an earlier unmeasured check', () => {
     const result = buildReadyCheckDisplay([{ key: 'audio', status: 'not_checked' }, { key: 'clients', status: 'attention' }])

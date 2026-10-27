@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include "input/input_group_access.h"
 #include "stream_display_policy.h"
 #include "user_unit_override.h"
 
@@ -128,6 +129,36 @@ namespace platf::kms_enable {
       return std::nullopt;
     }
     return std::string {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  }
+
+  /// Whether a group file has a line defining exactly this group: its whole name, then a colon.
+  inline bool group_file_defines(std::string_view text, std::string_view group) {
+    while (!text.empty()) {
+      const auto end = text.find('\n');
+      const auto line = text.substr(0, end);
+      if (line.size() > group.size() && line.starts_with(group) && line[group.size()] == ':') {
+        return true;
+      }
+      if (end == std::string_view::npos) {
+        break;
+      }
+      text.remove_prefix(end + 1);
+    }
+    return false;
+  }
+
+  /**
+   * @brief Whether an ostree image defines the group only in /usr/lib/group, out of usermod's reach.
+   *
+   * The account database reads both files there, so the group looks present while usermod, which
+   * writes /etc/group only, refuses to add anyone to it. A file that could not be read answers no,
+   * so nothing is copied on a guess and usermod reports what it finds.
+   *
+   * @param etc_group /etc/group as read; nothing when it could not be read.
+   * @param image_group /usr/lib/group as read; nothing when it could not be read.
+   */
+  inline bool group_defined_only_in_image(const std::optional<std::string> &etc_group, const std::optional<std::string> &image_group, std::string_view group) {
+    return etc_group && image_group && !group_file_defines(*etc_group, group) && group_file_defines(*image_group, group);
   }
 
   /**
@@ -297,6 +328,28 @@ namespace platf::kms_enable {
   }
 
   /**
+   * @brief What turning DRM/KMS capture on means for Host Virtual Display on KDE Plasma.
+   *
+   * There Host Virtual Display gets its screen from KWin, which withholds its screencast protocol
+   * from a program holding this capability. Polaris gives the capability up at startup only for the
+   * settings the portal capability policy names, so a host that keeps it gets no KWin screen. Host
+   * setup cannot tell which desktop the account uses, so this says when it applies rather than
+   * claiming it always does. Capture through the portal or KWin already gives the capability up,
+   * and capture_line says so.
+   *
+   * @param capture The capture polaris.conf sets, as written; nothing when it could not be read.
+   */
+  inline std::string kwin_virtual_display_note(const std::optional<std::string> &capture) {
+    if (capture && stream_display_policy::canonical_capture_backend(*capture) == "portal") {
+      return {};
+    }
+    return "On KDE Plasma, Host Virtual Display gets its screen from KWin, and KWin withholds its screencast\n"
+           "protocol from a program that holds this capability. Polaris gives the capability up at startup\n"
+           "when linux_virtual_display_backend = kwin and capture is Autodetect or portal; with capture = kms\n"
+           "it keeps it, and Host Virtual Display on KWin then gets no screen.\n";
+  }
+
+  /**
    * @brief Whether the account's service manager outlives its logins.
    *
    * Lingering keeps it running from boot to shutdown, so logging out and back in does not restart
@@ -338,6 +391,8 @@ namespace platf::kms_enable {
     std::function<service_run_e(const account_t &, const std::filesystem::path &)> service_running;
     /// The capture the account's polaris.conf sets, as written; nothing when it cannot be read.
     std::function<std::optional<std::string>(const account_t &)> configured_capture;
+    /// Whether this ostree host defines the group only in /usr/lib/group; unset means it never does.
+    std::function<bool(std::string_view group)> group_only_in_image;
   };
 
   enum class result_e {
@@ -704,6 +759,21 @@ namespace platf::kms_enable {
 
     auto membership = membership_e::member;
     if (!host.in_group(account)) {
+      // On an ostree image such as Bazzite the package can define the group in /usr/lib/group alone,
+      // which usermod does not write, so usermod would refuse it. Copy that one definition first.
+      if (host.group_only_in_image && host.group_only_in_image(group)) {
+        const auto copy = "sh -c '" + input_access::image_group_copy_command(group) + "'";
+        if (!host.run("copy the " + group + " group definition from /usr/lib/group into /etc/group", copy)) {
+          out.refusal = "Could not copy the " + group + " group definition from /usr/lib/group into /etc/group, which\n"
+                        "usermod needs on this ostree host, so DRM/KMS capture was left as it was. Run:\n"
+                        "  sudo " + copy + "\n"
+                        "  sudo usermod -aG " + group + " " + account.name + "\n"
+                        "and then " + std::string {finish_command} + " again.\n";
+          return out;
+        }
+        out.summary += "Copied the " + group + " group definition from /usr/lib/group into /etc/group, so usermod could\n"
+                       "add " + account.name + " to it.\n";
+      }
       // Only members may execute the helper, so a capability here is not a capability for every
       // local account, which is what marking /usr/bin/polaris used to mean.
       if (!host.run("add " + account.name + " to the " + group + " group", std::format(R"(usermod -aG "{}" "{}")", group, account.name))) {
@@ -737,6 +807,9 @@ namespace platf::kms_enable {
       turn_on(account, host, out);
     } else {
       park(account, host, state, membership, finish_command, out);
+    }
+    if (out.result == result_e::on || out.result == result_e::parked) {
+      out.summary += kwin_virtual_display_note(host.configured_capture ? host.configured_capture(account) : std::nullopt);
     }
     return out;
   }

@@ -62,6 +62,7 @@ namespace {
     std::vector<std::string> failing;  ///< commands starting with one of these fail
     ke::service_run_e service = ke::service_run_e::other;  ///< what the account's polaris user service runs now
     std::optional<std::string> capture;  ///< the capture the account's polaris.conf sets; nothing when unread
+    bool image_only_group = false;  ///< an ostree image defines polaris-kms in /usr/lib/group alone
 
     fake_host_t() {
       fs::create_directories(account.home);
@@ -165,6 +166,9 @@ namespace {
       };
       host.configured_capture = [this](const ke::account_t &) {
         return capture;
+      };
+      host.group_only_in_image = [this](std::string_view group) {
+        return image_only_group && group == uu::kms_group;
       };
       return host;
     }
@@ -933,6 +937,95 @@ TEST(KmsEnableTests, OnlyTheServicesOwnProcessRunningTheBinaryCounts) {
   }
   fake_proc_t empty;
   EXPECT_EQ(ke::user_service_running(empty.root / "missing", streamer_uid, helper), ke::service_run_e::other);
+}
+
+TEST(KmsEnableTests, OnAnOstreeImageTheGroupLineIsCopiedBeforeUsermod) {
+  // Bazzite defines polaris-kms in /usr/lib/group, which usermod does not write, so a plain usermod
+  // refused it and DRM/KMS capture stayed off (#523).
+  fake_host_t fake;
+  fake.install_helper();
+  fake.member = false;
+  fake.session = ke::session_group_e::not_live;
+  fake.image_only_group = true;
+
+  const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+
+  ASSERT_EQ(outcome.result, ke::result_e::parked) << outcome.refusal;
+  ASSERT_EQ(fake.commands.size(), 2u);
+  EXPECT_EQ(fake.commands[0], "sh -c 'grep ^polaris-kms: /usr/lib/group >> /etc/group'");
+  EXPECT_EQ(fake.commands[1], R"(usermod -aG "polaris-kms" "streamer")");
+  EXPECT_NE(outcome.summary.find("Copied the polaris-kms group definition from /usr/lib/group into /etc/group"), std::string::npos)
+    << outcome.summary;
+  EXPECT_NE(outcome.summary.find("joined the polaris-kms group just now"), std::string::npos);
+}
+
+TEST(KmsEnableTests, AFailedGroupCopyRefusesWithTheCommandsToRunByHand) {
+  fake_host_t fake;
+  fake.install_helper();
+  fake.member = false;
+  fake.session = ke::session_group_e::not_live;
+  fake.image_only_group = true;
+  fake.failing.push_back("sh -c");
+
+  const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+
+  EXPECT_EQ(outcome.result, ke::result_e::failed);
+  EXPECT_EQ(fake.commands.size(), 1u) << "usermod would refuse a group /etc/group lacks, so it is not tried";
+  EXPECT_NE(outcome.refusal.find("  sudo sh -c 'grep ^polaris-kms: /usr/lib/group >> /etc/group'\n"
+                                 "  sudo usermod -aG polaris-kms streamer\n"
+                                 "and then sudo -H polaris --setup-host --enable-kms again.\n"),
+            std::string::npos)
+    << outcome.refusal;
+  EXPECT_FALSE(fs::exists(fake.active()));
+  EXPECT_FALSE(fs::exists(fake.parked()));
+}
+
+TEST(KmsEnableTests, OnlyAGroupTheImageAloneDefinesNeedsCopying) {
+  const std::optional<std::string> etc {"root:x:0:\nwheel:x:10:papi\n"};
+  const std::optional<std::string> image {"root:x:0:\npolaris-kms:x:957:\n"};
+  EXPECT_TRUE(ke::group_defined_only_in_image(etc, image, "polaris-kms"));
+
+  // Already in /etc/group: usermod can add to it as it is.
+  EXPECT_FALSE(ke::group_defined_only_in_image(std::string {"polaris-kms:x:957:\n"}, image, "polaris-kms"));
+  // A name that merely starts the same is a different group.
+  EXPECT_FALSE(ke::group_defined_only_in_image(etc, std::string {"polaris-kms-extra:x:958:\n"}, "polaris-kms"));
+  EXPECT_FALSE(ke::group_defined_only_in_image(etc, std::string {"xpolaris-kms:x:958:\n"}, "polaris-kms"));
+  // A file that could not be read says nothing, so nothing is copied on a guess.
+  EXPECT_FALSE(ke::group_defined_only_in_image(std::nullopt, image, "polaris-kms"));
+  EXPECT_FALSE(ke::group_defined_only_in_image(etc, std::nullopt, "polaris-kms"));
+}
+
+TEST(KmsEnableTests, TurningKmsOnSaysWhenKWinWithholdsHostVirtualDisplay) {
+  // A KDE host that ran --enable-kms got no Host Virtual Display until it was undone (#519).
+  const auto summary_for = [](std::optional<std::string> capture) {
+    fake_host_t fake;
+    fake.install_helper();
+    fake.capture = std::move(capture);
+    const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+    EXPECT_EQ(outcome.result, ke::result_e::on) << outcome.refusal;
+    return outcome.summary;
+  };
+  const std::string note = "KWin withholds its screencast\nprotocol from a program that holds this capability.";
+  const std::string remedy = "when linux_virtual_display_backend = kwin and capture is Autodetect or portal; with capture = kms\nit keeps it";
+
+  for (const auto &capture : std::vector<std::optional<std::string>> {std::string {"kms"}, std::string {"auto"}, std::nullopt}) {
+    const auto summary = summary_for(capture);
+    EXPECT_NE(summary.find(note), std::string::npos) << summary;
+    EXPECT_NE(summary.find(remedy), std::string::npos) << summary;
+  }
+  // Capture through the portal or KWin already gives the capability up, and the summary says so.
+  for (const auto *capture : {"portal", "kwin"}) {
+    EXPECT_EQ(summary_for(std::string {capture}).find(note), std::string::npos) << capture;
+  }
+
+  // Parked until the next login, the account still gets the note.
+  fake_host_t parked;
+  parked.install_helper();
+  parked.member = false;
+  parked.session = ke::session_group_e::not_live;
+  const auto outcome = ke::enable(parked.account, parked.host(), "sudo -H polaris --setup-host --enable-kms");
+  ASSERT_EQ(outcome.result, ke::result_e::parked) << outcome.refusal;
+  EXPECT_NE(outcome.summary.find(note), std::string::npos) << outcome.summary;
 }
 
 #endif

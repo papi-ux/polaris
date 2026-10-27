@@ -634,7 +634,11 @@ on its own: `hvd_kwin_screen_unused` when Plasma got another backend, and why;
   `systemctl --user restart polaris`. `systemctl --user show-environment` lists `WAYLAND_DISPLAY`
   once the session is up. The KWin screen itself needs no dummy plug, but Plasma has to start
   without a monitor first; if `WAYLAND_DISPLAY` stays missing after automatic login, use a dummy
-  plug with Headless Dongle. Private Stream needs no session at all.
+  plug with Headless Dongle. Private Stream needs no session at all. Until a stream starts, the
+  Dashboard's Displays check reads Not needed on such a host, because Host Virtual Display creates
+  its screen then. If `--enable-kms` was run too, set `linux_virtual_display_backend = kwin` and
+  leave capture on Autodetect or portal: KWin withholds its screen from a Polaris that holds the
+  DRM/KMS capability, and those settings make Polaris give it up at startup.
 - **KWin does not offer its screencast protocol to Polaris.** KWin only offers it to a program a
   desktop entry names. Polaris writes one to `~/.local/share/applications` the first time and
   waits a few seconds for KWin to pick it up. If a launch still misses it, Polaris checks again
