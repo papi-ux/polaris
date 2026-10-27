@@ -151,6 +151,19 @@ describe('support export home paths', () => {
     expect(redactSensitiveText(redacted)).toBe(redacted)
   })
 
+  it('learns from a file URI alone and repeated leading slashes, preserving nested unrelated paths', () => {
+    const uri = `file://${homePath('home', 'uri.user+$', '/clip.mkv')}`
+    const input = `/run/uri.user+$/cache ${uri} /other/home/unknown /srv/home/unknown /run/unknown/cache`
+    const redacted = redactSensitiveText(input)
+
+    expect(redacted).toBe('/run/~/cache file://~/clip.mkv /other/home/unknown /srv/home/unknown /run/unknown/cache')
+    expect(redactSensitiveText(redacted)).toBe(redacted)
+    const repeated = `/run/repeat-user/cache /${homePath('home', 'repeat-user', '/log')}`
+    const redactedRepeated = redactSensitiveText(repeated)
+    expect(redactedRepeated).toBe('/run/~/cache ~/log')
+    expect(redactSensitiveText(redactedRepeated)).toBe(redactedRepeated)
+  })
+
   it('learns from nested Map, Set and Error contents before walking either field order', () => {
     const failure = new Error(`opening ${homePath('Users', 'macuser', '/log')} failed`)
     failure.name = '/run/ostree/Failure'

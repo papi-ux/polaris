@@ -153,7 +153,9 @@ export const REDACTED_VALUE = '[redacted]'
 // Match complete path segments, never a username substring or an arbitrary path.
 // Keep the sources fixed: learned names can contain regex metacharacters.
 const PATH_SEGMENT_SOURCE = String.raw`[^/\\\s"'\x60<>:;,|!?()[\]{}]+`
-const HOME_PATH_SOURCE = String.raw`(?<![\w./\\~-])/(?:var/home|home|Users)/(${PATH_SEGMENT_SOURCE})`
+// Keep a local file-URI prefix, or consume a whole leading slash run at a root
+// boundary. A repeated slash run after another URI scheme is not a plain root.
+const HOME_PATH_SOURCE = String.raw`(?<![\w./\\~-])(?:([Ff][Ii][Ll][Ee]://)/+|/(?!/)|(?<!:)/{2,})(?:var/home|home|Users)/(${PATH_SEGMENT_SOURCE})`
 
 function homeNamesFor(addresses) {
   // The book belongs to one export, including its separately built draft and
@@ -168,7 +170,7 @@ function isHomeName(name) {
 function learnHomePaths(value, names, seen = new WeakSet()) {
   if (typeof value === 'string') {
     for (const match of value.matchAll(new RegExp(HOME_PATH_SOURCE, 'g'))) {
-      if (isHomeName(match[1])) names.add(match[1])
+      if (isHomeName(match[2])) names.add(match[2])
     }
   } else if (value && typeof value === 'object' && !seen.has(value)) {
     seen.add(value)
@@ -193,7 +195,9 @@ function learnHomePaths(value, names, seen = new WeakSet()) {
 }
 
 function redactHomePaths(text, names) {
-  const withoutHomes = text.replace(new RegExp(HOME_PATH_SOURCE, 'g'), (path, name) => isHomeName(name) ? '~' : path)
+  const withoutHomes = text.replace(new RegExp(HOME_PATH_SOURCE, 'g'), (path, fileUri, name) => (
+    isHomeName(name) ? `${fileUri || ''}~` : path
+  ))
   return withoutHomes.replace(new RegExp(`(/)(${PATH_SEGMENT_SOURCE})`, 'g'), (_, slash, segment) => (
     `${slash}${names.has(segment) ? '~' : segment}`
   ))
@@ -1716,7 +1720,8 @@ export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = creat
       'which device it was. Loopback, multicast and example addresses stay readable.',
       'Home directories under /home, /var/home and /Users become ~. Names learned from those',
       'directories also become ~ when they are complete path segments elsewhere in this export.',
-      'Other paths and standalone names stay readable; review the export before sharing it.',
+      'Other paths stay readable unless a segment is a learned account name. Standalone names stay',
+      'readable; review the export before sharing it.',
     ].join(' '),
     // 4: older_run_logs and kernel_gpu_messages ride along.
     // 5: network addresses are replaced with labels.

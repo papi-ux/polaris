@@ -861,8 +861,10 @@ multicast and example addresses stay as they are.
 Home directories under `/home`, `/var/home` and `/Users` become `~`, including in crash log paths,
 configuration, retained logs, stream evidence and the issue draft. Within one export, names learned
 from those home directories also become `~` when they appear as whole path segments elsewhere.
-Other paths, such as `/usr/lib/polaris`, and standalone names stay readable. This only changes
-exported data; the crash record and logs on your machine keep their original paths.
+Local file URIs and home paths with repeated leading slashes follow the same rule. Other paths,
+such as `/usr/lib/polaris`, stay readable unless a segment is a learned account name. Standalone
+names stay readable. This only changes exported data; the crash record and logs on your machine
+keep their original paths.
 
 Redaction is not a promise that a bundle is safe to publish unread. Look at it first.
 
