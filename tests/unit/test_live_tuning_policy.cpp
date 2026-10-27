@@ -373,8 +373,8 @@ TEST(LiveTuningPolicy, QueueCeilingSurvivesLowerHoldLossAndBoundsItsFirstPromoti
   EXPECT_EQ(policy.ceiling_kbps(), queue_kbps);
   EXPECT_TRUE(policy.ceiling_is_queue());
 
-  // Independent sequence in this same component case: once the known queue rate itself passes
-  // its four-report dwell, its first completion probe is <=1.06x, rather than the old 1.1x.
+  // Independent sequence in this same component case: a queue rate that passes its four-report
+  // dwell becomes a real hold before any further completion-size probe.
   // This fixed clean continuation is a unit input, not another captured native observation.
   auto promotion = queue_hold;
   for (int second = 126; second <= 146; ++second) {
@@ -391,9 +391,149 @@ TEST(LiveTuningPolicy, QueueCeilingSurvivesLowerHoldLossAndBoundsItsFirstPromoti
     ASSERT_EQ(promotion.target_kbps(), queue_kbps);
   }
   promotion.report(origin + 151000, 90, 0);
-  EXPECT_EQ(promotion.state(), live_tuning_policy::state_e::climb);
-  EXPECT_GT(promotion.target_kbps(), queue_kbps);
-  EXPECT_LE(std::int64_t {promotion.target_kbps()} * 100, std::int64_t {queue_kbps} * 106);
+  EXPECT_EQ(promotion.state(), live_tuning_policy::state_e::hold);
+  EXPECT_EQ(promotion.target_kbps(), queue_kbps);
+  EXPECT_EQ(promotion.ceiling_kbps(), 15661);
+  EXPECT_TRUE(promotion.ceiling_is_queue());
+}
+
+TEST(LiveTuningPolicy, QueueStaircaseHoldsEachVerifiedRateAndBacksOffClosedBracketFailures) {
+  constexpr std::int64_t origin = 700000;
+  live_tuning_policy::policy_t policy {34988, FLOOR};
+  // Fixed component inputs, not a plant or native replay. As in the preceding case, adopt
+  // seeds adjacent rates; the 19/27 ms pair then establishes queue provenance through rtt().
+  for (int second = 84; second <= 103; ++second) {
+    policy.report(origin + second * 1000, 90, 0);
+    policy.rtt(origin + second * 1000 + 1, 2);
+  }
+  policy.adopt(origin + 104000, 13587);
+  policy.adopt(origin + 104000, 13197);
+
+  int last_hold = 13197;
+  auto changes = policy.changes();
+  const auto observe = [&] {
+    if (policy.changes() != changes) {
+      const auto &change = policy.last_change();
+      if (change.to_kbps > change.from_kbps) {
+        EXPECT_LE(std::int64_t {change.to_kbps} * 100, std::int64_t {last_hold} * 106)
+          << change.why << " at " << change.at_ms;
+      }
+      changes = policy.changes();
+    }
+    if (policy.state() == live_tuning_policy::state_e::hold) {
+      last_hold = policy.target_kbps();
+    }
+    EXPECT_NE(policy.target_kbps(), 13586);
+    EXPECT_NE(policy.target_kbps(), 13988);
+  };
+  const auto clean_report = [&](int second) {
+    policy.report(origin + second * 1000, 90, 0);
+    observe();
+    policy.rtt(origin + second * 1000 + 1, 2);
+    observe();
+  };
+  const auto reject = [&](int second) {
+    policy.rtt(origin + second * 1000 + 100, 19);
+    observe();
+    policy.rtt(origin + second * 1000 + 200, 27);
+    observe();
+  };
+  const auto expect_hold = [&](int target, int ceiling) {
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_EQ(policy.target_kbps(), target);
+    EXPECT_EQ(policy.ceiling_kbps(), ceiling);
+    EXPECT_TRUE(policy.ceiling_is_queue());
+    EXPECT_EQ(last_hold, target);
+  };
+
+  for (int second = 105; second <= 125; ++second) {
+    clean_report(second);  // First mixed report, then the existing 20 judged hold reports.
+  }
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  ASSERT_EQ(policy.target_kbps(), 13587);
+  reject(125);
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  expect_hold(13197, 13587);
+  for (int second = 126; second <= 146; ++second) {
+    clean_report(second);
+  }
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  ASSERT_EQ(policy.target_kbps(), 13587);
+
+  int second = 146;
+  for (const auto &[held, ceiling] : std::vector<std::pair<int, int>> {{13587, 14402}, {14402, 15266}}) {
+    SCOPED_TRACE(held);
+    for (int report = 0; report < 4; ++report) {
+      clean_report(++second);  // Mixed, then only three judged verification reports.
+      ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+      ASSERT_EQ(policy.target_kbps(), held);
+    }
+    clean_report(++second);  // Fourth judged report: hold this rate, do not climb past it.
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    expect_hold(held, ceiling);
+    for (int judged = 1; judged < 20; ++judged) {
+      clean_report(++second);  // A state-only hold entry does not create a mixed rate interval.
+      expect_hold(held, ceiling);
+    }
+    clean_report(++second);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(policy.target_kbps(), ceiling);
+    ASSERT_TRUE(policy.ceiling_is_queue());
+  }
+
+  // At the real 14402 hold, 15266 is a closed-bracket retry. Its first failure waits 20
+  // judged hold reports and the next waits 40; a mixed report after each cut counts as neither.
+  for (const int wait : {20, 40}) {
+    SCOPED_TRACE(wait);
+    reject(second);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    expect_hold(14402, 15266);
+    clean_report(++second);  // Mixed after the rejection's downward rate change.
+    expect_hold(14402, 15266);
+    for (int judged = 1; judged < wait; ++judged) {
+      clean_report(++second);
+      expect_hold(14402, 15266);
+    }
+    clean_report(++second);
+    ASSERT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+    ASSERT_EQ(policy.target_kbps(), 15266);
+    ASSERT_EQ(policy.ceiling_kbps(), 15266);
+    ASSERT_TRUE(policy.ceiling_is_queue());
+  }
+}
+
+TEST(LiveTuningPolicy, ADrainedRttCutRetriesAtMostOneCompletionStepAboveItsHold) {
+  constexpr std::int64_t origin = 700000;
+  live_tuning_policy::policy_t policy {34988, FLOOR};
+  for (int second = 84; second <= 103; ++second) {
+    policy.report(origin + second * 1000, 90, 0);
+    policy.rtt(origin + second * 1000 + 1, 2);
+  }
+  // Fixed standing RTT, then fixed drained RTT: no target-dependent queue model.
+  for (int second = 104; second <= 112; ++second) {
+    policy.rtt(origin + second * 1000 + 1, 19);
+  }
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::rtt_cut);
+  ASSERT_EQ(policy.target_kbps(), 29739);  // Existing floor(34988 * 0.85) cut.
+  ASSERT_EQ(policy.last_change().why, "rtt");
+  policy.rtt(origin + 113001, 2);
+  policy.rtt(origin + 114001, 2);  // Close the first drained second.
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  ASSERT_EQ(policy.target_kbps(), 29739);
+  ASSERT_EQ(policy.ceiling_kbps(), 31523);  // floor(29739 * 1.06), not the pre-cut 34988.
+  ASSERT_TRUE(policy.ceiling_is_queue());
+  for (int second = 115; second <= 122; ++second) {
+    policy.report(origin + second * 1000, 90, 0);  // Mixed, then seven judged hold reports.
+    policy.rtt(origin + second * 1000 + 1, 2);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_EQ(policy.target_kbps(), 29739);
+  }
+  policy.report(origin + 123000, 90, 0);  // The existing eighth judged report permits a retry.
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::verify_hi);
+  EXPECT_EQ(policy.target_kbps(), 31523);
+  EXPECT_EQ(policy.ceiling_kbps(), 31523);
+  EXPECT_TRUE(policy.ceiling_is_queue());
+  EXPECT_LE(std::int64_t {policy.last_change().to_kbps} * 100, std::int64_t {29739} * 106);
 }
 
 TEST(LiveTuningPolicy, Rp6S2FailedHoldWaitsForDelayedLossBeforePromotion) {

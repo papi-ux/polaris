@@ -30,9 +30,10 @@
  *   its deep sample after 1.5 s, once, and goes no further until reports return.
  * - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
  *   the measured burstiness. An undecided descent test counts as not having helped.
- * - A hold retries the rate above it after 8 reports, then every 20, and climbs from there when it is clean. A
- *   clean step within 25% under that rate retries it at once. While a hold's loss is not significantly lower
- *   than real loss at the rate above it, the loss is rate-independent after all.
+ * - A hold retries the rate above it after 8 reports, then every 20. Loss ceilings climb from there when
+ *   clean; queue ceilings use the staircase below. A clean step within 25% under that rate retries it at once.
+ *   While a hold's loss is not significantly lower than real loss at the rate above it, the loss is
+ *   rate-independent after all.
  *   After a hold fails, clean verify/bisect promotions need the existing four-report queue dwell until
  *   a rate at or above that failed hold passes. A higher queue ceiling survives a loss descent from its
  *   lower hold: verifying the lower rate resumes that queue bracket instead of retiring the higher bound.
@@ -44,11 +45,13 @@
  * - A held rate cuts 15% when the smoothed RTT has been raised and not falling for 8 s. A Wi-Fi background
  *   scan only raises it for about 5 s before it falls: a Steam Deck's scans peak at 83 ms for 5 s, every
  *   306.9 s. Cuts go on every 6 s until the queue starts to drain, at most three; the rate that queued is then
- *   the ceiling above the hold. Once verified clean, climbs use the existing 1.06x bracket-completion step
- *   while below 1.25x that rate: a queue at the link builds slower than a retry can see. A failed climb there
- *   holds one completion step under the last clean rate, retaining that clean rate as a conservative queue
- *   ceiling without assigning it measured loss. A queue three cuts did not drain, with nothing lost meanwhile, is
- *   someone else's, and is left alone for 5 minutes.
+ *   retried ceiling above the hold, capped at one existing 1.06x bracket-completion step. A queue ceiling
+ *   verified clean becomes a real hold before the next completion-size probe, while below 1.25x the first
+ *   verified queue rate: a queue at the link builds slower than a retry can see. Consecutive failed retries
+ *   in a closed queue bracket wait 20, then 40 reports, doubling up to the existing 1200-report back-off.
+ *   Clean verification, a new descent, a cut or an outside writer resets that queue-only back-off.
+ *   A queue three cuts did not drain, with nothing lost meanwhile, is someone else's, and is left alone
+ *   for 5 minutes.
  * - Heavy loss while cutting for a queue hands the stream to the loss probe.
  *
  * FEC
@@ -173,8 +176,8 @@ namespace live_tuning_policy {
       return last_change_;
     }
 
-    /// The rate above the hold to retry, if known: a lossy/queued rate, or the last clean rate retained
-    /// conservatively after a failed queue continuation, without measured loss assigned to it.
+    /// The rate above the hold to retry, if known: a lossy/queued rate, or the next completion-size
+    /// queue probe, without measured loss assigned to it.
     std::optional<int> ceiling_kbps() const {
       return hi_;
     }
@@ -228,6 +231,7 @@ namespace live_tuning_policy {
     void bisect_step(std::int64_t now_ms);
     void bisect_result(bool lossy, std::int64_t now_ms);
     void clean_promotion();
+    void queue_hold(std::int64_t now_ms, int kbps);
     void enter_hold(std::int64_t now_ms, int kbps);
     void climb_step(std::int64_t now_ms);
     void climb_result(bool lossy, std::int64_t now_ms);
@@ -299,9 +303,11 @@ namespace live_tuning_policy {
     std::optional<sprt_t> test_;
     int retry_wait_ = 0;
     int retries_ = 0;
+    // Consecutive closed queue-bracket failures; saturates once well beyond the capped retry wait.
+    int queue_retry_fails_ = 0;
     bool blind_step_ = false;
     bool hi_rechecked_ = false;
-    // A queue ceiling verified clean; bound the climb until its existing recheck radius is cleared.
+    // First clean queue rate anchoring the staircase's existing recheck radius across real holds.
     std::optional<int> queue_continuation_from_;
 
     // RTT.
