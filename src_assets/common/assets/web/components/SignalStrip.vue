@@ -29,7 +29,8 @@ let unmounted = false
 
 async function loadUPlot() {
   if (!uPlotLib) {
-    const [mod, timeline] = await Promise.all([import('uplot'), import('../live-tuning-timeline.js')])
+    const mod = await import('uplot')
+    const timeline = await import('../live-tuning-timeline.js')
     await import('uplot/dist/uPlot.min.css')
     drawTuningMarkers = timeline.drawTuningMarkers
     uPlotLib = mod.default
