@@ -123,11 +123,99 @@
         "function": "parse",
         "receiver": "json"
       },
-      "polaris_emitter": {
-        "file": "src/nvhttp.cpp",
-        "function": "spaces_snapshot_json",
-        "declaration": "nlohmann::json body {",
-        "style": "initializer_list"
+      "polaris_emitter": [
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "spaces_snapshot_json",
+          "declaration": "nlohmann::json body {",
+          "style": "initializer_list"
+        },
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "profile_spaces_request",
+          "style": "initializer_list",
+          "declaration": "profile_api_response_t response{200, {",
+          "fields": [
+            "schema",
+            "status",
+            "enabled",
+            "available",
+            "can_switch",
+            "selected_space_id",
+            "spaces"
+          ]
+        }
+      ],
+      "generated": true,
+      "types": {
+        "available": "boolean",
+        "can_switch": "boolean",
+        "capacity": "object",
+        "default_space_id": "string",
+        "desktop_allowed": "boolean",
+        "enabled": "boolean",
+        "schema": "integer",
+        "selected_space_id": "string",
+        "spaces": "array<object>",
+        "status": "boolean",
+        "switch_blocked_reason": "string",
+        "unavailable_reason": "string"
+      },
+      "required_present": [
+        "available",
+        "can_switch",
+        "enabled",
+        "schema",
+        "selected_space_id",
+        "spaces",
+        "status"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisSpaces.kt",
+          "function": "parse",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "read_helpers": [
+            "optionalWord"
+          ],
+          "literal_key_list_helper": "flag",
+          "reads": [
+            "available",
+            "can_switch",
+            "capacity",
+            "default_space_id",
+            "desktop_allowed",
+            "enabled",
+            "schema",
+            "selected_space_id",
+            "spaces",
+            "status",
+            "switch_blocked_reason",
+            "unavailable_reason"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_spaces.cpp",
+          "function": "parseSpaces",
+          "receiver": "o",
+          "style": "qt_json",
+          "read_helpers": [
+            "optionalWord"
+          ],
+          "reads": [
+            "available",
+            "can_switch",
+            "desktop_allowed",
+            "enabled",
+            "schema",
+            "selected_space_id",
+            "spaces",
+            "status",
+            "switch_blocked_reason",
+            "unavailable_reason"
+          ]
+        }
       }
     },
     "spaces_capacity": {
@@ -213,24 +301,105 @@
         "blocked_reason",
         "can_open",
         "id",
+        "launcher",
         "library_enabled",
         "name",
         "selected",
         "state"
       ],
       "optional": [
-        "blocked_reason"
+        "blocked_reason",
+        "launcher"
       ],
       "nova_reader": {
         "file": "app/src/main/java/com/papi/nova/api/PolarisSpaces.kt",
         "function": "parse",
         "receiver": "entry"
       },
-      "polaris_emitter": {
-        "file": "src/nvhttp.cpp",
-        "function": "space_json",
-        "declaration": "nlohmann::json entry {",
-        "style": "initializer_list"
+      "polaris_emitter": [
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "space_json",
+          "declaration": "nlohmann::json entry {",
+          "style": "initializer_list",
+          "fields": [
+            "blocked_reason",
+            "can_open",
+            "id",
+            "library_enabled",
+            "name",
+            "selected",
+            "state"
+          ]
+        },
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "space_json",
+          "style": "subscript",
+          "variable": "entry",
+          "fields": [
+            "launcher"
+          ]
+        }
+      ],
+      "generated": true,
+      "types": {
+        "blocked_reason": "string",
+        "can_open": "boolean",
+        "id": "string",
+        "launcher": "string",
+        "library_enabled": "boolean",
+        "name": "string",
+        "selected": "boolean",
+        "state": "string"
+      },
+      "required_present": [
+        "can_open",
+        "id",
+        "library_enabled",
+        "name",
+        "selected",
+        "state"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisSpaces.kt",
+          "function": "parse",
+          "receiver": "entry",
+          "style": "kotlin_org_json",
+          "read_helpers": [
+            "optionalWord",
+            "decoration"
+          ],
+          "reads": [
+            "blocked_reason",
+            "can_open",
+            "id",
+            "launcher",
+            "library_enabled",
+            "name",
+            "selected",
+            "state"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_spaces.cpp",
+          "function": "parseSpaces",
+          "receiver": "s",
+          "style": "qt_json",
+          "read_helpers": [
+            "optionalWord"
+          ],
+          "reads": [
+            "blocked_reason",
+            "can_open",
+            "id",
+            "library_enabled",
+            "name",
+            "selected",
+            "state"
+          ]
+        }
       }
     },
     "space_library": {
@@ -254,14 +423,57 @@
         "function": "space_library_json",
         "declaration": "return {",
         "style": "initializer_list"
+      },
+      "generated": true,
+      "types": {
+        "games": "array<object>",
+        "library_available": "boolean",
+        "schema": "integer",
+        "space_id": "string",
+        "space_name": "string",
+        "status": "boolean",
+        "total": "integer"
+      },
+      "required_present": [
+        "games",
+        "library_available",
+        "schema",
+        "space_id",
+        "space_name",
+        "status",
+        "total"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "getSpaceLibrary",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "games",
+            "space_id",
+            "status"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+          "function": "fetchSpaceLibrary",
+          "receiver": "o",
+          "style": "qt_json",
+          "scope_start": "DeckPolarisResult<std::vector<DeckPolarisGame>> DeckPolarisClient::fetchSpaceLibrary(",
+          "scope_end": "DeckPolarisResult<DeckPolarisCapabilities> DeckPolarisClient::fetchCapabilities()",
+          "reads": [
+            "games",
+            "schema",
+            "space_id",
+            "status"
+          ]
+        }
       }
     },
     "space_library_game": {
       "$comment": [
-        "One game of a Space library, id space.<profile>.<target>. Nova reads it through the",
-        "same PolarisGameJsonAdapter.fromJson as game, which reads every field the host game",
-        "object serves, so a reader entry here would report those as drift; the adapter is",
-        "audited under game and space_ref."
+        "One Space library game, parsed by the ordinary game readers. Shared served fields borrow game names; absent game fields remain explicit existing reader defaults in known_drift."
       ],
       "fields": [
         "app_id",
@@ -284,6 +496,146 @@
         "function": "space_library_game_json",
         "declaration": "nlohmann::json entry {",
         "style": "initializer_list"
+      },
+      "names_from": "game",
+      "generated": true,
+      "types": {
+        "app_id": "integer",
+        "artwork": "object",
+        "cover_url": "string",
+        "hdr_supported": "boolean",
+        "id": "string",
+        "installed": "boolean",
+        "launch_mode": "object",
+        "name": "string",
+        "source": "string",
+        "space": "object",
+        "steam_appid": "string"
+      },
+      "required_present": [
+        "app_id",
+        "cover_url",
+        "hdr_supported",
+        "id",
+        "installed",
+        "launch_mode",
+        "name",
+        "source",
+        "space",
+        "steam_appid"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+          "function": "fromJson",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "app_id",
+            "artwork",
+            "beat_time",
+            "category",
+            "cover_url",
+            "display_planner",
+            "genres",
+            "hdr_supported",
+            "id",
+            "installed",
+            "last_launched",
+            "launch_mode",
+            "launcher_detail",
+            "launcher_source",
+            "mangohud",
+            "name",
+            "platform",
+            "platform_label",
+            "play_time",
+            "runtime",
+            "runtime_label",
+            "source",
+            "space",
+            "steam_appid",
+            "steam_big_picture",
+            "steam_launch",
+            "steam_lifecycle"
+          ]
+        },
+        "nova_shared": {
+          "file": "shared/polaris/model/src/commonMain/kotlin/com/papi/nova/shared/polaris/model/PolarisGame.kt",
+          "style": "kotlin_serial_name",
+          "scope_start": "data class PolarisGame(",
+          "scope_end": ") {",
+          "reads": [
+            "app_id",
+            "artwork",
+            "beat_time",
+            "category",
+            "cover_url",
+            "display_planner",
+            "genres",
+            "hdr_supported",
+            "id",
+            "installed",
+            "last_launched",
+            "launch_mode",
+            "launcher_detail",
+            "launcher_source",
+            "mangohud",
+            "name",
+            "platform",
+            "platform_label",
+            "play_time",
+            "runtime",
+            "runtime_label",
+            "source",
+            "space",
+            "steam_appid",
+            "steam_big_picture",
+            "steam_launch",
+            "steam_lifecycle"
+          ]
+        },
+        "nova_deck": [
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseGame",
+            "receiver": "object",
+            "style": "qt_json",
+            "reads": [
+              "app_id",
+              "artwork",
+              "category",
+              "cover_url",
+              "display_planner",
+              "genres",
+              "hdr_supported",
+              "id",
+              "installed",
+              "last_launched",
+              "launch_mode",
+              "name",
+              "platform",
+              "platform_label",
+              "runtime",
+              "runtime_label",
+              "source",
+              "space",
+              "steam_appid",
+              "steam_launch",
+              "steam_lifecycle"
+            ]
+          },
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseGameTime",
+            "receiver": "game",
+            "style": "qt_json",
+            "reads": [
+              "beat_time",
+              "play_time"
+            ]
+          }
+        ]
       }
     },
     "space_ref": {
@@ -303,6 +655,40 @@
         "function": "space_ref_json",
         "declaration": "return {",
         "style": "initializer_list"
+      },
+      "generated": true,
+      "types": {
+        "id": "string",
+        "name": "string",
+        "target": "string"
+      },
+      "required_present": [
+        "id",
+        "name",
+        "target"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+          "function": "fromJson",
+          "receiver": "context",
+          "style": "kotlin_org_json",
+          "reads": [
+            "id",
+            "name",
+            "target"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+          "function": "parseGame",
+          "receiver": "context",
+          "style": "qt_json",
+          "reads": [
+            "id",
+            "name"
+          ]
+        }
       }
     },
     "space_launch_mode": {
@@ -444,6 +830,143 @@
         "function": "space_legacy_game_json",
         "declaration": "return {",
         "style": "initializer_list"
+      },
+      "names_from": "game",
+      "generated": true,
+      "types": {
+        "app_id": "integer",
+        "cover_url": "string",
+        "hdr_supported": "boolean",
+        "id": "string",
+        "installed": "boolean",
+        "launch_mode": "object",
+        "name": "string",
+        "source": "string",
+        "worker_profile": "boolean"
+      },
+      "required_present": [
+        "app_id",
+        "cover_url",
+        "hdr_supported",
+        "id",
+        "installed",
+        "launch_mode",
+        "name",
+        "source",
+        "worker_profile"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisGameJsonAdapter.kt",
+          "function": "fromJson",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "app_id",
+            "artwork",
+            "beat_time",
+            "category",
+            "cover_url",
+            "display_planner",
+            "genres",
+            "hdr_supported",
+            "id",
+            "installed",
+            "last_launched",
+            "launch_mode",
+            "launcher_detail",
+            "launcher_source",
+            "mangohud",
+            "name",
+            "platform",
+            "platform_label",
+            "play_time",
+            "runtime",
+            "runtime_label",
+            "source",
+            "space",
+            "steam_appid",
+            "steam_big_picture",
+            "steam_launch",
+            "steam_lifecycle"
+          ]
+        },
+        "nova_shared": {
+          "file": "shared/polaris/model/src/commonMain/kotlin/com/papi/nova/shared/polaris/model/PolarisGame.kt",
+          "style": "kotlin_serial_name",
+          "scope_start": "data class PolarisGame(",
+          "scope_end": ") {",
+          "reads": [
+            "app_id",
+            "artwork",
+            "beat_time",
+            "category",
+            "cover_url",
+            "display_planner",
+            "genres",
+            "hdr_supported",
+            "id",
+            "installed",
+            "last_launched",
+            "launch_mode",
+            "launcher_detail",
+            "launcher_source",
+            "mangohud",
+            "name",
+            "platform",
+            "platform_label",
+            "play_time",
+            "runtime",
+            "runtime_label",
+            "source",
+            "space",
+            "steam_appid",
+            "steam_big_picture",
+            "steam_launch",
+            "steam_lifecycle"
+          ]
+        },
+        "nova_deck": [
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseGame",
+            "receiver": "object",
+            "style": "qt_json",
+            "reads": [
+              "app_id",
+              "artwork",
+              "category",
+              "cover_url",
+              "display_planner",
+              "genres",
+              "hdr_supported",
+              "id",
+              "installed",
+              "last_launched",
+              "launch_mode",
+              "name",
+              "platform",
+              "platform_label",
+              "runtime",
+              "runtime_label",
+              "source",
+              "space",
+              "steam_appid",
+              "steam_launch",
+              "steam_lifecycle"
+            ]
+          },
+          {
+            "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+            "function": "parseGameTime",
+            "receiver": "game",
+            "style": "qt_json",
+            "reads": [
+              "beat_time",
+              "play_time"
+            ]
+          }
+        ]
       }
     },
     "game": {
@@ -1248,6 +1771,60 @@
         "file": "src/nvhttp.cpp",
         "variable": "capture_info",
         "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "backend": "string",
+        "cpu_copy": "boolean",
+        "cross_gpu_dmabuf_risk": "boolean",
+        "device": "string",
+        "effective_headless": "boolean",
+        "encoder_adapter": "string",
+        "format": "string",
+        "gpu_native": "boolean",
+        "gpu_native_override_active": "boolean",
+        "path": "string",
+        "reason": "string",
+        "reason_message": "string",
+        "requested_headless": "boolean",
+        "residency": "string",
+        "resolution": "string",
+        "transport": "string"
+      },
+      "required_present": [
+        "backend",
+        "cpu_copy",
+        "cross_gpu_dmabuf_risk",
+        "device",
+        "effective_headless",
+        "encoder_adapter",
+        "format",
+        "gpu_native",
+        "gpu_native_override_active",
+        "path",
+        "reason",
+        "reason_message",
+        "requested_headless",
+        "residency",
+        "resolution",
+        "transport"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseSessionStatusResponse",
+          "receiver": "capture",
+          "style": "kotlin_org_json",
+          "reads": [
+            "backend",
+            "format",
+            "path",
+            "reason",
+            "residency",
+            "resolution",
+            "transport"
+          ]
+        }
       }
     },
     "session_encoder": {
@@ -1295,6 +1872,85 @@
         "file": "src/nvhttp.cpp",
         "variable": "encoder",
         "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "active_backend": "string",
+        "bitrate_kbps": "integer",
+        "codec": "string",
+        "effective_backend": "string",
+        "encode_target_fps": "number",
+        "encode_time_ms": "number",
+        "fallback_allowed": "boolean",
+        "fps": "number",
+        "optimization_cache_status": "string",
+        "optimization_confidence": "string",
+        "optimization_normalization_reason": "string",
+        "optimization_reasoning": "string",
+        "optimization_source": "string",
+        "pacing_policy": "string",
+        "recommendation_version": "integer",
+        "requested_backend": "string",
+        "requested_client_fps": "number",
+        "selection": "object",
+        "session_override": "boolean",
+        "session_target_fps": "number",
+        "target_device": "string",
+        "target_format": "string",
+        "target_residency": "string"
+      },
+      "required_present": [
+        "active_backend",
+        "bitrate_kbps",
+        "codec",
+        "effective_backend",
+        "encode_target_fps",
+        "encode_time_ms",
+        "fallback_allowed",
+        "fps",
+        "optimization_cache_status",
+        "optimization_confidence",
+        "optimization_normalization_reason",
+        "optimization_reasoning",
+        "optimization_source",
+        "pacing_policy",
+        "recommendation_version",
+        "requested_backend",
+        "requested_client_fps",
+        "selection",
+        "session_override",
+        "session_target_fps",
+        "target_device",
+        "target_format",
+        "target_residency"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseSessionStatusResponse",
+          "receiver": "encoder",
+          "style": "kotlin_org_json",
+          "reads": [
+            "active_backend",
+            "bitrate_kbps",
+            "codec",
+            "encode_target_fps",
+            "fps",
+            "optimization_cache_status",
+            "optimization_confidence",
+            "optimization_normalization_reason",
+            "optimization_reasoning",
+            "optimization_source",
+            "pacing_policy",
+            "recommendation_version",
+            "requested_client_fps",
+            "selection",
+            "session_target_fps",
+            "target_device",
+            "target_format",
+            "target_residency"
+          ]
+        }
       }
     },
     "session_encoder_selection": {
@@ -1320,11 +1976,76 @@
         "function": "parseSessionStatusResponse",
         "receiver": "encoderSelection"
       },
-      "polaris_emitter": {
-        "file": "src/nvhttp.cpp",
-        "function": "encoder_selection_json",
-        "declaration": "return {",
-        "style": "initializer_list"
+      "polaris_emitter": [
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "encoder_selection_json",
+          "declaration": "return {",
+          "style": "initializer_list"
+        },
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "encoder_selection_json",
+          "style": "initializer_list",
+          "declaration": "const auto selection = video::active_encoder_selection_info();\n      return {"
+        }
+      ],
+      "generated": true,
+      "types": {
+        "exact_live_probe_required": "boolean",
+        "fallback_encoder": "string",
+        "fallback_used": "boolean",
+        "gpu_driver": "string",
+        "mode": "string",
+        "policy": "string",
+        "preferred_encoder": "string",
+        "reason": "string",
+        "selected_encoder": "string"
+      },
+      "required_present": [
+        "exact_live_probe_required",
+        "fallback_encoder",
+        "fallback_used",
+        "gpu_driver",
+        "mode",
+        "policy",
+        "preferred_encoder",
+        "reason",
+        "selected_encoder"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseSessionStatusResponse",
+          "receiver": "encoderSelection",
+          "style": "kotlin_org_json",
+          "reads": [
+            "exact_live_probe_required",
+            "fallback_encoder",
+            "fallback_used",
+            "gpu_driver",
+            "mode",
+            "policy",
+            "preferred_encoder",
+            "reason",
+            "selected_encoder"
+          ]
+        },
+        "polaris_web": {
+          "file": "src_assets/common/assets/web/views/TroubleshootingView.vue",
+          "style": "javascript",
+          "scope_start": "const doctorAdvancedItems = computed(() => {",
+          "scope_end": "const networkPathReport = computed(",
+          "receiver": "encoderSelection",
+          "reads": [
+            "gpu_driver",
+            "policy",
+            "preferred_encoder",
+            "fallback_encoder",
+            "fallback_used",
+            "reason"
+          ]
+        }
       }
     },
     "linux_gpu_profile": {
@@ -1405,7 +2126,26 @@
         "function": "build_session_timing_json",
         "variable": "output",
         "style": "subscript"
-      }
+      },
+      "generated": true,
+      "types": {
+        "capture_to_encode": "object",
+        "capture_to_send": "object",
+        "encode_to_send": "object",
+        "ring_complete": "boolean",
+        "session_active": "boolean",
+        "session_generation": "integer",
+        "stage_vocabulary": "string"
+      },
+      "required_present": [
+        "capture_to_encode",
+        "capture_to_send",
+        "encode_to_send",
+        "ring_complete",
+        "session_active",
+        "session_generation",
+        "stage_vocabulary"
+      ]
     },
     "client_settings_mode_option": {
       "$comment": [
@@ -1471,6 +2211,57 @@
         "function": "encoder_backend_options_json",
         "style": "initializer_list",
         "declaration": "options.push_back({"
+      },
+      "generated": true,
+      "types": {
+        "available": "boolean",
+        "experimental": "boolean",
+        "fallback_allowed": "boolean",
+        "label": "string",
+        "reason": "string",
+        "runtime_validation": "string",
+        "value": "string"
+      },
+      "required_present": [
+        "available",
+        "experimental",
+        "fallback_allowed",
+        "label",
+        "reason",
+        "runtime_validation",
+        "value"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseEncoderOptions",
+          "receiver": "encoder",
+          "style": "kotlin_org_json",
+          "reads": [
+            "available",
+            "experimental",
+            "fallback_allowed",
+            "label",
+            "reason",
+            "runtime_validation",
+            "value"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_game_tools.cpp",
+          "function": "gameToolReply",
+          "receiver": "e",
+          "style": "qt_json",
+          "scope_start": "if (action == \"settings\") {\n        const auto parsed = parseHostSettings(json);",
+          "scope_end": "} else if (action == \"search\") {",
+          "reads": [
+            "available",
+            "fallback_allowed",
+            "label",
+            "reason",
+            "value"
+          ]
+        }
       }
     },
     "optimization": {
@@ -1537,6 +2328,199 @@
         "function": "append_deterministic_optimization_json",
         "style": "assignments",
         "variable": "output"
+      },
+      "generated": true,
+      "types": {
+        "ai_explanation": "object",
+        "auto_action": "string",
+        "auto_mode": "boolean",
+        "cache_status": "string",
+        "color_range": "string",
+        "confidence": "string",
+        "display_mode": "string",
+        "encoder_backend": "string",
+        "encoder_options": "array<object>",
+        "encoder_resolution": "object",
+        "hdr": "boolean",
+        "limiting_factor": "string",
+        "nvenc_tune": "string",
+        "preferred_codec": "string",
+        "preset": "string",
+        "profile_state": "object",
+        "reasoning": "string",
+        "reasoning_summary": "string",
+        "recommendation_version": "integer",
+        "recovery_policy": "object",
+        "resolved_profile": "object",
+        "signals_used": "array<string>",
+        "source": "string",
+        "stability": "object",
+        "target_bitrate_kbps": "integer",
+        "topology_resolution": "object"
+      },
+      "optional": [
+        "color_range",
+        "display_mode",
+        "hdr",
+        "nvenc_tune",
+        "preferred_codec",
+        "target_bitrate_kbps"
+      ],
+      "required_present": [
+        "ai_explanation",
+        "auto_action",
+        "auto_mode",
+        "cache_status",
+        "confidence",
+        "encoder_backend",
+        "encoder_options",
+        "encoder_resolution",
+        "limiting_factor",
+        "preset",
+        "profile_state",
+        "reasoning",
+        "reasoning_summary",
+        "recommendation_version",
+        "recovery_policy",
+        "resolved_profile",
+        "signals_used",
+        "source",
+        "stability",
+        "topology_resolution"
+      ],
+      "consumers": {
+        "nova_android": [
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaGameDetailActivity.kt",
+            "function": "buildOptimizationState",
+            "receiver": "opt",
+            "style": "kotlin_org_json",
+            "reads": [
+              "cache_status",
+              "confidence",
+              "effective_target_fps",
+              "generated_at",
+              "normalization_reason",
+              "reasoning",
+              "requested_target_fps",
+              "resolved_profile",
+              "source",
+              "stability"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+            "function": "resolvedProfile",
+            "receiver": "payload",
+            "style": "kotlin_org_json",
+            "reads": [
+              "resolved_profile",
+              "source"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+            "function": "requiresLaunchPreflightReview",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "preference",
+              "preference_applied",
+              "profile_state"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+            "function": "launchPreflightReviewReason",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "preference",
+              "profile_state"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+            "function": "hasMaterialFpsOverride",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "effective_target_fps",
+              "requested_target_fps"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+            "function": "explicitPreferenceBlockReason",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "preference_blocked_reason",
+              "profile_state"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/NovaEncoderLaunchContract.kt",
+            "function": "honors",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "encoder_resolution",
+              "resolved_profile"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/LaunchTopologyEnvelope.kt",
+            "function": "matches",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "source",
+              "topology_resolution"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/LaunchTopologyEnvelope.kt",
+            "function": "resolvedSelection",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "topology_resolution"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaLaunchStreamOverride.kt",
+            "function": "automaticFps",
+            "receiver": "trustedRaw",
+            "style": "kotlin_org_json",
+            "reads": [
+              "resolved_profile"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaLaunchStreamOverride.kt",
+            "function": "compose",
+            "receiver": "composed",
+            "style": "kotlin_org_json",
+            "reads": [
+              "resolved_profile"
+            ]
+          }
+        ],
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_game_tools.cpp",
+          "function": "gameToolReply",
+          "receiver": "o",
+          "style": "qt_json",
+          "scope_start": "} else if (action == \"plan\") {\n        const auto p = ",
+          "scope_end": "} else if (action == \"steam\") {",
+          "reads": [
+            "encoder_resolution",
+            "resolved_profile",
+            "source",
+            "topology_resolution"
+          ]
+        }
       }
     },
     "optimization_encoder_resolution": {
@@ -1574,6 +2558,55 @@
         "function": "optimization_encoder_resolution_json",
         "style": "initializer_list",
         "declaration": "return {"
+      },
+      "generated": true,
+      "types": {
+        "active_backend": "string",
+        "fallback_allowed": "boolean",
+        "locked": "boolean",
+        "reason_code": "string",
+        "requested": "string",
+        "resolved": "string",
+        "runtime_validation": "string",
+        "source": "string",
+        "strict_runtime_validation": "boolean"
+      },
+      "required_present": [
+        "active_backend",
+        "fallback_allowed",
+        "locked",
+        "reason_code",
+        "requested",
+        "resolved",
+        "runtime_validation",
+        "source",
+        "strict_runtime_validation"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/manager/NovaEncoderLaunchContract.kt",
+          "function": "honors",
+          "receiver": "resolution",
+          "style": "kotlin_org_json",
+          "reads": [
+            "fallback_allowed",
+            "locked",
+            "requested",
+            "resolved"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_game_tools.cpp",
+          "function": "gameToolReply",
+          "receiver": "resolvedEncoder",
+          "style": "qt_json",
+          "scope_start": "} else if (action == \"plan\") {\n        const auto p = ",
+          "scope_end": "} else if (action == \"steam\") {",
+          "reads": [
+            "locked",
+            "resolved"
+          ]
+        }
       }
     },
     "optimization_topology_resolution": {
@@ -1607,6 +2640,79 @@
         "function": "optimization_topology_resolution_json",
         "style": "initializer_list",
         "declaration": "return {"
+      },
+      "generated": true,
+      "types": {
+        "app_id": "string",
+        "app_uuid": "string",
+        "force_private_after_steam_close_requested": "boolean",
+        "locked": "boolean",
+        "mirror_desktop_requested": "boolean",
+        "normalized": "boolean",
+        "reason_code": "string",
+        "requested": "string",
+        "resolved": "string",
+        "source": "string"
+      },
+      "required_present": [
+        "app_id",
+        "app_uuid",
+        "force_private_after_steam_close_requested",
+        "locked",
+        "mirror_desktop_requested",
+        "normalized",
+        "reason_code",
+        "requested",
+        "resolved",
+        "source"
+      ],
+      "consumers": {
+        "nova_android": [
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/LaunchTopologyEnvelope.kt",
+            "function": "matches",
+            "receiver": "topologyResolution",
+            "style": "kotlin_org_json",
+            "reads": [
+              "app_id",
+              "app_uuid",
+              "force_private_after_steam_close_requested",
+              "locked",
+              "mirror_desktop_requested",
+              "normalized",
+              "reason_code",
+              "requested",
+              "resolved",
+              "source"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/LaunchTopologyEnvelope.kt",
+            "function": "resolvedSelection",
+            "receiver": "topologyResolution",
+            "style": "kotlin_org_json",
+            "reads": [
+              "resolved"
+            ]
+          }
+        ],
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_game_tools.cpp",
+          "function": "gameToolReply",
+          "receiver": "topology",
+          "style": "qt_json",
+          "scope_start": "} else if (action == \"plan\") {\n        const auto p = ",
+          "scope_end": "} else if (action == \"steam\") {",
+          "reads": [
+            "app_uuid",
+            "locked",
+            "normalized",
+            "reason_code",
+            "requested",
+            "resolved",
+            "source"
+          ]
+        }
       }
     },
     "optimization_resolved_field": {
@@ -1631,11 +2737,115 @@
         "function": "validResolvedField",
         "receiver": "detail"
       },
-      "polaris_emitter": {
-        "file": "src/launch_profile.cpp",
-        "function": "add_field",
-        "style": "initializer_list",
-        "declaration": "fields[name] = {"
+      "polaris_emitter": [
+        {
+          "file": "src/launch_profile.cpp",
+          "function": "add_field",
+          "style": "initializer_list",
+          "declaration": "fields[name] = {"
+        },
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "resolve_profile_request",
+          "style": "initializer_list",
+          "declaration": "fields[key] = {"
+        },
+        {
+          "file": "src/nvhttp.cpp",
+          "function": "append_deterministic_optimization_json",
+          "style": "initializer_list",
+          "declaration": "output[v1::optimization::resolved_profile][\"fields\"][\"encoder_backend\"] = {"
+        }
+      ],
+      "generated": true,
+      "types": {
+        "locked": "boolean",
+        "normalized": "boolean",
+        "reason_code": "string",
+        "source": "string",
+        "value": "string|number|boolean"
+      },
+      "required_present": [
+        "locked",
+        "normalized",
+        "reason_code",
+        "source",
+        "value"
+      ],
+      "consumers": {
+        "nova_android": [
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+            "function": "validResolvedField",
+            "receiver": "detail",
+            "style": "kotlin_org_json",
+            "reads": [
+              "locked",
+              "normalized",
+              "reason_code",
+              "source",
+              "value"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/StreamSyncManager.kt",
+            "function": "resolvedField",
+            "receiver": "detail",
+            "style": "kotlin_org_json",
+            "reads": [
+              "value"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/WorkerLaunchContract.kt",
+            "function": "parse",
+            "receiver": "detail",
+            "style": "kotlin_org_json",
+            "reads": [
+              "locked",
+              "normalized",
+              "reason_code",
+              "source",
+              "value"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/manager/NovaEncoderLaunchContract.kt",
+            "function": "honors",
+            "receiver": "field",
+            "style": "kotlin_org_json",
+            "reads": [
+              "locked",
+              "value"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaGameDetailActivity.kt",
+            "function": "buildOptimizationState",
+            "receiver": "field",
+            "style": "kotlin_org_json",
+            "reads": [
+              "locked",
+              "normalized",
+              "source"
+            ]
+          }
+        ],
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_game_tools.cpp",
+          "function": "gameToolReply",
+          "receiver": "f",
+          "style": "qt_json",
+          "scope_start": "} else if (action == \"plan\") {\n        const auto p = ",
+          "scope_end": "} else if (action == \"steam\") {",
+          "reads": [
+            "locked",
+            "normalized",
+            "reason_code",
+            "source",
+            "value"
+          ]
+        }
       }
     },
     "host_power": {
@@ -1662,6 +2872,90 @@
         "function": "build_host_power_contract",
         "variable": "host_power",
         "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "last_sleep_at": "integer",
+        "last_sleep_message": "string",
+        "last_sleep_outcome": "string",
+        "last_sleep_reason": "string",
+        "sleep_blocked_message": "string",
+        "sleep_blocked_reason": "string",
+        "sleep_enabled": "boolean",
+        "sleep_endpoint": "string",
+        "sleep_permitted": "boolean",
+        "sleep_supported": "boolean"
+      },
+      "required_present": [
+        "last_sleep_at",
+        "last_sleep_message",
+        "last_sleep_outcome",
+        "last_sleep_reason",
+        "sleep_blocked_message",
+        "sleep_blocked_reason",
+        "sleep_enabled",
+        "sleep_endpoint",
+        "sleep_permitted",
+        "sleep_supported"
+      ],
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisApiClient.kt",
+          "function": "parseHostPower",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "last_sleep_at",
+            "last_sleep_message",
+            "last_sleep_outcome",
+            "last_sleep_reason",
+            "sleep_blocked_message",
+            "sleep_blocked_reason",
+            "sleep_enabled",
+            "sleep_endpoint",
+            "sleep_permitted",
+            "sleep_supported"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+          "function": "parseHostPower",
+          "receiver": "object",
+          "style": "qt_json",
+          "reads": [
+            "last_sleep_at",
+            "last_sleep_message",
+            "last_sleep_outcome",
+            "sleep_blocked_message",
+            "sleep_enabled",
+            "sleep_permitted",
+            "sleep_supported"
+          ]
+        },
+        "polaris_web": [
+          {
+            "file": "src_assets/common/assets/web/host-power-status.js",
+            "style": "javascript",
+            "scope_start": "function readiness(power, t) {",
+            "scope_end": "/** The lines to show",
+            "receiver": "power",
+            "reads": [
+              "sleep_supported",
+              "sleep_blocked_message",
+              "sleep_blocked_reason"
+            ]
+          },
+          {
+            "file": "src_assets/common/assets/web/host-power-status.js",
+            "style": "javascript",
+            "function": "hostPowerLines",
+            "receiver": "power",
+            "reads": [
+              "last_sleep_message",
+              "last_sleep_outcome"
+            ]
+          }
+        ]
       }
     },
     "pyrowave_bitrate": {
@@ -1904,7 +3198,49 @@
         "effective_target_fps",
         "generated_at",
         "normalization_reason",
+        "preference",
+        "preference_applied",
+        "preference_blocked_reason",
         "requested_target_fps"
+      ],
+      "space_library_game": [
+        "beat_time",
+        "category",
+        "display_planner",
+        "genres",
+        "last_launched",
+        "launcher_detail",
+        "launcher_source",
+        "mangohud",
+        "platform",
+        "platform_label",
+        "play_time",
+        "runtime",
+        "runtime_label",
+        "steam_big_picture",
+        "steam_launch",
+        "steam_lifecycle"
+      ],
+      "space_legacy_game": [
+        "artwork",
+        "beat_time",
+        "category",
+        "display_planner",
+        "genres",
+        "last_launched",
+        "launcher_detail",
+        "launcher_source",
+        "mangohud",
+        "platform",
+        "platform_label",
+        "play_time",
+        "runtime",
+        "runtime_label",
+        "space",
+        "steam_appid",
+        "steam_big_picture",
+        "steam_launch",
+        "steam_lifecycle"
       ]
     },
     "polaris_sends_nova_never_reads": {
@@ -1919,20 +3255,8 @@
       "game": [
         "emulator"
       ],
-      "spaces_snapshot": [
-        "available",
-        "can_switch",
-        "default_space_id",
-        "enabled",
-        "switch_blocked_reason",
-        "unavailable_reason"
-      ],
-      "space": [
-        "blocked_reason"
-      ],
       "space_library": [
         "library_available",
-        "schema",
         "space_name",
         "total"
       ],
@@ -1949,7 +3273,6 @@
       "optimization": [
         "display_mode",
         "preferred_codec",
-        "profile_state",
         "target_bitrate_kbps"
       ]
     },
@@ -1992,6 +3315,13 @@
       ],
       "stale_entries_removed_2026_10_26": [
         "The format-2 actual-reader audit against immutable Nova 3f6b6908 found eight obsolete declarations. spaces_snapshot.capacity and space.can_open/id/name/state are consumed; optimization.ai_recommended_mode/consecutive_poor_outcomes/effective_profile are no longer read in the scoped reader. Their entries were removed, not exempted. The historical Spaces notes above describe why older scans missed reads; this correction changes no wire field, fallback or runtime behavior."
+      ],
+      "p1_consumer_corrections": [
+        "Pinned Nova 3569a9ff: flag, optionalWord and decoration consume all previously missed Spaces fields and the already-served launcher. The seven false unread entries were removed; Deck fetchSpaceLibrary also reads schema and StreamSyncManager reads profile_state.",
+        "Space game readers are the ordinary game readers. Their absent fields are listed individually as existing missing/defaulted reads, not omitted producer fields. No reader or default was invented.",
+        "Newly declared StreamSyncManager legacy preflight readers ask for preference (auto), preference_applied (preference == auto), and preference_blocked_reason (none). Those top-level keys are never served; nested profile_state is separate. Session timing has no Nova reader.",
+        "Hand-built console mode options and encoder selection remain outside the /polaris/v1 contract. Deck host settings mode-option and artwork readers belong to P2; variable-key mode validation is a retained extraction gap for that batch, not coverage claimed here.",
+        "WorkerLaunchContract reads the Space-worker outer envelope, which is not optimization; only its resolved-field metadata is modelled. NovaLaunchStreamOverride composes envelope metadata but does not read a resolved-field receiver; parseProfileState reads a different nested object."
       ]
     }
   }

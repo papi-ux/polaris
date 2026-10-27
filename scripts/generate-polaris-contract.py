@@ -54,14 +54,26 @@ def consumers(obj: dict):
             yield kind, region
 
 
-def owner_name(schema: dict, name: str) -> str:
+def owner_name(schema: dict, name: str, field: str | None = None) -> str:
+    """Canonical namespace for a field; borrowers retain their extra fields."""
     seen = set()
-    while 'subset_of' in schema['objects'][name]:
+    while True:
+        if name not in schema['objects']:
+            raise ValueError('unknown names owner: ' + name)
         if name in seen:
-            raise ValueError('subset cycle: ' + name)
+            raise ValueError('names ownership cycle: ' + name)
         seen.add(name)
-        name = schema['objects'][name]['subset_of']
-    return name
+        obj = schema['objects'][name]
+        if field is not None and field not in obj['fields']:
+            raise ValueError('owner does not serve field: ' + name + '.' + field)
+        parent = obj.get('subset_of', obj.get('names_from'))
+        if parent is None:
+            return name
+        if parent not in schema['objects']:
+            raise ValueError('unknown names owner: ' + parent)
+        if 'names_from' in obj and field is not None and field not in schema['objects'][parent]['fields']:
+            return name
+        name = parent
 
 
 def validate(schema: dict) -> None:
@@ -87,6 +99,16 @@ def validate(schema: dict) -> None:
             if not set(obj.get('nullable', [])) <= set(obj.get('required_present', [])):
                 raise ValueError('nullable generated fields must declare presence: ' + name)
         omitted = obj.get('omitted', {})
+        if 'names_from' in obj:
+            if 'subset_of' in obj:
+                raise ValueError('names_from and subset_of are exclusive: ' + name)
+            owner_name(schema, name)
+            parent = schema['objects'][obj['names_from']]
+            shared = set(fields) & set(parent['fields'])
+            if not shared:
+                raise ValueError('names_from must share fields: ' + name)
+            if obj.get('generated') and not parent.get('generated'):
+                raise ValueError('names owner must be generated: ' + name)
         if 'subset_of' in obj:
             parent = schema['objects'].get(obj['subset_of'])
             if parent is None or not set(fields) <= set(parent['fields']):
@@ -161,7 +183,7 @@ def key_token(parts: list[str], at: int, definitions: dict[str, str]):
     return None, at + 1, False
 
 
-def emitter_fields(source: str, emitter: dict, definitions: dict[str, str]):
+def emitter_fields(source: str, emitter: dict, definitions: dict[str, str], owners: dict[str, str] | None = None):
     parts = cpp_scope(source, emitter.get('function'))
     if emitter['style'] == 'initializer_list':
         declaration = tokens(emitter['declaration'])
@@ -174,14 +196,18 @@ def emitter_fields(source: str, emitter: dict, definitions: dict[str, str]):
         if emitter['style'] == 'initializer_list':
             if parts[at] != '{':
                 continue
-            key, end, generated = key_token(parts, at + 1, definitions)
+            key_at = at + 1
+            key, end, generated = key_token(parts, key_at, definitions)
             is_key = end < len(parts) and parts[end] == ','
         else:
             if parts[at:at + 2] != [emitter['variable'], '[']:
                 continue
-            key, end, generated = key_token(parts, at + 2, definitions)
+            key_at = at + 2
+            key, end, generated = key_token(parts, key_at, definitions)
             is_key = parts[end:end + 2] == [']', '=']
         if key is not None and is_key:
+            if generated and owners is not None and ''.join(parts[key_at:end]) != owners.get(key):
+                raise ValueError('incorrect generated field owner: ' + ''.join(parts[key_at:end]))
             found.add(key)
             if not generated:
                 literals.add(key)
@@ -194,8 +220,9 @@ def audit_emitters(root: Path, schema: dict, definitions: dict[str, str]) -> Non
         if not obj.get('generated'):
             continue
         emitters = obj['polaris_emitter']
+        owners = {field: 'v1::' + owner_name(schema, name, field) + '::' + field for field in obj['fields']}
         for emitter in emitters if isinstance(emitters, list) else [emitters]:
-            actual, literals = emitter_fields((root / emitter['file']).read_text(), emitter, definitions)
+            actual, literals = emitter_fields((root / emitter['file']).read_text(), emitter, definitions, owners)
             expected = set(emitter.get('fields', obj['fields']))
             if actual != expected or literals:
                 raise ValueError(f'{name}: actual emitter keys {sorted(actual)} / literal keys {sorted(literals)} '
@@ -218,12 +245,14 @@ def render(schema: dict, schema_bytes: bytes, generator_bytes: bytes) -> dict[st
     js = [provenance]
     exports = set()
     for name, obj in schema['objects'].items():
-        if not obj.get('generated') or 'subset_of' in obj:
+        if not obj.get('generated'):
             continue
-        cpp.append('namespace polaris::contract::v1::' + name + ' {\n')
-        for field in obj['fields']:
-            cpp.append(f'  inline constexpr char {field}[] = "{field}";\n')
-        cpp.append('}\n\n')
+        owned = [field for field in obj['fields'] if owner_name(schema, name, field) == name]
+        if owned:
+            cpp.append('namespace polaris::contract::v1::' + name + ' {\n')
+            for field in owned:
+                cpp.append(f'  inline constexpr char {field}[] = "{field}";\n')
+            cpp.append('}\n\n')
         reads = {field for kind, reader in consumers(obj) if kind == 'polaris_web' for field in reader['reads']}
         if reads:
             export = name.upper()

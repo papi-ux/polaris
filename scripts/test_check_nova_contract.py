@@ -14,6 +14,67 @@ spec.loader.exec_module(contract)
 
 
 class NovaContractAudit(unittest.TestCase):
+    def test_declared_helpers_require_exact_receiver_scope_and_declaration(self):
+        source = '''
+    fun selected(json: JSONObject) {
+        optionalWord(json, "word")
+        decoration(json, "label")
+        other.optionalWord(json, "member_helper")
+        optionalWord(other, "wrong_receiver")
+        anotherHelper(json, "not_declared")
+        json.optString("direct")
+        // optionalWord(json, "comment")
+    }
+    fun sibling(json: JSONObject) { optionalWord(json, "wrong_scope") }
+'''
+        reader = {'function': 'selected', 'receiver': 'json', 'style': 'kotlin_org_json',
+                  'read_helpers': ['optionalWord', 'decoration'], 'reads': ['word', 'label', 'direct']}
+        self.assertEqual(contract.declared_reads('nova_android', reader, source, {}, None),
+                         {'word', 'label', 'direct'})
+        # Removing the declaration or changing its receiver still fails exact read equality.
+        for changed in ({**reader, 'read_helpers': []}, {**reader, 'receiver': 'other'}):
+            with self.assertRaisesRegex(contract.ReaderUnavailableError, 'declared reads differ'):
+                contract.declared_reads('nova_android', changed, source, {}, None)
+        self.assertEqual(contract.report_reads('sample', {'fields': ['direct']},
+            [('sample/nova_android', {'direct', 'word'})], 1, True, {}, {}), 1)
+
+    def test_qt_helpers_and_pointer_reads_resolve_only_actual_receiver_keys(self):
+        generator = contract.generator_module(Path(__file__).resolve().parent.parent)
+        source = '''json selected() {
+            optionalWord(o, "word", output);
+            optionalWord(other, "wrong_receiver", output);
+            undeclared(o, "not_declared");
+            other->optionalWord(o, "member_helper", output);
+            other::optionalWord(o, "qualified_helper", output);
+            o->value("direct");
+            o.value(v1::sample::generated);
+        }
+        json sibling() { optionalWord(o, "wrong_scope", output); }
+'''
+        reader = {'function': 'selected', 'receiver': 'o', 'style': 'qt_json',
+                  'read_helpers': ['optionalWord'], 'reads': ['word', 'direct', 'generated']}
+        definitions = {'v1::sample::generated': 'generated'}
+        self.assertEqual(contract.declared_reads('nova_deck', reader, source, definitions, generator),
+                         {'word', 'direct', 'generated'})
+        with self.assertRaisesRegex(contract.ReaderUnavailableError, 'undefined generated reader key'):
+            contract.declared_reads('nova_deck', reader, source, {}, generator)
+
+    def test_kotlin_multiline_receiver_reads_keep_exact_missing_predicate(self):
+        reader = {'function': 'selected', 'receiver': 'trustedRaw', 'style': 'kotlin_org_json',
+                  'reads': ['resolved_profile']}
+        source = '''
+        fun selected() {
+            trustedRaw
+                ?.optJSONObject("resolved_profile")
+            other.optString("wrong_receiver")
+        }
+        fun sibling() { trustedRaw.optString("wrong_scope") }
+'''
+        self.assertEqual(contract.declared_reads('nova_android', reader, source, {}, None), {'resolved_profile'})
+        with self.assertRaisesRegex(contract.ReaderUnavailableError, 'declared reads differ'):
+            contract.declared_reads('nova_android', reader,
+                source.replace('"resolved_profile"', '"missing_field"'), {}, None)
+
     def test_missing_readers_fail_gate_without_hiding_later_results(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

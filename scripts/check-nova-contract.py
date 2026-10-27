@@ -125,7 +125,7 @@ def source_region(source: str, reader: dict, generator) -> str:
             raise ReaderUnavailableError('JS function not found: ' + reader['function'])
         end = source.find('\nexport function ', start + 1)
         return source[start:end] if end >= 0 else source[start:]
-    return ' '.join(generator.cpp_scope(source, reader['function'])).replace(' :: ', '::')
+    return ' '.join(generator.cpp_scope(source, reader['function'])).replace(' :: ', '::').replace('- >', '->')
 
 
 def consumer_reads(source: str, reader: dict, definitions: dict[str, str], generator) -> set[str]:
@@ -140,7 +140,7 @@ def consumer_reads(source: str, reader: dict, definitions: dict[str, str], gener
         candidates = re.findall(r'@SerialName\(\s*' + argument, body)
     elif style == 'qt_json':
         candidates = re.findall(r'\b' + re.escape(reader['receiver']) +
-            r'\s*\.\s*(?:value|contains)\s*\(\s*(?:QStringLiteral\s*\(\s*)?' + argument, body)
+            r'\s*(?:\.|->)\s*(?:value|contains)\s*\(\s*(?:QStringLiteral\s*\(\s*)?' + argument, body)
     elif style == 'javascript':
         # The validation array drives receiver[key] reads in validSnapshot;
         # the other two regions use receiver[SPACES_CAPACITY.FIELD] directly.
@@ -149,10 +149,20 @@ def consumer_reads(source: str, reader: dict, definitions: dict[str, str], gener
             raise ReaderUnavailableError('declared JS receiver has no bracket read: ' + reader['receiver'])
     else:
         receiver = re.escape(reader['receiver'])
-        candidates = re.findall(r'\b' + receiver + r'\??\.(?:' + ACCESSORS + r')\(\s*' + argument, body)
+        candidates = re.findall(r'\b' + receiver + r'\s*\??\.\s*(?:' + ACCESSORS + r')\s*\(\s*' + argument, body)
         candidates += re.findall(r'\b(?:finiteDouble|strictString|strictBoolean)\(\s*' + receiver + r'\s*,\s*' + argument, body)
         if reader.get('literal_key_list_helper'):
             candidates += re.findall(r'\b' + re.escape(reader['literal_key_list_helper']) + r'\(\s*' + argument, body)
+    # Only explicitly declared helper(receiver, key) calls in this reader's
+    # existing scope count. Another receiver or an undeclared helper cannot
+    # hide an unread field or introduce a read for this object.
+    for helper in reader.get('read_helpers', []):
+        if style not in ('qt_json', 'kotlin_org_json') or not re.fullmatch(r'[A-Za-z_]\w*', helper):
+            raise ReaderUnavailableError('invalid declared read helper: ' + helper)
+        for match in re.finditer(r'\b' + re.escape(helper) + r'\s*\(\s*' +
+                re.escape(reader['receiver']) + r'\s*,\s*' + argument, body):
+            if not body[:match.start()].rstrip().endswith(('.', ':', '>')):
+                candidates.append(match[1])
     result = set()
     for token in candidates:
         if token.startswith('"'):

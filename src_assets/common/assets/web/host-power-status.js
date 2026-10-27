@@ -1,3 +1,5 @@
+import { HOST_POWER } from './generated/polarisV1Contract.js'
+
 // What the General tab says under Allow Clients To Sleep This Host, from GET /api/host/power:
 // whether logind would suspend this host for Polaris, and how the last request ended. The
 // owner learns that polkit would refuse before a client ever asks.
@@ -10,15 +12,15 @@ export const HOST_POWER_DOCS = Object.freeze({
 })
 
 function readiness(power, t) {
-  if (power.sleep_supported === true) {
+  if (power[HOST_POWER.SLEEP_SUPPORTED] === true) {
     return {
       tone: 'ok',
       text: t('config.host_power_ready'),
       link: { href: HOST_POWER_DOCS.beforeYouTurnItOn, label: t('config.host_power_ready_link') },
     }
   }
-  const message = String(power.sleep_blocked_message || '').trim()
-  switch (power.sleep_blocked_reason) {
+  const message = String(power[HOST_POWER.SLEEP_BLOCKED_MESSAGE] || '').trim()
+  switch (power[HOST_POWER.SLEEP_BLOCKED_REASON]) {
     case 'polkit_denied':
       return {
         tone: 'warning',
@@ -42,8 +44,8 @@ export function hostPowerLines(power, t) {
   const lines = []
   const ready = readiness(power, t)
   if (ready) lines.push(ready)
-  if (power.last_sleep_outcome === 'failed') {
-    const message = String(power.last_sleep_message || '').trim()
+  if (power[HOST_POWER.LAST_SLEEP_OUTCOME] === 'failed') {
+    const message = String(power[HOST_POWER.LAST_SLEEP_MESSAGE] || '').trim()
     lines.push({
       tone: 'warning',
       text: message ? t('config.host_power_last_failed', { message }) : t('config.host_power_last_failed_plain'),

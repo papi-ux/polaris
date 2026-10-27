@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import unittest
 
@@ -84,23 +85,64 @@ class ContractGeneratorTests(unittest.TestCase):
         raw = (ROOT / generator.SCHEMA).read_bytes()
         schema = generator.load_schema(raw)
         self.assertEqual(len(schema['objects']), 33)
-        self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 355)
+        self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 356)
         migrated = {name for name, obj in schema['objects'].items() if obj.get('generated')}
         self.assertEqual(migrated, {'launch_mode', 'space_launch_mode', 'spaces_capacity', 'bitrate_units',
                                     'game', 'steam_launch', 'display_planner', 'display_planner_choice',
-                                    'display_planner_scale_choice'})
+                                    'display_planner_scale_choice', 'spaces_snapshot', 'space',
+                                    'space_library', 'space_library_game', 'space_ref', 'space_legacy_game',
+                                    'session_capture', 'session_encoder', 'session_encoder_selection',
+                                    'session_timing', 'client_settings_encoder_option', 'host_power',
+                                    'optimization', 'optimization_encoder_resolution',
+                                    'optimization_topology_resolution', 'optimization_resolved_field'})
         outputs = generator.render(schema, raw, Path(generator.__file__).read_bytes())
         definitions = generator.generated_values(outputs[generator.CPP].decode())
-        self.assertEqual(len(definitions), 76)
+        self.assertEqual(len(definitions), 230)
         generator.audit_emitters(ROOT, schema, definitions)
         self.assertNotIn(b'::space_launch_mode {', outputs[generator.CPP])
         self.assertNotIn(b'LIVE_TUNING', outputs[generator.JS])
+        self.assertEqual(set(re.findall(rb'export const (\w+)', outputs[generator.JS])),
+                         {b'SPACES_CAPACITY', b'HOST_POWER', b'SESSION_ENCODER_SELECTION'})
         for reader in schema['objects']['spaces_capacity']['consumers']['polaris_web']:
             source = (ROOT / reader['file']).read_text()
             self.assertIn('import { SPACES_CAPACITY }', source)
             self.assertIn('SPACES_CAPACITY.CONCURRENT_ACTIVE', source)
             self.assertIn('SPACES_CAPACITY.CONCURRENT_LIMIT', source)
             self.assertNotIn('.capacity.concurrent_', source)
+
+    def test_names_from_reuses_only_shared_fields_and_keeps_extra_names(self):
+        self.schema['objects']['borrower'] = {
+            'fields': ['value', 'extra'], 'generated': True, 'names_from': 'sample',
+            # Names are shared even where the existing endpoints use different value types.
+            'types': {'value': 'string', 'extra': 'boolean'},
+            'polaris_emitter': {'file': 'borrower.cpp', 'function': 'borrow',
+                'style': 'initializer_list', 'declaration': 'return {'}}
+        self.write('borrower.cpp', 'json borrow() { return {{v1::sample::value, "legacy"}, {v1::borrower::extra, true}}; }')
+        outputs = generator.render(self.schema, b'schema', b'generator')
+        definitions = generator.generated_values(outputs[generator.CPP].decode())
+        self.assertEqual(definitions, {'v1::sample::value': 'value', 'v1::borrower::extra': 'extra'})
+        self.assertEqual(generator.owner_name(self.schema, 'borrower', 'value'), 'sample')
+        self.assertEqual(generator.owner_name(self.schema, 'borrower', 'extra'), 'borrower')
+        generator.audit_emitters(self.root, self.schema, definitions)
+
+    def test_names_from_refuses_unknown_owners_cycles_and_wrong_field_ownership(self):
+        for owner in ('missing', 'sample'):
+            with self.subTest(owner=owner):
+                changed = copy.deepcopy(self.schema)
+                changed['objects']['sample']['names_from'] = owner
+                with self.assertRaises(ValueError):
+                    generator.validate(changed)
+        changed = copy.deepcopy(self.schema)
+        changed['objects']['borrower'] = {**copy.deepcopy(changed['objects']['sample']), 'names_from': 'sample'}
+        changed['objects']['sample']['names_from'] = 'borrower'
+        with self.assertRaises(ValueError):
+            generator.validate(changed)
+        with self.assertRaisesRegex(ValueError, 'does not serve field'):
+            generator.owner_name(self.schema, 'sample', 'not_served')
+        # An unrelated namespace with the same wire value must not pass ownership by coincidence.
+        self.write('sample.cpp', 'json emit() { return {{v1::other::value, 7}}; }')
+        with self.assertRaisesRegex(ValueError, 'incorrect generated field owner'):
+            generator.audit_emitters(self.root, self.schema, {'v1::other::value': 'value'})
 
     def test_each_emitter_is_independently_inspected_not_generated_output(self):
         self.schema['objects']['sample']['polaris_emitter'] = [

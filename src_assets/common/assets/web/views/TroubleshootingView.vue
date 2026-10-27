@@ -514,6 +514,7 @@
 </template>
 
 <script setup>
+import { SESSION_ENCODER_SELECTION } from '../generated/polarisV1Contract.js'
 import { ref, computed, onBeforeUnmount, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
@@ -743,19 +744,19 @@ const doctorAdvancedItems = computed(() => {
     { label: i18n.t('troubleshooting.doctor_capture_path'), value: s.capture_path || s.capture_transport || unknown },
     { label: i18n.t('troubleshooting.doctor_capture_reason'), value: s.capture_path_reason || unknown },
     { label: i18n.t('troubleshooting.doctor_encoder'), value: s.encoder || s.encode_target_device || unknown },
-    { label: i18n.t('troubleshooting.doctor_detected_gpu_driver'), value: encoderSelection.gpu_driver || unknown },
-    { label: i18n.t('troubleshooting.doctor_encoder_policy'), value: encoderSelection.policy || unknown },
-    { label: i18n.t('troubleshooting.doctor_preferred_encoder'), value: encoderSelection.preferred_encoder || unknown },
-    { label: i18n.t('troubleshooting.doctor_fallback_encoder'), value: encoderSelection.fallback_encoder || none },
+    { label: i18n.t('troubleshooting.doctor_detected_gpu_driver'), value: encoderSelection[SESSION_ENCODER_SELECTION.GPU_DRIVER] || unknown },
+    { label: i18n.t('troubleshooting.doctor_encoder_policy'), value: encoderSelection[SESSION_ENCODER_SELECTION.POLICY] || unknown },
+    { label: i18n.t('troubleshooting.doctor_preferred_encoder'), value: encoderSelection[SESSION_ENCODER_SELECTION.PREFERRED_ENCODER] || unknown },
+    { label: i18n.t('troubleshooting.doctor_fallback_encoder'), value: encoderSelection[SESSION_ENCODER_SELECTION.FALLBACK_ENCODER] || none },
     {
       label: i18n.t('troubleshooting.doctor_fallback_used'),
-      value: encoderSelection.fallback_used === true
+      value: encoderSelection[SESSION_ENCODER_SELECTION.FALLBACK_USED] === true
         ? i18n.t('troubleshooting.doctor_yes')
-        : encoderSelection.fallback_used === false
+        : encoderSelection[SESSION_ENCODER_SELECTION.FALLBACK_USED] === false
           ? i18n.t('troubleshooting.doctor_no')
           : unknown,
     },
-    { label: i18n.t('troubleshooting.doctor_selection_reason'), value: encoderSelection.reason || unknown },
+    { label: i18n.t('troubleshooting.doctor_selection_reason'), value: encoderSelection[SESSION_ENCODER_SELECTION.REASON] || unknown },
     { label: i18n.t('troubleshooting.doctor_stream_stats'), value: summarizeStreamStats(s, i18n.t) },
   ]
 })

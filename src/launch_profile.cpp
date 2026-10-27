@@ -3,6 +3,7 @@
 #include "config.h"
 
 #include "device_db.h"
+#include "generated/polaris_v1_contract.h"
 #include "stream_bitrate.h"
 #include "utility.h"
 
@@ -10,6 +11,8 @@
 #include <cctype>
 #include <cmath>
 #include <sstream>
+
+namespace v1 = polaris::contract::v1;
 
 namespace launch_profile {
   namespace {
@@ -206,11 +209,11 @@ namespace launch_profile {
                    bool locked,
                    bool normalized = false) {
       fields[name] = {
-        {"value", std::move(value)},
-        {"source", source},
-        {"reason_code", reason_code},
-        {"locked", locked},
-        {"normalized", normalized}
+        {v1::optimization_resolved_field::value, std::move(value)},
+        {v1::optimization_resolved_field::source, source},
+        {v1::optimization_resolved_field::reason_code, reason_code},
+        {v1::optimization_resolved_field::locked, locked},
+        {v1::optimization_resolved_field::normalized, normalized}
       };
     }
 

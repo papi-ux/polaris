@@ -460,9 +460,13 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
          "session_encoder_name(stats)",
          "encoder_selection_json(stats)",
          "encoder[\"active_backend\"] =",
+         "encoder[v1::session_encoder::active_backend] =",
          "encoder[\"effective_backend\"] =",
+         "encoder[v1::session_encoder::effective_backend] =",
          "encoder[\"selection\"] =",
+         "encoder[v1::session_encoder::selection] =",
          "encoder[\"codec\"] =",
+         "encoder[v1::session_encoder::codec] =",
        }) {
     EXPECT_EQ(status_handler.find(process_wide), std::string::npos) << process_wide;
   }

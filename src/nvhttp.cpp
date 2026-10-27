@@ -936,15 +936,15 @@ namespace nvhttp {
         resolution.locked
       );
       return {
-        {"requested", resolution.requested},
-        {"resolved", resolution.resolved},
-        {"locked", resolution.locked},
-        {"source", resolution.source},
-        {"reason_code", resolution.reason_code},
-        {"strict_runtime_validation", !fallback_allowed},
-        {"fallback_allowed", fallback_allowed},
-        {"active_backend", active.empty() ? "unknown" : active},
-        {"runtime_validation", "launch"}
+        {v1::optimization_encoder_resolution::requested, resolution.requested},
+        {v1::optimization_encoder_resolution::resolved, resolution.resolved},
+        {v1::optimization_encoder_resolution::locked, resolution.locked},
+        {v1::optimization_encoder_resolution::source, resolution.source},
+        {v1::optimization_encoder_resolution::reason_code, resolution.reason_code},
+        {v1::optimization_encoder_resolution::strict_runtime_validation, !fallback_allowed},
+        {v1::optimization_encoder_resolution::fallback_allowed, fallback_allowed},
+        {v1::optimization_encoder_resolution::active_backend, active.empty() ? "unknown" : active},
+        {v1::optimization_encoder_resolution::runtime_validation, "launch"}
       };
     }
 
@@ -960,16 +960,16 @@ namespace nvhttp {
       const std::optional<proc::ctx_t> &app
     ) {
       return {
-        {"requested", requested_topology.empty() ? "host_default" : requested_topology},
-        {"resolved", resolved_topology},
-        {"locked", topology_locked},
-        {"source", source},
-        {"reason_code", reason_code},
-        {"normalized", normalized},
-        {"mirror_desktop_requested", mirror_desktop_requested},
-        {"force_private_after_steam_close_requested", force_private_requested},
-        {"app_uuid", app ? app->uuid : std::string {}},
-        {"app_id", app ? app->id : std::string {}}
+        {v1::optimization_topology_resolution::requested, requested_topology.empty() ? "host_default" : requested_topology},
+        {v1::optimization_topology_resolution::resolved, resolved_topology},
+        {v1::optimization_topology_resolution::locked, topology_locked},
+        {v1::optimization_topology_resolution::source, source},
+        {v1::optimization_topology_resolution::reason_code, reason_code},
+        {v1::optimization_topology_resolution::normalized, normalized},
+        {v1::optimization_topology_resolution::mirror_desktop_requested, mirror_desktop_requested},
+        {v1::optimization_topology_resolution::force_private_after_steam_close_requested, force_private_requested},
+        {v1::optimization_topology_resolution::app_uuid, app ? app->uuid : std::string {}},
+        {v1::optimization_topology_resolution::app_id, app ? app->id : std::string {}}
       };
     }
 
@@ -981,74 +981,74 @@ namespace nvhttp {
       const nlohmann::json &topology_resolution,
       const optimization_encoder_resolution_t &encoder_resolution
     ) {
-      output["source"] = "deterministic_preset_v1";
-      output["cache_status"] = "not_applicable";
-      output["confidence"] = "deterministic";
-      output["recommendation_version"] = launch_profile::k_policy_version;
-      output["preset"] = resolved.preset;
-      output["reasoning"] =
+      output[v1::optimization::source] = "deterministic_preset_v1";
+      output[v1::optimization::cache_status] = "not_applicable";
+      output[v1::optimization::confidence] = "deterministic";
+      output[v1::optimization::recommendation_version] = launch_profile::k_policy_version;
+      output[v1::optimization::preset] = resolved.preset;
+      output[v1::optimization::reasoning] =
         "Resolved from explicit launch and paired-client settings plus the selected versioned preset.";
-      output["reasoning_summary"] = output["reasoning"];
-      output["signals_used"] = nlohmann::json::array({
+      output[v1::optimization::reasoning_summary] = output[v1::optimization::reasoning];
+      output[v1::optimization::signals_used] = nlohmann::json::array({
         "explicit_launch_request", "paired_client_settings", "device_capabilities"
       });
-      output["resolved_profile"] = {
+      output[v1::optimization::resolved_profile] = {
         {"policy_version", launch_profile::k_policy_version},
         {"preset", resolved.preset},
         {"preset_label", launch_profile::preset_label(resolved.preset)},
         {"fields", resolved.fields}
       };
-      output["topology_resolution"] = topology_resolution;
-      output["encoder_resolution"] =
+      output[v1::optimization::topology_resolution] = topology_resolution;
+      output[v1::optimization::encoder_resolution] =
         optimization_encoder_resolution_json(encoder_resolution);
-      output["encoder_options"] = encoder_backend_options_json();
-      output["encoder_backend"] = encoder_resolution.resolved;
-      output["resolved_profile"]["fields"]["encoder_backend"] = {
-        {"value", encoder_resolution.resolved},
-        {"source", encoder_resolution.source},
-        {"reason_code", encoder_resolution.reason_code},
-        {"locked", encoder_resolution.locked},
-        {"normalized", false}
+      output[v1::optimization::encoder_options] = encoder_backend_options_json();
+      output[v1::optimization::encoder_backend] = encoder_resolution.resolved;
+      output[v1::optimization::resolved_profile]["fields"]["encoder_backend"] = {
+        {v1::optimization_resolved_field::value, encoder_resolution.resolved},
+        {v1::optimization_resolved_field::source, encoder_resolution.source},
+        {v1::optimization_resolved_field::reason_code, encoder_resolution.reason_code},
+        {v1::optimization_resolved_field::locked, encoder_resolution.locked},
+        {v1::optimization_resolved_field::normalized, false}
       };
 
       // Keep the v1 flat fields for compatibility while making every emitted
       // value explicit enough for the cross-repository contract extractor to
       // audit. The nested resolved_profile.fields object is authoritative.
       if (resolved.fields.contains("display_mode")) {
-        output["display_mode"] = resolved.fields["display_mode"]["value"];
+        output[v1::optimization::display_mode] = resolved.fields["display_mode"]["value"];
       }
       if (resolved.fields.contains("target_bitrate_kbps")) {
-        output["target_bitrate_kbps"] = resolved.fields["target_bitrate_kbps"]["value"];
+        output[v1::optimization::target_bitrate_kbps] = resolved.fields["target_bitrate_kbps"]["value"];
       }
       if (resolved.fields.contains("preferred_codec")) {
-        output["preferred_codec"] = resolved.fields["preferred_codec"]["value"];
+        output[v1::optimization::preferred_codec] = resolved.fields["preferred_codec"]["value"];
       }
       if (resolved.fields.contains("nvenc_tune")) {
-        output["nvenc_tune"] = resolved.fields["nvenc_tune"]["value"];
+        output[v1::optimization::nvenc_tune] = resolved.fields["nvenc_tune"]["value"];
       }
       if (resolved.fields.contains("hdr")) {
-        output["hdr"] = resolved.fields["hdr"]["value"];
+        output[v1::optimization::hdr] = resolved.fields["hdr"]["value"];
       }
       if (resolved.fields.contains("color_range")) {
-        output["color_range"] = resolved.fields["color_range"]["value"];
+        output[v1::optimization::color_range] = resolved.fields["color_range"]["value"];
       }
 
-      output["auto_mode"] = resolved.preset == "auto";
-      output["auto_action"] = "none";
-      output["limiting_factor"] = "none";
-      output["stability"] = {
+      output[v1::optimization::auto_mode] = resolved.preset == "auto";
+      output[v1::optimization::auto_action] = "none";
+      output[v1::optimization::limiting_factor] = "none";
+      output[v1::optimization::stability] = {
         {"state", "observational"},
         {"auto_action", "none"},
         {"limiting_factor", "none"},
         {"summary", "Doctor observations do not change launch settings."}
       };
-      output["recovery_policy"] = {
+      output[v1::optimization::recovery_policy] = {
         {"state", "deprecated"},
         {"applicable", false},
         {"cancellable", true},
         {"reason_code", "recovery_profile_launch_mutation_removed"}
       };
-      output["profile_state"] = {
+      output[v1::optimization::profile_state] = {
         {"device", device},
         {"game", game},
         {"state", "deterministic"},
@@ -1059,11 +1059,11 @@ namespace nvhttp {
         {"preference_label", launch_profile::preset_label(resolved.preset)},
         {"preference_applied", true},
         {"preference_note", "This preset is resolved without session history or AI-generated settings."},
-        {"current_profile", output["resolved_profile"]},
+        {"current_profile", output[v1::optimization::resolved_profile]},
         {"last_result", nlohmann::json::object()},
         {"actions", {{"can_change_preference", true}, {"can_reset", false}}}
       };
-      output["ai_explanation"] = {
+      output[v1::optimization::ai_explanation] = {
         {"status", "not_requested"},
         {"text", ""},
         {"authoritative", false},
@@ -1101,13 +1101,13 @@ namespace nvhttp {
       };
 
       nlohmann::json output;
-      output["capture_to_encode"] = percentile_json(timing.capture_to_encode);
-      output["encode_to_send"] = percentile_json(timing.encode_to_send);
-      output["capture_to_send"] = percentile_json(timing.capture_to_send);
-      output["stage_vocabulary"] = "T0=capture frame available, T1=encoder finished this frame, T2=packet handed off to send-thread packetization (before FEC/encrypt/pace/sendmsg)";
-      output["session_active"] = timing.session_active;
-      output["session_generation"] = timing.session_generation;
-      output["ring_complete"] = timing.ring_complete;
+      output[v1::session_timing::capture_to_encode] = percentile_json(timing.capture_to_encode);
+      output[v1::session_timing::encode_to_send] = percentile_json(timing.encode_to_send);
+      output[v1::session_timing::capture_to_send] = percentile_json(timing.capture_to_send);
+      output[v1::session_timing::stage_vocabulary] = "T0=capture frame available, T1=encoder finished this frame, T2=packet handed off to send-thread packetization (before FEC/encrypt/pace/sendmsg)";
+      output[v1::session_timing::session_active] = timing.session_active;
+      output[v1::session_timing::session_generation] = timing.session_generation;
+      output[v1::session_timing::ring_complete] = timing.ring_complete;
       return output;
     }
 
@@ -1121,21 +1121,21 @@ namespace nvhttp {
     // land well before a client would act on them.
     nlohmann::json build_host_power_contract(bool sleep_permitted) {
       nlohmann::json host_power;
-      host_power["sleep_endpoint"] = "/polaris/v1/host/sleep";
+      host_power[v1::host_power::sleep_endpoint] = "/polaris/v1/host/sleep";
       // Reported separately from sleep_enabled so a client can tell "this host
       // does not do that" apart from "this client is not allowed to".
-      host_power["sleep_permitted"] = sleep_permitted;
-      host_power["sleep_enabled"] = config::sunshine.host_sleep_enabled;
-      host_power["sleep_supported"] = false;
-      host_power["sleep_blocked_reason"] = "unsupported_platform";
-      host_power["sleep_blocked_message"] = "Host sleep is only implemented on Linux hosts.";
+      host_power[v1::host_power::sleep_permitted] = sleep_permitted;
+      host_power[v1::host_power::sleep_enabled] = config::sunshine.host_sleep_enabled;
+      host_power[v1::host_power::sleep_supported] = false;
+      host_power[v1::host_power::sleep_blocked_reason] = "unsupported_platform";
+      host_power[v1::host_power::sleep_blocked_message] = "Host sleep is only implemented on Linux hosts.";
       // What became of the last request, as opposed to whether it was accepted.
       // A client that told someone their host was going to sleep needs to be
       // able to take that back.
-      host_power["last_sleep_outcome"] = "none";
-      host_power["last_sleep_reason"] = "";
-      host_power["last_sleep_message"] = "";
-      host_power["last_sleep_at"] = 0;
+      host_power[v1::host_power::last_sleep_outcome] = "none";
+      host_power[v1::host_power::last_sleep_reason] = "";
+      host_power[v1::host_power::last_sleep_message] = "";
+      host_power[v1::host_power::last_sleep_at] = 0;
 
 #ifdef __linux__
       static std::mutex probe_mutex;
@@ -1155,9 +1155,9 @@ namespace nvhttp {
         readiness = cached;
       }
 
-      host_power["sleep_supported"] = readiness.supported;
-      host_power["sleep_blocked_reason"] = readiness.reason;
-      host_power["sleep_blocked_message"] = readiness.message;
+      host_power[v1::host_power::sleep_supported] = readiness.supported;
+      host_power[v1::host_power::sleep_blocked_reason] = readiness.reason;
+      host_power[v1::host_power::sleep_blocked_message] = readiness.message;
 
       const auto sleep_status = session_manager::host_sleep_status();
       const auto outcome_name = [](session_manager::host_sleep_outcome_e outcome) {
@@ -1173,10 +1173,10 @@ namespace nvhttp {
             return "none";
         }
       };
-      host_power["last_sleep_outcome"] = outcome_name(sleep_status.outcome);
-      host_power["last_sleep_reason"] = sleep_status.reason;
-      host_power["last_sleep_message"] = sleep_status.message;
-      host_power["last_sleep_at"] = sleep_status.observed_at;
+      host_power[v1::host_power::last_sleep_outcome] = outcome_name(sleep_status.outcome);
+      host_power[v1::host_power::last_sleep_reason] = sleep_status.reason;
+      host_power[v1::host_power::last_sleep_message] = sleep_status.message;
+      host_power[v1::host_power::last_sleep_at] = sleep_status.observed_at;
 #endif
 
       return host_power;
@@ -2604,22 +2604,22 @@ namespace nvhttp {
         // The reason is the route the asking client's own encoder reported,
         // because GPU colour conversion is the default and the CPU is only a
         // fallback, and another stream's route is no answer for this one.
-        return {{"mode", "explicit"}, {"gpu_driver", "unknown"}, {"policy", "explicit_codec"},
-          {"preferred_encoder", "pyrowave"}, {"fallback_encoder", ""}, {"selected_encoder", "pyrowave"},
-          {"exact_live_probe_required", false}, {"fallback_used", false},
-          {"reason", stream_stats::pyrowave_route_reason(stats, requester_generation)}};
+        return {{v1::session_encoder_selection::mode, "explicit"}, {v1::session_encoder_selection::gpu_driver, "unknown"}, {v1::session_encoder_selection::policy, "explicit_codec"},
+          {v1::session_encoder_selection::preferred_encoder, "pyrowave"}, {v1::session_encoder_selection::fallback_encoder, ""}, {v1::session_encoder_selection::selected_encoder, "pyrowave"},
+          {v1::session_encoder_selection::exact_live_probe_required, false}, {v1::session_encoder_selection::fallback_used, false},
+          {v1::session_encoder_selection::reason, stream_stats::pyrowave_route_reason(stats, requester_generation)}};
       }
       const auto selection = video::active_encoder_selection_info();
       return {
-        {"mode", selection.mode},
-        {"gpu_driver", selection.gpu_driver.empty() ? "unknown" : selection.gpu_driver},
-        {"policy", selection.policy},
-        {"preferred_encoder", selection.preferred_encoder},
-        {"fallback_encoder", selection.fallback_encoder},
-        {"selected_encoder", selection.selected_encoder.empty() ? "unknown" : selection.selected_encoder},
-        {"exact_live_probe_required", selection.exact_live_probe_required},
-        {"fallback_used", selection.fallback_used},
-        {"reason", selection.reason}
+        {v1::session_encoder_selection::mode, selection.mode},
+        {v1::session_encoder_selection::gpu_driver, selection.gpu_driver.empty() ? "unknown" : selection.gpu_driver},
+        {v1::session_encoder_selection::policy, selection.policy},
+        {v1::session_encoder_selection::preferred_encoder, selection.preferred_encoder},
+        {v1::session_encoder_selection::fallback_encoder, selection.fallback_encoder},
+        {v1::session_encoder_selection::selected_encoder, selection.selected_encoder.empty() ? "unknown" : selection.selected_encoder},
+        {v1::session_encoder_selection::exact_live_probe_required, selection.exact_live_probe_required},
+        {v1::session_encoder_selection::fallback_used, selection.fallback_used},
+        {v1::session_encoder_selection::reason, selection.reason}
       };
     }
 
@@ -2640,17 +2640,17 @@ namespace nvhttp {
                                         std::uint64_t requester_generation) {
       const auto active_backend = session_encoder_name(stats, requester_generation);
       const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
-      encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
-      encoder["requested_backend"] = requested_backend;
-      encoder["effective_backend"] = effective_session_encoder_name(
+      encoder[v1::session_encoder::active_backend] = active_backend.empty() ? "unknown" : active_backend;
+      encoder[v1::session_encoder::requested_backend] = requested_backend;
+      encoder[v1::session_encoder::effective_backend] = effective_session_encoder_name(
         stats, launch_backend, requester_generation);
-      encoder["session_override"] = session_override;
-      encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
+      encoder[v1::session_encoder::session_override] = session_override;
+      encoder[v1::session_encoder::fallback_allowed] = !pyrowave_stream && encoder_backend_fallback_allowed(
         requested_backend,
         session_override
       );
-      encoder["selection"] = encoder_selection_json(stats, requester_generation);
-      encoder["codec"] = session_codec(stats, requester_generation);
+      encoder[v1::session_encoder::selection] = encoder_selection_json(stats, requester_generation);
+      encoder[v1::session_encoder::codec] = session_codec(stats, requester_generation);
     }
 
     nlohmann::json build_session_health_json(const stream_stats::stats_t &stats,
@@ -3023,13 +3023,13 @@ namespace nvhttp {
         reason = "Require this encoder backend for this launch.";
       }
       options.push_back({
-        {"value", backend},
-        {"label", label},
-        {"available", true},
-        {"experimental", backend == "vulkan"},
-        {"fallback_allowed", encoder_backend_fallback_allowed(backend, true)},
-        {"runtime_validation", "launch"},
-        {"reason", reason}
+        {v1::client_settings_encoder_option::value, backend},
+        {v1::client_settings_encoder_option::label, label},
+        {v1::client_settings_encoder_option::available, true},
+        {v1::client_settings_encoder_option::experimental, backend == "vulkan"},
+        {v1::client_settings_encoder_option::fallback_allowed, encoder_backend_fallback_allowed(backend, true)},
+        {v1::client_settings_encoder_option::runtime_validation, "launch"},
+        {v1::client_settings_encoder_option::reason, reason}
       });
     }
     return options;
@@ -6122,11 +6122,11 @@ namespace nvhttp {
   }
 
   nlohmann::json space_json(const multiseat::profile_client_space_t &space) {
-    nlohmann::json entry {{"id", space.id}, {"name", space.name}, {"state", space.state}, {"selected", space.selected},
-      {"library_enabled", space.library_enabled}, {"can_open", space.can_open}, {"blocked_reason", space.blocked_reason}};
-    if (space.can_open) entry.erase("blocked_reason");
+    nlohmann::json entry {{v1::space::id, space.id}, {v1::space::name, space.name}, {v1::space::state, space.state}, {v1::space::selected, space.selected},
+      {v1::space::library_enabled, space.library_enabled}, {v1::space::can_open, space.can_open}, {v1::space::blocked_reason, space.blocked_reason}};
+    if (space.can_open) entry.erase(v1::space::blocked_reason);
     // Optional like the rest: a Space that opens no launcher says nothing rather than "".
-    if (!space.launcher.empty()) entry["launcher"] = space.launcher;
+    if (!space.launcher.empty()) entry[v1::space::launcher] = space.launcher;
     return entry;
   }
 
@@ -6135,16 +6135,16 @@ namespace nvhttp {
   nlohmann::json spaces_snapshot_json(const multiseat::profile_client_spaces_t &state, bool streaming) {
     nlohmann::json spaces = nlohmann::json::array();
     for (const auto &space : state.spaces) spaces.push_back(space_json(space));
-    nlohmann::json body {{"schema", 1}, {"status", true}, {"enabled", true}, {"available", state.available},
-      {"can_switch", state.can_switch && !streaming}, {"selected_space_id", state.selected},
-      {"desktop_allowed", state.desktop_allowed}, {"default_space_id", state.default_space},
-      {"unavailable_reason", state.unavailable_reason},
-      {"switch_blocked_reason", !state.available ? "unavailable" : !state.can_switch ? state.switch_blocked_reason : "your_stream"},
-      {"capacity", state.capacity ? spaces_capacity_json(*state.capacity) : nlohmann::json()},
-      {"spaces", std::move(spaces)}};
-    if (state.available) body.erase("unavailable_reason");
-    if (state.can_switch && !streaming) body.erase("switch_blocked_reason");
-    if (!state.capacity) body.erase("capacity");
+    nlohmann::json body {{v1::spaces_snapshot::schema, 1}, {v1::spaces_snapshot::status, true}, {v1::spaces_snapshot::enabled, true}, {v1::spaces_snapshot::available, state.available},
+      {v1::spaces_snapshot::can_switch, state.can_switch && !streaming}, {v1::spaces_snapshot::selected_space_id, state.selected},
+      {v1::spaces_snapshot::desktop_allowed, state.desktop_allowed}, {v1::spaces_snapshot::default_space_id, state.default_space},
+      {v1::spaces_snapshot::unavailable_reason, state.unavailable_reason},
+      {v1::spaces_snapshot::switch_blocked_reason, !state.available ? "unavailable" : !state.can_switch ? state.switch_blocked_reason : "your_stream"},
+      {v1::spaces_snapshot::capacity, state.capacity ? spaces_capacity_json(*state.capacity) : nlohmann::json()},
+      {v1::spaces_snapshot::spaces, std::move(spaces)}};
+    if (state.available) body.erase(v1::spaces_snapshot::unavailable_reason);
+    if (state.can_switch && !streaming) body.erase(v1::spaces_snapshot::switch_blocked_reason);
+    if (!state.capacity) body.erase(v1::spaces_snapshot::capacity);
     return body;
   }
 
@@ -6175,8 +6175,8 @@ namespace nvhttp {
           throw std::invalid_argument("selection identity");
       } catch (...) { return reject(400, "Invalid space selection"); }
     }
-    profile_api_response_t response{200, {{"schema", 1}, {"status", true}, {"enabled", false},
-      {"available", false}, {"can_switch", false}, {"selected_space_id", ""}, {"spaces", nlohmann::json::array()}}};
+    profile_api_response_t response{200, {{v1::spaces_snapshot::schema, 1}, {v1::spaces_snapshot::status, true}, {v1::spaces_snapshot::enabled, false},
+      {v1::spaces_snapshot::available, false}, {v1::spaces_snapshot::can_switch, false}, {v1::spaces_snapshot::selected_space_id, ""}, {v1::spaces_snapshot::spaces, nlohmann::json::array()}}};
     // Revalidate the exact paired identity and permission at the mutation point.
     // A caller cannot transplant another device ID into this request.
     const auto auth = publish_authorized_launch(current, PERM::launch, [&] {
@@ -6318,7 +6318,7 @@ namespace nvhttp {
   }
 
   nlohmann::json space_ref_json(std::string_view id, std::string_view name, std::string_view target) {
-    return {{"id", id}, {"name", name}, {"target", target}};
+    return {{v1::space_ref::id, id}, {v1::space_ref::name, name}, {v1::space_ref::target, target}};
   }
 
   nlohmann::json space_launch_mode_json(std::string_view where) {
@@ -6345,34 +6345,34 @@ namespace nvhttp {
     // from "not loaded yet", so it drew every such title as the same blank tile.
     const bool poster = launcher ? launcher_poster_path(snapshot.family).has_value() :
                                    profile_artwork_cache_id(target).has_value();
-    nlohmann::json entry {{"id", identity}, {"app_id", multiseat::profile_app_id}, {"name", name},
-      {"source", snapshot.family.empty() ? std::string("steam") : snapshot.family},
+    nlohmann::json entry {{v1::game::id, identity}, {v1::game::app_id, multiseat::profile_app_id}, {v1::game::name, name},
+      {v1::game::source, snapshot.family.empty() ? std::string("steam") : snapshot.family},
       // Only a Steam title has a Steam app id. A launcher family's target is
       // that launcher's own identifier, and a client pairs titles across Spaces
       // by app id, so lending one here would pair a Heroic game with a Steam one.
-      {"steam_appid", launcher || snapshot.family != "steam" ? std::string {} : std::string(target)},
-      {"installed", true}, {"hdr_supported", false},
-      {"space", space_ref_json(snapshot.id, snapshot.name, target)},
-      {"cover_url", poster ? "/polaris/v1/games/" + identity + "/space-artwork/poster" : std::string {}},
-      {"launch_mode", space_launch_mode_json(snapshot.name)},
-      {"artwork", launcher ? nlohmann::json() : profile_artwork_manifest(platf::appdata(), identity, target)}};
-    if (launcher) entry.erase("artwork");
+      {v1::game::steam_appid, launcher || snapshot.family != "steam" ? std::string {} : std::string(target)},
+      {v1::game::installed, true}, {v1::game::hdr_supported, false},
+      {v1::space_library_game::space, space_ref_json(snapshot.id, snapshot.name, target)},
+      {v1::game::cover_url, poster ? "/polaris/v1/games/" + identity + "/space-artwork/poster" : std::string {}},
+      {v1::game::launch_mode, space_launch_mode_json(snapshot.name)},
+      {v1::game::artwork, launcher ? nlohmann::json() : profile_artwork_manifest(platf::appdata(), identity, target)}};
+    if (launcher) entry.erase(v1::game::artwork);
     return entry;
   }
 
   nlohmann::json space_library_json(std::string_view profile, const multiseat::profile_library_snapshot_t &snapshot,
                                     nlohmann::json games) {
     const auto total = games.size();
-    return {{"schema", 1}, {"status", true}, {"space_id", profile}, {"space_name", snapshot.name},
-      {"library_available", snapshot.library.available}, {"games", std::move(games)}, {"total", total}};
+    return {{v1::space_library::schema, 1}, {v1::space_library::status, true}, {v1::space_library::space_id, profile}, {v1::space_library::space_name, snapshot.name},
+      {v1::space_library::library_available, snapshot.library.available}, {v1::space_library::games, std::move(games)}, {v1::space_library::total, total}};
   }
 
   // The pre-library shape an older Nova still opens a Space from: one entry
   // under the fixed profile app identity.
   nlohmann::json space_legacy_game_json(std::string_view name) {
-    return {{"id", multiseat::profile_app_uuid}, {"app_id", multiseat::profile_app_id}, {"name", name},
-      {"source", "polaris"}, {"installed", true}, {"hdr_supported", false}, {"worker_profile", true},
-      {"launch_mode", space_launch_mode_json("its own Space with its own display and encoder")}, {"cover_url", ""}};
+    return {{v1::game::id, multiseat::profile_app_uuid}, {v1::game::app_id, multiseat::profile_app_id}, {v1::game::name, name},
+      {v1::game::source, "polaris"}, {v1::game::installed, true}, {v1::game::hdr_supported, false}, {v1::space_legacy_game::worker_profile, true},
+      {v1::game::launch_mode, space_launch_mode_json("its own Space with its own display and encoder")}, {v1::game::cover_url, ""}};
   }
 
   profile_api_response_t profile_library_request(const crypto::p_named_cert_t &candidate, std::string_view profile) {
@@ -6546,8 +6546,8 @@ namespace nvhttp {
         target_bitrate = std::min(target_bitrate, config::video.max_bitrate);
       nlohmann::json fields;
       auto field = [&](const char *key, nlohmann::json value, bool normalized = false) {
-        fields[key] = {{"value", std::move(value)}, {"source", "capability_validation"},
-          {"locked", true}, {"normalized", normalized}, {"reason_code", "worker_media_contract"}};
+        fields[key] = {{v1::optimization_resolved_field::value, std::move(value)}, {v1::optimization_resolved_field::source, "capability_validation"},
+          {v1::optimization_resolved_field::locked, true}, {v1::optimization_resolved_field::normalized, normalized}, {v1::optimization_resolved_field::reason_code, "worker_media_contract"}};
       };
       const auto display = std::to_string(static_cast<int>(width)) + "x" +
         std::to_string(static_cast<int>(height)) + "x" + std::to_string(static_cast<int>(fps));
@@ -9390,23 +9390,23 @@ namespace nvhttp {
 
       // Capture info
       auto &capture_info = output["capture"];
-      capture_info["backend"] = stats.runtime_backend.empty() ? "screencopy" : stats.runtime_backend;
-      capture_info["resolution"] = std::to_string(stats.width) + "x" + std::to_string(stats.height);
-      capture_info["transport"] = platf::from_frame_transport(stats.capture_transport);
-      capture_info["residency"] = platf::from_frame_residency(stats.capture_residency);
-      capture_info["format"] = platf::from_frame_format(stats.capture_format);
-      capture_info["device"] = stats.capture_device;
-      capture_info["encoder_adapter"] = config::video.adapter_name;
-      capture_info["cross_gpu_dmabuf_risk"] = stream_stats::capture_path_has_cross_gpu_dmabuf_risk(stats);
-      capture_info["path"] = stream_stats::capture_path_summary(stats);
+      capture_info[v1::session_capture::backend] = stats.runtime_backend.empty() ? "screencopy" : stats.runtime_backend;
+      capture_info[v1::session_capture::resolution] = std::to_string(stats.width) + "x" + std::to_string(stats.height);
+      capture_info[v1::session_capture::transport] = platf::from_frame_transport(stats.capture_transport);
+      capture_info[v1::session_capture::residency] = platf::from_frame_residency(stats.capture_residency);
+      capture_info[v1::session_capture::format] = platf::from_frame_format(stats.capture_format);
+      capture_info[v1::session_capture::device] = stats.capture_device;
+      capture_info[v1::session_capture::encoder_adapter] = config::video.adapter_name;
+      capture_info[v1::session_capture::cross_gpu_dmabuf_risk] = stream_stats::capture_path_has_cross_gpu_dmabuf_risk(stats);
+      capture_info[v1::session_capture::path] = stream_stats::capture_path_summary(stats);
       const auto capture_reason = stream_stats::capture_path_reason(stats);
-      capture_info["reason"] = capture_reason;
-      capture_info["reason_message"] = stream_stats::capture_path_reason_message(capture_reason);
-      capture_info["cpu_copy"] = stream_stats::capture_path_uses_cpu_copy(stats);
-      capture_info["gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
-      capture_info["requested_headless"] = stats.runtime_requested_headless;
-      capture_info["effective_headless"] = stats.runtime_effective_headless;
-      capture_info["gpu_native_override_active"] = stats.runtime_gpu_native_override_active;
+      capture_info[v1::session_capture::reason] = capture_reason;
+      capture_info[v1::session_capture::reason_message] = stream_stats::capture_path_reason_message(capture_reason);
+      capture_info[v1::session_capture::cpu_copy] = stream_stats::capture_path_uses_cpu_copy(stats);
+      capture_info[v1::session_capture::gpu_native] = stream_stats::capture_path_is_gpu_native(stats);
+      capture_info[v1::session_capture::requested_headless] = stats.runtime_requested_headless;
+      capture_info[v1::session_capture::effective_headless] = stats.runtime_effective_headless;
+      capture_info[v1::session_capture::gpu_native_override_active] = stats.runtime_gpu_native_override_active;
 
       // Encoder info
       auto &encoder = output["encoder"];
@@ -9422,22 +9422,22 @@ namespace nvhttp {
         status_snapshot.encoder_backend_explicit,
         requester_generation
       );
-      encoder["encode_time_ms"] = stats.encode_time_ms;
-      encoder["bitrate_kbps"] = stats.bitrate_kbps;
-      encoder["fps"] = stats.fps;
-      encoder["requested_client_fps"] = stats.requested_client_fps;
-      encoder["session_target_fps"] = stats.session_target_fps;
-      encoder["encode_target_fps"] = stats.encode_target_fps;
-      encoder["target_device"] = stats.encode_target_device;
-      encoder["target_residency"] = platf::from_frame_residency(stats.encode_target_residency);
-      encoder["target_format"] = platf::from_frame_format(stats.encode_target_format);
-      encoder["pacing_policy"] = stats.pacing_policy;
-      encoder["optimization_source"] = stats.optimization_source;
-      encoder["optimization_confidence"] = stats.optimization_confidence;
-      encoder["optimization_cache_status"] = stats.optimization_cache_status;
-      encoder["optimization_reasoning"] = stats.optimization_reasoning;
-      encoder["optimization_normalization_reason"] = stats.optimization_normalization_reason;
-      encoder["recommendation_version"] = stats.recommendation_version;
+      encoder[v1::session_encoder::encode_time_ms] = stats.encode_time_ms;
+      encoder[v1::session_encoder::bitrate_kbps] = stats.bitrate_kbps;
+      encoder[v1::session_encoder::fps] = stats.fps;
+      encoder[v1::session_encoder::requested_client_fps] = stats.requested_client_fps;
+      encoder[v1::session_encoder::session_target_fps] = stats.session_target_fps;
+      encoder[v1::session_encoder::encode_target_fps] = stats.encode_target_fps;
+      encoder[v1::session_encoder::target_device] = stats.encode_target_device;
+      encoder[v1::session_encoder::target_residency] = platf::from_frame_residency(stats.encode_target_residency);
+      encoder[v1::session_encoder::target_format] = platf::from_frame_format(stats.encode_target_format);
+      encoder[v1::session_encoder::pacing_policy] = stats.pacing_policy;
+      encoder[v1::session_encoder::optimization_source] = stats.optimization_source;
+      encoder[v1::session_encoder::optimization_confidence] = stats.optimization_confidence;
+      encoder[v1::session_encoder::optimization_cache_status] = stats.optimization_cache_status;
+      encoder[v1::session_encoder::optimization_reasoning] = stats.optimization_reasoning;
+      encoder[v1::session_encoder::optimization_normalization_reason] = stats.optimization_normalization_reason;
+      encoder[v1::session_encoder::recommendation_version] = stats.recommendation_version;
       // PyroWave's bitrate advice for this stream and the host's verdict on it, only while the stream
       // is PyroWave. Every advice figure is a request, which is what a client sets.
       if (auto pyrowave_bitrate = stream_stats::pyrowave_bitrate_json(stats); !pyrowave_bitrate.is_null()) {
