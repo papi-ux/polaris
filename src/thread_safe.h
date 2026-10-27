@@ -8,9 +8,12 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
+#include <type_traits>
 #include <vector>
 
 // local includes
@@ -286,10 +289,18 @@ namespace safe {
     return std::make_shared<alarm_raw_t<T>>();
   }
 
+  // Element types may opt into oldest-only eviction. Ordinary queues retain
+  // their vector storage and clear-on-full behavior, including unsafe()'s type.
+  template<class T>
+  struct queue_policy_t {
+    static constexpr bool drop_oldest = false;
+  };
+
   template<class T>
   class queue_t {
   public:
     using status_t = util::optional_t<T>;
+    using storage_t = std::conditional_t<queue_policy_t<T>::drop_oldest, std::deque<T>, std::vector<T>>;
 
     queue_t(std::uint32_t max_elements = 32):
         _max_elements {max_elements} {
@@ -297,19 +308,40 @@ namespace safe {
 
     template<class... Args>
     void raise(Args &&...args) {
-      std::lock_guard ul {_lock};
+      if constexpr (queue_policy_t<T>::drop_oldest) {
+        std::optional<T> evicted;
+        // Run after the queue lock is released, including if constructing the
+        // replacement throws. The evicted element remains alive for accounting.
+        auto account_eviction = util::fail_guard([&] {
+          if (evicted) queue_policy_t<T>::on_evict(*evicted);
+        });
+        {
+          std::lock_guard ul {_lock};
+          if (!_continue) return;
 
-      if (!_continue) {
-        return;
+          if (_queue.size() == _max_elements && !_queue.empty()) {
+            evicted.emplace(std::move(_queue.front()));
+            _queue.pop_front();
+          }
+
+          _queue.emplace_back(std::forward<Args>(args)...);
+          _cv.notify_all();
+        }
+      } else {
+        std::lock_guard ul {_lock};
+
+        if (!_continue) {
+          return;
+        }
+
+        if (_queue.size() == _max_elements) {
+          _queue.clear();
+        }
+
+        _queue.emplace_back(std::forward<Args>(args)...);
+
+        _cv.notify_all();
       }
-
-      if (_queue.size() == _max_elements) {
-        _queue.clear();
-      }
-
-      _queue.emplace_back(std::forward<Args>(args)...);
-
-      _cv.notify_all();
     }
 
     bool peek() {
@@ -332,7 +364,7 @@ namespace safe {
       }
 
       auto val = std::move(_queue.front());
-      _queue.erase(std::begin(_queue));
+      pop_front();
 
       return val;
     }
@@ -353,12 +385,12 @@ namespace safe {
       }
 
       auto val = std::move(_queue.front());
-      _queue.erase(std::begin(_queue));
+      pop_front();
 
       return val;
     }
 
-    std::vector<T> &unsafe() {
+    storage_t &unsafe() {
       return _queue;
     }
 
@@ -376,13 +408,21 @@ namespace safe {
     }
 
   private:
+    void pop_front() {
+      if constexpr (queue_policy_t<T>::drop_oldest) {
+        _queue.pop_front();
+      } else {
+        _queue.erase(std::begin(_queue));
+      }
+    }
+
     bool _continue {true};
     std::uint32_t _max_elements;
 
     mutable std::mutex _lock;
     std::condition_variable _cv;
 
-    std::vector<T> _queue;
+    storage_t _queue;
   };
 
   template<class T>
