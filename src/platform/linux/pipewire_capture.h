@@ -74,6 +74,39 @@ namespace pipewire_capture {
     // Watch this capture core's own registry so producer_binding() can name the process behind the
     // actual linked source. Off by default: a capture that does not ask creates no registry.
     bool track_producer = false;
+    // A failed HDR Gamescope negotiation may inspect this same core's exact producer port.
+    bool inspect_hdr_formats = false;
+  };
+
+  struct producer_format_identity_t {
+    std::uint32_t node_id = 0;
+    std::uint64_t node_serial = 0;
+    std::uint32_t port_id = 0;
+    std::uint64_t port_serial = 0;
+    std::uint64_t stream_generation = 0;
+    bool operator==(const producer_format_identity_t &) const = default;
+  };
+
+  // One unfiltered EnumFormat request, never a capability cache. Only an ordered done after a
+  // nonempty, completely parsed inventory can establish absence of our packed RGB10 formats.
+  class producer_format_inventory_t {
+  public:
+    static constexpr std::uint32_t max_params = 32;
+    void begin(producer_format_identity_t identity, int param_seq, int done_seq);
+    void param(int seq, std::uint32_t index, std::uint32_t next, const spa_pod *pod) noexcept;
+    void done(int seq, const producer_format_identity_t &current) noexcept;
+    void invalidate() noexcept { valid_ = false; }
+    bool unsupported(const producer_format_identity_t &current) const noexcept;
+
+  private:
+    producer_format_identity_t identity_;
+    int param_seq_ = -1;
+    int done_seq_ = -1;
+    std::uint32_t next_index_ = 0;
+    std::uint32_t count_ = 0;
+    bool valid_ = false;
+    bool complete_ = false;
+    bool has_rgb10_ = false;
   };
 
   struct egl_dmabuf_format_t {
@@ -234,6 +267,10 @@ namespace pipewire_capture {
      * Never call it from the PipeWire loop thread or the frame path.
      */
     capture_producer::binding_t producer_binding(std::chrono::milliseconds timeout);
+    // A bounded read of this capture core, including after a stream negotiation error. Missing
+    // permissions, identity, completion, cancellation or any unreadable format answers unknown.
+    bool producer_lacks_hdr_rgb10(std::chrono::milliseconds timeout,
+                                 const std::function<bool()> &cancelled);
 
   private:
 #ifdef POLARIS_TESTS
@@ -254,10 +291,17 @@ namespace pipewire_capture {
     static void on_core_info(void *userdata, const struct pw_core_info *info) noexcept;
     static void on_core_done(void *userdata, std::uint32_t id, int seq) noexcept;
     static void on_core_error(void *userdata, std::uint32_t id, int seq, int res, const char *message) noexcept;
+    static void on_format_node_info(void *userdata, const struct pw_node_info *info) noexcept;
+    static void on_format_port_info(void *userdata, const struct pw_port_info *info) noexcept;
+    static void on_format_port_param(void *userdata, int seq, std::uint32_t id,
+                                     std::uint32_t index, std::uint32_t next, const struct spa_pod *param) noexcept;
 
     bool connect_stream(bool use_max_framerate);
     bool start_producer_tracking();
     void stop_producer_tracking();
+    void observe_format_global(std::uint32_t id, std::uint32_t permissions,
+                               const char *type, std::uint32_t version, const spa_dict *props);
+    producer_format_identity_t current_format_identity() const;
     bool process_buffer(struct pw_buffer *buffer, std::uint64_t generation);
     void set_terminal(wait_result_e result);
     void queue_buffer_locked(struct pw_buffer *buffer, std::uint64_t generation);
@@ -287,6 +331,25 @@ namespace pipewire_capture {
     // Bumped whenever the stream (and so the capture node) is replaced.
     std::uint64_t stream_generation_ = 0;
     std::atomic<bool> producer_cancel_ {false};
+    struct format_port_t {
+      std::uint64_t serial = 0;
+      std::uint32_t permissions = 0;
+      std::uint32_t version = 0;
+    };
+    std::unordered_map<std::uint32_t, format_port_t> format_ports_;
+    bool format_target_seen_ = false;
+    bool format_registry_invalid_ = false;
+    pw_node *format_node_ = nullptr;
+    pw_port *format_port_ = nullptr;
+    spa_hook format_node_listener_ {};
+    spa_hook format_port_listener_ {};
+    std::uint32_t format_port_id_ = 0;
+    bool format_node_info_ = false;
+    bool format_port_info_ = false;
+    bool format_query_error_ = false;
+    int format_sync_seq_ = -1;
+    bool format_sync_done_ = false;
+    producer_format_inventory_t format_inventory_;
     std::unordered_map<struct pw_buffer *, std::uint64_t> buffer_keys_;
     buffer_generation_t buffer_generations_;
 

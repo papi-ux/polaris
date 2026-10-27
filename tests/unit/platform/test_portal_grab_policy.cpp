@@ -9,6 +9,7 @@
 #ifdef POLARIS_BUILD_PORTAL
 
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -1337,7 +1338,134 @@ namespace pipewire_capture {
       capture.negotiated_rate_ = negotiated;
       capture.frame_cv_.notify_all();
     }
+    static void begin_formats(capture_t &capture, std::uint32_t outputs = 1) {
+      capture.options_.node_id = 51;
+      capture.options_.node_serial = 501;
+      capture.options_.inspect_hdr_formats = true;
+      capture.stream_generation_ = 1;
+      const spa_dict_item node_items[] {{PW_KEY_OBJECT_SERIAL, "501"}};
+      const spa_dict node_props = SPA_DICT_INIT(node_items, 1);
+      capture_t::on_registry_global(&capture, 51, PW_PERM_R, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, &node_props);
+      const spa_dict_item port_items[] {{PW_KEY_NODE_ID, "51"}, {PW_KEY_OBJECT_SERIAL, "601"}, {PW_KEY_PORT_DIRECTION, "out"}};
+      const spa_dict port_props = SPA_DICT_INIT(port_items, 3);
+      capture_t::on_registry_global(&capture, 61, PW_PERM_R | PW_PERM_X, PW_TYPE_INTERFACE_Port, PW_VERSION_PORT, &port_props);
+      capture.format_port_id_ = 61;
+      const pw_node_info node_info {.id = 51, .n_output_ports = outputs};
+      capture_t::on_format_node_info(&capture, &node_info);
+      spa_param_info param {SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ};
+      const pw_port_info port_info {.id = 61, .direction = PW_DIRECTION_OUTPUT, .params = &param, .n_params = 1};
+      capture_t::on_format_port_info(&capture, &port_info);
+      capture.format_sync_seq_ = 9;
+      capture.format_inventory_.begin(capture.current_format_identity(), 7, 9);
+    }
+    static void format(capture_t &capture, const spa_pod *pod, std::uint32_t index = 0) {
+      capture_t::on_format_port_param(&capture, 7, SPA_PARAM_EnumFormat, index, index + 1, pod);
+    }
+    static void formats_done(capture_t &capture, int seq = 9) { capture_t::on_core_done(&capture, PW_ID_CORE, seq); }
+    static bool unsupported(capture_t &capture) {
+      return !capture.producer_cancel_.load() && !capture.format_query_error_ &&
+             capture.format_inventory_.unsupported(capture.current_format_identity());
+    }
+    static void remove_port(capture_t &capture) { capture_t::on_registry_global_remove(&capture, 61); }
+    static void change_port(capture_t &capture) {
+      const pw_port_info info {.id = 61, .direction = PW_DIRECTION_OUTPUT};
+      capture_t::on_format_port_info(&capture, &info);
+    }
+    static void replace_stream(capture_t &capture) { ++capture.stream_generation_; }
+    static void permission_error(capture_t &capture) { capture_t::on_core_error(&capture, 61, 7, -EACCES, "denied"); }
   };
+}
+
+TEST(PortalGrabPolicyTests, ProducerFormatAbsenceNeedsTheActualCompleteRawInventory) {
+  using access = pipewire_capture::capture_test_access;
+  pipewire_capture::capture_t capture {{}};
+  access::begin_formats(capture);
+  alignas(8) std::array<std::uint8_t, 512> storage {};
+  spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage.data(), storage.size());
+  const auto *bgrx = static_cast<const spa_pod *>(spa_pod_builder_add_object(&builder,
+    SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx)));
+  const auto *nv12 = static_cast<const spa_pod *>(spa_pod_builder_add_object(&builder,
+    SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_NV12)));
+  access::format(capture, bgrx);
+  access::format(capture, nv12, 1);
+  EXPECT_FALSE(access::unsupported(capture));
+  access::formats_done(capture, 8);  // A different request's done is not completion.
+  EXPECT_FALSE(access::unsupported(capture));
+  access::formats_done(capture);
+  EXPECT_TRUE(access::unsupported(capture));
+  access::format(capture, bgrx, 2);  // Late replies invalidate an allegedly complete snapshot.
+  EXPECT_FALSE(access::unsupported(capture));
+  pipewire_capture::capture_t empty {{}};
+  access::begin_formats(empty);
+  access::formats_done(empty);
+  EXPECT_FALSE(access::unsupported(empty));
+}
+
+TEST(PortalGrabPolicyTests, ProducerFormatChoicesCannotHideRgb10OrBecomeAnUnboundedNegativeProof) {
+  using access = pipewire_capture::capture_test_access;
+  alignas(8) std::array<std::uint8_t, 512> storage {};
+  spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage.data(), storage.size());
+  auto *pod = static_cast<spa_pod *>(spa_pod_builder_add_object(&builder,
+    SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format,
+    SPA_POD_CHOICE_ENUM_Id(3, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_xRGB_210LE)));
+  pipewire_capture::capture_t capture {{}};
+  access::begin_formats(capture);
+  access::format(capture, pod);
+  access::formats_done(capture);
+  EXPECT_FALSE(access::unsupported(capture)) << "the default is BGRx but another advertised choice supports RGB10";
+
+  auto *format = const_cast<spa_pod_prop *>(spa_pod_find_prop(pod, nullptr, SPA_FORMAT_VIDEO_format));
+  ASSERT_NE(format, nullptr);
+  auto *choice = reinterpret_cast<spa_pod_choice *>(&format->value);
+  choice->body.type = SPA_CHOICE_Range;
+  pipewire_capture::capture_t unbounded {{}};
+  access::begin_formats(unbounded);
+  access::format(unbounded, pod);
+  access::formats_done(unbounded);
+  EXPECT_FALSE(access::unsupported(unbounded));
+  choice->body.type = SPA_CHOICE_Enum;
+  --choice->pod.size;  // An incomplete choice body is not an inventory of 8-bit formats.
+  pipewire_capture::capture_t malformed {{}};
+  access::begin_formats(malformed);
+  access::format(malformed, pod);
+  access::formats_done(malformed);
+  EXPECT_FALSE(access::unsupported(malformed));
+}
+
+TEST(PortalGrabPolicyTests, ProducerFormatProofIsLostOnRemovalReplacementCancellationOrPermissionFailure) {
+  using access = pipewire_capture::capture_test_access;
+  alignas(8) std::array<std::uint8_t, 256> storage {};
+  spa_pod_builder builder = SPA_POD_BUILDER_INIT(storage.data(), storage.size());
+  const auto *pod = static_cast<const spa_pod *>(spa_pod_builder_add_object(&builder,
+    SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+    SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx)));
+  for (const auto invalidate : {&access::remove_port, &access::change_port, &access::replace_stream, &access::permission_error}) {
+    pipewire_capture::capture_t capture {{}};
+    access::begin_formats(capture);
+    access::format(capture, pod);
+    invalidate(capture);
+    access::formats_done(capture);
+    EXPECT_FALSE(access::unsupported(capture));
+  }
+  pipewire_capture::capture_t stopped {{}};
+  access::begin_formats(stopped);
+  access::format(stopped, pod);
+  access::formats_done(stopped);
+  stopped.stop();
+  EXPECT_FALSE(access::unsupported(stopped));
+  pipewire_capture::capture_t capped {{}};
+  access::begin_formats(capped);
+  for (std::uint32_t i = 0; i < pipewire_capture::producer_format_inventory_t::max_params; ++i) access::format(capped, pod, i);
+  access::formats_done(capped);
+  EXPECT_FALSE(access::unsupported(capped)) << "the request limit may have truncated the producer's inventory";
+  pipewire_capture::capture_t hidden_port {{}};
+  access::begin_formats(hidden_port, 2);
+  access::format(hidden_port, pod);
+  access::formats_done(hidden_port);
+  EXPECT_FALSE(access::unsupported(hidden_port)) << "one visible port is not proof of a sole output";
 }
 
 TEST(PipeWireRateTests, ActualFrameWaitStaysEventDrivenWhenProducerMeetsTheRate) {

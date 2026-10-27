@@ -27,6 +27,7 @@
 
 // local includes
 #include "src/config.h"
+#include "src/capture_generation.h"
 #include "src/logging.h"
 #include "src/thread_safe.h"
 #include "src/utility.h"
@@ -716,6 +717,16 @@ namespace platf {
     error  ///< Error
   };
 
+  enum class capture_failure_e { none, unsupported_hdr_producer_format };
+
+  // A failure belongs to one admitted opening, not the host's future availability. The owner is
+  // equality-only; video retains its own mail and must acquire the matching live destination.
+  struct capture_failure_t {
+    capture_failure_e reason = capture_failure_e::none;
+    capture_generation::identity_t generation;
+    const void *owner = nullptr;
+  };
+
   /**
    * @brief What a display's initialization opened, named the way the capture setting names backends.
    *
@@ -794,6 +805,9 @@ namespace platf {
     virtual std::shared_ptr<img_t> alloc_img() = 0;
 
     virtual int dummy_img(img_t *img) = 0;
+
+    // A portal display can fail before a frame while reopening its particular capture generation.
+    virtual capture_failure_t capture_failure() const { return {}; }
 
     // An empty result declines in-process probe reuse. Implementations report
     // the actual connected route; configuration alone cannot establish it.
@@ -985,6 +999,9 @@ namespace platf {
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
 #ifdef __linux__
+  // Preserve the cause of this particular open even when no display could be constructed.
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name,
+                                    const video::config_t &config, capture_failure_t &failure);
   // Only the selected portal backend needs interactive Desktop preparation.
   bool prepare_desktop_capture(mem_type_e hwdevice_type, const video::config_t &config,
                                std::shared_ptr<void> &preparation);

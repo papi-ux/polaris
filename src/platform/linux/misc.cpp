@@ -1673,7 +1673,8 @@ std::string get_local_ip_for_gateway() {
 
 #ifdef POLARIS_BUILD_PORTAL
   std::vector<std::string> portal_display_names();
-  std::shared_ptr<display_t> portal_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+  std::shared_ptr<display_t> portal_display(mem_type_e hwdevice_type, const std::string &display_name,
+                                           const video::config_t &config, capture_failure_t &failure);
 
   bool verify_portal() {
     return !portal_display_names().empty();
@@ -1917,6 +1918,13 @@ std::string get_local_ip_for_gateway() {
 #endif
 
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    capture_failure_t ignored;
+    return display(hwdevice_type, display_name, config, ignored);
+  }
+
+  std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name,
+                                     const video::config_t &config, capture_failure_t &failure) {
+    failure = {};
     const auto requested_backend = config.capture_generation.capture_backend;
     const auto backend = selected_display_backend(hwdevice_type, config);
     log_display_backend_choice(backend, config);
@@ -1945,7 +1953,7 @@ std::string get_local_ip_for_gateway() {
       case display_backend_e::portal:
 #ifdef POLARIS_BUILD_PORTAL
         BOOST_LOG(info) << "Screencasting with XDG Desktop Portal"sv;
-        return named(portal_display(hwdevice_type, display_name, config));
+        return named(portal_display(hwdevice_type, display_name, config, failure));
 #else
         break;
 #endif

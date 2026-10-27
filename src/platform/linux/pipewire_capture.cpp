@@ -29,6 +29,7 @@
 #include <spa/param/video/format.h>
 #include <spa/param/video/raw.h>
 #include <spa/param/video/type-info.h>
+#include <spa/pod/iter.h>
 #include <spa/utils/defs.h>
 #include <spa/utils/result.h>
 #include <unistd.h>
@@ -103,6 +104,91 @@ namespace pipewire_capture {
     using egl_query_formats_fn = EGLBoolean (*)(EGLDisplay, EGLint, EGLint *, EGLint *);
     using egl_query_modifiers_fn = EGLBoolean (*)(EGLDisplay, EGLint, EGLint, EGLuint64KHR *, EGLBoolean *, EGLint *);
   }  // namespace
+
+  namespace {
+    // Read the complete format choice rather than spa_format_video_raw_parse's fixated default.
+    // A missing/unbounded choice cannot prove that a supported layout was absent.
+    std::optional<bool> offer_has_rgb10(const spa_pod *pod) {
+      if (!pod || pod->type != SPA_TYPE_Object || pod->size < sizeof(spa_pod_object_body) || pod->size > 4096) return std::nullopt;
+      const auto *object = reinterpret_cast<const spa_pod_object *>(pod);
+      if (object->body.type != SPA_TYPE_OBJECT_Format) return std::nullopt;
+      const auto *cursor = reinterpret_cast<const std::uint8_t *>(&object->body) + sizeof(object->body);
+      const auto *end = reinterpret_cast<const std::uint8_t *>(&object->body) + pod->size;
+      std::optional<std::uint32_t> media, subtype;
+      std::optional<bool> rgb10;
+      while (cursor < end) {
+        const auto remaining = static_cast<std::size_t>(end - cursor);
+        if (remaining < sizeof(spa_pod_prop)) return std::nullopt;
+        const auto *prop = reinterpret_cast<const spa_pod_prop *>(cursor);
+        if (prop->value.size > remaining - sizeof(spa_pod_prop)) return std::nullopt;
+        const auto step = SPA_ROUND_UP_N(sizeof(spa_pod_prop) + prop->value.size, 8);
+        if (step > remaining) return std::nullopt;
+        if (prop->key == SPA_FORMAT_mediaType || prop->key == SPA_FORMAT_mediaSubtype) {
+          std::uint32_t value;
+          auto &target = prop->key == SPA_FORMAT_mediaType ? media : subtype;
+          if (target || prop->value.size != sizeof(value) || spa_pod_get_id(&prop->value, &value) < 0) return std::nullopt;
+          target = value;
+        } else if (prop->key == SPA_FORMAT_VIDEO_format) {
+          if (rgb10) return std::nullopt;
+          const std::uint32_t *values = nullptr;
+          std::size_t count = 0;
+          if (prop->value.type == SPA_TYPE_Id && prop->value.size == sizeof(std::uint32_t)) {
+            values = reinterpret_cast<const std::uint32_t *>(&prop->value + 1);
+            count = 1;
+          } else if (prop->value.type == SPA_TYPE_Choice && prop->value.size >= sizeof(spa_pod_choice_body)) {
+            const auto *choice = reinterpret_cast<const spa_pod_choice *>(&prop->value);
+            const auto bytes = prop->value.size - sizeof(spa_pod_choice_body);
+            if (choice->body.flags != 0 || choice->body.child.type != SPA_TYPE_Id ||
+                choice->body.child.size != sizeof(std::uint32_t) || bytes % sizeof(std::uint32_t) != 0) return std::nullopt;
+            count = bytes / sizeof(std::uint32_t);
+            if (!((choice->body.type == SPA_CHOICE_None && count == 1) ||
+                  (choice->body.type == SPA_CHOICE_Enum && count >= 2))) return std::nullopt;
+            values = reinterpret_cast<const std::uint32_t *>(reinterpret_cast<const std::uint8_t *>(&choice->body) + sizeof(choice->body));
+          } else return std::nullopt;
+          if (count == 0 || count > 64) return std::nullopt;
+          rgb10 = false;
+          for (std::size_t i = 0; i < count; ++i) {
+            if (values[i] == SPA_VIDEO_FORMAT_UNKNOWN || values[i] == SPA_ID_INVALID) return std::nullopt;
+            *rgb10 = *rgb10 || spa_format_is_hdr_rgb10(values[i]);
+          }
+        }
+        cursor += step;
+      }
+      if (media != SPA_MEDIA_TYPE_video || subtype != SPA_MEDIA_SUBTYPE_raw) return std::nullopt;
+      return rgb10;
+    }
+  }
+
+  void producer_format_inventory_t::begin(producer_format_identity_t identity, int param_seq, int done_seq) {
+    *this = {};
+    identity_ = identity;
+    param_seq_ = param_seq;
+    done_seq_ = done_seq;
+    valid_ = identity.node_id && identity.node_serial && identity.port_id && identity.port_serial &&
+             identity.stream_generation && param_seq >= 0 && done_seq >= 0;
+  }
+
+  void producer_format_inventory_t::param(int seq, std::uint32_t index, std::uint32_t next, const spa_pod *pod) noexcept {
+    if (seq != param_seq_) return;
+    if (!valid_ || complete_ || index != next_index_ || next != index + 1 || ++count_ >= max_params) {
+      invalidate();
+      return;
+    }
+    const auto rgb10 = offer_has_rgb10(pod);
+    if (!rgb10) { invalidate(); return; }
+    has_rgb10_ = has_rgb10_ || *rgb10;
+    next_index_ = next;
+  }
+
+  void producer_format_inventory_t::done(int seq, const producer_format_identity_t &current) noexcept {
+    if (seq != done_seq_) return;
+    if (current != identity_ || count_ == 0) invalidate();
+    complete_ = true;
+  }
+
+  bool producer_format_inventory_t::unsupported(const producer_format_identity_t &current) const noexcept {
+    return valid_ && complete_ && count_ > 0 && !has_rgb10_ && current == identity_;
+  }
 
   std::optional<std::uint32_t> drm_format_for_spa(std::uint32_t spa_format) {
     switch (spa_format) {
@@ -701,6 +787,7 @@ namespace pipewire_capture {
   bool capture_t::connect_stream(bool use_max_framerate) {
     // A new stream is a new capture node: no earlier binding read may complete against it.
     ++stream_generation_;
+    format_inventory_.invalidate();
     const bool has_node = options_.node_id != 0;
     const bool has_serial = options_.node_serial != 0 &&
                             (options_.node_serial & SPA_ID_INVALID) != SPA_ID_INVALID;
@@ -1424,7 +1511,7 @@ namespace pipewire_capture {
   }
 
   bool capture_t::start_producer_tracking() {
-    // Called once from start(), before pw_thread_loop_start, on the capture's own core.
+    // Before the loop starts for producer binding, or under its lock for a failed HDR attempt.
     static const pw_registry_events registry_events = [] {
       pw_registry_events events {};
       events.version = PW_VERSION_REGISTRY_EVENTS;
@@ -1441,9 +1528,11 @@ namespace pipewire_capture {
       return events;
     }();
     if (!core_ || registry_) return registry_ != nullptr;
-    spa_zero(core_listener_);
-    pw_core_add_listener(core_, &core_listener_, &core_events, this);
-    core_listener_added_ = true;
+    if (!core_listener_added_) {
+      spa_zero(core_listener_);
+      pw_core_add_listener(core_, &core_listener_, &core_events, this);
+      core_listener_added_ = true;
+    }
     registry_ = pw_core_get_registry(core_, PW_VERSION_REGISTRY, 0);
     if (!registry_) return false;
     spa_zero(registry_listener_);
@@ -1465,9 +1554,172 @@ namespace pipewire_capture {
     producer_sync_seq_ = -1;
   }
 
-  void capture_t::on_registry_global(void *userdata, std::uint32_t id, std::uint32_t, const char *type, std::uint32_t, const spa_dict *props) noexcept {
+  void capture_t::observe_format_global(std::uint32_t id, std::uint32_t permissions,
+                                        const char *type, std::uint32_t version, const spa_dict *props) {
+    if (!options_.inspect_hdr_formats || !options_.node_id || !options_.node_serial) return;
+    const auto value = [props](const char *key) { return props ? spa_dict_lookup(props, key) : nullptr; };
+    if (id == options_.node_id && std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+      const auto *text = value(PW_KEY_OBJECT_SERIAL);
+      const auto serial = text ? pipewire_producer_binding::parse_decimal(text, UINT64_MAX) : std::nullopt;
+      format_target_seen_ = serial && *serial == options_.node_serial &&
+                            (permissions & PW_PERM_R) && version >= PW_VERSION_NODE;
+      format_inventory_.invalidate();
+    } else if (std::strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+      const auto *node_text = value(PW_KEY_NODE_ID);
+      const auto node = node_text ? pipewire_producer_binding::parse_id(node_text) : std::nullopt;
+      if (!node || *node != options_.node_id) return;
+      const auto *direction = value(PW_KEY_PORT_DIRECTION);
+      if (direction && std::strcmp(direction, "in") == 0) return;
+      const auto *serial_text = value(PW_KEY_OBJECT_SERIAL);
+      const auto serial = serial_text ? pipewire_producer_binding::parse_decimal(serial_text, UINT64_MAX) : std::nullopt;
+      if (!direction || std::strcmp(direction, "out") != 0 || !serial || *serial == 0 || format_ports_.size() >= 16) {
+        format_registry_invalid_ = true;
+      } else {
+        format_ports_[id] = {*serial, permissions, version};
+      }
+      format_inventory_.invalidate();
+    }
+  }
+
+  producer_format_identity_t capture_t::current_format_identity() const {
+    if (!format_target_seen_ || format_registry_invalid_ || format_ports_.size() != 1) return {};
+    const auto port = format_ports_.find(format_port_id_);
+    if (port == format_ports_.end()) return {};
+    return {options_.node_id, options_.node_serial, format_port_id_, port->second.serial, stream_generation_};
+  }
+
+  void capture_t::on_format_node_info(void *userdata, const pw_node_info *info) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap || !info) return;
+    // A complete registry may still hide globals from this client. The node's own output count
+    // must confirm that the visible, serial-bound port is its sole possible capture output.
+    if (cap->format_node_info_ || info->id != cap->options_.node_id || info->n_output_ports != 1) {
+      cap->format_query_error_ = true;
+      cap->format_inventory_.invalidate();
+    }
+    cap->format_node_info_ = true;
+  }
+
+  void capture_t::on_format_port_info(void *userdata, const pw_port_info *info) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap || !info) return;
+    bool readable = false;
+    if (info->params && info->n_params <= 64) {
+      for (std::uint32_t i = 0; i < info->n_params; ++i) {
+        if (info->params[i].id == SPA_PARAM_EnumFormat && (info->params[i].flags & SPA_PARAM_INFO_READ)) readable = true;
+      }
+    }
+    if (cap->format_port_info_ || info->id != cap->format_port_id_ ||
+        info->direction != PW_DIRECTION_OUTPUT || !readable) {
+      cap->format_query_error_ = true;
+      cap->format_inventory_.invalidate();
+    }
+    cap->format_port_info_ = true;
+  }
+
+  void capture_t::on_format_port_param(void *userdata, int seq, std::uint32_t id,
+                                      std::uint32_t index, std::uint32_t next, const spa_pod *param) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap) return;
+    if (id != SPA_PARAM_EnumFormat) { cap->format_inventory_.invalidate(); return; }
+    cap->format_inventory_.param(seq, index, next, param);
+  }
+
+  bool capture_t::producer_lacks_hdr_rgb10(std::chrono::milliseconds timeout,
+                                          const std::function<bool()> &cancelled) {
+    if (!options_.inspect_hdr_formats || !options_.prefer_hdr_formats) return false;
+    const auto deadline = std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds {0});
+    const auto stopping = [&] { return producer_cancel_.load(std::memory_order_acquire) || (cancelled && cancelled()); };
+    if (stopping()) return false;
+    std::unique_lock shutdown_lock(shutdown_mtx_, std::try_to_lock);
+    if (!shutdown_lock.owns_lock() || shutdown_complete_ || !loop_ || !core_ ||
+        pw_thread_loop_in_thread(loop_) || stopping()) return false;
+    pw_thread_loop_lock(loop_);
+    auto unlock = util::fail_guard([&] { pw_thread_loop_unlock(loop_); });
+    if (!stream_ || producer_core_error_) return false;
+    // Successful captures acquire no additional registry. This bounded read starts only after
+    // failed HDR negotiation and never substitutes another core or a separate host probe.
+    if (!registry_ && !start_producer_tracking()) return false;
+    {
+      std::lock_guard lock(frame_mtx_);
+      if (stop_requested_ || negotiated_) return false;
+    }
+    bool node_hook = false, port_hook = false;
+    auto cleanup = util::fail_guard([&] {
+      format_sync_seq_ = -1;
+      format_inventory_.invalidate();
+      if (port_hook) spa_hook_remove(&format_port_listener_);
+      if (node_hook) spa_hook_remove(&format_node_listener_);
+      if (format_port_) pw_proxy_destroy(reinterpret_cast<pw_proxy *>(format_port_));
+      if (format_node_) pw_proxy_destroy(reinterpret_cast<pw_proxy *>(format_node_));
+      format_port_ = nullptr;
+      format_node_ = nullptr;
+    });
+    format_query_error_ = false;
+    format_node_info_ = format_port_info_ = false;
+    const auto barrier = [&]() {
+      format_sync_done_ = false;
+      format_sync_seq_ = pw_core_sync(core_, PW_ID_CORE, 0);
+      return format_sync_seq_ >= 0;
+    };
+    const auto wait_done = [&]() {
+      while (!format_sync_done_ && !format_query_error_ && !stopping()) {
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::steady_clock::duration::zero()) return false;
+        const auto slice = std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining), std::chrono::nanoseconds {20'000'000});
+        timespec until {};
+        if (pw_thread_loop_get_time(loop_, &until, slice.count()) < 0) return false;
+        const auto result = pw_thread_loop_timed_wait_full(loop_, &until);
+        if (result < 0 && result != -ETIMEDOUT) return false;
+      }
+      return format_sync_done_ && !format_query_error_ && !stopping() && std::chrono::steady_clock::now() < deadline;
+    };
+    // First drain registry events on THIS connection, then bind only its exact target identity.
+    if (!barrier() || !wait_done() || !format_target_seen_ || format_registry_invalid_ || format_ports_.size() != 1) return false;
+    const auto &[port_id, port] = *format_ports_.begin();
+    if (port.version < PW_VERSION_PORT || (port.permissions & (PW_PERM_R | PW_PERM_X)) != (PW_PERM_R | PW_PERM_X)) return false;
+    format_port_id_ = port_id;
+    const auto identity = current_format_identity();
+    static const pw_node_events node_events = [] {
+      pw_node_events events {}; events.version = PW_VERSION_NODE_EVENTS;
+      events.info = &capture_t::on_format_node_info; return events;
+    }();
+    static const pw_port_events port_events = [] {
+      pw_port_events events {}; events.version = PW_VERSION_PORT_EVENTS;
+      events.info = &capture_t::on_format_port_info;
+      events.param = &capture_t::on_format_port_param; return events;
+    }();
+    format_node_ = static_cast<pw_node *>(pw_registry_bind(registry_, identity.node_id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0));
+    format_port_ = static_cast<pw_port *>(pw_registry_bind(registry_, identity.port_id, PW_TYPE_INTERFACE_Port, PW_VERSION_PORT, 0));
+    if (!format_node_ || !format_port_) return false;
+    spa_zero(format_node_listener_); spa_zero(format_port_listener_);
+    node_hook = pw_node_add_listener(format_node_, &format_node_listener_, &node_events, this) >= 0;
+    port_hook = pw_port_add_listener(format_port_, &format_port_listener_, &port_events, this) >= 0;
+    if (!node_hook || !port_hook || !barrier() || !wait_done() || !format_node_info_ || !format_port_info_ ||
+        identity != current_format_identity()) return false;
+    // Native enum_params returns the sequence echoed by param events. A following core sync is
+    // ordered after the server's enumeration and replies (PipeWire port.h/core.h, impl-port.c).
+    // Hitting the request cap is deliberately not accepted as a complete inventory.
+    const int seq = pw_port_enum_params(format_port_, 0, SPA_PARAM_EnumFormat, 0, producer_format_inventory_t::max_params, nullptr);
+    if (seq < 0 || !barrier()) return false;
+    format_inventory_.begin(identity, seq, format_sync_seq_);
+    if (!wait_done() || stopping()) return false;
+    {
+      std::lock_guard lock(frame_mtx_);
+      if (stop_requested_ || negotiated_) return false;
+    }
+    return !stopping() && format_inventory_.unsupported(current_format_identity());
+  }
+
+  void capture_t::on_registry_global(void *userdata, std::uint32_t id, std::uint32_t permissions, const char *type, std::uint32_t version, const spa_dict *props) noexcept {
     auto *cap = static_cast<capture_t *>(userdata);
     if (!cap || !type) return;
+    try {
+      cap->observe_format_global(id, permissions, type, version, props);
+    } catch (...) {
+      cap->format_registry_invalid_ = true;
+      cap->format_inventory_.invalidate();
+    }
     if (id == PW_ID_CORE && std::strcmp(type, PW_TYPE_INTERFACE_Core) == 0) {
       // The server publishes its own library version on the Core global too (impl-core.c keys),
       // which a registry added after connect can still read.
@@ -1499,7 +1751,13 @@ namespace pipewire_capture {
   }
 
   void capture_t::on_registry_global_remove(void *userdata, std::uint32_t id) noexcept {
-    if (auto *cap = static_cast<capture_t *>(userdata)) cap->producer_graph_.global_remove(id);
+    if (auto *cap = static_cast<capture_t *>(userdata)) {
+      cap->producer_graph_.global_remove(id);
+      if (id == cap->options_.node_id || cap->format_ports_.erase(id)) {
+        cap->format_inventory_.invalidate();
+        if (id == cap->options_.node_id) cap->format_target_seen_ = false;
+      }
+    }
   }
 
   void capture_t::on_core_info(void *userdata, const pw_core_info *info) noexcept {
@@ -1515,13 +1773,25 @@ namespace pipewire_capture {
 
   void capture_t::on_core_done(void *userdata, std::uint32_t id, int seq) noexcept {
     auto *cap = static_cast<capture_t *>(userdata);
-    if (!cap || id != PW_ID_CORE || cap->producer_sync_seq_ < 0 || seq != cap->producer_sync_seq_) return;
-    cap->producer_sync_done_ = true;
-    pw_thread_loop_signal(cap->loop_, false);
+    if (!cap || id != PW_ID_CORE) return;
+    if (cap->format_sync_seq_ >= 0 && seq == cap->format_sync_seq_) {
+      cap->format_sync_done_ = true;
+      cap->format_inventory_.done(seq, cap->current_format_identity());
+      if (cap->loop_) pw_thread_loop_signal(cap->loop_, false);
+    }
+    if (cap->producer_sync_seq_ >= 0 && seq == cap->producer_sync_seq_) {
+      cap->producer_sync_done_ = true;
+      if (cap->loop_) pw_thread_loop_signal(cap->loop_, false);
+    }
   }
 
   void capture_t::on_core_error(void *userdata, std::uint32_t id, int, int, const char *) noexcept {
     auto *cap = static_cast<capture_t *>(userdata);
+    if (cap && cap->format_sync_seq_ >= 0) {
+      cap->format_query_error_ = true;
+      cap->format_inventory_.invalidate();
+      if (cap->loop_) pw_thread_loop_signal(cap->loop_, false);
+    }
     // Errors on other proxies (the stream's node) belong to the stream state machine. A core-level
     // error means this connection's graph can no longer be trusted.
     if (!cap || id != PW_ID_CORE) return;

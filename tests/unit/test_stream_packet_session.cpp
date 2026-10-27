@@ -199,8 +199,11 @@ namespace {
     }
 
     platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override {
-      return platf::capture_e::ok;
+      ++captures;
+      return failure.reason == platf::capture_failure_e::none ? platf::capture_e::ok : platf::capture_e::reinit;
     }
+
+    platf::capture_failure_t capture_failure() const override { return failure; }
 
     std::shared_ptr<platf::img_t> alloc_img() override {
       return {};
@@ -216,6 +219,8 @@ namespace {
     }
 
     int sessions = 0;
+    int captures = 0;
+    platf::capture_failure_t failure;
     std::function<void(int)> on_session;
   };
 
@@ -232,6 +237,17 @@ namespace {
   }
 
   constexpr std::string_view hdr_refusal = "negotiated HDR and the captured display is not in HDR";
+  constexpr std::string_view producer_refusal = "current producer snapshot did not advertise a supported packed 10-bit RGB format for this attempt";
+
+  video::config_t gamescope_hdr_stream() {
+    auto config = pyrowave_stream(true);
+    config.capture_generation.generation_id = 71;
+    config.capture_generation.stream_mode = "gamescope_stream";
+    config.capture_generation.capture_backend = "portal";
+    config.capture_generation.exact_display_name = "test-gamescope-source";
+    config.capture_generation.requested_output_name = config.capture_generation.exact_display_name;
+    return config;
+  }
 }  // namespace
 
 /**
@@ -269,6 +285,42 @@ TEST(StreamControlTerminationTests, AnHdrStreamFromADisplayNotInHdrIsRefusedOnce
   stream::session::stop(*session);
   EXPECT_EQ(stream::session::control_termination_code_for_tests(*session), std::optional<std::uint32_t> {0x800e9403u})
     << "the stream ends with a code the client reconnects into, or with none";
+
+  // The same terminal agreement also applies before any display exists and when that display
+  // reopens capture. Both go through the actual reset/capture consumers, not an encoder-only loop.
+  for (const bool reopen_capture : {false, true}) {
+    auto opening = make_session();
+    stream::session::set_state_for_tests(*opening, stream::session::state_e::RUNNING);
+    const auto opening_mail = stream::session::mail_for_tests(*opening);
+    const auto destination = stream::session::packet_destination_for_tests(*opening);
+    const auto config = gamescope_hdr_stream();
+    auto opened = std::make_shared<SdrDisplay>([](int) {});
+    int attempts = 0, ordered_stops = 0;
+    const auto before = log.count(producer_refusal);
+    const auto open = [&](platf::mem_type_e, const std::string &, const video::config_t &requested,
+                          platf::capture_failure_t &failure) -> std::shared_ptr<platf::display_t> {
+      ++attempts;
+      const platf::capture_failure_t unsupported {platf::capture_failure_e::unsupported_hdr_producer_format,
+                                                 requested.capture_generation, destination.capture_owner_tag()};
+      if (reopen_capture) { opened->failure = unsupported; return opened; }
+      failure = unsupported;
+      return {};
+    };
+    const auto before_shutdown = [&] {
+      ++ordered_stops;
+      EXPECT_TRUE(opening_mail->event<bool>(mail::frame_conversion_failed)->peek());
+      EXPECT_FALSE(opening_mail->event<bool>(mail::shutdown)->peek());
+    };
+    video::reset_capture_display_for_tests(opening_mail, config, destination, open, reopen_capture, before_shutdown);
+    video::reset_capture_display_for_tests(opening_mail, config, destination, open);
+    EXPECT_EQ(attempts, 1) << "the outer display-open path retried a terminal or already stopped owner";
+    EXPECT_EQ(opened->captures, reopen_capture ? 1 : 0);
+    EXPECT_EQ(ordered_stops, 1);
+    EXPECT_EQ(log.count(producer_refusal), before + 1);
+    EXPECT_TRUE(opening_mail->event<bool>(mail::shutdown)->peek());
+    stream::session::stop(*opening);
+    EXPECT_EQ(stream::session::control_termination_code_for_tests(*opening), std::optional<std::uint32_t> {0x800e9403u});
+  }
 }
 
 /**
@@ -305,6 +357,29 @@ TEST(StreamControlTerminationTests, ASessionThatCouldNotBeBuiltThisTimeIsBuiltAg
       << "a failure that may not repeat ended the stream as one that cannot change";
     stream::session::stop(*session);
     EXPECT_EQ(stream::session::control_termination_code_for_tests(*session),
+              graceful ? std::optional<std::uint32_t> {0x80030023u} : std::nullopt);
+
+    auto opening = make_session();
+    stream::session::set_state_for_tests(*opening, stream::session::state_e::RUNNING);
+    const auto opening_mail = stream::session::mail_for_tests(*opening);
+    int attempts = 0;
+    video::reset_capture_display_for_tests(opening_mail, gamescope_hdr_stream(),
+      stream::session::packet_destination_for_tests(*opening),
+      [&](platf::mem_type_e, const std::string &, const video::config_t &, platf::capture_failure_t &) {
+        ++attempts; return std::shared_ptr<platf::display_t> {};
+      });
+    EXPECT_EQ(attempts, 3) << "a generic display-open failure became permanent";
+    // Browser capture passes no packet destination. It must still open and capture normally.
+    const auto unowned = std::make_shared<SdrDisplay>([](int) {});
+    video::reset_capture_display_for_tests(opening_mail, gamescope_hdr_stream(), {},
+      [&](platf::mem_type_e, const std::string &, const video::config_t &, platf::capture_failure_t &) {
+        return unowned;
+      }, true);
+    EXPECT_EQ(unowned->captures, 1);
+    EXPECT_FALSE(opening_mail->event<bool>(mail::frame_conversion_failed)->peek());
+    EXPECT_FALSE(opening_mail->event<bool>(mail::shutdown)->peek());
+    graceful ? stream::session::graceful_stop(*opening) : stream::session::stop(*opening);
+    EXPECT_EQ(stream::session::control_termination_code_for_tests(*opening),
               graceful ? std::optional<std::uint32_t> {0x80030023u} : std::nullopt);
   }
 }
@@ -359,6 +434,42 @@ TEST(StreamControlTerminationTests, CancellationDuringEncoderInitializationBacko
     stream::session::stop(*session);
     EXPECT_EQ(stream::session::control_termination_code_for_tests(*session),
               graceful ? std::optional<std::uint32_t> {0x80030023u} : std::nullopt);
+
+    auto opening = make_session();
+    stream::session::set_state_for_tests(*opening, stream::session::state_e::RUNNING);
+    const auto opening_mail = stream::session::mail_for_tests(*opening);
+    const auto destination = stream::session::packet_destination_for_tests(*opening);
+    int attempts = 0;
+    video::reset_capture_display_for_tests(opening_mail, gamescope_hdr_stream(), destination,
+      [&](platf::mem_type_e, const std::string &, const video::config_t &requested, platf::capture_failure_t &failure) {
+        ++attempts;
+        failure = {platf::capture_failure_e::unsupported_hdr_producer_format, requested.capture_generation, destination.capture_owner_tag()};
+        graceful ? stream::session::graceful_stop(*opening) : stream::session::stop(*opening);
+        return std::shared_ptr<platf::display_t> {};
+      });
+    EXPECT_EQ(attempts, 1);
+    EXPECT_FALSE(opening_mail->event<bool>(mail::frame_conversion_failed)->peek());
+    EXPECT_EQ(stream::session::control_termination_code_for_tests(*opening),
+              graceful ? std::optional<std::uint32_t> {0x80030023u} : std::nullopt);
+  }
+  for (const bool replaced_generation : {false, true}) {
+    auto current = make_session(), foreign = make_session();
+    stream::session::set_state_for_tests(*current, stream::session::state_e::RUNNING);
+    const auto current_mail = stream::session::mail_for_tests(*current);
+    const auto foreign_mail = stream::session::mail_for_tests(*foreign);
+    const auto destination = stream::session::packet_destination_for_tests(*current);
+    video::reset_capture_display_for_tests(current_mail, gamescope_hdr_stream(), destination,
+      [&](platf::mem_type_e, const std::string &, const video::config_t &requested, platf::capture_failure_t &failure) {
+        failure = {platf::capture_failure_e::unsupported_hdr_producer_format, requested.capture_generation,
+          replaced_generation ? destination.capture_owner_tag() : stream::session::packet_destination_for_tests(*foreign).capture_owner_tag()};
+        if (replaced_generation) --failure.generation.generation_id;
+        return std::shared_ptr<platf::display_t> {};
+      });
+    EXPECT_FALSE(current_mail->event<bool>(mail::frame_conversion_failed)->peek());
+    EXPECT_FALSE(current_mail->event<bool>(mail::shutdown)->peek());
+    EXPECT_FALSE(foreign_mail->event<bool>(mail::frame_conversion_failed)->peek());
+    stream::session::stop(*current);
+    EXPECT_EQ(stream::session::control_termination_code_for_tests(*current), std::nullopt);
   }
 }
 #endif

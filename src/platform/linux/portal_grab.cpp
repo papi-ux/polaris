@@ -498,6 +498,7 @@ namespace portal {
       .requested_rate = requested_rate,
       .request_fixed_rate = generation.private_runtime != "gamescope" && running_kwin_uses_fixed_rate(),
       .track_producer = track_producer,
+      .inspect_hdr_formats = prefer_hdr && generation.stream_mode == "gamescope_stream",
     });
     if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) return nullptr;
     if (!local->start()) {
@@ -747,8 +748,10 @@ namespace portal {
     const capture_generation::identity_t &generation,
     AVRational requested_rate,
     const std::shared_ptr<const void> &prepared_token = {},
-    platf::capture_route_t *route_out = nullptr
+    platf::capture_route_t *route_out = nullptr,
+    platf::capture_failure_t *failure_out = nullptr
   ) {
+    if (failure_out) *failure_out = {};
     if (!portal_capture_backend_allowed(generation.capture_backend)) {
       BOOST_LOG(error) << "portal: capture generation backend ["sv << generation.capture_backend
                        << "] is not portal-authoritative; refusing acquisition"sv;
@@ -1093,6 +1096,7 @@ namespace portal {
           .prefer_sdr_formats = want_prefer_sdr,
           .requested_rate = requested_rate,
           .request_fixed_rate = generation.private_runtime != "gamescope" && running_kwin_uses_fixed_rate(),
+          .inspect_hdr_formats = want_prefer_hdr && generation.stream_mode == "gamescope_stream",
         });
         if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) return nullptr;
         if (!new_capture->start()) {
@@ -1120,6 +1124,12 @@ namespace portal {
     // Wait outside g_media_mu so release_global_capture can take the lock.
     const bool negotiated = wait_for_capture_negotiation(capture);
 
+    // A failed wait is not a capability verdict. Only a completed, identity-bound read of the
+    // producer's own port on this capture core can prove the HDR agreement cannot be served.
+    const bool unsupported_hdr = !negotiated && want_prefer_hdr && generation.stream_mode == "gamescope_stream" &&
+      session_media::pending_start_owner() && !capture_start_cancelled() && capture &&
+      capture->producer_lacks_hdr_rgb10(std::chrono::milliseconds {250}, capture_start_cancelled);
+
     {
       std::lock_guard lock(g_media_mu);
       // If release_global_capture raced us, drop the orphan (caller must not use it).
@@ -1131,7 +1141,14 @@ namespace portal {
         return nullptr;
       }
       if (!negotiated) {
-        BOOST_LOG(warning) << "portal: PipeWire format negotiation did not complete; invalidating portal session"sv;
+        if (unsupported_hdr && failure_out) {
+          *failure_out = {platf::capture_failure_e::unsupported_hdr_producer_format,
+                          generation, session_media::pending_start_owner()};
+        } else if (want_prefer_hdr && generation.stream_mode == "gamescope_stream") {
+          BOOST_LOG(warning) << "portal: HDR Gamescope Stream format negotiation did not complete; source format support is unknown. Start a new stream with HDR off, or use a source providing the required HDR capture format; invalidating portal session"sv;
+        } else {
+          BOOST_LOG(warning) << "portal: PipeWire format negotiation did not complete; invalidating portal session"sv;
+        }
         // Keep local `capture` so ~capture_t runs after unlock (no dtor under g_media_mu).
         g_media.reset_all();
         return nullptr;
@@ -1220,6 +1237,8 @@ namespace portal {
 
     bool probe_only = false;  // true during encoder probe (skip portal session)
     capture_generation::identity_t generation_;
+    platf::capture_failure_t failure_;
+    platf::capture_failure_t capture_failure() const override { return failure_; }
 
     int
     init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
@@ -1257,7 +1276,7 @@ namespace portal {
 #endif
         if (!cage_configured) {
           platf::capture_route_t route;
-          auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &route);
+          auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &route, &failure_);
           if (!cap) {
             return -1;
           }
@@ -1408,7 +1427,7 @@ namespace portal {
 
       // Fallback: source-owned portal/KWin capture (only when cage is NOT configured)
       platf::capture_route_t active_route;
-      auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &active_route);
+      auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &active_route, &failure_);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
         return platf::capture_e::reinit;
@@ -1623,12 +1642,14 @@ namespace portal {
 namespace platf {
 
   std::shared_ptr<display_t>
-  portal_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+  portal_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config,
+                 capture_failure_t &failure) {
     auto disp = std::make_shared<portal::portal_display_t>();
     // Encoder validation must remain picker-free and use the RAM factory.
     // Real capture construction negotiates before image-pool/factory selection.
     disp->probe_only = video::encoder_probe_active();
     if (disp->init(hwdevice_type, display_name, config)) {
+      if (!disp->probe_only) failure = disp->capture_failure();
       return nullptr;
     }
     return disp;

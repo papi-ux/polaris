@@ -133,6 +133,8 @@ Private Stream (labwc) is the solid default: apps stay off the host desktop, and
 
 Gamescope Stream attaches to an idle `gamescope-0` unit or spawns an owned headless Gamescope session, and the portal captures it. It needs `gamescope` on the host `PATH`, and some host setups also need private portal units; that part is host and packaging specific, see [the gamescope notes in Stream paths](stream-paths.md#relation-to-gamescope). The web UI's labwc-only flags (cage compositor, GPU-native capture preference) are ignored on this path. Encoder, bitrate, and HDR settings below the checklist still apply.
 
+HDR Gamescope Stream requires a capture source that can provide a supported 10-bit RGB format. Polaris does not retry an HDR stream as SDR when format negotiation fails. If the current producer's complete format snapshot did not advertise a supported packed 10-bit RGB format for that failed attempt, Polaris ends that owned stream with a video error. A new stream checks a fresh snapshot. Start it with HDR off, or use a Gamescope build and capture path that provide the required HDR format. A timeout, cancelled negotiation, or unreadable format advertisement leaves source support unknown; the snapshot does not establish whether the hardware can provide HDR through another path.
+
 ### Headless Dongle checklist
 
 Set the streaming output (the dummy plug) and the primary output (the real panel), pick a swap mode, and save. Capture goes through the portal after Polaris prepares the display topology. The **Detect connectors** button fills empty output fields from host discovery; the swap behavior itself is described under [Headless Dongle](#headless-dongle), and the `headless_swap_mode` values live in [Configuration](configuration.md#common-options).

@@ -2257,6 +2257,7 @@ namespace video {
     config_t config;
     int frame_nr;
     stream_packets::destination_t channel_data;
+    safe::mail_t mail;
   };
 
   /**
@@ -2449,6 +2450,7 @@ namespace video {
     img_event_t images;
     config_t config;
     stream_packets::destination_t channel_data;
+    safe::mail_t mail;
   };
 
   struct capture_thread_async_ctx_t {
@@ -3322,12 +3324,89 @@ namespace video {
 #endif
   }
 
-  void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
+  void end_stream_encoder_cannot_serve(const safe::mail_t &mail);
+
+  struct capture_failure_owner_t {
+    safe::mail_t mail;
+    stream_packets::destination_t destination;
+    std::function<bool()> current = {};
+  };
+
+  bool capture_owner_live(const capture_failure_owner_t &owner) {
+    if (!owner.mail || (owner.current && !owner.current()) || owner.mail->event<bool>(mail::shutdown)->peek()) return false;
+    // Browser capture intentionally has no packet owner. Keep its ordinary behavior; absence of
+    // an owner can never authorize the terminal failure below.
+    if (owner.destination.capture_owner_tag() && !owner.destination.acquire()) return false;
+#ifdef __linux__
+    if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(owner.destination.capture_owner_tag())) return false;
+#endif
+    return true;
+  }
+
+  bool consume_capture_failure(const platf::capture_failure_t &failure, const config_t &config,
+                                const capture_failure_owner_t &owner) {
+    if (failure.reason != platf::capture_failure_e::unsupported_hdr_producer_format ||
+        config.dynamicRange <= 0 || config.capture_generation.stream_mode != "gamescope_stream" ||
+        config.capture_generation.generation_id == 0 || failure.generation != config.capture_generation ||
+        !failure.owner || failure.owner != owner.destination.capture_owner_tag() || !capture_owner_live(owner)) return false;
+    // This is the actual session's separately retained mail. The opaque owner tag is never cast.
+    auto delivery = owner.destination.acquire();
+    if (!delivery || owner.mail->event<bool>(mail::shutdown)->peek()) return false;
+    BOOST_LOG(error) << "HDR Gamescope Stream format negotiation failed: the current producer snapshot did not advertise a supported packed 10-bit RGB format for this attempt. Ending this stream; start a new stream with HDR off, or use a source providing the required HDR capture format."sv;
+    end_stream_encoder_cannot_serve(owner.mail);
+    return true;
+  }
+
+  using display_open_t = std::function<std::shared_ptr<platf::display_t>(platf::mem_type_e, const std::string &, const config_t &, platf::capture_failure_t &)>;
+#ifdef POLARIS_TESTS
+  const display_open_t *display_open_test_hook = nullptr;
+  const std::function<void()> *capture_terminal_test_hook = nullptr;
+#endif
+
+  platf::capture_e capture_owned_display(const std::shared_ptr<platf::display_t> &disp,
+                                         const platf::display_t::push_captured_image_cb_t &push,
+                                         const platf::display_t::pull_free_image_cb_t &pull, bool *cursor,
+                                         const config_t &config, const capture_failure_owner_t &owner) {
+#ifdef __linux__
+    session_media::pending_start_owner_scope_t owner_scope {owner.destination.capture_owner_tag()};
+#endif
+    const auto result = disp->capture(push, pull, cursor);
+    if (const auto failure = disp->capture_failure(); failure.reason != platf::capture_failure_e::none) {
+      if (consume_capture_failure(failure, config, owner)) return platf::capture_e::error;
+    }
+    return result;
+  }
+
+  // True means this owning capture path must stop, including an owner whose cancellation won.
+  // Probes pass no owner and retain the ordinary pointer-only failure/retry behavior.
+  bool open_capture_display(std::shared_ptr<platf::display_t> &disp, platf::mem_type_e type,
+                             const std::string &name, const config_t &config, const capture_failure_owner_t *owner) {
+    if (owner && !capture_owner_live(*owner)) return true;
+    platf::capture_failure_t failure;
+#ifdef POLARIS_TESTS
+    if (display_open_test_hook) disp = (*display_open_test_hook)(type, name, config, failure);
+    else
+#endif
+    {
+#ifdef __linux__
+      disp = platf::display(type, name, config, failure);
+#else
+      disp = platf::display(type, name, config);
+#endif
+    }
+    if (owner && failure.reason != platf::capture_failure_e::none) {
+      if (consume_capture_failure(failure, config, *owner)) return true;
+    }
+    return owner && !capture_owner_live(*owner);
+  }
+
+  bool reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name,
+                       const config_t &config, const capture_failure_owner_t *owner = nullptr) {
     constexpr int max_attempts = 3;
 
     for (int x = 0; x < max_attempts; ++x) {
       disp.reset();
-      disp = platf::display(type, display_name, config);
+      if (open_capture_display(disp, type, display_name, config, owner)) return true;
       if (disp) {
         break;
       }
@@ -3338,6 +3417,7 @@ namespace video {
 
       std::this_thread::sleep_for(reset_display_retry_delay(x));
     }
+    return false;
   }
 
   /**
@@ -3775,7 +3855,8 @@ namespace video {
     };
 #endif
     if (!exact_display_name.empty()) {
-      disp = platf::display(session_device_type(), exact_display_name, capture_ctxs.front().config);
+      const capture_failure_owner_t owner {capture_ctxs.front().mail, capture_ctxs.front().channel_data};
+      if (open_capture_display(disp, session_device_type(), exact_display_name, capture_ctxs.front().config, &owner)) return;
     }
     if (!disp && !capture_fallback_allowed(exact_display_name)) {
       BOOST_LOG(error) << "Requested display ["sv << exact_display_name
@@ -3795,8 +3876,8 @@ namespace video {
         BOOST_LOG(error) << "Requested display is unavailable for initial capture setup"sv;
         return;
       }
-      disp = platf::display(session_device_type(), display_names[display_p],
-                            capture_ctxs.front().config);
+      const capture_failure_owner_t owner {capture_ctxs.front().mail, capture_ctxs.front().channel_data};
+      if (open_capture_display(disp, session_device_type(), display_names[display_p], capture_ctxs.front().config, &owner)) return;
       if (disp) {
         proc::proc.display_name = display_names[display_p];
       } else {
@@ -3974,7 +4055,14 @@ namespace video {
         return true;
       };
 
-      auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+      const auto capture_config = capture_ctxs.front().config;
+      const auto capture_owner = capture_ctxs.front().channel_data.capture_owner_tag();
+      const capture_failure_owner_t owner {capture_ctxs.front().mail, capture_ctxs.front().channel_data, [&] {
+        return !capture_ctxs.empty() && capture_ctxs.front().channel_data.capture_owner_tag() == capture_owner &&
+               capture_ctxs.front().config.capture_generation == capture_config.capture_generation;
+      }};
+      auto status = capture_owned_display(disp, push_captured_image_callback, pull_free_image_callback,
+                                           &display_cursor, capture_config, owner);
 
       if (artificial_reinit && status != platf::capture_e::error) {
         status = platf::capture_e::reinit;
@@ -4038,12 +4126,14 @@ namespace video {
                     capture_ctxs.front().channel_data.capture_owner_tag()
                   };
 #endif
-                  reset_display(
+                  const capture_failure_owner_t owner {capture_ctxs.front().mail, capture_ctxs.front().channel_data};
+                  if (reset_display(
                     disp,
                     session_device_type(),
                     exact_display_name,
-                    capture_ctxs.front().config
-                  );
+                    capture_ctxs.front().config,
+                    &owner
+                  )) return;
                 }
                 if (!disp) {
                   BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
@@ -4084,12 +4174,14 @@ namespace video {
                   capture_ctxs.front().channel_data.capture_owner_tag()
                 };
 #endif
-                reset_display(
+                const capture_failure_owner_t owner {capture_ctxs.front().mail, capture_ctxs.front().channel_data};
+                if (reset_display(
                   disp,
                   session_device_type(),
                   display_names[display_p],
-                  capture_ctxs.front().config
-                );
+                  capture_ctxs.front().config,
+                  &owner
+                )) return;
               }
               if (disp) {
                 proc::proc.display_name = display_names[display_p];
@@ -5062,6 +5154,9 @@ namespace video {
    */
   void end_stream_encoder_cannot_serve(const safe::mail_t &mail) {
     mail->event<bool>(mail::frame_conversion_failed)->raise(true);
+#ifdef POLARIS_TESTS
+    if (capture_terminal_test_hook) (*capture_terminal_test_hook)();
+#endif
     mail->event<bool>(mail::shutdown)->raise(true);
   }
 
@@ -6351,12 +6446,14 @@ namespace video {
             synced_session_ctxs.front()->channel_data.capture_owner_tag()
           };
 #endif
-          reset_display(
+          const capture_failure_owner_t owner {synced_session_ctxs.front()->mail, synced_session_ctxs.front()->channel_data};
+          if (reset_display(
             disp,
             encoder.platform_formats->dev_type,
             exact_display_name,
-            synced_session_ctxs.front()->config
-          );
+            synced_session_ctxs.front()->config,
+            &owner
+          )) return encode_e::error;
         }
         if (!disp) {
           BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
@@ -6399,7 +6496,8 @@ namespace video {
           synced_session_ctxs.front()->channel_data.capture_owner_tag()
         };
 #endif
-        reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config);
+        const capture_failure_owner_t owner {synced_session_ctxs.front()->mail, synced_session_ctxs.front()->channel_data};
+        if (reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config, &owner)) return encode_e::error;
       }
       if (disp) {
         break;
@@ -6576,7 +6674,14 @@ namespace video {
         return true;
       };
 
-      auto status = disp->capture(push_captured_image_callback, pull_free_image_callback, &display_cursor);
+      const auto capture_config = synced_session_ctxs.front()->config;
+      const auto capture_owner = synced_session_ctxs.front()->channel_data.capture_owner_tag();
+      const capture_failure_owner_t owner {synced_session_ctxs.front()->mail, synced_session_ctxs.front()->channel_data, [&] {
+        return !synced_session_ctxs.empty() && synced_session_ctxs.front()->channel_data.capture_owner_tag() == capture_owner &&
+               synced_session_ctxs.front()->config.capture_generation == capture_config.capture_generation;
+      }};
+      auto status = capture_owned_display(disp, push_captured_image_callback, pull_free_image_callback,
+                                           &display_cursor, capture_config, owner);
       switch (status) {
         case platf::capture_e::reinit:
         case platf::capture_e::error:
@@ -6760,6 +6865,7 @@ namespace video {
       images,
       config,
       channel_data,
+      mail,
     });
 
     if (!ref->capture_ctx_queue->running()) {
@@ -6870,6 +6976,7 @@ namespace video {
         config,
         1,
         channel_data,
+        mail,
       });
 
       // Wait for join signal
@@ -8801,6 +8908,30 @@ namespace video {
 
   void end_stream_encoder_cannot_serve_for_tests(const safe::mail_t &mail) {
     end_stream_encoder_cannot_serve(mail);
+  }
+
+  void reset_capture_display_for_tests(const safe::mail_t &mail, const config_t &config,
+    const stream_packets::destination_t &destination, const display_open_t &open,
+    bool capture_after_open, const std::function<void()> &before_shutdown) {
+    const auto previous_open = display_open_test_hook;
+    const auto previous_terminal = capture_terminal_test_hook;
+    display_open_test_hook = &open;
+    capture_terminal_test_hook = before_shutdown ? &before_shutdown : nullptr;
+    auto restore = util::fail_guard([&] {
+      display_open_test_hook = previous_open;
+      capture_terminal_test_hook = previous_terminal;
+    });
+    const capture_failure_owner_t owner {mail, destination};
+    std::shared_ptr<platf::display_t> display;
+#ifdef __linux__
+    session_media::pending_start_owner_scope_t owner_scope {destination.capture_owner_tag()};
+#endif
+    if (reset_display(display, platf::mem_type_e::system, config.capture_generation.exact_display_name, config, &owner)) return;
+    if (capture_after_open && display) {
+      bool cursor = false;
+      capture_owned_display(display, [](std::shared_ptr<platf::img_t> &&, bool) { return false; },
+        [](std::shared_ptr<platf::img_t> &) { return false; }, &cursor, config, owner);
+    }
   }
 
   void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,

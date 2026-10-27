@@ -1138,6 +1138,12 @@ namespace video {
   /** What the encode loop raises on a session's mail to end a stream its encoder can never serve. */
   void end_stream_encoder_cannot_serve_for_tests(const safe::mail_t &mail);
 
+  // The real display-open retry and capture-reopen consumers, with only the platform open replaced.
+  void reset_capture_display_for_tests(const safe::mail_t &mail, const config_t &config,
+    const stream_packets::destination_t &destination,
+    const std::function<std::shared_ptr<platf::display_t>(platf::mem_type_e, const std::string &, const config_t &, platf::capture_failure_t &)> &open,
+    bool capture_after_open = false, const std::function<void()> &before_shutdown = {});
+
   /**
    * The loop capture_async() runs for a session on the parallel encode path, which builds an encode
    * session on the display capture published and builds it again each time one returns, run over
