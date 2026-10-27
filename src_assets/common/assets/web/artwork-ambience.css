@@ -1,0 +1,38 @@
+/* The stage's live glow in its cover's own colour (artwork-tint.js). It is decoration, so it stays
+   out of the startup stylesheet: a stage loads these rules once, the first time a live cover has a
+   tint, and they join the components layer that holds the rest of the stage. A still wash sits
+   over the artwork and under the scrim, so the copy keeps its contrast, and a soft ring circles the
+   key art. Each enters once and then holds. Reduced motion, High Contrast and Director keep the
+   plain stage; forced colours drop gradients and shadows on their own. */
+@layer components {
+  .mc-stage-ambience {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    background: radial-gradient(75% 95% at 72% 32%, color-mix(in srgb, var(--mc-ambience) 42%, transparent), transparent 75%);
+    transition: opacity 0.6s ease;
+  }
+
+  /* The wash is drawn when the glow begins, so it enters with a single fade rather than a
+     transition from a state that was never painted. */
+  @media (prefers-reduced-motion: no-preference) {
+    .mc-keyart {
+      transition: box-shadow 0.6s ease;
+    }
+
+    :root:not([data-theme="high-contrast"], [data-theme="director"]) .mc-stage.has-ambience .mc-stage-ambience {
+      opacity: 1;
+      animation: mc-ambience-in 0.6s ease;
+    }
+
+    :root:not([data-theme="high-contrast"], [data-theme="director"]) .mc-stage.has-ambience .mc-keyart {
+      box-shadow: 0 1.25rem 2.5rem -1.25rem rgb(0 0 0 / 0.85), 0 0 2.25rem -0.5rem color-mix(in srgb, var(--mc-ambience) 50%, transparent);
+    }
+  }
+}
+
+@keyframes mc-ambience-in {
+  from {
+    opacity: 0;
+  }
+}
