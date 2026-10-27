@@ -348,16 +348,17 @@ class Controller:
             self.clean_promotion()
             self.lo = self.target
             if self.retained_queue_ceiling is not None and self.target < self.retained_queue_ceiling:
-                # Resume the still-unverified queue bracket without inventing loss samples.
+                # Preserve queue provenance without reopening unrestricted discovery.
                 # The failed-hold dwell keeps its own existing lifetime.
                 self.hi, self.retained_queue_ceiling = self.retained_queue_ceiling, None
                 self.hi_kind = 'queue'
                 self.hi_loss = self.CLIMB_LOSSY
                 self.hi_stats = [0, 0]
                 self.hi_rechecked = False
-                self.state = BISECT
-                self.bisect_step(now)
-                return
+                if self.hi / self.lo <= self.BISECT_DONE:
+                    # Keep a closed bracket's tighter ceiling; wider bounds use the staircase below.
+                    self.enter_hold(now, self.target)
+                    return
             # A clean queue ceiling becomes a real hold before the next completion-size probe.
             # Keep the staircase's original anchor until its existing recheck radius is cleared.
             if self.hi_kind == 'queue' or self.retained_queue_ceiling is not None:

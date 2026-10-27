@@ -338,16 +338,18 @@ namespace live_tuning_policy {
       clean_promotion();
       lo_ = target_;
       if (retained_queue_ceiling_ && target_ < *retained_queue_ceiling_) {
-        // This only verified the lower rate. Resume the still-unverified queue bracket, with
-        // no invented loss samples; any failed-hold dwell keeps its own existing lifetime.
+        // This only verified the lower rate. Preserve the queue provenance without reopening
+        // unrestricted discovery; any failed-hold dwell keeps its own existing lifetime.
         hi_ = std::exchange(retained_queue_ceiling_, std::nullopt);
         hi_is_queue_ = true;
         hi_loss_ = CLIMB_LOSSY;
         hi_stats_ = {0.0, 0.0};
         hi_rechecked_ = false;
-        state_ = state_e::bisect;
-        bisect_step(now_ms);
-        return;
+        if (static_cast<double>(*hi_) / *lo_ <= BISECT_DONE) {
+          // Keep a closed bracket's tighter ceiling. Wider bounds use the staircase below.
+          enter_hold(now_ms, target_);
+          return;
+        }
       }
       // A queue ceiling that held clean becomes a real hold before the next completion-size probe.
       // Keep the staircase's original anchor until its existing recheck radius is cleared.
