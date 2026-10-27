@@ -41,11 +41,15 @@ async function render(first) {
   await flushPromises()
   shared.stats.value = first
   await flushPromises()
+  await vi.dynamicImportSettled()
+  await flushPromises()
 }
 async function receive(stats, { at, connected = true } = {}) {
   if (at !== undefined) vi.setSystemTime(START + at * 1000)
   shared.connected.value = connected
   shared.stats.value = stats
+  await flushPromises()
+  await vi.dynamicImportSettled()
   await flushPromises()
 }
 const lastCell = () => wrapper.get('[data-idle-signal="last"]')

@@ -547,7 +547,6 @@ import {
   streamStatusUnavailable,
   unavailableSignalCells,
 } from '../mission-control.js'
-import { latestTuningChange, tuningChanges, tuningMarkers } from '../live-tuning-timeline.js'
 
 const { stats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats(1000)
 const { label: liveTuningLabel } = useLiveTuning()
@@ -1822,10 +1821,21 @@ const liveCells = computed(() => liveSignalCells({
 }))
 // Live Tuning's recorded changes, from the same report as the readings. The markers follow the
 // sparklines' axis and vanish with them under reduced motion; the line says nothing when nothing changed.
+// Load the account only for the live stage, including its text under reduced motion.
+const tuningTimeline = shallowRef(null)
+watch(stageMode, async (mode, _previous, onCleanup) => {
+  if (mode !== 'live' || tuningTimeline.value) return
+  let current = true
+  onCleanup(() => { current = false })
+  try {
+    const timeline = await import('../live-tuning-timeline.js')
+    if (current) tuningTimeline.value = timeline
+  } catch {}
+}, { immediate: true })
 const tuningHistory = computed(() => stats.value?.live_tuning_history)
-const tuningChangeList = computed(() => tuningChanges(tuningHistory.value))
-const tuningSparkMarkers = computed(() => tuningMarkers(tuningChangeList.value, tuningHistory.value, timestamps.value))
-const tuningNote = computed(() => latestTuningChange(tuningChangeList.value, tuningHistory.value, t))
+const tuningChangeList = computed(() => tuningTimeline.value?.tuningChanges(tuningHistory.value) ?? [])
+const tuningSparkMarkers = computed(() => tuningTimeline.value?.tuningMarkers(tuningChangeList.value, tuningHistory.value, timestamps.value) ?? {})
+const tuningNote = computed(() => tuningTimeline.value?.latestTuningChange(tuningChangeList.value, tuningHistory.value, t) ?? '')
 const unavailableCells = computed(() => unavailableSignalCells({ t }))
 // The mode new sessions start in: the configured stream path on Linux, Private Stream or Windowed
 // elsewhere. Nothing is claimed until the host's settings have been read.

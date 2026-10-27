@@ -1,7 +1,6 @@
 <script setup>
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onThemeTokensChange, readThemeTokens, withAlpha } from '../theme-bridge.js'
-import { drawTuningMarkers } from '../live-tuning-timeline.js'
 
 // The stage's lower edge: one reading per cell, from Mission Control's helpers. The live cells
 // carry sparklines of the dashboard's rolling history. uPlot loads only when a sparkline is shown,
@@ -23,14 +22,16 @@ const root = ref(null)
 const sparkEls = {}
 const charts = {}
 let uPlotLib = null
+let drawTuningMarkers = null
 let resizeObserver = null
 let unsubscribeTheme = null
 let unmounted = false
 
 async function loadUPlot() {
   if (!uPlotLib) {
-    const mod = await import('uplot')
+    const [mod, timeline] = await Promise.all([import('uplot'), import('../live-tuning-timeline.js')])
     await import('uplot/dist/uPlot.min.css')
+    drawTuningMarkers = timeline.drawTuningMarkers
     uPlotLib = mod.default
   }
   return uPlotLib
@@ -96,8 +97,8 @@ function pushData() {
 async function syncCharts() {
   if (!props.charts || props.prefersReducedMotion) { destroyAll(); return }
   if (!Object.keys(sparkEls).length) return
-  const lib = await loadUPlot()
-  if (unmounted || !props.charts || props.prefersReducedMotion) return
+  const lib = await loadUPlot().catch(() => null)
+  if (!lib || unmounted || !props.charts || props.prefersReducedMotion) return
   for (const [key, el] of Object.entries(sparkEls)) {
     const width = Math.floor(el.clientWidth)
     if (!el.isConnected || width <= 0) continue
