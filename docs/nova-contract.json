@@ -18,6 +18,32 @@
   ],
   "version": 2,
   "objects": {
+    "video_queue": {
+      "$comment": [
+        "The informational clients[].video_queue object in stream_stats, served only for a registered host-session generation.",
+        "evicted_frames counts encoded frames removed at queue capacity for the evicted packet's live owner, even when another session produced the replacement. It is cumulative for that generation, not client network loss; normal pop, stop and destruction do not count.",
+        "The host video queue is shared across sessions. Browser video queues use the same oldest-only policy but have no host-session destination and are not included in these per-client counters. Stopped, expired and unregistered owners cannot write a live row."
+      ],
+      "fields": [
+        "evicted_frames"
+      ],
+      "informational_ok": [
+        "evicted_frames"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_stats.cpp",
+        "function": "video_queue_json",
+        "declaration": "nlohmann::json queue {",
+        "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "evicted_frames"
+      ],
+      "types": {
+        "evicted_frames": "integer"
+      }
+    },
     "live_tuning_history_entry": {
       "$comment": [
         "One entry of live_tuning_history, bounded to 64 entries with version 1. Diagnostic kind/cause are open strings, distinct from Live Tuning status states.",

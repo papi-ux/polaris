@@ -67,6 +67,20 @@ TEST(StreamPacketSessionTests, StopRejectsQueuedAudioAndVideoBeforeSessionDestru
     EXPECT_EQ(active.get(), session.get());
     EXPECT_EQ(audio.first.acquire().get(), session.get());
 
+    // Exercise the actual capacity-32 mail queues: video loses only frame 0,
+    // while audio keeps its existing clear-on-full behavior.
+    auto mailbox = std::make_shared<safe::mail_raw_t>();
+    auto video_packets = mailbox->queue<video::packet_t>(mail::video_packets);
+    auto audio_packets = mailbox->queue<audio::packet_t>(mail::audio_packets);
+    for (int index = 0; index < 33; ++index) {
+      auto packet = std::make_unique<video::packet_raw_generic>(std::vector<std::uint8_t> {1, 2, 3}, index, true);
+      packet->channel_data = destination;
+      video_packets->raise(std::move(packet));
+      audio::packet_t sound {destination, audio::buffer_t {1}};
+      sound.second[0] = static_cast<std::uint8_t>(index);
+      audio_packets->raise(std::move(sound));
+    }
+
     stream::session::set_state_for_tests(*session, stream::session::state_e::RUNNING);
     if (graceful) {
       stream::session::graceful_stop(*session);
@@ -83,6 +97,18 @@ TEST(StreamPacketSessionTests, StopRejectsQueuedAudioAndVideoBeforeSessionDestru
     session.reset();
     EXPECT_FALSE(video.channel_data.acquire());
     EXPECT_FALSE(audio.first.acquire());
+    for (int index = 1; index <= 32; ++index) {
+      auto packet = video_packets->pop(0ms);
+      ASSERT_TRUE(packet);
+      EXPECT_EQ(packet->frame_index(), index);
+      EXPECT_FALSE(packet->channel_data.acquire());
+    }
+    EXPECT_FALSE(video_packets->peek());
+    auto sound = audio_packets->pop(0ms);
+    ASSERT_TRUE(sound);
+    EXPECT_EQ(sound->second[0], 32);
+    EXPECT_FALSE(sound->first.acquire());
+    EXPECT_FALSE(audio_packets->peek());
   }
 }
 

@@ -785,6 +785,23 @@ namespace video {
   };
 
   using packet_t = std::unique_ptr<packet_raw_t>;
+
+  // Called only for a capacity eviction, after releasing the queue lock.
+  void record_queue_eviction(const packet_t &packet);
+}  // namespace video
+
+namespace safe {
+  // Must precede packet_queue_t and every queue_t<video::packet_t> instantiation.
+  template<>
+  struct queue_policy_t<video::packet_t> {
+    static constexpr bool drop_oldest = true;
+    static void on_evict(const video::packet_t &packet) {
+      video::record_queue_eviction(packet);
+    }
+  };
+}  // namespace safe
+
+namespace video {
   using packet_queue_t = safe::mail_raw_t::queue_t<packet_t>;
 
   struct hdr_info_raw_t {

@@ -201,6 +201,9 @@ namespace stream_stats {
     std::string encoder_backend;
     int width = 0;
     int height = 0;
+    // Encoded frames evicted at video-queue capacity for this live generation.
+    // Host queue pressure, independent of client media/network loss.
+    std::uint64_t video_queue_evicted_frames = 0;
     // Last real source frame accepted by this client's encoder, before scaling.
     capture_source_t capture_source;
     // What this client's capture asked for and opened. Empty opened means nothing was published.
@@ -906,6 +909,9 @@ namespace stream_stats {
    */
   void remove_client(const std::string &client_ip,
                      std::uint64_t session_generation = 0);
+
+  /** Count one capacity-evicted encoded frame for its live owner, never by IP. */
+  bool record_video_queue_eviction(std::uint64_t session_generation);
 
   /**
    * @brief Update video statistics (backward-compatible single-client API).

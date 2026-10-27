@@ -47,6 +47,7 @@ extern "C" {
 #include "logging.h"
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
+#include "stream.h"
 #include "stream_stats.h"
 #include "sync.h"
 #include "video.h"
@@ -95,6 +96,18 @@ extern "C" {
 using namespace std::literals;
 
 namespace video {
+
+  void record_queue_eviction(const packet_t &packet) {
+    if (!packet) return;
+    // The shared host queue may evict a different session's frame. Its existing
+    // destination lease protects that session through the generation lookup and
+    // stats write, and rejects stopped/expired owners. Browser capture has no
+    // host-session destination and therefore contributes no per-client count.
+    auto owner = packet->channel_data.acquire();
+    if (!owner) return;
+    stream_stats::record_video_queue_eviction(
+      stream::session::generation(*static_cast<stream::session_t *>(owner.get())));
+  }
 
   namespace {
 

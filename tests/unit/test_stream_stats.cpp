@@ -17,6 +17,9 @@
 #include <src/vrr_clock_proof.h>
 #include <src/vrr_source_time.h>
 #include <src/launch_profile.h>
+#include <src/globals.h>
+#include <src/rtsp.h>
+#include <src/stream.h>
 #include "../tests_events.h"
 
 #include <gtest/gtest.h>
@@ -894,6 +897,74 @@ TEST(StreamStatsCapturePathTests, LabelsWindowedDmabufOverridePath) {
   EXPECT_TRUE(stream_stats::capture_path_is_gpu_native(stats));
 }
 
+
+TEST(StreamStatsVideoQueueTests, CountsOnlyCapacityEvictionsForTheEvictedLiveOwner) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream::config_t config {};
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 1;
+  launch.gcm_key.resize(16);
+  launch.iv.resize(16);
+  launch.unique_id = "queue-owner";
+  auto first = stream::session::alloc(config, launch);
+  launch.id = 2;
+  launch.unique_id = "queue-producer";
+  auto second = stream::session::alloc(config, launch);
+  const auto first_generation = stream::session::generation(*first);
+  const auto second_generation = stream::session::generation(*second);
+  const auto first_destination = stream::session::packet_destination_for_tests(*first);
+  const auto second_destination = stream::session::packet_destination_for_tests(*second);
+  stream_stats::add_client("same-client", "Owner", first_generation);
+  stream_stats::add_client("same-client", "Producer", second_generation);
+  EXPECT_FALSE(stream_stats::record_video_queue_eviction(0));
+  EXPECT_FALSE(stream_stats::record_video_queue_eviction(first_generation + second_generation + 1));
+
+  auto mailbox = std::make_shared<safe::mail_raw_t>();
+  auto packets = mailbox->queue<video::packet_t>(mail::video_packets);
+  const auto enqueue = [&](const stream_packets::destination_t &destination, int index) {
+    auto packet = std::make_unique<video::packet_raw_generic>(std::vector<std::uint8_t> {1}, index, true);
+    packet->channel_data = destination;
+    packets->raise(std::move(packet));
+  };
+  enqueue(first_destination, 0);
+  for (int index = 1; index <= 32; ++index) enqueue(second_destination, index);
+  auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json["clients"][0]["video_queue"]["evicted_frames"], 1u);
+  EXPECT_EQ(json["clients"][1]["video_queue"]["evicted_frames"], 0u);
+  EXPECT_EQ(json["clients"][0]["packet_loss"], 0.0);
+  for (int index = 1; index <= 32; ++index) {
+    auto packet = packets->pop(std::chrono::milliseconds(0));
+    ASSERT_TRUE(packet);
+    EXPECT_EQ(packet->frame_index(), index);
+  }
+  EXPECT_FALSE(packets->peek());
+
+  // Retained packets do not write through a stopped or destroyed owner, and
+  // browser packets with no host-session destination never borrow this client.
+  stream::session::set_state_for_tests(*first, stream::session::state_e::RUNNING);
+  stream::session::stop(*first);
+  for (int state = 0; state < 3; ++state) {
+    if (state == 1) first.reset();
+    enqueue(state == 2 ? stream_packets::destination_t {} : first_destination, 0);
+    for (int index = 1; index <= 32; ++index) enqueue(second_destination, index);
+    while (packets->pop(std::chrono::milliseconds(0))) {}
+  }
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json["clients"][0]["video_queue"]["evicted_frames"], 1u);
+  EXPECT_EQ(json["clients"][1]["video_queue"]["evicted_frames"], 0u);
+  stream_stats::remove_client("same-client", first_generation);
+  EXPECT_FALSE(stream_stats::record_video_queue_eviction(first_generation));
+
+  // Neither shutdown destruction nor a rejected raise counts as eviction.
+  enqueue(second_destination, 0);
+  packets->stop();
+  enqueue(second_destination, 1);
+  packets.reset();
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  ASSERT_EQ(json["clients"].size(), 1u);
+  EXPECT_EQ(json["clients"][0]["video_queue"]["evicted_frames"], 0u);
+}
 
 TEST(StreamStatsCaptureSourceTests, KeepsReconnectAndIndependentClientEvidenceSeparate) {
   stream_stats::update_stream_active(false);

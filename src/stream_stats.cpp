@@ -696,6 +696,13 @@ namespace stream_stats {
       return nonce;
     }
 
+    nlohmann::json video_queue_json(const client_stats_t &client) {
+      nlohmann::json queue {
+        {v1::video_queue::evicted_frames, client.video_queue_evicted_frames}
+      };
+      return queue;
+    }
+
     /// The frames a client accepted from the display its capture names. Only frames that display
     /// delivered count, so until it delivers one, transport, residency and format read unknown,
     /// and a display opened again starts over.
@@ -1415,6 +1422,7 @@ namespace stream_stats {
       cj["capture_source"] = capture_source_json(c.capture_source);
       if (c.session_generation != 0) {
         cj["stream_instance_id"] = stream_instance_id(c.session_generation);
+        cj["video_queue"] = video_queue_json(c);
         // This client's own frozen request, named by the same opaque identity as the row.
         if (c.vrr) {
           cj["vrr"] = vrr_record_json(*c.vrr, {{"stream_instance_id", stream_instance_id(c.session_generation)}}, c.vrr_pacing);
@@ -4342,6 +4350,18 @@ namespace stream_stats {
     hot_avg_frame_age_ms.store(avg_frame_age_ms, std::memory_order_relaxed);
     hot_frame_jitter_ms.store(frame_jitter_ms, std::memory_order_relaxed);
     hot_video_sample_revision.fetch_add(1, std::memory_order_release);
+  }
+
+  bool record_video_queue_eviction(std::uint64_t session_generation) {
+    if (session_generation == 0) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    ++client->video_queue_evicted_frames;
+    return true;
   }
 
   bool record_capture_source(std::uint64_t session_generation, const capture_source_t &source) {
