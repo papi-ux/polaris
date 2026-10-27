@@ -127,6 +127,19 @@ TEST(InputGroupAccessTests, AnOrdinaryHostStillGetsPlainUsermod) {
   EXPECT_EQ("sudo usermod -aG input papi", input_group_remedy_command("papi", false, true));
 }
 
+TEST(InputGroupAccessTests, TheGroupCopyTakesOnlyTheLineForTheWholeName) {
+  using platf::input_access::image_group_copy_command;
+  using platf::input_access::input_group_remedy_command;
+
+  // Anchored on the name and its colon, so a group whose name merely starts with it is left alone.
+  EXPECT_EQ("grep ^input: /usr/lib/group >> /etc/group", image_group_copy_command("input"));
+  EXPECT_EQ("grep ^polaris-kms: /usr/lib/group >> /etc/group", image_group_copy_command("polaris-kms"));
+
+  // Host setup copies polaris-kms with the same builder, and the input remedy reads exactly as it did.
+  EXPECT_EQ("sudo bash -c 'grep ^input: /usr/lib/group >> /etc/group' && sudo usermod -aG input papi",
+            input_group_remedy_command("papi", true, false));
+}
+
 TEST(InputGroupAccessTests, SetupHostReportsOnTheAccountThatInvokedSudo) {
   using platf::input_access::setup_host_target_user;
 

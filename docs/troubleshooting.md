@@ -634,7 +634,11 @@ on its own: `hvd_kwin_screen_unused` when Plasma got another backend, and why;
   `systemctl --user restart polaris`. `systemctl --user show-environment` lists `WAYLAND_DISPLAY`
   once the session is up. The KWin screen itself needs no dummy plug, but Plasma has to start
   without a monitor first; if `WAYLAND_DISPLAY` stays missing after automatic login, use a dummy
-  plug with Headless Dongle. Private Stream needs no session at all.
+  plug with Headless Dongle. Private Stream needs no session at all. Until a stream starts, the
+  Dashboard's Displays check reads Not needed on such a host, because Host Virtual Display creates
+  its screen then. If `--enable-kms` was run too, set `linux_virtual_display_backend = kwin` and
+  leave capture on Autodetect or portal: KWin withholds its screen from a Polaris that holds the
+  DRM/KMS capability, and those settings make Polaris give it up at startup.
 - **KWin does not offer its screencast protocol to Polaris.** KWin only offers it to a program a
   desktop entry names. Polaris writes one to `~/.local/share/applications` the first time and
   waits a few seconds for KWin to pick it up. If a launch still misses it, Polaris checks again
@@ -857,6 +861,14 @@ Each one becomes a label that keeps what kind of address it was, such as `[lan-1
 address keeps the same label throughout one export. That keeps the part that usually matters, such
 as a client that moved from your LAN to a tailnet, without saying which address it had. Loopback,
 multicast and example addresses stay as they are.
+
+Home directories under `/home`, `/var/home` and `/Users` become `~`, including in crash log paths,
+configuration, retained logs, stream evidence and the issue draft. Within one export, names learned
+from those home directories also become `~` when they appear as whole path segments elsewhere.
+Local file URIs and home paths with repeated leading slashes follow the same rule. Other paths,
+such as `/usr/lib/polaris`, stay readable unless a segment is a learned account name. Standalone
+names stay readable. This only changes exported data; the crash record and logs on your machine
+keep their original paths.
 
 Redaction is not a promise that a bundle is safe to publish unread. Look at it first.
 

@@ -14,6 +14,26 @@ spec.loader.exec_module(contract)
 
 
 class NovaContractAudit(unittest.TestCase):
+    def test_javascript_optional_brackets_still_require_the_declared_receiver(self):
+        reader = {'function': 'selected', 'receiver': 'pyrowave', 'style': 'javascript',
+                  'reads': ['starved']}
+        definitions = {'PYROWAVE_BITRATE.STARVED': 'starved'}
+        for access in ('pyrowave[PYROWAVE_BITRATE.STARVED]',
+                       'pyrowave?.[PYROWAVE_BITRATE.STARVED]',
+                       'pyrowave\n  ?. [PYROWAVE_BITRATE.STARVED]'):
+            with self.subTest(access=access):
+                source = 'export function selected() { return ' + access + '; }'
+                self.assertEqual(contract.declared_reads('polaris_web', reader, source,
+                                                        definitions, None), {'starved'})
+        for access in ('other?.[PYROWAVE_BITRATE.STARVED]',
+                       'other_pyrowave?.[PYROWAVE_BITRATE.STARVED]'):
+            with self.subTest(access=access):
+                source = ('export function selected() { return ' + access + '; }\n'
+                          'export function sibling() { return pyrowave?.[PYROWAVE_BITRATE.STARVED]; }')
+                with self.assertRaisesRegex(contract.ReaderUnavailableError,
+                                            'declared JS receiver has no bracket read'):
+                    contract.declared_reads('polaris_web', reader, source, definitions, None)
+
     def test_declared_helpers_require_exact_receiver_scope_and_declaration(self):
         source = '''
     fun selected(json: JSONObject) {

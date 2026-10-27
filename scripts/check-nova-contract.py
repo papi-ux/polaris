@@ -145,7 +145,7 @@ def consumer_reads(source: str, reader: dict, definitions: dict[str, str], gener
         # The validation array drives receiver[key] reads in validSnapshot;
         # the other two regions use receiver[SPACES_CAPACITY.FIELD] directly.
         candidates = re.findall(r'\b[A-Z_]+\.[A-Z_]+\b', body)
-        if not re.search(re.escape(reader['receiver']) + r'\s*\[', body):
+        if not re.search(r'\b' + re.escape(reader['receiver']) + r'\s*(?:\?\.\s*)?\[', body):
             raise ReaderUnavailableError('declared JS receiver has no bracket read: ' + reader['receiver'])
     else:
         receiver = re.escape(reader['receiver'])

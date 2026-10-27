@@ -1,6 +1,7 @@
 #include "game_artwork_manual.h"
 
 #include "game_artwork_override.h"
+#include "generated/polaris_v1_contract.h"
 
 #include <nlohmann/json.hpp>
 
@@ -15,6 +16,8 @@
 #include <set>
 #include <sstream>
 #include <system_error>
+
+namespace v1 = polaris::contract::v1;
 
 namespace game_artwork::manual {
   namespace {
@@ -619,9 +622,9 @@ namespace game_artwork::manual {
 
   nlohmann::json artwork_choice_json(const std::string_view uuid, const choice_t &choice) {
     nlohmann::json body {
-      {"selection_token", choice.token},
-      {"preview", "/polaris/v1/games/" + std::string(uuid) + "/artwork/candidate/" + choice.token + "/" + std::string(kind_name(choice.kind))},
-      {"expires_at", choice.expires_at},
+      {v1::artwork_choice::selection_token, choice.token},
+      {v1::artwork_choice::preview, "/polaris/v1/games/" + std::string(uuid) + "/artwork/candidate/" + choice.token + "/" + std::string(kind_name(choice.kind))},
+      {v1::artwork_choice::expires_at, choice.expires_at},
     };
     return body;
   }
@@ -630,9 +633,9 @@ namespace game_artwork::manual {
     auto values = nlohmann::json::array();
     for (const auto &choice : choices) values.push_back(artwork_choice_json(uuid, choice));
     nlohmann::json body {
-      {"status", true},
-      {"kind", std::string(kind_name(kind))},
-      {"choices", std::move(values)},
+      {v1::artwork_choices::status, true},
+      {v1::artwork_choices::kind, std::string(kind_name(kind))},
+      {v1::artwork_choices::choices, std::move(values)},
     };
     return body;
   }

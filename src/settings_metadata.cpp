@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include "adaptive_bitrate.h"
+#include "generated/polaris_v1_contract.h"
 #include "process.h"
 #include "stream_stats.h"
 #ifdef __linux__
@@ -25,6 +26,7 @@
 #endif
 
 using namespace std::literals;
+namespace v1 = polaris::contract::v1;
 
 namespace settings_metadata {
   namespace {
@@ -238,22 +240,22 @@ namespace settings_metadata {
       std::string unavailable_reason = available ? std::string {} : option.unavailable_reason;
       if (!available && unavailable_reason.empty()) unavailable_reason = "This mode is not available on this host right now.";
       modes.push_back({
-        {"value", option.value},
-        {"label", option.label},
-        {"badge", option.badge},
-        {"available", available},
-        {"unavailable_reason", unavailable_reason},
-        {"restart_required", true},
-        {"reason", option.reason},
-        {"group", option.group},
-        {"runtime", option.runtime},
-        {"capture", option.capture},
-        {"topology", option.topology},
+        {v1::client_settings_mode_option::value, option.value},
+        {v1::client_settings_mode_option::label, option.label},
+        {v1::client_settings_mode_option::badge, option.badge},
+        {v1::client_settings_mode_option::available, available},
+        {v1::client_settings_mode_option::unavailable_reason, unavailable_reason},
+        {v1::client_settings_mode_option::restart_required, true},
+        {v1::client_settings_mode_option::reason, option.reason},
+        {v1::client_settings_mode_option::group, option.group},
+        {v1::client_settings_mode_option::runtime, option.runtime},
+        {v1::client_settings_mode_option::capture, option.capture},
+        {v1::client_settings_mode_option::topology, option.topology},
         // Available and session-overridable are different questions. A dongle
         // swap is a perfectly valid host default while still being something a
         // single client must not switch on for one launch, and a client that
         // cannot see the difference offers a choice the host will silently drop.
-        {"session_overridable", stream_display_policy::selection_session_overridable(option.value)},
+        {v1::client_settings_mode_option::session_overridable, stream_display_policy::selection_session_overridable(option.value)},
       });
     }
 #else
@@ -273,17 +275,17 @@ namespace settings_metadata {
       modes.push_back({
         // Same shape as the Linux branch so clients parse one contract;
         // the runtime/capture/topology vocabulary is Linux-only and empty here.
-        {"value", selection},
-        {"label", stream_display_mode_label_for_selection(selection)},
-        {"badge", badge},
-        {"available", available},
-        {"unavailable_reason", available ? "" : "Host virtual display is not available on this host."},
-        {"restart_required", true},
-        {"reason", stream_display_mode_reason_for_selection(selection)},
-        {"group", private_group ? "private" : "host"},
-        {"runtime", ""},
-        {"capture", ""},
-        {"topology", ""},
+        {v1::client_settings_mode_option::value, selection},
+        {v1::client_settings_mode_option::label, stream_display_mode_label_for_selection(selection)},
+        {v1::client_settings_mode_option::badge, badge},
+        {v1::client_settings_mode_option::available, available},
+        {v1::client_settings_mode_option::unavailable_reason, available ? "" : "Host virtual display is not available on this host."},
+        {v1::client_settings_mode_option::restart_required, true},
+        {v1::client_settings_mode_option::reason, stream_display_mode_reason_for_selection(selection)},
+        {v1::client_settings_mode_option::group, private_group ? "private" : "host"},
+        {v1::client_settings_mode_option::runtime, ""},
+        {v1::client_settings_mode_option::capture, ""},
+        {v1::client_settings_mode_option::topology, ""},
       });
     }
 #endif
