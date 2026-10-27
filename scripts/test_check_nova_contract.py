@@ -61,6 +61,44 @@ object Reader {
 '''
         self.assertEqual(contract.reads_for_object(source, {'function': 'selected', 'receiver': 'json'}), {'nested', 'enabled'})
 
+    def test_complementary_partial_readers_are_judged_on_their_union(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            findings = contract.report_reads('game', {'fields': ['a', 'b', 'c']},
+                [('game/nova_deck', {'a', 'b'}), ('game/nova_deck', {'c'})], 2, True, {}, {})
+        self.assertEqual(findings, 0)
+        result = output.getvalue()
+        self.assertNotIn('never reads', result)
+        self.assertIn('game/nova_deck: Polaris serves 3, Nova reads 2 [ok]', result)
+        self.assertIn('game: 2 readers together read 3 of 3 served [ok]', result)
+
+    def test_a_served_field_no_reader_reads_is_reported_once(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            findings = contract.report_reads('game', {'fields': ['a', 'b', 'c']},
+                [('game/nova_android', {'a'}), ('game/nova_deck', {'b'})], 2, True, {}, {})
+        self.assertEqual(findings, 1)
+        self.assertEqual(output.getvalue().count('Polaris serves [c] that Nova never reads'), 1)
+
+    def test_mismatched_or_unavailable_reader_still_fails_without_hiding_missing_reads(self):
+        source = 'fun read(json: JSONObject) {\n    json.optString("a")\n    json.optString("b")\n}\n'
+        reader = {'function': 'read', 'receiver': 'json', 'style': 'kotlin_org_json', 'reads': ['a']}
+        with self.assertRaisesRegex(contract.ReaderUnavailableError, 'declared reads differ'):
+            contract.declared_reads('nova_android', reader, source, {}, None)
+        with self.assertRaisesRegex(contract.ReaderUnavailableError, 'function not found'):
+            contract.declared_reads('nova_android', {**reader, 'function': 'gone'}, source, {}, None)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            # The other declared reader was unavailable: there is no union verdict, but a read
+            # Polaris never serves still counts.
+            findings = contract.report_reads('game', {'fields': ['a', 'b']},
+                [('game/nova_android', {'a', 'z'})], 2, False, {}, {})
+        self.assertEqual(findings, 1)
+        result = output.getvalue()
+        self.assertIn('Nova reads [z] that Polaris never serves', result)
+        self.assertNotIn('never reads', result)
+        self.assertNotIn('readers together', result)
+
 
 if __name__ == '__main__':
     unittest.main()

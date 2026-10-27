@@ -164,6 +164,64 @@ def consumer_reads(source: str, reader: dict, definitions: dict[str, str], gener
     return result
 
 
+def declared_reads(kind: str, reader: dict, raw: str, definitions: dict[str, str], generator) -> set[str]:
+    """One reader's actual scoped reads; a format-2 consumer must read exactly what it declares."""
+    read = reads_for_object(raw, reader) if kind == 'legacy' else consumer_reads(raw, reader, definitions, generator)
+    if kind != 'legacy' and read != set(reader['reads']):
+        raise ReaderUnavailableError('declared reads differ from actual scoped reads: ' + str(sorted(read)))
+    return read
+
+
+def report_reads(name: str, obj: dict, readers: list, declared: int, available: bool,
+                 known_missing: dict, known_unread: dict) -> int:
+    """Print each verified reader's coverage and return the new drift findings.
+
+    A field a reader asks for that Polaris never serves is judged reader by reader. A served
+    field nobody reads is judged once, on the union of every declared reader: one reader may
+    legitimately read only its part (the Deck reads a game's play and beat times in a separate
+    function). It is judged only when every declared reader was read, since an unavailable one
+    would make the union look short; that reader already fails the check by itself.
+    """
+    served = set(obj['fields'])
+    omitted = set(obj.get('omitted', {}))
+    informational = set(obj.get('informational_ok', []))
+    union = set().union(*(read for _, read in readers))
+    unread = served - union - informational if available else set()
+    fresh_unread = sorted(unread - set(known_unread.get(name, [])))
+    single = declared == 1
+    findings = 0
+    for label, read in readers:
+        missing = read - served - omitted
+        fresh_missing = sorted(missing - set(known_missing.get(name, [])))
+        # A single reader is its own union, so its line reports unread fields as it always has.
+        own_unread = fresh_unread if single else []
+        status = 'drift' if fresh_missing or own_unread else 'ok'
+        print(f'{label}: Polaris serves {len(served)}, Nova reads {len(read)} [{status}]')
+        for field in fresh_missing:
+            print(f'    DRIFT  Nova reads [{field}] that Polaris never serves')
+        for field in own_unread:
+            print(f'    DRIFT  Polaris serves [{field}] that Nova never reads')
+        others = (union - read) & served
+        if not single and others:
+            print(f'    reads part of the object; {len(others)} served field(s) read by the other readers')
+        outstanding = len(missing & set(known_missing.get(name, [])))
+        if single:
+            outstanding += len(unread & set(known_unread.get(name, [])))
+        if outstanding:
+            print(f'    {outstanding} known drift field(s) still outstanding')
+        findings += len(fresh_missing) + len(own_unread)
+    if not single and available:
+        status = 'drift' if fresh_unread else 'ok'
+        print(f'{name}: {declared} readers together read {len(union & served)} of {len(served)} served [{status}]')
+        for field in fresh_unread:
+            print(f'    DRIFT  Polaris serves [{field}] that Nova never reads')
+        outstanding = len(unread & set(known_unread.get(name, [])))
+        if outstanding:
+            print(f'    {outstanding} known drift field(s) still outstanding')
+        findings += len(fresh_unread)
+    return findings
+
+
 def javascript_definitions(source: str) -> dict[str, str]:
     result = {}
     for owner, body in re.findall(r'export const (\w+) = Object.freeze\(\{([^}]+)\}\)', source):
@@ -247,36 +305,21 @@ def main() -> int:
         if not declared:
             print(f'{name}: Polaris serves {len(served)}, no Nova reader yet [not yet consumed]')
             continue
-        union, available = set(), True
+        readers, available = [], True
         for kind, reader in declared:
             label = name if kind == 'legacy' else name + '/' + kind
             try:
                 raw = source(reader['file'], host=kind == 'polaris_web')
-                read = reads_for_object(raw, reader) if kind == 'legacy' else consumer_reads(raw, reader, definitions_for(kind), generator)
-                if kind != 'legacy' and read != set(reader['reads']):
-                    raise ReaderUnavailableError('declared reads differ from actual scoped reads: ' + str(sorted(read)))
+                read = declared_reads(kind, reader, raw, definitions_for(kind) if kind != 'legacy' else {}, generator)
             except (ReaderUnavailableError, ValueError) as error:
                 print(f'{label}: Polaris serves {len(served)}, Nova reader unavailable [drift]')
                 print(f'    DRIFT  {error}')
                 new_findings += 1
                 available = False
                 continue
-            union.update(read)
-            omitted = set(obj.get('omitted', {}))
-            missing = read - served - omitted
-            unread = served - read - set(obj.get('informational_ok', []))
-            fresh_missing = sorted(missing - set(known_missing.get(name, [])))
-            fresh_unread = sorted(unread - set(known_unread.get(name, [])))
-            status = 'drift' if fresh_missing or fresh_unread else 'ok'
-            print(f'{label}: Polaris serves {len(served)}, Nova reads {len(read)} [{status}]')
-            for field in fresh_missing:
-                print(f'    DRIFT  Nova reads [{field}] that Polaris never serves')
-            for field in fresh_unread:
-                print(f'    DRIFT  Polaris serves [{field}] that Nova never reads')
-            outstanding = len(missing & set(known_missing.get(name, []))) + len(unread & set(known_unread.get(name, [])))
-            if outstanding:
-                print(f'    {outstanding} known drift field(s) still outstanding')
-            new_findings += len(fresh_missing) + len(fresh_unread)
+            readers.append((label, read))
+        new_findings += report_reads(name, obj, readers, len(declared), available, known_missing, known_unread)
+        union = set().union(*(read for _, read in readers))
         if obj.get('omitted'):
             print(f'{name}: {len(obj["omitted"])} declared omissions; exact reader defaults retained (runtime tests separate)')
         if obj.get('nullable'):

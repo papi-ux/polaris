@@ -121,8 +121,11 @@
 #include "stream_stats.h"
 #include "game_classifier.h"
 #include "game_library_scanner.h"
+#include "generated/polaris_v1_contract.h"
 
 #define DEFAULT_APP_IMAGE_PATH POLARIS_ASSETS_DIR "/box.png"
+
+namespace v1 = polaris::contract::v1;
 
 namespace proc {
   using namespace std::literals;
@@ -551,26 +554,26 @@ namespace proc {
       const auto &identity = found->second;
       if (!identity.platform.empty()) {
         // Nova's shared contract calls the platform macos; Heroic records mac.
-        metadata["platform"] = identity.platform == "mac" ? "macos" : identity.platform;
+        metadata[v1::game::platform] = identity.platform == "mac" ? "macos" : identity.platform;
       }
       if (!identity.runtime.empty()) {
-        metadata["runtime"] = identity.runtime;
-        if (!identity.runtime_name.empty()) metadata["runtime_label"] = identity.runtime_name;
+        metadata[v1::game::runtime] = identity.runtime;
+        if (!identity.runtime_name.empty()) metadata[v1::game::runtime_label] = identity.runtime_name;
       }
       return metadata;
     }
 
     if (const auto identity = launcher_identity_from_lutris_runner(app.lutris_runner); !identity.runtime.empty()) {
-      if (!identity.platform.empty()) metadata["platform"] = identity.platform;
-      metadata["runtime"] = identity.runtime;
+      if (!identity.platform.empty()) metadata[v1::game::platform] = identity.platform;
+      metadata[v1::game::runtime] = identity.runtime;
     }
     if (boost::iequals(app.source, "emulator")) {
       const auto identity = launcher_identity_from_emulator(app.emulator);
-      if (!identity.platform.empty()) metadata["platform"] = identity.platform;
-      if (!identity.platform_label.empty()) metadata["platform_label"] = identity.platform_label;
-      if (!identity.runtime.empty()) metadata["runtime"] = identity.runtime;
-      if (!identity.runtime_label.empty()) metadata["runtime_label"] = identity.runtime_label;
-      metadata["emulator"] = app.emulator;
+      if (!identity.platform.empty()) metadata[v1::game::platform] = identity.platform;
+      if (!identity.platform_label.empty()) metadata[v1::game::platform_label] = identity.platform_label;
+      if (!identity.runtime.empty()) metadata[v1::game::runtime] = identity.runtime;
+      if (!identity.runtime_label.empty()) metadata[v1::game::runtime_label] = identity.runtime_label;
+      metadata[v1::game::emulator] = app.emulator;
     }
     return metadata;
   }

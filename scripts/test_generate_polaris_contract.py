@@ -86,10 +86,12 @@ class ContractGeneratorTests(unittest.TestCase):
         self.assertEqual(len(schema['objects']), 33)
         self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 355)
         migrated = {name for name, obj in schema['objects'].items() if obj.get('generated')}
-        self.assertEqual(migrated, {'launch_mode', 'space_launch_mode', 'spaces_capacity', 'bitrate_units'})
+        self.assertEqual(migrated, {'launch_mode', 'space_launch_mode', 'spaces_capacity', 'bitrate_units',
+                                    'game', 'steam_launch', 'display_planner', 'display_planner_choice',
+                                    'display_planner_scale_choice'})
         outputs = generator.render(schema, raw, Path(generator.__file__).read_bytes())
         definitions = generator.generated_values(outputs[generator.CPP].decode())
-        self.assertEqual(len(definitions), 21)
+        self.assertEqual(len(definitions), 76)
         generator.audit_emitters(ROOT, schema, definitions)
         self.assertNotIn(b'::space_launch_mode {', outputs[generator.CPP])
         self.assertNotIn(b'LIVE_TUNING', outputs[generator.JS])

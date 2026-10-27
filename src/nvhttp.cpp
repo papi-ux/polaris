@@ -3654,24 +3654,24 @@ namespace nvhttp {
     nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {
       nlohmann::json contract;
       const bool is_steam = !app.steam_appid.empty() || boost::iequals(app.source, "steam");
-      contract["available"] = is_steam;
+      contract[v1::steam_launch::available] = is_steam;
 
       if (!is_steam) {
-        contract["mode"] = "";
-        contract["recommended_mode"] = "";
-        contract["allowed_modes"] = nlohmann::json::array();
-        contract["mode_reason"] = "";
+        contract[v1::steam_launch::mode] = "";
+        contract[v1::steam_launch::recommended_mode] = "";
+        contract[v1::steam_launch::allowed_modes] = nlohmann::json::array();
+        contract[v1::steam_launch::mode_reason] = "";
         return contract;
       }
 
       const auto mode = proc::normalize_steam_launch_mode(app.steam_launch_mode);
-      contract["mode"] = mode;
-      contract["recommended_mode"] = std::string {proc::STEAM_LAUNCH_MODE_DIRECT};
-      contract["allowed_modes"] = nlohmann::json::array({
+      contract[v1::steam_launch::mode] = mode;
+      contract[v1::steam_launch::recommended_mode] = std::string {proc::STEAM_LAUNCH_MODE_DIRECT};
+      contract[v1::steam_launch::allowed_modes] = nlohmann::json::array({
         std::string {proc::STEAM_LAUNCH_MODE_DIRECT},
         std::string {proc::STEAM_LAUNCH_MODE_BIG_PICTURE}
       });
-      contract["mode_reason"] = mode == proc::STEAM_LAUNCH_MODE_BIG_PICTURE ?
+      contract[v1::steam_launch::mode_reason] = mode == proc::STEAM_LAUNCH_MODE_BIG_PICTURE ?
         "Steam Big Picture compatibility mode may also receive controller input." :
         "Direct launch avoids opening Steam Big Picture.";
       return contract;
@@ -3769,27 +3769,27 @@ namespace nvhttp {
 
     nlohmann::json display_planner_scale_option_json(const display_planner::scale_option_t &option) {
       nlohmann::json scale_option;
-      scale_option["scale_factor"] = planner_number_json(option.scale_factor);
-      scale_option["label"] = option.label;
-      scale_option["target_mode"] = option.target_mode;
-      scale_option["safe"] = option.safe;
+      scale_option[v1::display_planner_scale_choice::scale_factor] = planner_number_json(option.scale_factor);
+      scale_option[v1::display_planner_scale_choice::label] = option.label;
+      scale_option[v1::display_planner_scale_choice::target_mode] = option.target_mode;
+      scale_option[v1::display_planner_scale_choice::safe] = option.safe;
       return scale_option;
     }
 
     nlohmann::json display_planner_choice_json(const display_planner::choice_t &planned) {
       nlohmann::json choice;
-      choice["id"] = planned.id;
-      choice["title"] = planned.title;
-      choice["intent"] = planned.intent;
-      choice["target_mode"] = planned.target_mode;
-      choice["badge"] = planned.badge;
-      choice["reason"] = planned.reason;
-      choice["advanced"] = planned.advanced;
-      choice["custom"] = planned.custom;
-      choice["safe"] = planned.safe;
-      choice["hidden"] = planned.hidden;
-      choice["scale_factor"] = planner_number_json(planned.scale_factor);
-      choice["aspect_ratio"] = planned.aspect_ratio;
+      choice[v1::display_planner_choice::id] = planned.id;
+      choice[v1::display_planner_choice::title] = planned.title;
+      choice[v1::display_planner_choice::intent] = planned.intent;
+      choice[v1::display_planner_choice::target_mode] = planned.target_mode;
+      choice[v1::display_planner_choice::badge] = planned.badge;
+      choice[v1::display_planner_choice::reason] = planned.reason;
+      choice[v1::display_planner_choice::advanced] = planned.advanced;
+      choice[v1::display_planner_choice::custom] = planned.custom;
+      choice[v1::display_planner_choice::safe] = planned.safe;
+      choice[v1::display_planner_choice::hidden] = planned.hidden;
+      choice[v1::display_planner_choice::scale_factor] = planner_number_json(planned.scale_factor);
+      choice[v1::display_planner_choice::aspect_ratio] = planned.aspect_ratio;
       return choice;
     }
 
@@ -3807,15 +3807,15 @@ namespace nvhttp {
       }
 
       nlohmann::json planner;
-      planner["available"] = source.available;
-      planner["source_mode"] = plan.source_mode;
-      planner["source_aspect_ratio"] = plan.source_aspect_ratio;
-      planner["source_fps"] = planner_number_json(plan.source.fps);
-      planner["recommended_id"] = plan.recommended_id;
-      planner["recommended_title"] = plan.recommended_title;
-      planner["recommended_mode"] = plan.recommended_mode;
-      planner["choices"] = std::move(choices);
-      planner["advanced_scale_factors"] = std::move(advanced_scale_factors);
+      planner[v1::display_planner::available] = source.available;
+      planner[v1::display_planner::source_mode] = plan.source_mode;
+      planner[v1::display_planner::source_aspect_ratio] = plan.source_aspect_ratio;
+      planner[v1::display_planner::source_fps] = planner_number_json(plan.source.fps);
+      planner[v1::display_planner::recommended_id] = plan.recommended_id;
+      planner[v1::display_planner::recommended_title] = plan.recommended_title;
+      planner[v1::display_planner::recommended_mode] = plan.recommended_mode;
+      planner[v1::display_planner::choices] = std::move(choices);
+      planner[v1::display_planner::advanced_scale_factors] = std::move(advanced_scale_factors);
       return planner;
     }
 
@@ -10305,51 +10305,51 @@ namespace nvhttp {
         if ((int)games.size() >= limit) break;
 
         nlohmann::json game;
-        game["id"] = app.uuid;
-        game["app_id"] = app.id;
-        game["name"] = app.name;
-        game["steam_appid"] = app.steam_appid;
-        game["category"] = app.game_category;
-        game["source"] = app.source;
+        game[v1::game::id] = app.uuid;
+        game[v1::game::app_id] = app.id;
+        game[v1::game::name] = app.name;
+        game[v1::game::steam_appid] = app.steam_appid;
+        game[v1::game::category] = app.game_category;
+        game[v1::game::source] = app.source;
         // Steam Big Picture on the desktop, so Nova can pair it with a Space's Big Picture.
-        if (proc::is_steam_big_picture_launcher(app)) game["steam_big_picture"] = true;
-        game["installed"] = true;
-        game["hdr_supported"] = advertised_codec_support.hevc_mode == 3;
-        game["cover_url"] = "/polaris/v1/games/" + app.uuid + "/cover";
+        if (proc::is_steam_big_picture_launcher(app)) game[v1::game::steam_big_picture] = true;
+        game[v1::game::installed] = true;
+        game[v1::game::hdr_supported] = advertised_codec_support.hevc_mode == 3;
+        game[v1::game::cover_url] = "/polaris/v1/games/" + app.uuid + "/cover";
         promote_local_artwork_poster(app);
-        game["artwork"] = artwork_manifest_for(platf::appdata(), app);
-        game["last_launched"] = app.last_launched;
+        game[v1::game::artwork] = artwork_manifest_for(platf::appdata(), app);
+        game[v1::game::last_launched] = app.last_launched;
         game.update(proc::launcher_metadata_for_app(app, heroic_runtimes));
         if (const auto play_time = play_time_for_app(app)) {
-          game["play_time"] = *play_time;
+          game[v1::game::play_time] = *play_time;
         }
         // Only one particular game has a completion time. A launcher's or an emulator's title is
         // an ordinary word, and the lookup finds a game that shares it: Heroic was given the hours
         // of a game called Heroic Dungeon. Skipping here also keeps it from asking at all.
         if (!proc::uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {
-          if (const auto beat_time = beat_time_for_app(app, game["artwork"])) {
-            game["beat_time"] = *beat_time;
+          if (const auto beat_time = beat_time_for_app(app, game[v1::game::artwork])) {
+            game[v1::game::beat_time] = *beat_time;
           }
         }
-        game["launch_mode"] = launch_mode_contract_for_app(app);
-        game["steam_launch"] = steam_launch_contract_for_app(app);
+        game[v1::game::launch_mode] = launch_mode_contract_for_app(app);
+        game[v1::game::steam_launch] = steam_launch_contract_for_app(app);
         bool steam_lifetime_game_mode = false;
 #ifdef __linux__
         steam_lifetime_game_mode = platf::game_mode_host::session_live();
 #endif
-        game["steam_lifecycle"] = {
+        game[v1::game::steam_lifecycle] = {
           {"desktop_policy", app.desktop_steam_lifetime},
           {"host_default_keep", config::sunshine.keep_desktop_steam_running},
           {"keep_in_host_virtual_display", proc::keep_desktop_steam(app.desktop_steam_lifetime, config::sunshine.keep_desktop_steam_running, "host_virtual_display", steam_lifetime_game_mode)},
           {"keep_in_desktop_display", proc::keep_desktop_steam(app.desktop_steam_lifetime, config::sunshine.keep_desktop_steam_running, "desktop_display", steam_lifetime_game_mode)},
           {"private_end", "cleanup"}
         };
-        game["display_planner"] = display_planner_contract;
+        game[v1::game::display_planner] = display_planner_contract;
 
         nlohmann::json genre_arr = nlohmann::json::array();
         for (const auto &g : app.genres) genre_arr.push_back(g);
-        game["genres"] = genre_arr;
-        game["mangohud"] = app.env_vars.count("MANGOHUD") > 0 && app.env_vars.at("MANGOHUD") == "1";
+        game[v1::game::genres] = genre_arr;
+        game[v1::game::mangohud] = app.env_vars.count("MANGOHUD") > 0 && app.env_vars.at("MANGOHUD") == "1";
 
         games.push_back(game);
         idx++;
