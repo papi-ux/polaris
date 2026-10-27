@@ -122,12 +122,18 @@ export function recordingAuthorizationUpdate(client) {
 export function useClients() {
   const clients = ref([])
   const clientsLoaded = ref(false)
+  const clientsReady = ref(false)
   const platform = ref('')
 
   function refreshClients() {
     return fetch('./api/clients/list', { credentials: 'include' })
-      .then(r => r.json())
+      .then(r => {
+        if (r.ok === false) throw new Error('Client list unavailable')
+        return r.json()
+      })
       .then(data => {
+        clientsReady.value = data.status === true && Array.isArray(data.named_certs)
+        if (!clientsReady.value) return
         if (data.status && data.named_certs && data.named_certs.length) {
           platform.value = data.platform
           clients.value = data.named_certs.map(({
@@ -147,7 +153,10 @@ export function useClients() {
           clients.value = []
         }
       })
-      .catch(e => console.error('Failed to refresh clients:', e))
+      .catch(e => {
+        clientsReady.value = false
+        console.error('Failed to refresh clients:', e)
+      })
       .finally(() => { clientsLoaded.value = true })
   }
 
@@ -267,6 +276,7 @@ export function useClients() {
   return {
     clients,
     clientsLoaded,
+    clientsReady,
     platform,
     profiles,
     refreshClients,

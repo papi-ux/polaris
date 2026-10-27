@@ -1004,6 +1004,7 @@ import { usePendingPairings } from '../composables/usePendingPairings'
 import { useConfigProjection } from '../composables/useConfigProjection'
 import { buildClientHostSyncRows } from '../client-host-sync.js'
 import { useToast } from '../composables/useToast'
+import { useDeviceJoinedToast } from '../composables/useDeviceJoinedToast.js'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { formatClientTimestamp } from '../client-timestamps'
 import { deviceNameLabels } from '../device-names.js'
@@ -1021,11 +1022,12 @@ const i18n = inject('i18n')
 const route = useRoute()
 const router = useRouter()
 const {
-  clients, clientsLoaded, platform, profiles,
+  clients, clientsLoaded, clientsReady, platform, profiles,
   refreshClients, refreshProfiles, saveClient: saveClientAPI,
   saveProfile, deleteProfile, unpairSingle, unpairAll: unpairAllAPI,
   disconnectClient, sendWol: sendWolAPI
 } = useClients()
+useDeviceJoinedToast(() => clientsReady.value ? clients.value : null, { t: (key, params) => i18n.t(key, params) })
 
 const pairingMethods = [
   { key: 'OTP', titleKey: 'pin.method_nova_qr', descKey: 'pin.method_nova_qr_desc', badgeKey: 'pin.method_recommended', badgeTone: 'recommended' },
