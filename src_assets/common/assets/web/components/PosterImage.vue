@@ -8,6 +8,15 @@ const props = defineProps({
 const failed = ref(false)
 const loaded = ref(false)
 watch(() => props.src, () => { failed.value = false; loaded.value = false })
+// A poster fades in once it has decoded, so the fade never runs over a half-drawn image. A decode
+// that settles after the artwork changed reveals nothing; one that fails still shows the image,
+// which the browser then decodes as it paints.
+function imageLoaded(event) {
+  const src = props.src
+  const show = () => { if (props.src === src) loaded.value = true }
+  if (typeof event.target.decode === 'function') event.target.decode().then(show, show)
+  else show()
+}
 const initials = computed(() => {
   const words = props.name.trim().split(/\s+/u).filter(Boolean)
   return words.length ? words.slice(0, 2).map(word => Array.from(word)[0]).join('').toLocaleUpperCase() : '?'
@@ -22,12 +31,14 @@ const nameHash = computed(() => {
 
 <template>
   <div class="poster-image" :style="{ '--poster-accent-mix': `${30 + nameHash % 25}%`, '--poster-angle': `${95 + nameHash % 160}deg` }" data-poster-image>
-    <div class="poster-fallback" role="img" :aria-label="`${name || 'Untitled app'} artwork unavailable`" :aria-hidden="src && !failed ? 'true' : undefined" data-poster-fallback>
+    <div class="poster-fallback" :class="{ 'is-covered': src && !failed }" role="img" :aria-label="`${name || 'Untitled app'} artwork unavailable`" :aria-hidden="src && !failed ? 'true' : undefined" data-poster-fallback>
       <span aria-hidden="true">{{ initials }}</span>
     </div>
-    <div v-if="src && !failed && !loaded" class="poster-loading skeleton-shimmer" aria-hidden="true"></div>
-    <img v-if="src && !failed" :src="src" :alt="`${name || 'Untitled app'} artwork`" loading="lazy"
-      @load="loaded = true" @error="failed = true" />
+    <Transition name="poster-reveal">
+      <div v-if="src && !failed && !loaded" class="poster-loading skeleton-shimmer" aria-hidden="true"></div>
+    </Transition>
+    <img v-if="src && !failed" :class="{ 'is-loaded': loaded }" :src="src" :alt="`${name || 'Untitled app'} artwork`" loading="lazy"
+      @load="imageLoaded" @error="failed = true" />
   </div>
 </template>
 
@@ -58,6 +69,19 @@ const nameHash = computed(() => {
   font-size: clamp(1rem, 4vw, 1.5rem);
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+/* The decoded poster fades in as the shimmer fades out. The initials stay hidden beneath while
+   artwork is expected, so they never show through the crossfade. */
+.poster-image img {
+  opacity: 0;
+  transition: opacity 0.3s ease-out;
+}
+.poster-image img.is-loaded { opacity: 1; }
+.poster-reveal-leave-active { transition: opacity 0.3s ease-out; }
+.poster-reveal-leave-to { opacity: 0; }
+.poster-fallback.is-covered { visibility: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  .poster-image img, .poster-reveal-leave-active { transition: none; }
 }
 </style>
 
