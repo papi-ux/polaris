@@ -2687,7 +2687,6 @@
         "encoder_backend",
         "encoder_options",
         "hdr",
-        "limiting_factor",
         "nvenc_tune",
         "reasoning_summary",
         "recommendation_version",
@@ -2891,6 +2890,43 @@
               "preset",
               "resolved_profile",
               "topology_resolution"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaLaunchProfileSummary.kt",
+            "function": "buildNovaLaunchProfileSummary",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "display_mode",
+              "effective_profile",
+              "preference",
+              "preference_applied",
+              "preference_blocked_reason",
+              "preference_requested_profile",
+              "profile_state",
+              "reasoning",
+              "requested_profile",
+              "source",
+              "trial_profile"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaLaunchProfileSummary.kt",
+            "function": "diagnosticIssues",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "limiting_factor"
+            ]
+          },
+          {
+            "file": "app/src/main/java/com/papi/nova/ui/NovaLaunchProfileSummary.kt",
+            "function": "hasCompleteDiagnosticIssueEvidence",
+            "receiver": "optimization",
+            "style": "kotlin_org_json",
+            "reads": [
+              "limiting_factor"
             ]
           }
         ],
@@ -3854,13 +3890,17 @@
         "space"
       ],
       "optimization": [
+        "effective_profile",
         "effective_target_fps",
         "generated_at",
         "normalization_reason",
         "preference",
         "preference_applied",
         "preference_blocked_reason",
-        "requested_target_fps"
+        "preference_requested_profile",
+        "requested_profile",
+        "requested_target_fps",
+        "trial_profile"
       ],
       "space_library_game": [
         "beat_time",
@@ -3932,7 +3972,6 @@
         "topology"
       ],
       "optimization": [
-        "display_mode",
         "preferred_codec",
         "target_bitrate_kbps"
       ],
