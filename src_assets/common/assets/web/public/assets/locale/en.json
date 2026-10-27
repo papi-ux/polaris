@@ -2680,7 +2680,7 @@
     "download_issue_draft_desc": "Save the redacted Markdown issue draft next to your support bundle.",
     "download_issue_draft_success": "Issue draft downloaded.",
     "issue_draft_error": "Failed to build issue draft.",
-    "support_redaction_notice": "No passwords, tokens, cookies, auth headers, or credentials are intentionally included. Polaris redacts those fields locally before copying or downloading support data.",
+    "support_redaction_notice": "No passwords, tokens, cookies, auth headers, or credentials are intentionally included. Polaris redacts those fields and replaces network addresses with labels locally before copying or downloading support data. Home directories under /home, /var/home, and /Users become ~, as do names learned from them when they appear as whole path segments elsewhere in the export. Other paths stay readable unless a segment is a learned account name. Standalone names stay readable. Review support data before sharing it.",
     "previous_run": "Previous run",
     "previous_run_started": "That run started at",
     "previous_run_dismiss": "Dismiss",

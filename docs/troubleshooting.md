@@ -858,6 +858,14 @@ address keeps the same label throughout one export. That keeps the part that usu
 as a client that moved from your LAN to a tailnet, without saying which address it had. Loopback,
 multicast and example addresses stay as they are.
 
+Home directories under `/home`, `/var/home` and `/Users` become `~`, including in crash log paths,
+configuration, retained logs, stream evidence and the issue draft. Within one export, names learned
+from those home directories also become `~` when they appear as whole path segments elsewhere.
+Local file URIs and home paths with repeated leading slashes follow the same rule. Other paths,
+such as `/usr/lib/polaris`, stay readable unless a segment is a learned account name. Standalone
+names stay readable. This only changes exported data; the crash record and logs on your machine
+keep their original paths.
+
 Redaction is not a promise that a bundle is safe to publish unread. Look at it first.
 
 ### Reporting a crash
