@@ -1719,7 +1719,7 @@ TEST(SourceSafetyContracts, PortalRouteTravelsWithEveryCaptureToTheDisplayThatOp
 
   // The display asks for the route as it initializes and keeps it before it reads the capture.
   const auto asked = portal.find(
-    "auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &route);"
+    "auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &route, &failure_);"
   );
   ASSERT_NE(asked, npos) << "initialization no longer asks for the route its capture took";
   const auto declared = portal.rfind("platf::capture_route_t route;", asked);

@@ -416,11 +416,15 @@ TEST(StreamControlTerminationTests, AnHdrStreamFromADisplayNotInHdrIsRefusedOnce
   // when its last session leaves.
   const auto retired = std::make_shared<safe::mail_raw_t>();
   const auto kept = std::make_shared<safe::mail_raw_t>();
+  // Mail keeps its events only weakly. A stream session holds its own shutdown event, so hold
+  // both here as the sessions would, or the retired context takes the raised one with it.
+  const auto retired_shutdown = retired->event<bool>(mail::shutdown);
+  const auto kept_shutdown = kept->event<bool>(mail::shutdown);
   safe::signal_t retired_join, kept_join;
   EXPECT_TRUE(video::retire_front_sync_session_for_tests({{retired, &retired_join}, {kept, &kept_join}}));
-  EXPECT_TRUE(retired->event<bool>(mail::shutdown)->peek());
+  EXPECT_TRUE(retired_shutdown->peek());
   EXPECT_TRUE(retired_join.peek());
-  EXPECT_FALSE(kept->event<bool>(mail::shutdown)->peek());
+  EXPECT_FALSE(kept_shutdown->peek());
   EXPECT_FALSE(kept_join.peek());
   EXPECT_FALSE(video::retire_front_sync_session_for_tests({{kept, &kept_join}}));
   EXPECT_TRUE(kept_join.peek());
