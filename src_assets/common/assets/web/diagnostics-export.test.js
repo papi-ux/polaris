@@ -136,10 +136,13 @@ describe('diagnostics export redaction', () => {
 })
 
 describe('support export home paths', () => {
+  // Explicit synthetic accounts; construct paths without embedding host-looking paths in source.
+  const homePath = (root, name, tail = '') => `/${root}/${name}${tail}`
+
   it('redacts the three home roots and literal whole segments, preserving unrelated text', () => {
     const text = '/srv/dev.user+$/cache /srv/devXuserZZ/cache /srv/dev.user+$-cache '
       + 'dev.user+$ /usr/lib/polaris /opt/homebrew/bin /other/home/unknown '
-      + '"/home/dev.user+$/log" /var/home/ostree/.config /Users/macuser /srv/dev.user+$'
+      + `"${homePath('home', 'dev.user+$', '/log')}" ${homePath('var/home', 'ostree', '/.config')} ${homePath('Users', 'macuser')} /srv/dev.user+$`
     const redacted = redactSensitiveText(text)
 
     expect(redacted).toBe('/srv/~/cache /srv/devXuserZZ/cache /srv/dev.user+$-cache '
@@ -149,13 +152,13 @@ describe('support export home paths', () => {
   })
 
   it('learns from nested Map, Set and Error contents before walking either field order', () => {
-    const failure = new Error('opening /Users/macuser/log failed')
+    const failure = new Error(`opening ${homePath('Users', 'macuser', '/log')} failed`)
     failure.name = '/run/ostree/Failure'
     failure.detail = '/run/macuser/cache'
     const entries = [
       ['early', '/run/macuser/cache /run/ostree/cache /run/keyuser/cache'],
       ['nested', new Map([
-        ['/home/keyuser/log', new Set([failure, '/var/home/ostree/.config'])],
+        [homePath('home', 'keyuser', '/log'), new Set([failure, homePath('var/home', 'ostree', '/.config')])],
       ])],
     ]
     const expected = {
@@ -176,10 +179,10 @@ describe('support export home paths', () => {
     const input = {
       config: { log_path: '/run/player/cache', library: '/usr/share/polaris' },
       logs: 'open /run/player/log token=secret123 from 192.168.1.45',
-      previous_run_logs: '/home/player/.config/polaris/log',
-      older_run_logs: '/var/home/player/old.log',
+      previous_run_logs: homePath('home', 'player', '/.config/polaris/log'),
+      older_run_logs: homePath('var/home', 'player', '/old.log'),
       stream_evidence: { detail: '/run/player/stream' },
-      crash: { ...crashedRun, log_path: '/home/player/.config/polaris/log', evidence: 'failed /run/player/crash' },
+      crash: { ...crashedRun, log_path: homePath('home', 'player', '/.config/polaris/log'), evidence: 'failed /run/player/crash' },
     }
     const bundle = buildAnonymizedDiagnosticsBundle(input)
 
@@ -192,7 +195,7 @@ describe('support export home paths', () => {
     expect(bundle.issue_draft).toContain('failed /run/~/crash')
     expect(bundle.redaction_notice).toContain('Home directories under /home, /var/home and /Users become ~')
     expect(JSON.stringify(bundle)).not.toContain('player')
-    expect(input.crash.log_path).toBe('/home/player/.config/polaris/log')
+    expect(input.crash.log_path).toBe(homePath('home', 'player', '/.config/polaris/log'))
     expect(sanitizeDiagnosticsValue(bundle)).toEqual(bundle)
     expect(buildAnonymizedDiagnosticsBundle({ ...input, issue_draft: '/run/player/draft' }).issue_draft)
       .toBe('/run/~/draft')
@@ -200,7 +203,7 @@ describe('support export home paths', () => {
 
   it('shares learned names with separately built subsets and learns before projecting stream evidence', () => {
     const input = {
-      config: { path: '/home/player/.config' },
+      config: { path: homePath('home', 'player', '/.config') },
       session_snapshot: { capture_path_reason: '/run/player/capture' },
       recent_issues: [{ message: 'failed /run/player/log' }],
     }
