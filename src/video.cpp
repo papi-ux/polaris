@@ -3363,16 +3363,22 @@ namespace video {
   const std::function<void()> *capture_terminal_test_hook = nullptr;
 #endif
 
+  // A consumed refusal ends only this owner: @p owner_ended tells a shared worker to retire it and
+  // keep serving the rest.
   platf::capture_e capture_owned_display(const std::shared_ptr<platf::display_t> &disp,
                                          const platf::display_t::push_captured_image_cb_t &push,
                                          const platf::display_t::pull_free_image_cb_t &pull, bool *cursor,
-                                         const config_t &config, const capture_failure_owner_t &owner) {
+                                         const config_t &config, const capture_failure_owner_t &owner,
+                                         bool *owner_ended = nullptr) {
 #ifdef __linux__
     session_media::pending_start_owner_scope_t owner_scope {owner.destination.capture_owner_tag()};
 #endif
     const auto result = disp->capture(push, pull, cursor);
     if (const auto failure = disp->capture_failure(); failure.reason != platf::capture_failure_e::none) {
-      if (consume_capture_failure(failure, config, owner)) return platf::capture_e::error;
+      if (consume_capture_failure(failure, config, owner)) {
+        if (owner_ended) *owner_ended = true;
+        return platf::capture_e::error;
+      }
     }
     return result;
   }
@@ -3848,7 +3854,36 @@ namespace video {
     std::shared_ptr<platf::display_t> disp;
     const auto active_generation = capture_ctxs.front().config.capture_generation;
     const auto &exact_display_name = active_generation.exact_display_name;
-    {
+    // The one intake rule: a context joins only the generation this thread opened.
+    const auto admit_capture_ctx = [&](std::optional<capture_ctx_t> &incoming_capture_ctx) {
+      if (!capture_generations_match(
+            active_generation,
+            incoming_capture_ctx->config.capture_generation
+          )) {
+        BOOST_LOG(error) << "Rejecting capture context from generation ["sv
+                         << incoming_capture_ctx->config.capture_generation.exact_display_name
+                         << "/"sv << incoming_capture_ctx->config.capture_generation.stream_mode
+                         << "] while generation ["sv << exact_display_name
+                         << "/"sv << active_generation.stream_mode << "] is active"sv;
+        incoming_capture_ctx->images->stop();
+        return;
+      }
+      capture_ctxs.emplace_back(std::move(*incoming_capture_ctx));
+    };
+    // An owner that must stop (cancelled, or its HDR refusal consumed) leaves exactly as the push
+    // callback prunes a stopped one; the others keep this thread. With no subscriber left, wait for
+    // the next one as this thread started. False only once the queue stops.
+    const auto retire_front_capture_owner = [&]() {
+      capture_ctxs.front().images->stop();
+      capture_ctxs.erase(capture_ctxs.begin());
+      while (capture_ctxs.empty()) {
+        auto incoming_capture_ctx = capture_ctx_queue->pop();
+        if (!incoming_capture_ctx) return false;
+        admit_capture_ctx(incoming_capture_ctx);
+      }
+      return capture_ctx_queue->running();
+    };
+    while (!disp) {
 #ifdef __linux__
     session_media::pending_start_owner_scope_t initial_owner_scope {
       capture_ctxs.front().channel_data.capture_owner_tag()
@@ -3856,7 +3891,11 @@ namespace video {
 #endif
     if (!exact_display_name.empty()) {
       const capture_failure_owner_t owner {capture_ctxs.front().mail, capture_ctxs.front().channel_data};
-      if (open_capture_display(disp, session_device_type(), exact_display_name, capture_ctxs.front().config, &owner)) return;
+      if (open_capture_display(disp, session_device_type(), exact_display_name, capture_ctxs.front().config, &owner)) {
+        disp.reset();
+        if (!retire_front_capture_owner()) return;
+        continue;
+      }
     }
     if (!disp && !capture_fallback_allowed(exact_display_name)) {
       BOOST_LOG(error) << "Requested display ["sv << exact_display_name
@@ -3877,7 +3916,11 @@ namespace video {
         return;
       }
       const capture_failure_owner_t owner {capture_ctxs.front().mail, capture_ctxs.front().channel_data};
-      if (open_capture_display(disp, session_device_type(), display_names[display_p], capture_ctxs.front().config, &owner)) return;
+      if (open_capture_display(disp, session_device_type(), display_names[display_p], capture_ctxs.front().config, &owner)) {
+        disp.reset();
+        if (!retire_front_capture_owner()) return;
+        continue;
+      }
       if (disp) {
         proc::proc.display_name = display_names[display_p];
       } else {
@@ -4018,19 +4061,7 @@ namespace video {
           if (!incoming_capture_ctx) {
             return false;
           }
-          if (!capture_generations_match(
-                active_generation,
-                incoming_capture_ctx->config.capture_generation
-              )) {
-            BOOST_LOG(error) << "Rejecting capture context from generation ["sv
-                             << incoming_capture_ctx->config.capture_generation.exact_display_name
-                             << "/"sv << incoming_capture_ctx->config.capture_generation.stream_mode
-                             << "] while generation ["sv << exact_display_name
-                             << "/"sv << active_generation.stream_mode << "] is active"sv;
-            incoming_capture_ctx->images->stop();
-            continue;
-          }
-          capture_ctxs.emplace_back(std::move(*incoming_capture_ctx));
+          admit_capture_ctx(incoming_capture_ctx);
         }
 
         if (switch_display_event->peek()) {
@@ -4061,8 +4092,14 @@ namespace video {
         return !capture_ctxs.empty() && capture_ctxs.front().channel_data.capture_owner_tag() == capture_owner &&
                capture_ctxs.front().config.capture_generation == capture_config.capture_generation;
       }};
+      bool owner_ended = false;
       auto status = capture_owned_display(disp, push_captured_image_callback, pull_free_image_callback,
-                                           &display_cursor, capture_config, owner);
+                                           &display_cursor, capture_config, owner, &owner_ended);
+      if (owner_ended) {
+        // Reopen for the next subscriber of this generation, which may be SDR or another owner.
+        if (!retire_front_capture_owner()) return;
+        status = platf::capture_e::reinit;
+      }
 
       if (artificial_reinit && status != platf::capture_e::error) {
         status = platf::capture_e::reinit;
@@ -4133,7 +4170,10 @@ namespace video {
                     exact_display_name,
                     capture_ctxs.front().config,
                     &owner
-                  )) return;
+                  )) {
+                    if (!retire_front_capture_owner()) return;
+                    continue;
+                  }
                 }
                 if (!disp) {
                   BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
@@ -4181,7 +4221,10 @@ namespace video {
                   display_names[display_p],
                   capture_ctxs.front().config,
                   &owner
-                )) return;
+                )) {
+                  if (!retire_front_capture_owner()) return;
+                  continue;
+                }
               }
               if (disp) {
                 proc::proc.display_name = display_names[display_p];
@@ -6405,6 +6448,21 @@ namespace video {
     return encode_session;
   }
 
+  /**
+   * Retire only the front synchronized session, as the push callback removes one that shut down:
+   * its stream is told to stop, then its waiting thread may delete its events. What encode_run_sync
+   * returns next: reinit, so captureThreadSync reopens for the session now in front or the one
+   * queued; with neither, ok, so the worker ends as it does when its last session leaves.
+   */
+  encode_e retire_front_sync_session(std::vector<std::unique_ptr<sync_session_ctx_t>> &synced_session_ctxs,
+                                     encode_session_ctx_queue_t &encode_session_ctx_queue) {
+    auto &ctx = *synced_session_ctxs.front();
+    ctx.shutdown_event->raise(true);
+    ctx.join_event->raise(true);
+    synced_session_ctxs.erase(std::begin(synced_session_ctxs));
+    return synced_session_ctxs.empty() && !encode_session_ctx_queue.peek() ? encode_e::ok : encode_e::reinit;
+  }
+
   encode_e encode_run_sync(
     std::vector<std::unique_ptr<sync_session_ctx_t>> &synced_session_ctxs,
     encode_session_ctx_queue_t &encode_session_ctx_queue,
@@ -6453,7 +6511,9 @@ namespace video {
             exact_display_name,
             synced_session_ctxs.front()->config,
             &owner
-          )) return encode_e::error;
+          )) {
+            return retire_front_sync_session(synced_session_ctxs, encode_session_ctx_queue);
+          }
         }
         if (!disp) {
           BOOST_LOG(error) << "Exact active display ["sv << exact_display_name
@@ -6497,7 +6557,9 @@ namespace video {
         };
 #endif
         const capture_failure_owner_t owner {synced_session_ctxs.front()->mail, synced_session_ctxs.front()->channel_data};
-        if (reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config, &owner)) return encode_e::error;
+        if (reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], synced_session_ctxs.front()->config, &owner)) {
+          return retire_front_sync_session(synced_session_ctxs, encode_session_ctx_queue);
+        }
       }
       if (disp) {
         break;
@@ -6680,8 +6742,13 @@ namespace video {
         return !synced_session_ctxs.empty() && synced_session_ctxs.front()->channel_data.capture_owner_tag() == capture_owner &&
                synced_session_ctxs.front()->config.capture_generation == capture_config.capture_generation;
       }};
+      bool owner_ended = false;
       auto status = capture_owned_display(disp, push_captured_image_callback, pull_free_image_callback,
-                                           &display_cursor, capture_config, owner);
+                                           &display_cursor, capture_config, owner, &owner_ended);
+      if (owner_ended) {
+        invalidate_live_probe_reuse();
+        status = retire_front_sync_session(synced_session_ctxs, encode_session_ctx_queue);
+      }
       switch (status) {
         case platf::capture_e::reinit:
         case platf::capture_e::error:
@@ -8932,6 +8999,42 @@ namespace video {
       capture_owned_display(display, [](std::shared_ptr<platf::img_t> &&, bool) { return false; },
         [](std::shared_ptr<platf::img_t> &) { return false; }, &cursor, config, owner);
     }
+  }
+
+  void capture_thread_for_tests(const std::vector<capture_subscriber_for_tests_t> &subscribers,
+    const display_open_t &open, const std::function<void()> &before_shutdown) {
+    const auto previous_open = display_open_test_hook;
+    const auto previous_terminal = capture_terminal_test_hook;
+    display_open_test_hook = &open;
+    capture_terminal_test_hook = before_shutdown ? &before_shutdown : nullptr;
+    auto restore = util::fail_guard([&] {
+      display_open_test_hook = previous_open;
+      capture_terminal_test_hook = previous_terminal;
+    });
+    auto queue = std::make_shared<safe::queue_t<capture_ctx_t>>(30);
+    for (const auto &subscriber : subscribers) {
+      queue->raise(capture_ctx_t {subscriber.images, subscriber.config, subscriber.destination, subscriber.mail});
+    }
+    sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;
+    safe::signal_t reinit_event;
+    safe::signal_t reinit_request_event;
+    // Its own thread, as start_capture_async runs it, so its priority and owner scopes stay there.
+    std::thread {captureThread, queue, std::ref(display_wp), std::ref(reinit_event),
+                 std::ref(reinit_request_event), std::cref(software)}.join();
+  }
+
+  bool retire_front_sync_session_for_tests(const std::vector<std::pair<safe::mail_t, safe::signal_t *>> &sessions) {
+    std::vector<std::unique_ptr<sync_session_ctx_t>> synced_session_ctxs;
+    encode_session_ctx_queue_t encode_session_ctx_queue {30};
+    for (const auto &session : sessions) {
+      sync_session_ctx_t ctx {};
+      ctx.join_event = session.second;
+      ctx.shutdown_event = session.first->event<bool>(mail::shutdown);
+      ctx.frame_nr = 1;
+      ctx.mail = session.first;
+      synced_session_ctxs.emplace_back(std::make_unique<sync_session_ctx_t>(std::move(ctx)));
+    }
+    return retire_front_sync_session(synced_session_ctxs, encode_session_ctx_queue) == encode_e::reinit;
   }
 
   void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,

@@ -269,6 +269,7 @@ namespace pipewire_capture {
     capture_producer::binding_t producer_binding(std::chrono::milliseconds timeout);
     // A bounded read of this capture core, including after a stream negotiation error. Missing
     // permissions, identity, completion, cancellation or any unreadable format answers unknown.
+    // True is this attempt's final decision: the capture is already terminal and cannot negotiate.
     bool producer_lacks_hdr_rgb10(std::chrono::milliseconds timeout,
                                  const std::function<bool()> &cancelled);
 
@@ -302,6 +303,9 @@ namespace pipewire_capture {
     void observe_format_global(std::uint32_t id, std::uint32_t permissions,
                                const char *type, std::uint32_t version, const spa_dict *props);
     producer_format_identity_t current_format_identity() const;
+    // Loop lock held. Decides refusal from the current negotiation and inventory evidence and
+    // terminalizes in the same frame-lock section, so success either came first or never lands.
+    bool commit_hdr_refusal_locked(bool stopping);
     bool process_buffer(struct pw_buffer *buffer, std::uint64_t generation);
     void set_terminal(wait_result_e result);
     void queue_buffer_locked(struct pw_buffer *buffer, std::uint64_t generation);

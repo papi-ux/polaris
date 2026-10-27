@@ -1144,6 +1144,29 @@ namespace video {
     const std::function<std::shared_ptr<platf::display_t>(platf::mem_type_e, const std::string &, const config_t &, platf::capture_failure_t &)> &open,
     bool capture_after_open = false, const std::function<void()> &before_shutdown = {});
 
+  /** One stream the shared capture thread serves, with its own images, mail, packet owner and config. */
+  struct capture_subscriber_for_tests_t {
+    img_event_t images;
+    safe::mail_t mail;
+    stream_packets::destination_t destination;
+    config_t config;
+  };
+
+  /**
+   * The actual shared capture thread, on a thread of its own, raised these subscribers in order, with
+   * only the platform display open replaced. It returns when that thread does.
+   */
+  void capture_thread_for_tests(const std::vector<capture_subscriber_for_tests_t> &subscribers,
+    const std::function<std::shared_ptr<platf::display_t>(platf::mem_type_e, const std::string &, const config_t &, platf::capture_failure_t &)> &open,
+    const std::function<void()> &before_shutdown = {});
+
+  /**
+   * The synchronized capture worker's owner retirement over sessions in this order, each a mail and
+   * the join signal its thread waits on, with none queued. True when the worker goes on to reopen
+   * for a session it kept.
+   */
+  bool retire_front_sync_session_for_tests(const std::vector<std::pair<safe::mail_t, safe::signal_t *>> &sessions);
+
   /**
    * The loop capture_async() runs for a session on the parallel encode path, which builds an encode
    * session on the display capture published and builds it again each time one returns, run over

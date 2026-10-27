@@ -1126,6 +1126,7 @@ namespace portal {
 
     // A failed wait is not a capability verdict. Only a completed, identity-bound read of the
     // producer's own port on this capture core can prove the HDR agreement cannot be served.
+    // A true answer also ended this capture, so no later format can contradict the refusal.
     const bool unsupported_hdr = !negotiated && want_prefer_hdr && generation.stream_mode == "gamescope_stream" &&
       session_media::pending_start_owner() && !capture_start_cancelled() && capture &&
       capture->producer_lacks_hdr_rgb10(std::chrono::milliseconds {250}, capture_start_cancelled);

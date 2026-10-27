@@ -1362,9 +1362,19 @@ namespace pipewire_capture {
       capture_t::on_format_port_param(&capture, 7, SPA_PARAM_EnumFormat, index, index + 1, pod);
     }
     static void formats_done(capture_t &capture, int seq = 9) { capture_t::on_core_done(&capture, PW_ID_CORE, seq); }
-    static bool unsupported(capture_t &capture) {
-      return !capture.producer_cancel_.load() && !capture.format_query_error_ &&
-             capture.format_inventory_.unsupported(capture.current_format_identity());
+    // The query's actual final decision over this capture's current evidence; true also ends it.
+    static bool unsupported(capture_t &capture) { return capture.commit_hdr_refusal_locked(capture.producer_cancel_.load()); }
+    static void negotiate(capture_t &capture) {
+      spa_video_info_raw info {};
+      info.format = SPA_VIDEO_FORMAT_BGRx;
+      info.size = {8, 8};
+      info.framerate = {60, 1};
+      alignas(8) std::array<std::uint8_t, 1024> bytes {};
+      spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes.data(), bytes.size());
+      auto *format = spa_format_video_raw_build(&builder, SPA_PARAM_Format, &info);
+      pw_thread_loop_lock(capture.loop_);
+      capture_t::on_param_changed(&capture, SPA_PARAM_Format, format);
+      pw_thread_loop_unlock(capture.loop_);
     }
     static void remove_port(capture_t &capture) { capture_t::on_registry_global_remove(&capture, 61); }
     static void change_port(capture_t &capture) {
@@ -1443,12 +1453,16 @@ TEST(PortalGrabPolicyTests, ProducerFormatProofIsLostOnRemovalReplacementCancell
     SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
     SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx)));
   for (const auto invalidate : {&access::remove_port, &access::change_port, &access::replace_stream, &access::permission_error}) {
-    pipewire_capture::capture_t capture {{}};
-    access::begin_formats(capture);
-    access::format(capture, pod);
-    invalidate(capture);
-    access::formats_done(capture);
-    EXPECT_FALSE(access::unsupported(capture));
+    for (const bool after_completion : {false, true}) {
+      pipewire_capture::capture_t capture {{}};
+      access::begin_formats(capture);
+      access::format(capture, pod);
+      if (!after_completion) invalidate(capture);
+      access::formats_done(capture);
+      // A complete snapshot whose evidence changed before the decision is stale, not a refusal.
+      if (after_completion) invalidate(capture);
+      EXPECT_FALSE(access::unsupported(capture));
+    }
   }
   pipewire_capture::capture_t stopped {{}};
   access::begin_formats(stopped);
@@ -1466,6 +1480,26 @@ TEST(PortalGrabPolicyTests, ProducerFormatProofIsLostOnRemovalReplacementCancell
   access::format(hidden_port, pod);
   access::formats_done(hidden_port);
   EXPECT_FALSE(access::unsupported(hidden_port)) << "one visible port is not proof of a sole output";
+
+  // The decision is the attempt's one serialized point. A format that negotiated first leaves
+  // support unknown. A refusal decided first already ended the capture, so the actual late Format
+  // callback cannot negotiate it and rate retry cannot reconnect it.
+  for (const bool format_first : {true, false}) {
+    pipewire_capture::capture_t capture {{}};
+    ASSERT_TRUE(access::local_stream(capture));
+    access::running(capture);
+    access::begin_formats(capture);
+    access::format(capture, pod);
+    access::formats_done(capture);
+    if (format_first) access::negotiate(capture);
+    EXPECT_EQ(access::unsupported(capture), !format_first);
+    if (!format_first) access::negotiate(capture);
+    EXPECT_EQ(capture.negotiated(), format_first);
+    EXPECT_EQ(capture.running(), format_first);
+    EXPECT_EQ(capture.wait_for_frame(std::chrono::milliseconds(0)),
+              format_first ? pipewire_capture::wait_result_e::timeout : pipewire_capture::wait_result_e::reinit);
+    EXPECT_FALSE(capture.retry_rate_negotiation());
+  }
 }
 
 TEST(PipeWireRateTests, ActualFrameWaitStaysEventDrivenWhenProducerMeetsTheRate) {

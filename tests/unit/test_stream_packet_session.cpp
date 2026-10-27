@@ -28,6 +28,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -198,8 +200,9 @@ namespace {
       height = env_height = 1080;
     }
 
-    platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override {
+    platf::capture_e capture(const push_captured_image_cb_t &push, const pull_free_image_cb_t &, bool *) override {
       ++captures;
+      if (on_capture) return on_capture(push, failure);
       return failure.reason == platf::capture_failure_e::none ? platf::capture_e::ok : platf::capture_e::reinit;
     }
 
@@ -222,6 +225,7 @@ namespace {
     int captures = 0;
     platf::capture_failure_t failure;
     std::function<void(int)> on_session;
+    std::function<platf::capture_e(const push_captured_image_cb_t &, platf::capture_failure_t &)> on_capture;
   };
 
   /// A 60 fps PyroWave stream as a client negotiates it, in HDR or not.
@@ -247,6 +251,60 @@ namespace {
     config.capture_generation.exact_display_name = "test-gamescope-source";
     config.capture_generation.requested_output_name = config.capture_generation.exact_display_name;
     return config;
+  }
+
+  /**
+   * The HDR owner at the front of the actual shared capture thread, and an SDR stream of the same
+   * generation behind it. @p end_front ends the owner's attempt at @p site: its first open ("open"),
+   * its reopen after a reinit ("reset"), or a capture that already admitted the SDR stream
+   * ("capture"). Returns the owner's opens, and whether the SDR stream was then served: a display
+   * reopened with its own config captured while its images ran, its stream was not shut down and
+   * the owner's images had stopped.
+   */
+  std::pair<int, bool> serve_sdr_after_hdr_owner_ends(std::string_view site, stream::session_t &owner, stream::session_t &sdr,
+    const std::function<void(const video::config_t &, platf::capture_failure_t &)> &end_front,
+    const std::function<void()> &before_shutdown = {}) {
+    auto sdr_config = gamescope_hdr_stream();
+    sdr_config.dynamicRange = 0;
+    const std::vector<video::capture_subscriber_for_tests_t> subscribers {
+      {std::make_shared<video::img_event_t::element_type>(), stream::session::mail_for_tests(owner),
+       stream::session::packet_destination_for_tests(owner), gamescope_hdr_stream()},
+      {std::make_shared<video::img_event_t::element_type>(), stream::session::mail_for_tests(sdr),
+       stream::session::packet_destination_for_tests(sdr), sdr_config},
+    };
+    const auto &front = subscribers.front();
+    const auto &survivor = subscribers.back();
+    int owner_opens = 0;
+    bool served = false;
+    video::capture_thread_for_tests(subscribers, [&](platf::mem_type_e, const std::string &, const video::config_t &requested,
+                                                     platf::capture_failure_t &failure) -> std::shared_ptr<platf::display_t> {
+      auto display = std::make_shared<SdrDisplay>([](int) {});
+      if (requested.dynamicRange == 0) {
+        display->on_capture = [&](const platf::display_t::push_captured_image_cb_t &, platf::capture_failure_t &) {
+          served = survivor.images->running() && !survivor.mail->event<bool>(mail::shutdown)->peek() && !front.images->running();
+          return platf::capture_e::ok;
+        };
+        return display;
+      }
+      if (++owner_opens == 1 && site == "reset") {
+        display->on_capture = [](const platf::display_t::push_captured_image_cb_t &, platf::capture_failure_t &) {
+          return platf::capture_e::reinit;
+        };
+        return display;
+      }
+      if (site == "capture") {
+        display->on_capture = [&end_front, requested](const platf::display_t::push_captured_image_cb_t &push,
+                                                      platf::capture_failure_t &captured) {
+          push({}, false);  // The capture thread admits the queued SDR stream here.
+          end_front(requested, captured);
+          return platf::capture_e::reinit;
+        };
+        return display;
+      }
+      end_front(requested, failure);
+      return {};
+    }, before_shutdown);
+    return {owner_opens, served};
   }
 }  // namespace
 
@@ -321,6 +379,51 @@ TEST(StreamControlTerminationTests, AnHdrStreamFromADisplayNotInHdrIsRefusedOnce
     stream::session::stop(*opening);
     EXPECT_EQ(stream::session::control_termination_code_for_tests(*opening), std::optional<std::uint32_t> {0x800e9403u});
   }
+
+  // A refusal ends only its owner. The shared capture thread keeps the SDR stream of the same
+  // generation behind it and reopens for that stream, whether the refusal came at the first open,
+  // a reopen or a capture.
+  for (const std::string_view site : {"open", "reset", "capture"}) {
+    auto owner = make_session(), sdr = make_session();
+    stream::session::set_state_for_tests(*owner, stream::session::state_e::RUNNING);
+    stream::session::set_state_for_tests(*sdr, stream::session::state_e::RUNNING);
+    const auto owner_mail = stream::session::mail_for_tests(*owner);
+    const auto sdr_mail = stream::session::mail_for_tests(*sdr);
+    const auto owner_tag = stream::session::packet_destination_for_tests(*owner).capture_owner_tag();
+    int ordered_stops = 0;
+    const auto before = log.count(producer_refusal);
+    const auto [owner_opens, served] = serve_sdr_after_hdr_owner_ends(site, *owner, *sdr,
+      [&](const video::config_t &requested, platf::capture_failure_t &failure) {
+        failure = {platf::capture_failure_e::unsupported_hdr_producer_format, requested.capture_generation, owner_tag};
+      }, [&] {
+        ++ordered_stops;
+        EXPECT_TRUE(owner_mail->event<bool>(mail::frame_conversion_failed)->peek());
+        EXPECT_FALSE(owner_mail->event<bool>(mail::shutdown)->peek());
+      });
+    EXPECT_EQ(owner_opens, site == "reset" ? 2 : 1) << site;
+    EXPECT_TRUE(served) << site << ": the stream sharing the capture was ended or never reopened";
+    EXPECT_EQ(ordered_stops, 1) << site;
+    EXPECT_EQ(log.count(producer_refusal), before + 1) << site;
+    EXPECT_TRUE(owner_mail->event<bool>(mail::shutdown)->peek()) << site;
+    EXPECT_FALSE(sdr_mail->event<bool>(mail::frame_conversion_failed)->peek()) << site;
+    EXPECT_FALSE(sdr_mail->event<bool>(mail::shutdown)->peek()) << site;
+    stream::session::stop(*owner);
+    EXPECT_EQ(stream::session::control_termination_code_for_tests(*owner), std::optional<std::uint32_t> {0x800e9403u});
+  }
+
+  // The synchronized capture worker retires its front owner with the operation its reset and capture
+  // sites call, and goes on to reopen for the session it kept. With nobody left it ends, as it does
+  // when its last session leaves.
+  const auto retired = std::make_shared<safe::mail_raw_t>();
+  const auto kept = std::make_shared<safe::mail_raw_t>();
+  safe::signal_t retired_join, kept_join;
+  EXPECT_TRUE(video::retire_front_sync_session_for_tests({{retired, &retired_join}, {kept, &kept_join}}));
+  EXPECT_TRUE(retired->event<bool>(mail::shutdown)->peek());
+  EXPECT_TRUE(retired_join.peek());
+  EXPECT_FALSE(kept->event<bool>(mail::shutdown)->peek());
+  EXPECT_FALSE(kept_join.peek());
+  EXPECT_FALSE(video::retire_front_sync_session_for_tests({{kept, &kept_join}}));
+  EXPECT_TRUE(kept_join.peek());
 }
 
 /**
@@ -470,6 +573,30 @@ TEST(StreamControlTerminationTests, CancellationDuringEncoderInitializationBacko
     EXPECT_FALSE(foreign_mail->event<bool>(mail::frame_conversion_failed)->peek());
     stream::session::stop(*current);
     EXPECT_EQ(stream::session::control_termination_code_for_tests(*current), std::nullopt);
+  }
+  // A cancelled owner at the front of a shared capture leaves it to the SDR stream behind it, at the
+  // first open, a reopen or a capture, and keeps its own termination reason.
+  for (const auto graceful : {false, true}) {
+    for (const std::string_view site : {"open", "reset", "capture"}) {
+      auto owner = make_session(), sdr = make_session();
+      stream::session::set_state_for_tests(*owner, stream::session::state_e::RUNNING);
+      stream::session::set_state_for_tests(*sdr, stream::session::state_e::RUNNING);
+      const auto owner_mail = stream::session::mail_for_tests(*owner);
+      const auto sdr_mail = stream::session::mail_for_tests(*sdr);
+      const auto owner_tag = stream::session::packet_destination_for_tests(*owner).capture_owner_tag();
+      const auto [owner_opens, served] = serve_sdr_after_hdr_owner_ends(site, *owner, *sdr,
+        [&](const video::config_t &requested, platf::capture_failure_t &failure) {
+          failure = {platf::capture_failure_e::unsupported_hdr_producer_format, requested.capture_generation, owner_tag};
+          graceful ? stream::session::graceful_stop(*owner) : stream::session::stop(*owner);
+        });
+      EXPECT_EQ(owner_opens, site == "reset" ? 2 : 1) << site;
+      EXPECT_TRUE(served) << site << ": the stream sharing the capture was ended or never reopened";
+      EXPECT_FALSE(owner_mail->event<bool>(mail::frame_conversion_failed)->peek()) << site;
+      EXPECT_FALSE(sdr_mail->event<bool>(mail::frame_conversion_failed)->peek()) << site;
+      EXPECT_FALSE(sdr_mail->event<bool>(mail::shutdown)->peek()) << site;
+      EXPECT_EQ(stream::session::control_termination_code_for_tests(*owner),
+                graceful ? std::optional<std::uint32_t> {0x80030023u} : std::nullopt) << site;
+    }
   }
 }
 #endif

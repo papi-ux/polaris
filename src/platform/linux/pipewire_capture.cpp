@@ -1704,11 +1704,21 @@ namespace pipewire_capture {
     if (seq < 0 || !barrier()) return false;
     format_inventory_.begin(identity, seq, format_sync_seq_);
     if (!wait_done() || stopping()) return false;
+    return commit_hdr_refusal_locked(stopping());
+  }
+
+  bool capture_t::commit_hdr_refusal_locked(bool stopping) {
     {
       std::lock_guard lock(frame_mtx_);
-      if (stop_requested_ || negotiated_) return false;
+      if (stopping || stop_requested_ || negotiated_ || format_query_error_ ||
+          !format_inventory_.unsupported(current_format_identity())) return false;
+      // This attempt's decision: a later Format callback fails its running() guard, and reinit
+      // (never error) keeps rate retry from reconnecting the stream.
+      running_ = false;
+      terminal_result_ = wait_result_e::reinit;
     }
-    return !stopping() && format_inventory_.unsupported(current_format_identity());
+    frame_cv_.notify_all();
+    return true;
   }
 
   void capture_t::on_registry_global(void *userdata, std::uint32_t id, std::uint32_t permissions, const char *type, std::uint32_t version, const spa_dict *props) noexcept {
