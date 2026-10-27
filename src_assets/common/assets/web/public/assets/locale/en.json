@@ -1821,6 +1821,7 @@
     "check_display": "Displays",
     "check_display_ok": "{count} active displays reported by the host.",
     "check_display_missing": "No active display path is being reported yet.",
+    "check_display_virtual_idle": "No monitor is reported, which is expected on a host without one. Host Virtual Display creates its display when a stream starts.",
     "check_audio": "Audio",
     "check_audio_ok": "An active host audio sink is available.",
     "check_audio_missing": "No host audio sink has been detected yet.",

@@ -65,6 +65,23 @@ namespace platf::input_access {
   bool host_has_ujust();
 
   /**
+   * @brief The shell command that copies one group's definition out of an ostree image into /etc/group.
+   *
+   * usermod writes /etc/group only, so a group an ostree image defines in /usr/lib/group has to be
+   * copied over before anyone can be added to it. The match is anchored on the whole name and its
+   * colon, so it copies that group's line and nothing that merely starts with or contains the name.
+   * Host setup runs it for polaris-kms, and the input group's remedy prints it.
+   *
+   * @param group The group to copy.
+   */
+  inline std::string image_group_copy_command(std::string_view group) {
+    std::string command = "grep ^";
+    command += group;
+    command += ": /usr/lib/group >> /etc/group";
+    return command;
+  }
+
+  /**
    * @brief The command that adds an account to the group.
    *
    * Pure, so the ostree variants can be tested without an ostree host.

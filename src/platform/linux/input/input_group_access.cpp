@@ -132,7 +132,7 @@ namespace platf::input_access {
     }
 
     // The same two steps by hand, for an ostree host without ujust.
-    std::string command = "sudo bash -c 'grep ^input: /usr/lib/group >> /etc/group' && sudo usermod -aG ";
+    std::string command = "sudo bash -c '" + image_group_copy_command(input_group) + "' && sudo usermod -aG ";
     command += input_group;
     command += ' ';
     command += user;

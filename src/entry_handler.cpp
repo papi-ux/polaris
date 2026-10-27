@@ -369,7 +369,8 @@ namespace {
       << "  systemctl --user daemon-reload && systemctl --user start polaris"sv << std::endl
       << "Note: Private Stream and Gamescope Stream need no desktop. Streaming the visible"sv << std::endl
       << "desktop (Mirror Desktop, Host Virtual Display) still needs a desktop login, and"sv << std::endl
-      << "Polaris must be restarted after that login to see it."sv << std::endl;
+      << "Polaris must be restarted after that login to see it. On a host with no monitor, that"sv << std::endl
+      << "login has to be automatic: turn it on in the display manager (SDDM on KDE Plasma)."sv << std::endl;
     return true;
   }
 
@@ -457,6 +458,16 @@ namespace {
         return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
       });
       return capture;
+    };
+    // The account database on an ostree image reads /usr/lib/group too, so getgrnam finds a group that
+    // usermod, which writes /etc/group only, cannot add anyone to.
+    host.group_only_in_image = [](std::string_view group) {
+      return platf::input_access::host_is_ostree_booted() &&
+             platf::kms_enable::group_defined_only_in_image(
+               platf::kms_enable::read_small_file("/etc/group"),
+               platf::kms_enable::read_small_file("/usr/lib/group"),
+               group
+             );
     };
     return host;
   }
@@ -968,7 +979,8 @@ namespace args {
                 << game_mode_advice;
     } else {
       std::cout
-        << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl;
+        << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl
+        << "Mirror Desktop and Host Virtual Display still need a desktop session there; with no monitor, turn on automatic login in the display manager (SDDM on KDE Plasma)."sv << std::endl;
     }
     if (!kms_summary.empty()) {
       std::cout << std::endl
