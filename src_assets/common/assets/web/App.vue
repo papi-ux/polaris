@@ -157,7 +157,7 @@
         </div>
       </div>
     </main>
-    <CommandPalette v-model="commandPaletteOpen" />
+    <CommandPalette v-if="commandPaletteActivated" v-model="commandPaletteOpen" />
     <Toast />
   </div>
   <div v-else>
@@ -167,10 +167,9 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { defineAsyncComponent, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
 import SettingsUnreadableBanner from './components/SettingsUnreadableBanner.vue'
@@ -183,8 +182,14 @@ import { settingsUnreadable, showsSettingsBanner } from './settings-unreadable.j
 import { createNavSections, getNavItemByPath } from './nav-metadata.js'
 import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } from './update-center.js'
 
+const CommandPalette = defineAsyncComponent(() => import('./CommandPalette.vue'))
 const route = useRoute()
 const commandPaletteOpen = ref(false)
+const commandPaletteActivated = ref(false)
+// Load on first use and keep the instance: confirmations outlive the palette closing.
+watch(commandPaletteOpen, (open) => {
+  if (open) commandPaletteActivated.value = true
+})
 const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(localStorage.getItem('sidebarCollapsed') === 'true')
 const appVersion = ref('')

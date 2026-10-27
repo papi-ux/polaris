@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import process from 'node:process'
 import { describe, expect, it, vi } from 'vitest'
 
 import { createNavSections, flattenNavItems, getNavItemByPath } from './nav-metadata.js'
@@ -121,6 +122,29 @@ describe('command action registry', () => {
     await expect(executeCommandAction(restart, { confirmDangerousAction })).resolves.toBe(true)
     expect(fetchImpl).toHaveBeenCalledWith('./api/restart', { method: 'POST' })
     expect(toast).toHaveBeenCalledWith('Restart requested', 'info')
+  })
+
+  it('opens existing Spaces flows for management and device access without sending a mutation', async () => {
+    const router = { push: vi.fn() }
+    const fetchImpl = vi.fn()
+    const confirmDangerousAction = vi.fn()
+    const actions = createCommandActions({ t, router, fetchImpl })
+    const spacesActions = actions.filter(action => action.group === 'Spaces')
+    expect(spacesActions.map(action => action.label)).toEqual(['Create or manage Spaces', 'Spaces device access'])
+
+    for (const query of ['create space', 'rename space', 'archive space', 'restore space', 'delete space']) {
+      const action = filterCommandActions(actions, query)[0]
+      expect(action.id, query).toBe('spaces-manage')
+      await expect(executeCommandAction(action, { confirmDangerousAction })).resolves.toBe(true)
+      expect(router.push).toHaveBeenLastCalledWith('/spaces')
+    }
+    const access = filterCommandActions(actions, 'spaces device access')[0]
+    expect(access.id).toBe('spaces-device-access')
+    await executeCommandAction(access, { confirmDangerousAction })
+    expect(router.push).toHaveBeenLastCalledWith('/spaces')
+    // Changes stay with the Spaces UI's availability, permission and confirmation guards.
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(confirmDangerousAction).not.toHaveBeenCalled()
   })
 
   it('exposes lightweight roadmap hooks for fuzzy scoring and recent commands', () => {

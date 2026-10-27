@@ -146,6 +146,57 @@ export function unavailableSignalCells({ t = key => key } = {}) {
     .map(([key, label]) => missingCell(key, label, sub, { attrs: { 'data-unavailable-signal': label } }))
 }
 
+// How long the Last session cell recaps a stream this page watched end before it settles back.
+export const RECAP_HOLD_MS = 15000
+// How far this browser's record of a stream may differ from the span the host reports for it and
+// still be that stream watched whole: a report tick at each end and the host's whole-second times.
+export const RECAP_SPAN_TOLERANCE_S = 5
+export const RECAP_REPORT_ROUTE = '/troubleshooting'
+
+// Only the controller's own decisions count as Live Tuning; Doctor, operator and config changes do not.
+const LIVE_TUNING_CAUSES = new Set(['network_feedback', 'stream_health'])
+
+// How many times Live Tuning lowered its requested target in a history captured while the stream
+// was live, or null when that history cannot vouch for every decision since the stream began.
+export function liveTuningLoweredCount(history) {
+  if (history?.version !== 1 || history.available !== true || history.reason !== 'recorded') return null
+  if (history.truncated !== false || history.dropped !== 0 || !Array.isArray(history.entries)) return null
+  let count = 0
+  let previous = null
+  for (const entry of history.entries) {
+    const requested = finite(entry?.requested_bitrate_kbps)
+    if (requested === null) return null
+    if (entry.kind === 'decision' && LIVE_TUNING_CAUSES.has(entry.cause) && previous > 0 && requested > 0 && requested < previous) count++
+    previous = requested
+  }
+  return count
+}
+
+// The recap for a stream this page watched end, or null. It needs the host's ended record to name
+// the captured stream, and this browser's history entry to have been written at that end and to
+// span what the host says the stream lasted; an entry from a page that joined late, or one merged
+// across a feed gap, does not. Averages come from that entry, and what it lacks is left out.
+export function lastSessionRecap({ snapshot = null, lastSession = null, entry = null, t = key => key } = {}) {
+  const capturedAt = Date.parse(snapshot?.capturedAt)
+  if (snapshot?.origin !== 'completed' || typeof snapshot.streamId !== 'string' || !snapshot.streamId || !Number.isFinite(capturedAt)) return null
+  if (lastSession?.state !== 'ended' || lastSession.stream_instance_id !== snapshot.streamId) return null
+  const hostSpan = (Date.parse(lastSession.ended_at) - Date.parse(lastSession.started_at)) / 1000
+  const duration = finite(entry?.duration_s)
+  const endedAt = finite(entry?.ended_at)
+  if (!(hostSpan > 0) || !(duration > 0) || !(endedAt >= capturedAt) || Math.abs(duration - hostSpan) > RECAP_SPAN_TOLERANCE_S) return null
+  const fps = finite(entry.avg_fps)
+  const kbps = finite(entry.avg_bitrate_kbps)
+  const lowered = liveTuningLoweredCount(snapshot.stats?.live_tuning_history)
+  const detail = [
+    fps > 0 ? t('mission_control.recap_fps_avg', { fps: Number(fps.toFixed(1)) }) : '',
+    kbps > 0 ? t('mission_control.recap_bitrate_avg', { mbps: (kbps / 1000).toFixed(1) }) : '',
+  ].filter(Boolean).join(' · ')
+  // The optional explanation must not grow the strip during the brief recap. Keep it available
+  // on hover and to assistive technology while the visible sub line stays a compact summary.
+  const tuningDetail = lowered > 0 ? t('mission_control.recap_live_tuning_lowered', { count: lowered }) : ''
+  return { entry, detail, tuningDetail }
+}
+
 // The idle strip summarises readiness from the checks, clients, history, config and GPU reads the
 // dashboard already makes. A source that has not answered shows a dash with its reason.
 export function idleSignalCells({
@@ -167,8 +218,14 @@ export function idleSignalCells({
       : missingCell('paired', t('mission_control.signal_paired'), t('mission_control.not_read'), { attrs: attrs('paired') }),
   ]
   if (lastSession) {
-    cells.push(cell('last', t('mission_control.signal_last_session'), lastSession.duration || MISSING, {
-      word: true, grade: lastSession.grade || '', tone: lastSession.tone || '', sub: lastSession.detail || '', attrs: attrs('last'),
+    // While a recap holds, the same cell says the stream ended, opens stream details and puts
+    // the stream's averages where the client and date go. It adds no row; only that text changes.
+    const recap = lastSession.recap
+    cells.push(cell('last', t(recap ? 'mission_control.recap_label' : 'mission_control.signal_last_session'), lastSession.duration || MISSING, {
+      word: true, grade: lastSession.grade || '', tone: lastSession.tone || '', sub: recap?.detail || lastSession.detail || '', attrs: attrs('last'),
+      title: recap ? [recap.detail, recap.tuningDetail].filter(Boolean).join(' · ') : lastSession.detail || '',
+      ...(recap ? { recap: true,
+        link: { to: RECAP_REPORT_ROUTE, label: t('mission_control.recap_link'), description: recap.tuningDetail || '' } } : {}),
     }))
   }
   cells.push(modeLabel
