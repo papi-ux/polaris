@@ -34,7 +34,7 @@
               :placeholder="t('command_palette.placeholder')"
               class="flex-1 bg-transparent text-silver outline-none placeholder-storm"
               @keydown.escape="close"
-              @keydown.enter="executeSelected"
+              @keydown.enter.prevent="executeSelected"
               @keydown.up.prevent="selectedIndex = Math.max(0, selectedIndex - 1)"
               @keydown.down.prevent="selectedIndex = Math.max(0, Math.min(filteredActions.length - 1, selectedIndex + 1))"
             >

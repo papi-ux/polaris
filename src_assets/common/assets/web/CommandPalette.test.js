@@ -57,8 +57,10 @@ async function requestRestart() {
   search().value = 'restart'
   search().dispatchEvent(new Event('input', { bubbles: true }))
   await nextTick()
-  search().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  const openingKey = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+  search().dispatchEvent(openingKey)
   await flushPromises()
+  return openingKey
 }
 
 describe('command palette first-open lifecycle', () => {
@@ -110,5 +112,15 @@ describe('command palette first-open lifecycle', () => {
     }
     expect(document.querySelector('[data-confirm-confirm]')).toBeNull()
     expect(wrapper.findComponent(CommandPalette).exists()).toBe(true)
+  })
+
+  it('consumes the opening Enter before it can activate the newly focused Cancel button', async () => {
+    await start()
+    const openingKey = await requestRestart()
+    expect(openingKey.defaultPrevented).toBe(true)
+    const cancel = document.querySelector('[data-confirm-cancel]')
+    expect(cancel).not.toBeNull()
+    expect(document.activeElement).toBe(cancel)
+    expect(mutations()).toHaveLength(0)
   })
 })
