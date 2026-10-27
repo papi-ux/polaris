@@ -163,6 +163,8 @@
             :prefers-reduced-motion="prefersReducedMotion"
             :history="chartHistory"
             :history-revision="historyRevision"
+            :markers="tuningSparkMarkers"
+            :note="tuningNote"
           />
           <SignalStrip v-else-if="stageMode === 'idle'" :aria-label="t('mission_control.idle_signals_label')" :cells="idleCells" />
           <SignalStrip v-else :aria-label="t('mission_control.unavailable_signals_label')" :cells="unavailableCells" />
@@ -545,6 +547,7 @@ import {
   streamStatusUnavailable,
   unavailableSignalCells,
 } from '../mission-control.js'
+import { latestTuningChange, tuningChanges, tuningMarkers } from '../live-tuning-timeline.js'
 
 const { stats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats(1000)
 const { label: liveTuningLabel } = useLiveTuning()
@@ -1817,6 +1820,12 @@ const streamFormat = computed(() => streamFormatLabel(stats.value || {}))
 const liveCells = computed(() => liveSignalCells({
   stats: stats.value || {}, summary: liveSummary.value, grade: qualityGrade.value, score: qualityScore.value, t,
 }))
+// Live Tuning's recorded changes, from the same report as the readings. The markers follow the
+// sparklines' axis and vanish with them under reduced motion; the line says nothing when nothing changed.
+const tuningHistory = computed(() => stats.value?.live_tuning_history)
+const tuningChangeList = computed(() => tuningChanges(tuningHistory.value))
+const tuningSparkMarkers = computed(() => tuningMarkers(tuningChangeList.value, tuningHistory.value, timestamps.value))
+const tuningNote = computed(() => latestTuningChange(tuningChangeList.value, tuningHistory.value, t))
 const unavailableCells = computed(() => unavailableSignalCells({ t }))
 // The mode new sessions start in: the configured stream path on Linux, Private Stream or Windowed
 // elsewhere. Nothing is claimed until the host's settings have been read.
