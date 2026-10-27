@@ -135,6 +135,88 @@ describe('diagnostics export redaction', () => {
   })
 })
 
+describe('support export home paths', () => {
+  it('redacts the three home roots and literal whole segments, preserving unrelated text', () => {
+    const text = '/srv/dev.user+$/cache /srv/devXuserZZ/cache /srv/dev.user+$-cache '
+      + 'dev.user+$ /usr/lib/polaris /opt/homebrew/bin /other/home/unknown '
+      + '"/home/dev.user+$/log" /var/home/ostree/.config /Users/macuser /srv/dev.user+$'
+    const redacted = redactSensitiveText(text)
+
+    expect(redacted).toBe('/srv/~/cache /srv/devXuserZZ/cache /srv/dev.user+$-cache '
+      + 'dev.user+$ /usr/lib/polaris /opt/homebrew/bin /other/home/unknown '
+      + '"~/log" ~/.config ~ /srv/~')
+    expect(redactSensitiveText(redacted)).toBe(redacted)
+  })
+
+  it('learns from nested Map, Set and Error contents before walking either field order', () => {
+    const failure = new Error('opening /Users/macuser/log failed')
+    failure.name = '/run/ostree/Failure'
+    failure.detail = '/run/macuser/cache'
+    const entries = [
+      ['early', '/run/macuser/cache /run/ostree/cache /run/keyuser/cache'],
+      ['nested', new Map([
+        ['/home/keyuser/log', new Set([failure, '/var/home/ostree/.config'])],
+      ])],
+    ]
+    const expected = {
+      early: '/run/~/cache /run/~/cache /run/~/cache',
+      nested: { '~/log': [
+        { name: '/run/~/Failure', message: 'opening ~/log failed', detail: '/run/~/cache' },
+        '~/.config',
+      ] },
+    }
+    const forward = Object.fromEntries(entries)
+    forward.self = forward
+
+    expect(sanitizeDiagnosticsValue(forward)).toEqual({ ...expected, self: '[circular]' })
+    expect(sanitizeDiagnosticsValue(Object.fromEntries([...entries].reverse()))).toEqual(expected)
+  })
+
+  it('uses one home-name book for config, retained logs, stream evidence, crash and the issue draft', () => {
+    const input = {
+      config: { log_path: '/run/player/cache', library: '/usr/share/polaris' },
+      logs: 'open /run/player/log token=secret123 from 192.168.1.45',
+      previous_run_logs: '/home/player/.config/polaris/log',
+      older_run_logs: '/var/home/player/old.log',
+      stream_evidence: { detail: '/run/player/stream' },
+      crash: { ...crashedRun, log_path: '/home/player/.config/polaris/log', evidence: 'failed /run/player/crash' },
+    }
+    const bundle = buildAnonymizedDiagnosticsBundle(input)
+
+    expect(bundle.config).toEqual({ log_path: '/run/~/cache', library: '/usr/share/polaris' })
+    expect(bundle.logs).toEqual(['open /run/~/log token=[redacted] from [lan-1]'])
+    expect(bundle.previous_run_logs).toEqual(['~/.config/polaris/log'])
+    expect(bundle.older_run_logs).toEqual(['~/old.log'])
+    expect(bundle.stream_evidence.detail).toBe('/run/~/stream')
+    expect(bundle.crash.log_path).toBe('~/.config/polaris/log')
+    expect(bundle.issue_draft).toContain('failed /run/~/crash')
+    expect(bundle.redaction_notice).toContain('Home directories under /home, /var/home and /Users become ~')
+    expect(JSON.stringify(bundle)).not.toContain('player')
+    expect(input.crash.log_path).toBe('/home/player/.config/polaris/log')
+    expect(sanitizeDiagnosticsValue(bundle)).toEqual(bundle)
+    expect(buildAnonymizedDiagnosticsBundle({ ...input, issue_draft: '/run/player/draft' }).issue_draft)
+      .toBe('/run/~/draft')
+  })
+
+  it('shares learned names with separately built subsets and learns before projecting stream evidence', () => {
+    const input = {
+      config: { path: '/home/player/.config' },
+      session_snapshot: { capture_path_reason: '/run/player/capture' },
+      recent_issues: [{ message: 'failed /run/player/log' }],
+    }
+    const addresses = createExportAddressBook(input)
+
+    expect(sanitizeDiagnosticsValue('/run/player/first', new WeakSet(), addresses)).toBe('/run/~/first')
+    expect(buildStreamEvidence(input).recent_issues[0].message).toBe('failed /run/~/log')
+    expect(buildGithubIssueDraft(input, { addresses })).toContain('/run/~/capture')
+    expect(new URL(buildGithubIssueUrl(input, { addresses })).searchParams.get('logs')).toContain('/run/~/log')
+    expect(buildAnonymizedDiagnosticsBundle(input, { addresses }).config.path).toBe('~/.config')
+    // A new export cannot learn a name from a previous export.
+    expect(buildAnonymizedDiagnosticsBundle({ config: { path: '/run/player/cache' } }).config.path)
+      .toBe('/run/player/cache')
+  })
+})
+
 describe('diagnostics export display mode and network path', () => {
   // The support bundle that prompted these: a client that "cannot select 1080p" because its
   // pairing pinned 4K, and microstutter from a client that had moved onto Tailscale.
@@ -2237,8 +2319,8 @@ describe('silent failure reporting', () => {
       silent_failures: silentFailures,
     })
 
-    // 5 since network addresses became labels.
-    expect(bundle.support_bundle_version).toBe(6)
+    // 7 since home directories and learned username path segments became ~.
+    expect(bundle.support_bundle_version).toBe(7)
     expect(bundle.crash.outcome).toBe('crashed')
     expect(bundle.silent_failures).toHaveLength(1)
     expect(bundle.issue_draft).toContain('SIGSEGV')

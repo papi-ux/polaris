@@ -150,6 +150,55 @@ const URL_CREDENTIAL_PATTERN = /(https?:\/\/)([^\s/@:]+):([^\s/@]+)@/gi
 
 export const REDACTED_VALUE = '[redacted]'
 
+// Match complete path segments, never a username substring or an arbitrary path.
+// Keep the sources fixed: learned names can contain regex metacharacters.
+const PATH_SEGMENT_SOURCE = String.raw`[^/\\\s"'\x60<>:;,|!?()[\]{}]+`
+const HOME_PATH_SOURCE = String.raw`(?<![\w./\\~-])/(?:var/home|home|Users)/(${PATH_SEGMENT_SOURCE})`
+
+function homeNamesFor(addresses) {
+  // The book belongs to one export, including its separately built draft and
+  // stream evidence. No username state survives in a module-level cache.
+  return addresses.homeNames || (addresses.homeNames = new Set())
+}
+
+function isHomeName(name) {
+  return name !== '.' && name !== '..' && name !== '~'
+}
+
+function learnHomePaths(value, names, seen = new WeakSet()) {
+  if (typeof value === 'string') {
+    for (const match of value.matchAll(new RegExp(HOME_PATH_SOURCE, 'g'))) {
+      if (isHomeName(match[1])) names.add(match[1])
+    }
+  } else if (value && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value)
+    // Mirror the exported shapes, including the non-enumerable Error fields.
+    // Discover the whole input before redacting any part: a later home path
+    // must protect an earlier /run/<name> just as well as the reverse order.
+    if (value instanceof Error) {
+      learnHomePaths(String(value.name || 'Error'), names, seen)
+      learnHomePaths(String(value.message || ''), names, seen)
+    }
+    if (Array.isArray(value) || value instanceof Set) {
+      for (const item of value) learnHomePaths(item, names, seen)
+    } else if (!(value instanceof Date)) {
+      const entries = value instanceof Map ? value.entries() : Object.entries(value)
+      for (const [key, item] of entries) {
+        learnHomePaths(String(key), names, seen)
+        learnHomePaths(item, names, seen)
+      }
+    }
+  }
+  return names
+}
+
+function redactHomePaths(text, names) {
+  const withoutHomes = text.replace(new RegExp(HOME_PATH_SOURCE, 'g'), (path, name) => isHomeName(name) ? '~' : path)
+  return withoutHomes.replace(new RegExp(`(/)(${PATH_SEGMENT_SOURCE})`, 'g'), (_, slash, segment) => (
+    `${slash}${names.has(segment) ? '~' : segment}`
+  ))
+}
+
 /**
  * Split an identifier into lowercase words across camelCase and . _ - breaks.
  */
@@ -276,11 +325,13 @@ function redactAssignments(text) {
  * throughout it; a call on its own gets a book of its own.
  */
 export function redactSensitiveText(value, addresses = new NetworkAddressBook()) {
-  const withoutCredentials = redactAssignments(String(value || '')
+  const text = String(value || '')
+  const homeNames = learnHomePaths(text, homeNamesFor(addresses))
+  const withoutCredentials = redactAssignments(text
     .replace(URL_CREDENTIAL_PATTERN, `$1${REDACTED_VALUE}:${REDACTED_VALUE}@`)
     .replace(AUTH_HEADER_PATTERN, (_, scheme) => `${scheme} ${REDACTED_VALUE}`)
     .replace(COOKIE_HEADER_PATTERN, (_, label, separator) => `${label}${separator}${REDACTED_VALUE}`))
-  return pseudonymizeNetworkAddresses(withoutCredentials, addresses)
+  return pseudonymizeNetworkAddresses(redactHomePaths(withoutCredentials, homeNames), addresses)
 }
 
 
@@ -292,10 +343,10 @@ export function redactSensitiveText(value, addresses = new NetworkAddressBook())
  * is JSON either way. Which names count as credentials stays with
  * isSensitiveFieldName rather than becoming a second definition here.
  */
-function sanitizeEntries(entries, seen, addresses) {
+function sanitizeEntries(entries, seen, addresses, homeNames) {
   return Object.fromEntries(entries.map(([key, item]) => [
-    String(key),
-    isSensitiveFieldName(String(key)) ? REDACTED_VALUE : sanitizeDiagnosticsValue(item, seen, addresses),
+    redactHomePaths(String(key), homeNames),
+    isSensitiveFieldName(String(key)) ? REDACTED_VALUE : sanitizeValue(item, seen, addresses, homeNames),
   ]))
 }
 
@@ -311,11 +362,11 @@ function sanitizeEntries(entries, seen, addresses) {
  * The stack is deliberately not carried. The bundle already ships log text, and
  * a stack adds host paths without adding much a maintainer cannot get there.
  */
-function sanitizeError(error, seen, addresses) {
+function sanitizeError(error, seen, addresses, homeNames) {
   return {
-    name: String(error.name || 'Error'),
+    name: redactHomePaths(String(error.name || 'Error'), homeNames),
     message: redactSensitiveText(error.message || '', addresses),
-    ...sanitizeEntries(Object.entries(error), seen, addresses),
+    ...sanitizeEntries(Object.entries(error), seen, addresses, homeNames),
   }
 }
 
@@ -327,24 +378,29 @@ function sanitizeError(error, seen, addresses) {
  * safe direction and the useless one: the bundle still opened and still read as
  * complete while carrying nothing.
  */
-function sanitizeObjectLike(value, seen, addresses) {
-  if (Array.isArray(value)) return value.map((item) => sanitizeDiagnosticsValue(item, seen, addresses))
+function sanitizeObjectLike(value, seen, addresses, homeNames) {
+  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, seen, addresses, homeNames))
   // An invalid date has no ISO form and toISOString throws on it, which would
   // take the whole export down over one bad field.
   if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null
-  if (value instanceof Error) return sanitizeError(value, seen, addresses)
-  if (value instanceof Map) return sanitizeEntries([...value.entries()], seen, addresses)
-  if (value instanceof Set) return [...value].map((item) => sanitizeDiagnosticsValue(item, seen, addresses))
-  return sanitizeEntries(Object.entries(value), seen, addresses)
+  if (value instanceof Error) return sanitizeError(value, seen, addresses, homeNames)
+  if (value instanceof Map) return sanitizeEntries([...value.entries()], seen, addresses, homeNames)
+  if (value instanceof Set) return [...value].map((item) => sanitizeValue(item, seen, addresses, homeNames))
+  return sanitizeEntries(Object.entries(value), seen, addresses, homeNames)
 }
 
 /**
  * Sanitise a value for export, recursively.
  *
- * @param addresses One address book for the whole value, so an address that
- *   appears in the logs and again in a field carries the same label in both.
+ * @param addresses One book for the whole value's addresses and home names, so
+ *   separately built parts of the same export agree on their replacements.
  */
 export function sanitizeDiagnosticsValue(value, seen = new WeakSet(), addresses = new NetworkAddressBook()) {
+  const homeNames = learnHomePaths(value, homeNamesFor(addresses))
+  return sanitizeValue(value, seen, addresses, homeNames)
+}
+
+function sanitizeValue(value, seen, addresses, homeNames) {
   if (value === null || value === undefined) return value
   if (typeof value === 'string') return redactSensitiveText(value, addresses)
   if (typeof value !== 'object') return value
@@ -356,7 +412,7 @@ export function sanitizeDiagnosticsValue(value, seen = new WeakSet(), addresses 
   if (seen.has(value)) return '[circular]'
   seen.add(value)
   try {
-    return sanitizeObjectLike(value, seen, addresses)
+    return sanitizeObjectLike(value, seen, addresses, homeNames)
   } finally {
     seen.delete(value)
   }
@@ -939,6 +995,7 @@ function endedSessionDraftLines(facts) {
 }
 
 export function buildStreamEvidence(input = {}, { addresses = new NetworkAddressBook() } = {}) {
+  learnHomePaths(input, homeNamesFor(addresses))
   const stats = input.session_snapshot || input.stream_stats || {}
   const doctor = stats?.doctor || input.doctor || {}
   const ended = retainedEndedSessionFacts(stats)
@@ -1582,7 +1639,7 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
 }
 
 /**
- * One address book for a whole export.
+ * One address and home-name book for a whole export.
  *
  * Every part of a bundle that is built separately (stream evidence, the issue
  * draft, the bundle itself) shares it, and so does anything shared alongside
@@ -1593,10 +1650,12 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
  * subset, its [lan-1] and the logs' [lan-1] can be two different devices, which
  * is worse than no label. Labels already present in the input are reserved
  * before any part is built, so a new address never takes a label that already
- * means something else.
+ * means something else. Home names are learned from the whole input here too,
+ * before a separately built subset can encounter a username without its home.
  */
 export function createExportAddressBook(input) {
   const addresses = new NetworkAddressBook()
+  learnHomePaths(input, homeNamesFor(addresses))
   try {
     addresses.reserveExistingLabels(JSON.stringify(input))
   } catch {
@@ -1632,6 +1691,7 @@ function logTextAsLines(bundle) {
 }
 
 export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = createExportAddressBook(input) } = {}) {
+  learnHomePaths(input, homeNamesFor(addresses))
   const streamEvidence = input.stream_evidence || buildStreamEvidence(input, { addresses })
   const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence }, { addresses })
   return logTextAsLines(sanitizeDiagnosticsValue({
@@ -1654,11 +1714,15 @@ export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = creat
       'lan, cgnat (the range Tailscale uses on IPv4), tailscale, link-local or public, and stay the',
       'same throughout one export, so two lines about the same device still match without saying',
       'which device it was. Loopback, multicast and example addresses stay readable.',
+      'Home directories under /home, /var/home and /Users become ~. Names learned from those',
+      'directories also become ~ when they are complete path segments elsewhere in this export.',
+      'Other paths and standalone names stay readable; review the export before sharing it.',
     ].join(' '),
     // 4: older_run_logs and kernel_gpu_messages ride along.
     // 5: network addresses are replaced with labels.
     // 6: the log fields are lines, like kernel_gpu_messages already was.
-    support_bundle_version: 6,
+    // 7: home directories and learned username path segments are replaced with ~.
+    support_bundle_version: 7,
     ...input,
     ...(input.network_connection ? { network_connection: safeTailscalePeerSnapshot(input.network_connection) } : {}),
     stream_evidence: streamEvidence,
