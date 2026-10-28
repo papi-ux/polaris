@@ -9,7 +9,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -127,4 +130,63 @@ TEST(LaunchSessionKey, HostBuiltSessionNeedsNoClientKey) {
 
   ASSERT_NE(session, nullptr);
   EXPECT_TRUE(session->gcm_key.empty());
+}
+
+TEST(NvhttpLaunchQuery, CoreverKeepsMissingEmptyAndNondigitArithmetic) {
+  const std::vector<std::pair<std::string, std::int64_t>> cases {
+    {"", 0}, {"corever", 0}, {"COREVER=", 0}, {"corever=0", 0},
+    {"corever=1", 1}, {"corever=-1", -1}, {"corever=x", 72}
+  };
+  for (const auto &[query, expected] : cases) {
+    SCOPED_TRACE(query);
+    const auto args = SimpleWeb::QueryString::parse(query);
+    EXPECT_EQ(nvhttp::decode_client_corever(args), expected);
+  }
+}
+
+TEST(NvhttpLaunchQuery, RikeyIdKeepsRequiredEmptyNarrowAndBigEndianBytes) {
+  EXPECT_THROW(nvhttp::decode_client_iv_prefix(nvhttp::args_t {}), std::out_of_range);
+  const std::vector<std::pair<std::string, std::array<unsigned char, 4>>> cases {
+    {"rikeyid", {0, 0, 0, 0}}, {"RIKEYID=", {0, 0, 0, 0}},
+    {"rikeyid=0", {0, 0, 0, 0}}, {"rikeyid=1", {0, 0, 0, 1}},
+    {"rikeyid=16909060", {1, 2, 3, 4}}, {"rikeyid=-1", {255, 255, 255, 255}},
+    {"rikeyid=4294967296", {0, 0, 0, 0}}, {"rikeyid=x", {0, 0, 0, 72}}
+  };
+  for (const auto &[query, expected] : cases) {
+    SCOPED_TRACE(query);
+    const auto args = SimpleWeb::QueryString::parse(query);
+    const auto prefix = nvhttp::decode_client_iv_prefix(args);
+    ASSERT_EQ(sizeof(prefix), expected.size());
+    const auto *bytes = reinterpret_cast<const unsigned char *>(&prefix);
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+      EXPECT_EQ(bytes[i], expected[i]) << i;
+    }
+  }
+}
+
+TEST(NvhttpLaunchQuery, RikeyKeepsLenientHexAndRightmostOddPairs) {
+  EXPECT_THROW(nvhttp::decode_client_rikey(nvhttp::args_t {}), std::out_of_range);
+  const auto decode = [](const std::string &value) {
+    nvhttp::args_t args;
+    args.emplace("rikey", value);
+    return nvhttp::decode_client_rikey(args);
+  };
+  EXPECT_TRUE(decode("").empty());
+  EXPECT_EQ(decode("0102"), std::string("\x01\x02", 2));
+  EXPECT_EQ(decode(std::string(32, '0')), std::string(16, '\0'));
+  EXPECT_EQ(decode(std::string(32, 'z')), std::string(16, '3'));
+  EXPECT_EQ(decode("a!b?c"), std::string(1, static_cast<char>(0xbc)));
+  EXPECT_EQ(decode("f" + std::string(32, '0')), std::string(16, '\0'));
+  const auto escaped = SimpleWeb::QueryString::parse("RIKEY=%61%62%63&ri%6bey=ff");
+  EXPECT_EQ(nvhttp::decode_client_rikey(escaped), std::string(1, static_cast<char>(0xbc)));
+}
+
+TEST(LaunchSessionKey, ShortKeyRefusesBeforeMissingRikeyId) {
+  auto cert = client_cert();
+  auto args = launch_args_for_key_bytes(1);
+  args.erase("rikeyid");
+  args.emplace("corever", "1");
+  EXPECT_NO_THROW({
+    EXPECT_EQ(nvhttp::make_launch_session(true, false, args, cert.get()), nullptr);
+  });
 }

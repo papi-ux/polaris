@@ -1,7 +1,8 @@
-# Opt-in config/app validator fuzzer
+# Opt-in parser fuzzers
 
-This standalone developer target exercises the production config/app JSON validators.
-It builds only when explicitly enabled; ordinary source CI does not compile or run it.
+These standalone developer targets exercise the production config/app JSON validators
+and the raw GameStream query/key-material decoders described below. They build only
+when explicitly enabled; ordinary source CI does not compile or run them.
 A bounded campaign can find a failure, but a clean run is not an exhaustive security
 guarantee, qualification of a different toolchain, or package or hardware acceptance.
 
@@ -34,7 +35,8 @@ being validated; the harness never executes them.
 This omits route authentication/content-type/admission, response-only config-key
 preprocessing in `read_config_payload`, persistence, and other JSON route decoders.
 RTSP primitives and handlers, the full typed control IDX/FEC boundary and nvhttp
-query/launch validation still need separately owned targets. Generic JSON syntax
+query/launch validation outside the key-material slice below still need separately
+owned targets. Generic JSON syntax
 coverage or Nova XML cannot substitute for those areas. Keep campaigns separate
 from ordinary per-push builds, using a manual or nightly lane with an explicit
 source, toolchain, time and resource budget.
@@ -122,3 +124,92 @@ Unless noted otherwise, cases are in
 | `empty.json` | Added parser boundary: zero bytes |
 | `truncated.json` | Added parser boundary: truncated object/value |
 | `numeric-overflow.json` | Upstream [Number limits](https://json.nlohmann.me/features/types/number_handling/#number-limits): literal `1E400`, documented parsing `out_of_range.406`; [v3.11.3 parser](https://raw.githubusercontent.com/nlohmann/json/v3.11.3/include/nlohmann/detail/input/parser.hpp), non-finite `value_float` rejection |
+
+
+## Raw GameStream launch/resume key-material queries
+
+`fuzz_nvhttp_launch_query` calls the pinned SimpleWeb `QueryString::parse` used by
+`Request::parse_query_string`, then the real production `nvhttp_query.cpp` helpers.
+The input is only the raw query text, without a request line, `?` prefix or
+fuzzer-specific framing. It does not create a server or a session.
+
+The extraction keeps `get_arg`'s lookup, copied value, absent-field default and
+`std::out_of_range(name)` behavior. The three pure field decoders use the existing
+`util::from_hex_vec`, `util::from_view` and 32-bit endian conversion unchanged.
+Product calls remain at their original statements: malformed key length still
+logs/refuses before numeric decoding; corever is decoded after key assignment;
+rikeyid is decoded after cipher/scheme setup, both random draws and IV allocation.
+The shared 16-byte driver bound is asserted against the product's AES key size.
+
+The driver consumes every decoded key byte, corever and the IV prefix through a
+volatile result. It returns before numeric decoding when the key is not 16 bytes.
+Each missing-required-field catch is scoped to that field's helper and confirms
+that field is absent; unexpected exceptions and sanitizer failures are not hidden.
+Absent corever still defaults to `"0"`; empty numeric values still mean zero and
+short nonnumeric values keep the old arithmetic, rather than becoming validation
+errors. `rikeyid` is narrowed to uint32 before its endian conversion, producing
+the object bytes the existing product copy uses.
+
+Parsing semantics come from the pinned SimpleWeb headers: names stay raw, values
+are percent-decoded and `+` becomes space, keys are case-insensitive, empty names
+are omitted, and bare names have empty values. Duplicate selection remains the
+real multimap's `find`; no particular duplicate winner is promised. The hex
+decoder remains lenient: all ASCII letters count as convertible, other characters
+are skipped, and an odd count drops the leftmost convertible character because
+pairs are consumed from the right. For example `abc` yields one byte `bc`.
+These are compatibility facts, not new admission rules.
+
+### Build, resource and coverage limits
+
+The default-OFF gate, native Linux x86_64/Clang 18+/C++20 checks, target-local
+ASan/UBSan/libFuzzer flags and disabled IPO are shared with the existing JSON
+harness. This target additionally needs the already materialized pinned
+`third-party/Simple-Web-Server/{utility.hpp,status_code.hpp}` and the existing
+installed nlohmann_json package used by `utility.h`; nothing is fetched or
+provisioned by this target. Its build compiles the real helper cpp with the driver,
+without `nvhttp.cpp`, OpenSSL, asio, a product library, a server or a live session.
+The new pure helper is also in the ordinary production source list; only the
+fuzzer executable/instrumentation stays outside ordinary builds.
+
+The driver refuses more than 65,536 bytes as a harness resource bound. A future
+separately admitted campaign would copy only `corpus/nvhttp_launch_query/*` into a
+fresh external corpus, build only `fuzz_nvhttp_launch_query`, and use the existing
+60-second campaign, `-max_len=65536`, 5-second per-input timeout and 1024 MiB RSS
+limits, preserving the first failure and all exact source/tool/binary/corpus
+identities. These settings do not authorize a run or waive host admission.
+
+**Preparation only: compile, tests, native and fuzz execution are UNRUN.** The
+current manual selector admits only JSON/FEC and needs a separately owned ROOT
+extension before this target can use that lane. Do not replay unchanged JSON
+campaign 2758 as a substitute. The known signed-arithmetic overflow in unchanged
+`util::from_chars` is tracked separately in Polaris #542; it is not fixed here,
+and there is no long-numeric seed or undefined-overflow expected result. Preserve
+any actual first finding for that separate work.
+
+This covers only raw query parsing and the three named client-key field decoders.
+It does not exercise route/auth/presence admission, crypto or RNG, session/worker
+state, other launch fields, pre-auth appid conversion, pairing, request-line or
+header parsing, RTSP, typed control/FEC, or a real launch/resume. It supplies no
+full #505, security, package, hardware, device or release acceptance.
+
+### Exactly eight synthetic query seeds
+
+The Polaris literal origins below are at
+`371845d0b53f9ece149981eb61e6a411690e575b`; SimpleWeb is pinned to
+`5b29c7004cc53252a8eff06d62899c8847ada971`. These ASCII files have no trailing
+newline and contain no private captures. Field-subset serializations are labelled
+as such; added boundaries are not presented as existing full test requests.
+
+| File | Origin or explicitly added boundary |
+| --- | --- |
+| `empty.query` | Existing exact empty literal, SimpleWeb `tests/parse_test.cpp:180` |
+| `valid-key.query` | Serialize `launch_args_for_key_bytes(16)` literals from `tests/unit/test_launch_session_key.cpp:29-34`: 32 zero characters, rikeyid=1, mode=1920x1080x60 |
+| `encrypted-rtsp.query` | Serialize only the rikey/rikeyid/corever literals in `MultiseatProfileHttp::args`, `tests/unit/platform/test_multiseat_launch_service.cpp:1267` |
+| `short-key.query` | Serialize only the rikey=00112233/rikeyid=1/corever=1 fields in `LaunchDesktopSteamTest.LaunchesRefusedBeforeTheSteamStepLeaveSteamAlone`, `tests/unit/test_launch_desktop_steam.cpp:376` |
+| `missing-rikeyid.query` | Added boundary: remove rikeyid from valid-key |
+| `empty-fields.query` | Added boundary: valid key with explicit empty corever/rikeyid |
+| `odd-key.query` | Added boundary: prepend convertible f to the 32-zero key; its leftmost character is ignored |
+| `percent-and-duplicates.query` | Added boundary: percent-encoded zero key and equivalent duplicate/case key, raw percent in an unrelated name, unrelated truncated percent value; no duplicate winner assumption |
+
+The empty file remains part of the original corpus identity even when libFuzzer
+counts only nonempty initial files.

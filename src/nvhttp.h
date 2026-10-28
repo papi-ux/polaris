@@ -25,6 +25,7 @@
 
 // local includes
 #include "crypto.h"
+#include "nvhttp_query.h"
 #include "pyrowave_availability.h"
 #include "process.h"
 #include "rtsp.h"
@@ -198,9 +199,6 @@ namespace nvhttp {
     const std::string &path,
     const std::function<void(nlohmann::json &)> &mutation
   );
-
-  std::string
-  get_arg(const args_t &args, const char *name, const char *default_value = nullptr);
 
   /**
    * @brief Normalize and validate a client-facing encoder backend id.

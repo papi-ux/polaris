@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(PolarisConfigValidatorFuzz LANGUAGES NONE)
 
 # Standalone only: the product and ordinary test projects do not include this directory.
-option(POLARIS_BUILD_PARSER_FUZZERS "Build the opt-in config validator libFuzzer target" OFF)
+option(POLARIS_BUILD_PARSER_FUZZERS "Build the opt-in parser libFuzzer targets" OFF)
 if(NOT POLARIS_BUILD_PARSER_FUZZERS)
     message(STATUS "Polaris config validator fuzzer disabled; no compiler or dependencies requested")
     return()
@@ -62,4 +62,30 @@ target_compile_options(fuzz_confighttp_json PRIVATE
     -O1 -g -fno-omit-frame-pointer -fno-sanitize-recover=all
     -fsanitize=fuzzer-no-link,address,undefined)
 target_link_options(fuzz_confighttp_json PRIVATE
+    -fno-sanitize-recover=all -fsanitize=fuzzer,address,undefined)
+
+# Parse the real raw query and individual client launch fields, without a server.
+foreach(required_file IN ITEMS
+        src/nvhttp_query.cpp src/nvhttp_query.h src/utility.h
+        third-party/Simple-Web-Server/utility.hpp
+        third-party/Simple-Web-Server/status_code.hpp)
+    if(NOT EXISTS "${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
+        message(FATAL_ERROR "Missing production source: ${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
+    endif()
+endforeach()
+add_executable(fuzz_nvhttp_launch_query
+    fuzz_nvhttp_launch_query.cpp
+    "${POLARIS_FUZZ_SOURCE_ROOT}/src/nvhttp_query.cpp")
+target_include_directories(fuzz_nvhttp_launch_query PRIVATE
+    "${POLARIS_FUZZ_SOURCE_ROOT}/src"
+    "${POLARIS_FUZZ_SOURCE_ROOT}/third-party")
+target_link_libraries(fuzz_nvhttp_launch_query PRIVATE nlohmann_json::nlohmann_json)
+target_compile_features(fuzz_nvhttp_launch_query PRIVATE cxx_std_20)
+set_target_properties(fuzz_nvhttp_launch_query PROPERTIES
+    CXX_EXTENSIONS OFF
+    INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_options(fuzz_nvhttp_launch_query PRIVATE
+    -O1 -g -fno-omit-frame-pointer -fno-sanitize-recover=all
+    -fsanitize=fuzzer-no-link,address,undefined)
+target_link_options(fuzz_nvhttp_launch_query PRIVATE
     -fno-sanitize-recover=all -fsanitize=fuzzer,address,undefined)
