@@ -110,3 +110,59 @@ target_compile_options(fuzz_nvhttp_launch_query PRIVATE
     -fsanitize=fuzzer-no-link,address,undefined)
 target_link_options(fuzz_nvhttp_launch_query PRIVATE
     -fno-sanitize-recover=all -fsanitize=fuzzer,address,undefined)
+
+# Parse raw request bytes with the product's adapted parser copy, then decode Content-length.
+foreach(required_file IN ITEMS src/rtsp_content_length.cpp src/rtsp_content_length.h src/utility.h
+        cmake/dependencies/rtsp_parser.cmake)
+    if(NOT EXISTS "${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
+        message(FATAL_ERROR "Missing production source: ${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
+    endif()
+endforeach()
+# The pinned moonlight-common-c inputs come from a gitlink that a plain checkout leaves empty.
+# Only a materialized gitlink enables C and prepares the copy, so other targets' configure is
+# unchanged; the product's hash pins and ownership adaptation then apply exactly as in its build.
+set(POLARIS_FUZZ_RTSP_PARSER_INPUT "${POLARIS_FUZZ_SOURCE_ROOT}/third-party/moonlight-common-c/src")
+if(NOT EXISTS "${POLARIS_FUZZ_RTSP_PARSER_INPUT}/RtspParser.c")
+    add_custom_target(fuzz_rtsp_message
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "Materialize the pinned third-party/moonlight-common-c gitlink, then reconfigure"
+        COMMAND "${CMAKE_COMMAND}" -E false
+        VERBATIM)
+else()
+    if(NOT CMAKE_C_COMPILER AND "$ENV{CC}" STREQUAL "")
+        # Use the C driver installed beside the selected Clang C++ compiler.
+        get_filename_component(POLARIS_FUZZ_CXX_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        get_filename_component(POLARIS_FUZZ_CXX_NAME "${CMAKE_CXX_COMPILER}" NAME)
+        string(REGEX REPLACE "^clang\\+\\+" "clang" POLARIS_FUZZ_C_NAME "${POLARIS_FUZZ_CXX_NAME}")
+        if(POLARIS_FUZZ_C_NAME STREQUAL POLARIS_FUZZ_CXX_NAME
+                OR NOT EXISTS "${POLARIS_FUZZ_CXX_DIR}/${POLARIS_FUZZ_C_NAME}")
+            message(FATAL_ERROR "Select the matching LLVM Clang C compiler explicitly, e.g. -DCMAKE_C_COMPILER=/usr/bin/clang-18")
+        endif()
+        set(CMAKE_C_COMPILER "${POLARIS_FUZZ_CXX_DIR}/${POLARIS_FUZZ_C_NAME}")
+    endif()
+    enable_language(C)
+    if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang"
+            OR NOT CMAKE_C_COMPILER_VERSION VERSION_EQUAL CMAKE_CXX_COMPILER_VERSION)
+        message(FATAL_ERROR "The adapted RTSP parser must use the same LLVM Clang version as C++ (${CMAKE_CXX_COMPILER_VERSION}) and its runtimes")
+    endif()
+    include("${POLARIS_FUZZ_SOURCE_ROOT}/cmake/dependencies/rtsp_parser.cmake")
+    set(POLARIS_FUZZ_RTSP_PARSER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/moonlight-common-c")
+    polaris_prepare_rtsp_parser("${POLARIS_FUZZ_RTSP_PARSER_INPUT}" "${POLARIS_FUZZ_RTSP_PARSER_OUTPUT}")
+    add_executable(fuzz_rtsp_message
+        fuzz_rtsp_message.cpp
+        "${POLARIS_FUZZ_SOURCE_ROOT}/src/rtsp_content_length.cpp"
+        "${POLARIS_FUZZ_RTSP_PARSER_OUTPUT}/RtspParser.c")
+    target_include_directories(fuzz_rtsp_message PRIVATE
+        "${POLARIS_FUZZ_SOURCE_ROOT}/src"
+        "${POLARIS_FUZZ_SOURCE_ROOT}/third-party")
+    target_link_libraries(fuzz_rtsp_message PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_features(fuzz_rtsp_message PRIVATE cxx_std_20)
+    set_target_properties(fuzz_rtsp_message PROPERTIES
+        CXX_EXTENSIONS OFF
+        INTERPROCEDURAL_OPTIMIZATION FALSE)
+    target_compile_options(fuzz_rtsp_message PRIVATE
+        -O1 -g -fno-omit-frame-pointer -fno-sanitize-recover=all
+        -fsanitize=fuzzer-no-link,address,undefined)
+    target_link_options(fuzz_rtsp_message PRIVATE
+        -fno-sanitize-recover=all -fsanitize=fuzzer,address,undefined)
+endif()
