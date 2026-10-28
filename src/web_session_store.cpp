@@ -75,6 +75,7 @@ namespace web_session_store {
     mutable std::mutex mutex;
     std::unordered_map<std::string, session_t> sessions;
     bool authorization_state_available = true;
+    mutable private_state_file::refusal_t refusal;
 
     bool configured() const {
       return !path.empty() && is_valid_sha256_hex(credential_fingerprint) && valid_policy(policy);
@@ -121,7 +122,9 @@ namespace web_session_store {
       if (payload.size() > policy.max_file_bytes) {
         return {private_state_file::write_status_e::not_committed};
       }
-      return private_state_file::write_atomic(path, payload);
+      const auto result = private_state_file::write_atomic(path, payload);
+      refusal = result.refusal;
+      return result;
     }
 
     bool prune(clock_snapshot_t now) {
@@ -147,6 +150,7 @@ namespace web_session_store {
     }
 
     const auto stored = private_state_file::read_secure(impl_->path, impl_->policy.max_file_bytes);
+    impl_->refusal = stored.refusal;
     if (stored.status == private_state_file::read_status_e::missing) {
       impl_->sessions.clear();
       impl_->authorization_state_available = true;
@@ -465,6 +469,14 @@ namespace web_session_store {
     impl_->sessions.clear();
     impl_->authorization_state_available = true;
     return true;
+  }
+
+  std::optional<persistence_refusal_t> manager_t::last_refusal() const {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->refusal || impl_->refusal.kind == private_state_file::refusal_e::missing) {
+      return std::nullopt;
+    }
+    return persistence_refusal_t {impl_->path, impl_->refusal};
   }
 
   bool manager_t::fingerprint_matches(std::string_view credential_fingerprint) const {

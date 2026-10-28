@@ -5,10 +5,12 @@
 #include "utility.h"
 #include "logging.h"
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <unordered_map>
 #include <unistd.h>
+#include <pwd.h>
 
 namespace configuration_store {
   namespace {
@@ -87,15 +89,45 @@ namespace configuration_store {
     return found->second;
   }
 
-  refusal_t describe_refusal(const std::string &path, const private_state_file::refusal_t &refusal) {
+  refusal_t describe_refusal(const std::string &path, const private_state_file::refusal_t &refusal, path_display_e paths) {
     using enum private_state_file::refusal_e;
     refusal_t described {.kind = refusal.kind, .path = path};
-    const auto target = spelled_out(path).string();
-    const auto file = shell_word(target);
-    const auto lock_file = shell_word(target + ".lock");
+    const bool private_paths = paths == path_display_e::home_relative;
+    std::filesystem::path home;
+    if (private_paths) {
+      if (const char *value = std::getenv("HOME"); value && *value) {
+        home = value;
+      } else if (const auto *account = ::getpwuid(::geteuid()); account && account->pw_dir) {
+        home = account->pw_dir;
+      }
+      home = home.lexically_normal();
+    }
+    constexpr auto unnamed_parent = "the Polaris configuration directory's parent";
+    bool unnamed_location = false;
+    const auto display = [&](const std::filesystem::path &value) {
+      if (!private_paths || value.empty()) return value.string();
+      const auto relative = value.lexically_normal().lexically_relative(home);
+      if (home.is_absolute() && home.has_relative_path() && !relative.empty() &&
+          *relative.begin() != "..") {
+        return relative == "." ? std::string {"~"} : "~/" + relative.generic_string();
+      }
+      unnamed_location = true;
+      return std::string {unnamed_parent};
+    };
+    const auto command_path = [private_paths](const std::string &value) {
+      // Keep ~ outside shell quotes so the remedy still expands in the host
+      // operator's shell, even when a directory below HOME contains spaces.
+      if (private_paths && value == "~") return value;
+      if (private_paths && value.starts_with("~/")) return "~/" + shell_word(value.substr(2));
+      return shell_word(value);
+    };
+    const auto target = display(spelled_out(path));
+    if (private_paths) described.path = target;
+    const auto file = command_path(target);
+    const auto lock_file = command_path(target + ".lock");
     const auto directory_path = spelled_out(refusal.directory);
-    const auto directory = directory_path.string();
-    const auto folder = shell_word(directory);
+    const auto directory = display(directory_path);
+    const auto folder = command_path(directory);
     // The walk refuses folders above the file as well. Calling one of those the
     // folder that holds it sends people to the wrong folder.
     const auto folder_named = std::string {refusal.holds_file ? "the folder that holds it, " : "a folder on the way to it, "} +
@@ -210,7 +242,7 @@ namespace configuration_store {
       case oversize:
         described.reason = "It is " + std::to_string(refusal.size) + " bytes, more than the " +
                            std::to_string(max_bytes / (1024 * 1024)) + " MiB the settings store reads.";
-        described.fix = "Move it aside with \"mv " + file + ' ' + shell_word(target + ".old") +
+        described.fix = "Move it aside with \"mv " + file + ' ' + command_path(target + ".old") +
                         "\", restart Polaris to write a new one, then copy back the settings you need.";
         break;
       case size_changed:
@@ -221,6 +253,14 @@ namespace configuration_store {
         described.reason = "Reading it failed" + errno_suffix(refusal.error_number) + ".";
         described.fix = "Check the file with \"ls -l " + file + "\" and the disk that holds it, then try again.";
         break;
+    }
+    if (private_paths && unnamed_location) {
+      // An external location cannot be named in a pre-authentication reply.
+      // Keep a concrete permission remedy, and point the host operator to the
+      // unchanged full-path journal instead of suggesting a fake shell path.
+      described.fix = refusal.kind == directory_writable ?
+        "Restrict group and other write access on " + std::string {unnamed_parent} + " (mode 0700). " : std::string {};
+      described.fix += "Check the Polaris journal on the host for the exact location and remedy for " + std::string {unnamed_parent} + ".";
     }
     return described;
   }
