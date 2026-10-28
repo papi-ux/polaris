@@ -46,6 +46,7 @@ extern "C" {
 #include "stream.h"
 #include "stream_fec.h"
 #include "stream_fec_status.h"
+#include "stream_pacing.h"
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
 #include "stream_stats.h"
@@ -1883,6 +1884,8 @@ namespace stream {
     }
 
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
+    // With wire pacing on, each session keeps its own schedule on this shared sender.
+    stream_pacing::session_starts_t ratecontrol_session_starts;
 
     // Persistent reusable buffers — avoids per-frame heap allocation.
     // These grow to steady-state size within the first few frames and stay there.
@@ -2129,8 +2132,10 @@ namespace stream {
       });
 
       try {
-        // Use around 80% of 1Gbps          1Gbps            percent    ms     packet      byte
-        size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
+        // Use around 80% of 1Gbps, unless wire pacing paces this session at its own negotiated rate.
+        const auto pacing = stream_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request.split_kbps,
+          config::stream.wire_pacing_headroom, blocksize);
+        size_t ratecontrol_packets_in_1ms = pacing.packets_in_1ms;
 
         // Send less than 64K in a single batch.
         // On Windows, batches above 64K seem to bypass SO_SNDBUF regardless of its size,
@@ -2141,12 +2146,16 @@ namespace stream {
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
+        send_batch_size = stream_pacing::send_batch_limit(pacing, send_batch_size);
         if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
           .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
-          .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage));
+          .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage)
+          .s("pacing", stream_pacing::rate_name(pacing)).u("packets_per_second", pacing.packets_per_second));
 
         // Don't ignore the last ratecontrol group of the previous frame
-        auto ratecontrol_frame_start = std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
+        auto ratecontrol_frame_start = pacing.enabled ?
+          ratecontrol_session_starts.frame_start(session->session_generation, std::chrono::steady_clock::now()) :
+          std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
 
         size_t ratecontrol_frame_packets_sent = 0;
         size_t ratecontrol_group_packets_sent = 0;
@@ -2206,7 +2215,10 @@ namespace stream {
           // When a timestamp isn't available (duplicate frames), the timestamp from rate control is used instead.
           bool frame_is_dupe = false;
           if (!packet->frame_timestamp) {
-            packet->frame_timestamp = ratecontrol_next_frame_start;
+            // With wire pacing on, from this session's own schedule.
+            packet->frame_timestamp = pacing.enabled ?
+              ratecontrol_session_starts.next(session->session_generation).value_or(ratecontrol_frame_start) :
+              ratecontrol_next_frame_start;
             frame_is_dupe = true;
           }
           using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
@@ -2263,15 +2275,16 @@ namespace stream {
               // to account for the last send_batch() of the previous frame.
               if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
                   ratecontrol_frame_packets_sent == 0) {
-                auto due = ratecontrol_frame_start +
-                           std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
-                             ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
+                auto due = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
 
                 auto now = std::chrono::steady_clock::now();
                 while (now < due) {
                   if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
-                  timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
+                  // Wire pacing sleeps to an absolute deadline, and keeps the timer where it cannot.
+                  if (!pacing.enabled || !stream_pacing::sleep_until(stream_pacing::next_wake(due, now))) {
+                    timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
+                  }
                   now = std::chrono::steady_clock::now();
                 }
 
@@ -2326,9 +2339,10 @@ namespace stream {
           }
 
           // remember this in case the next frame comes immediately
-          ratecontrol_next_frame_start = ratecontrol_frame_start +
-                                         std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
-                                           ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
+          ratecontrol_next_frame_start = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
+          if (pacing.enabled) {
+            ratecontrol_session_starts.frame_end(session->session_generation, ratecontrol_next_frame_start);
+          }
 
           frame_network_latency_logger.second_point_now_and_log();
 

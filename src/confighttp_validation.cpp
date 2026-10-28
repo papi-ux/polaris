@@ -291,6 +291,8 @@ namespace confighttp::validation {
       "vt_realtime"sv,
       "vt_software"sv,
       "wan_encryption_mode"sv,
+      "wire_pacing"sv,
+      "wire_pacing_headroom"sv,
     };
 
     bool validate_safe_string(std::string_view key, const nlohmann::json &value, std::string &error) {

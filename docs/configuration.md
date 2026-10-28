@@ -620,6 +620,34 @@ color_range = 1
 
 Then test HEVC Main 8-bit before enabling Main10 or client HDR requests.
 
+## Experimental wire pacing
+
+Polaris spaces each video frame's packets at about 80% of 1 Gbps, whatever bitrate the session
+negotiated. On Wi-Fi that sends short bursts well above the stream's own rate into the access point's
+queue. Wire pacing spaces a session's packets at its own negotiated rate instead. It is experimental,
+off by default, and set only in the config file; it is not in the web UI.
+
+Pacing changes when packets leave, not which packets are sent or the protocol they use, so no client
+needs an update. A session that negotiated no bitrate, and one whose paced rate would not be slower
+than about 80% of 1 Gbps, keeps the usual pacing rate.
+
+```ini
+wire_pacing = enabled
+wire_pacing_headroom = 200
+```
+
+### wire_pacing
+
+`enabled` paces each session at its own negotiated total, times `wire_pacing_headroom`. Default:
+`disabled`, which keeps the usual pacing exactly.
+
+### wire_pacing_headroom
+
+The share of the session's negotiated total to pace at, as a percentage from `100` to `1000`. Default:
+`200`, twice the negotiated rate, which leaves room for a keyframe or extra error correction to leave
+without waiting. Lower values smooth the stream more but can delay large frames. Only applies when
+`wire_pacing` is enabled.
+
 ## NVIDIA NVENC Encoder
 
 ### nvenc_split_encode_mode

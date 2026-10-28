@@ -697,6 +697,9 @@ namespace config {
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
 
     2,  // max_sessions (default 2 — allows a second viewer on the same stream)
+
+    false,  // wire_pacing (experimental, off by default)
+    200,  // wire_pacing_headroom (percent of the session's negotiated total)
   };
 
   nvhttp_t nvhttp {
@@ -1685,6 +1688,9 @@ namespace config {
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
 
     int_between_f(vars, "max_sessions", stream.max_sessions, {0, 8});
+
+    bool_f(vars, "wire_pacing", stream.wire_pacing);
+    int_between_f(vars, "wire_pacing_headroom", stream.wire_pacing_headroom, {100, 1000});
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
