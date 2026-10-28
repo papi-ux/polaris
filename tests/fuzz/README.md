@@ -62,11 +62,11 @@ install or fetch missing tools/dependencies as part of this target's invocation.
 The following recipe runs one bounded local campaign after those prerequisites
 have been checked. Run from the product root, setting `fuzz_evidence`
 to a new absolute directory outside the checkout. Set `nlohmann_json_DIR` or
-`CMAKE_PREFIX_PATH` to the admitted local package if it is not found in system paths.
+`CMAKE_PREFIX_PATH` to the reviewed local package if it is not found in system paths.
 
 ```sh
 set -euo pipefail
-: "${fuzz_evidence:?Set a new approved absolute evidence directory outside the checkout}"
+: "${fuzz_evidence:?Set a new absolute evidence directory outside the checkout}"
 test ! -e "$fuzz_evidence"
 mkdir -p "$fuzz_evidence/corpus" "$fuzz_evidence/crashes"
 cp tests/fuzz/corpus/confighttp_json/* "$fuzz_evidence/corpus/"
@@ -83,7 +83,7 @@ cmake --build "$fuzz_evidence/build" --target fuzz_confighttp_json --parallel 2 
 ```
 
 The driver also refuses inputs over 65,536 bytes; this is a harness resource bound,
-not a new HTTP limit. The recipe proposes one 60-second libFuzzer budget, a 5-second
+not a new HTTP limit. The recipe sets one 60-second libFuzzer budget, a 5-second
 per-input timeout and a 1024 MiB RSS limit. It runs one process with no retry or
 parallel fuzz workers; these settings do not guarantee exact wall-clock or host
 resource usage. Keep the first nonzero exit, configure/build/run logs, exact source

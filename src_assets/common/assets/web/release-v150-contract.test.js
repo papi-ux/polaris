@@ -227,9 +227,9 @@ describe('v1.5.0 release contract', () => {
     expect(notes).toContain('never past 300 Mbps or your `max_bitrate`')
     // Live Tuning lifts a request below adaptive_bitrate_min to that floor, so Doctor is not the only lift.
     expect(notes).toContain('Live Tuning lifting a request below `adaptive_bitrate_min` (2 Mbps by default) to that floor')
-    // Live Tuning is on unless a host turned it off, and while it is on Doctor's PyroWave
-    // finding is advice to set a bitrate, not the one tap raise.
-    expect(notes).toContain('With Live Tuning on, which is the default, Doctor says what to set instead.')
+    // Live Tuning is opt-in; while it is on Doctor's PyroWave finding is advice
+    // to set a bitrate, not the one tap raise.
+    expect(notes).toContain("With Live Tuning on (it's off unless you turn it on), Doctor says what to set instead.")
     // A tunnel that carries Ethernet, ZeroTier or an OpenVPN tap, still reports its own MAC.
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
