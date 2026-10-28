@@ -19,8 +19,11 @@ namespace configuration_store {
     explicit operator bool() const { return kind != private_state_file::refusal_e::none; }
   };
 
+  /// Full paths for host logs; home-relative locations for replies before sign-in.
+  enum class path_display_e { full, home_relative };
   /// The one description the read and the write side share, so both name the same fix.
-  refusal_t describe_refusal(const std::string &path, const private_state_file::refusal_t &refusal);
+  refusal_t describe_refusal(const std::string &path, const private_state_file::refusal_t &refusal,
+                             path_display_e paths = path_display_e::full);
 
   /// A refused read returns nullopt and, when @p refusal is given, says why there.
   /// The log carries one warning each time the refusal changes, not one per read.

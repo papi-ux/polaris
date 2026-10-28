@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 /**
  * @brief Responsible for file handling functions.
@@ -48,6 +49,11 @@ namespace file_handler {
    * @examples_end
    */
   bool make_directory(const std::string &path);
+
+  /// Create missing state-directory components with mode 0700. Existing
+  /// directories keep their permissions; private_state_file validates them.
+  bool make_private_directory(const std::filesystem::path &path, std::error_code &error);
+  void make_private_directory(const std::filesystem::path &path);
 
   /**
    * @brief Seed a writable user file from a packaged template, only if absent.

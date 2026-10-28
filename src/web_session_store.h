@@ -8,8 +8,11 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+
+#include "private_state_file.h"
 
 namespace web_session_store {
   struct clock_snapshot_t {
@@ -44,6 +47,11 @@ namespace web_session_store {
     io_error,
   };
 
+  struct persistence_refusal_t {
+    std::filesystem::path path;
+    private_state_file::refusal_t refusal;
+  };
+
   class manager_t {
   public:
     manager_t(std::filesystem::path path, std::string credential_fingerprint, policy_t policy);
@@ -65,6 +73,7 @@ namespace web_session_store {
     bool rotate_credentials(std::string credential_fingerprint, clock_snapshot_t now);
     bool fingerprint_matches(std::string_view credential_fingerprint) const;
     std::size_t size() const;
+    std::optional<persistence_refusal_t> last_refusal() const;
 
   private:
     struct impl_t;
