@@ -151,6 +151,7 @@ namespace platf::epic {
       virtual std::optional<std::string> read(const std::filesystem::path &, std::size_t limit) = 0;
       // Only initial census status may prove absence; ordinary read failures never do.
       virtual status_result_t initial_status(const std::filesystem::path &process, std::size_t limit) { return {read(process / "status", limit)}; }
+      // A /proc/<pid>/exe path reads the executable that task runs, wherever its own path points.
       virtual std::optional<std::string> prefix(const std::filesystem::path &, std::size_t length) = 0;
       virtual std::optional<std::filesystem::path> link(const std::filesystem::path &) = 0;
       // Missing/raced links are not permission denials. Fixture backends opt in explicitly.

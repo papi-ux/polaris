@@ -226,7 +226,9 @@ namespace {
     }
 
     std::optional<std::string> prefix(const fs::path &path, std::size_t length) override {
-      const auto found = headers.find(path);
+      // A task's exe handle opens the file it runs, wherever that file's own path points.
+      const auto handle = links.find(path);
+      const auto found = headers.find(path.filename() == "exe" && handle != links.end() ? handle->second : path);
       if (found == headers.end() || found->second.size() < length) {
         return std::nullopt;
       }
@@ -243,8 +245,8 @@ namespace {
         ep::testing::link_result_t {link(path), false};
     }
 
-    void add_protected_process(std::uint64_t pid = 43, std::uint64_t start = 10003) {
-      add_process(pid, "/usr/lib/systemd/systemd", "/fixture/owner", start);
+    void add_protected_process(std::uint64_t pid = 43, std::uint64_t start = 10003, std::uint64_t parent = 1) {
+      add_process(pid, "/usr/lib/systemd/systemd", "/fixture/owner", start, parent);
       const auto exe = fs::path("/proc") / std::to_string(pid) / "exe";
       links.erase(exe);
       denied_links.insert(exe);
@@ -851,6 +853,29 @@ TEST_F(EpicProcess, AdmissionRequiresBothGameAndExactPrefixServerAbsentInAComple
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, AdmissionCensusesStayDefiniteBesideUnrelatedFlatpakAndDeletedTasks) {
+  std::string reason;
+  host->pids.clear();
+  // A Flatpak app runs a sandbox path in its own cgroup namespace, and an updated daemon still
+  // runs its replaced executable. The host can open neither path; both tasks stay readable.
+  host->add_process(60, "/app/bin/flatapp", "/fixture/owner", 10060);
+  host->links["/proc/60/ns/cgroup"] = "cgroup:[999]";
+  host->identities.erase("/app/bin/flatapp");
+  host->add_process(61, "/usr/bin/olddaemon (deleted)", "/", 10061);
+  host->identities.erase("/usr/bin/olddaemon (deleted)");
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true);
+  EXPECT_EQ(reason, "title_runtime_absent");
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 0U);
+  EXPECT_TRUE(error.empty());
+  // A launcher candidate still needs its full identity, so the same sandbox view refuses.
+  host->add_process(62, "/app/bin/EpicGamesLauncher", "/fixture/owner", 10062);
+  host->identities.erase("/app/bin/EpicGamesLauncher");
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "unreadable_file_identity");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, EpicObserveInSessionNeverTakesTheDesktopCopy) {
   const auto lease = host->private_tree();
   host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 250);
@@ -919,7 +944,8 @@ TEST_F(EpicProcess, PrivateSelectionRefusesPredispatchUnreadableAndStaleGenerati
   EXPECT_EQ(seen.reason, "private_supervisor_changed");
   EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
   host->files["/proc/100/stat"] = stat_line(100, 200, 'S', 10);
-  host->add_protected_process(84);
+  // A protected task inside the generation (here under its compositor) still refuses.
+  host->add_protected_process(84, 10003, 101);
   seen = ep::observe_in_session(host->title(), *session, 300);
   EXPECT_FALSE(seen.available);
   EXPECT_EQ(seen.reason, "private_process_inventory_incomplete");
@@ -931,6 +957,44 @@ TEST_F(EpicProcess, PrivateSelectionRefusesPredispatchUnreadableAndStaleGenerati
   EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
   EXPECT_FALSE(ep::testing::pin_private_session(lease, "retired-generation", error, host));
   EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateCensusExcludesOnlyProtectedTasksProvedOutsideTheGeneration) {
+  const auto lease = host->private_tree();
+  host->private_game();
+  host->private_server();
+  // Desktop tasks born before the supervisor. One has a root-owned proc directory, so only its
+  // status and stat are readable. The desktop copy of the title descends from a protected one.
+  host->add_protected_process(43, 50);
+  host->add_protected_process(44, 60);
+  host->identities["/proc/44"].uid = 0;
+  host->files["/proc/41/stat"] = stat_line(41, 10001, 'S', 43);
+  host->files["/proc/42/stat"] = stat_line(42, 10000, 'S', 43);
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+  ASSERT_TRUE(session) << error;
+  const auto seen = ep::observe_in_session(host->title(), *session, 300);
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.pid, 81);
+  host->fd_pid = 81;
+  auto grant = ep::adopt_in_session(host->title(), *session, 300, seen, error);
+  ASSERT_TRUE(grant) << error;
+
+  // A later SSH login or polkit prompt is born after the supervisor, under a desktop task.
+  host->add_protected_process(45, 500, 43);
+  host->add_protected_process(46, 510, 45);
+  host->identities["/proc/46"].uid = 0;
+  EXPECT_TRUE(ep::inspect(*grant).available);
+  // A reused parent PID, younger than its child, leaves the ancestry unproven.
+  host->files["/proc/45/stat"] = stat_line(45, 520, 'S', 43);
+  EXPECT_EQ(ep::observe_in_session(host->title(), *session, 300).reason, "private_ancestry_unproven");
+  host->files["/proc/45/stat"] = stat_line(45, 500, 'S', 43);
+  EXPECT_TRUE(ep::inspect(*grant).available);
+  // Outside the private census, the same unreadable owner task still refuses.
+  EXPECT_EQ(observe().reason, "unreadable_owner_process");
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "unreadable_owner_process");
+  EXPECT_EQ(host->opened, std::vector<std::uint64_t> {81});
   EXPECT_TRUE(host->signals.empty());
 }
 
