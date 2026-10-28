@@ -261,6 +261,11 @@ namespace config {
 
     // Maximum number of simultaneous streaming sessions (0 = unlimited)
     int max_sessions;
+
+    // Experimental, off by default and config-file only: pace each session's video at its own negotiated
+    // total times wire_pacing_headroom percent, instead of at about 80% of 1 Gbps. See stream_pacing.h.
+    bool wire_pacing;
+    int wire_pacing_headroom;
   };
 
   struct nvhttp_t {

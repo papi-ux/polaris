@@ -1072,13 +1072,14 @@ namespace {
     return comm;
   }
 
-  /// Alive and not a zombie, which kill(pid, 0) alone cannot tell apart.
+  /// Neither a zombie ('Z') nor a dead task ('X') still visible while it is reaped.
+  /// kill(pid, 0) alone cannot distinguish either exited state from a live task.
   bool running(pid_t pid) {
     std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
     std::string stat;
     std::getline(in, stat);
     const auto state = stat.rfind(')');
-    return state != std::string::npos && state + 2 < stat.size() && stat[state + 2] != 'Z';
+    return state != std::string::npos && state + 2 < stat.size() && stat[state + 2] != 'Z' && stat[state + 2] != 'X';
   }
 
   void collect_descendants(pid_t pid, std::vector<pid_t> &out) {
