@@ -8,7 +8,8 @@ import { readConfigOrNull } from './config-cache.js'
 import { initializeWebUiAuthState } from './auth-state.js'
 import { probeWebUiAuth } from './router-helpers.js'
 
-const parent = '/home/ubuntu/.config'
+const absoluteHome = '/home/ubuntu'
+const parent = '~/.config'
 const reason = `A folder on the way to it, ${parent}, is writable by group or other users (mode 0775), so Polaris will not keep private state there.`
 const fix = `Restrict it with "chmod 700 ${parent}"; a umask of 002 is enough to leave it group writable.`
 const error = `The Web UI session could not be persisted. ${reason} ${fix}`
@@ -34,7 +35,10 @@ describe('private state refused by a parent directory (#550)', () => {
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/login', component: LoginView }] })
     await router.push('/login')
     await router.isReady()
-    vi.stubGlobal('fetch', vi.fn(async () => reply({ status: false, code: 'private_state_unavailable', error, reason, fix })))
+    const body = { status: false, code: 'private_state_unavailable', error, reason, fix }
+    expect(body).not.toHaveProperty('path')
+    expect(JSON.stringify(body)).not.toContain(absoluteHome)
+    vi.stubGlobal('fetch', vi.fn(async () => reply(body)))
     const wrapper = mount(LoginView, { global: { plugins: [router], mocks: { $t } } })
     await wrapper.find('#usernameInput').setValue('ubuntu')
     await wrapper.find('#passwordInput').setValue('fixture-password')
@@ -42,6 +46,7 @@ describe('private state refused by a parent directory (#550)', () => {
     await flushPromises()
     expect(wrapper.text()).toContain(error)
     expect(wrapper.text()).toContain(`chmod 700 ${parent}`)
+    expect(wrapper.text()).not.toContain(absoluteHome)
     expect(router.currentRoute.value.path).toBe('/login')
     expect(localStorage.getItem('login')).toBe(null)
     wrapper.unmount()
@@ -58,10 +63,13 @@ describe('private state refused by a parent directory (#550)', () => {
 
   it('shows the same parent remedy through Mission Control’s existing settings-readiness banner', async () => {
     const wrapper = mount(SettingsUnreadableBanner, { global: { mocks: { $t } } })
-    await expect(readConfigOrNull(reply({ status: false, error: 'config_unreadable', path: `${parent}/polaris/polaris.conf`, reason, fix }))).resolves.toBe(null)
+    // Authenticated settings-only refusals retain their full host location.
+    const fullReason = reason.replaceAll(parent, `${absoluteHome}/.config`)
+    const fullFix = fix.replaceAll(parent, `${absoluteHome}/.config`)
+    await expect(readConfigOrNull(reply({ status: false, error: 'config_unreadable', path: `${absoluteHome}/.config/polaris/polaris.conf`, reason: fullReason, fix: fullFix }))).resolves.toBe(null)
     await flushPromises()
-    expect(wrapper.find('[data-settings-unreadable-banner-reason]').text()).toBe(reason)
-    expect(wrapper.find('[data-settings-unreadable-banner-fix]').text()).toBe(fix)
+    expect(wrapper.find('[data-settings-unreadable-banner-reason]').text()).toBe(fullReason)
+    expect(wrapper.find('[data-settings-unreadable-banner-fix]').text()).toBe(fullFix)
     wrapper.unmount()
   })
 })

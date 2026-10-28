@@ -1207,12 +1207,12 @@ namespace confighttp {
       if (!s_web_sessions) return false;
       const auto refused = s_web_sessions->last_refusal();
       if (!refused) return false;
-      const auto described = configuration_store::describe_refusal(refused->path.string(), refused->refusal);
+      const auto described = configuration_store::describe_refusal(refused->path.string(), refused->refusal,
+        configuration_store::path_display_e::home_relative);
       nlohmann::json output = {
         {"status", false},
         {"code", "private_state_unavailable"},
         {"error", std::string {message} + " " + described.reason + " " + described.fix},
-        {"path", described.path},
         {"reason", described.reason},
         {"fix", described.fix},
       };

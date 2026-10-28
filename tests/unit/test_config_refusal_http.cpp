@@ -6,8 +6,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -42,10 +44,12 @@ namespace {
   protected:
     void SetUp() override {
       previous = config::sunshine;
+      if (const char *home = std::getenv("HOME")) previous_home = home;
       directory = fs::temp_directory_path() /
         ("polaris-config-refusal-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
       ASSERT_TRUE(fs::create_directory(directory));
       fs::permissions(directory, fs::perms::owner_all);
+      ASSERT_EQ(::setenv("HOME", directory.c_str(), 1), 0);
       parent = directory / ".config";
       state = parent / "polaris";
       const auto credentials = (directory / "credentials.json").string();
@@ -57,6 +61,8 @@ namespace {
 
     void TearDown() override {
       config::sunshine = previous;
+      if (previous_home) ::setenv("HOME", previous_home->c_str(), 1);
+      else ::unsetenv("HOME");
       std::error_code ignored;
       fs::remove_all(directory, ignored);
     }
@@ -101,6 +107,7 @@ namespace {
 
     fs::path directory, parent, state;
     decltype(config::sunshine) previous;
+    std::optional<std::string> previous_home;
   };
 
   auto login(unsigned short port, const std::string &password = "fixture-password") {
@@ -126,8 +133,12 @@ TEST_F(ConfigParentRefusalHttp, ExistingGroupWritableParentExplainsLoginRefusalA
     const auto body = nlohmann::json::parse(response->content.string());
     EXPECT_EQ(body.at("status"), false);
     EXPECT_EQ(body.at("code"), "private_state_unavailable");
-    EXPECT_NE(body.at("error").get<std::string>().find(parent.string()), std::string::npos);
-    EXPECT_NE(body.at("error").get<std::string>().find("chmod 700 " + parent.string()), std::string::npos);
+    EXPECT_FALSE(body.contains("path"));
+    EXPECT_EQ(body.dump().find(directory.string()), std::string::npos);
+    EXPECT_EQ(body.dump().find(parent.string()), std::string::npos);
+    EXPECT_NE(body.at("reason").get<std::string>().find("~/.config"), std::string::npos);
+    EXPECT_NE(body.at("fix").get<std::string>().find("chmod 700 ~/.config"), std::string::npos);
+    EXPECT_NE(body.at("error").get<std::string>().find("chmod 700 ~/.config"), std::string::npos);
     EXPECT_EQ(response->header.count("Set-Cookie"), 0u);
     const auto cache_control = response->header.find("Cache-Control");
     ASSERT_NE(cache_control, response->header.end());
@@ -146,6 +157,8 @@ TEST_F(ConfigParentRefusalHttp, ExistingGroupWritableParentExplainsLoginRefusalA
       const auto detail = nlohmann::json::parse(unavailable->content.string());
       EXPECT_EQ(detail.at("code"), "private_state_unavailable");
       EXPECT_EQ(detail.at("fix"), body.at("fix"));
+      EXPECT_FALSE(detail.contains("path"));
+      EXPECT_EQ(detail.dump().find(directory.string()), std::string::npos);
       EXPECT_EQ(unavailable->header.count("Set-Cookie"), 0u);
     }
     const auto readiness = client.request("GET", "/api/config", "",
@@ -153,8 +166,29 @@ TEST_F(ConfigParentRefusalHttp, ExistingGroupWritableParentExplainsLoginRefusalA
     ASSERT_EQ(readiness->status_code.substr(0, 3), "503");
     const auto refusal = nlohmann::json::parse(readiness->content.string());
     EXPECT_EQ(refusal.at("error"), "config_unreadable");
-    EXPECT_EQ(refusal.at("reason"), body.at("reason"));
-    EXPECT_EQ(refusal.at("fix"), body.at("fix"));
+    // Full locations remain available on this independently authenticated route.
+    EXPECT_NE(refusal.at("reason").get<std::string>().find(parent.string()), std::string::npos);
+    EXPECT_NE(refusal.at("fix").get<std::string>().find("chmod 700 " + parent.string()), std::string::npos);
+  });
+}
+
+TEST_F(ConfigParentRefusalHttp, ParentOutsideHomeHasNoPathInThePreAuthReply) {
+  create_state_through_config();
+  fs::permissions(parent, static_cast<fs::perms>(0775));
+  // A shared text prefix is not a HOME path-component match.
+  const auto sibling_home = directory.string().substr(0, directory.string().size() - 1);
+  ASSERT_EQ(::setenv("HOME", sibling_home.c_str(), 1), 0);
+  with_server([&](unsigned short port) {
+    const auto response = login(port);
+    ASSERT_EQ(response->status_code.substr(0, 3), "503");
+    const auto body = nlohmann::json::parse(response->content.string());
+    EXPECT_EQ(body.at("code"), "private_state_unavailable");
+    EXPECT_FALSE(body.contains("path"));
+    EXPECT_EQ(body.dump().find(directory.string()), std::string::npos);
+    EXPECT_NE(body.at("reason").get<std::string>().find("the Polaris configuration directory's parent"), std::string::npos);
+    EXPECT_NE(body.at("fix").get<std::string>().find("0700"), std::string::npos);
+    EXPECT_NE(body.at("fix").get<std::string>().find("journal"), std::string::npos);
+    EXPECT_EQ(mode(parent), 0775u);
   });
 }
 
