@@ -482,6 +482,8 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
     "headless_swap_primary",  // Deprecated boolean, read once to migrate old configs to headless_swap_mode
     "trusted_subnet_auto_pairing",  // Security opt-in is currently surfaced as inline copy rather than localized config docs
     "webrtc_browser_streaming",  // Deprecated alias for browser_streaming
+    "wire_pacing",  // Experimental per-session wire pacing, off by default - config-file-only until a measured comparison
+    "wire_pacing_headroom",  // Its headroom, config-file-only with it
   };
 
   std::vector<std::string> missingFromFiles;
