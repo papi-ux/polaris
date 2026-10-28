@@ -1,6 +1,7 @@
 # moonlight-common-c c999436858471dfefa7617af3b7dc03ec1644ce4.
 # Keep the canonical parser and its headers untouched. Only the parser-owned
 # duplicate node is released in this build-tree copy; insertOption stays generic.
+# The copy also keeps the end-of-message check inside messageBuffer.
 function(polaris_prepare_rtsp_parser source output)
     set(paths RtspParser.c Rtsp.h Platform.h Limelight.h)
     set(hashes
@@ -41,6 +42,21 @@ function(polaris_prepare_rtsp_parser source output)
     if(adapted STREQUAL content)
         message(FATAL_ERROR "Pinned RTSP parser insertion site not found")
     endif()
+
+    # A header value that runs to messageBuffer's terminator puts endCheck one byte
+    # past the allocation. No CRLF can follow that value, so skip every end-form read.
+    set(end_check_before [=[                if (startsWith(endCheck, "\n") && endCheck[1] == '\0') {
+]=])
+    set(end_check_after [=[                if (endCheck > messageBuffer + length) {
+                    // The value ended at messageBuffer's terminator, so the message did not end here.
+                }
+                else if (startsWith(endCheck, "\n") && endCheck[1] == '\0') {
+]=])
+    string(REPLACE "${end_check_before}" "${end_check_after}" bounded "${adapted}")
+    if(bounded STREQUAL adapted)
+        message(FATAL_ERROR "Pinned RTSP parser end-of-message check not found")
+    endif()
+    set(adapted "${bounded}")
 
     file(MAKE_DIRECTORY "${output}")
     # Preserve the original quoted-include closure, rather than resolving a

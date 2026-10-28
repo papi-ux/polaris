@@ -56,6 +56,15 @@ static const char duplicate[] =
  */
 static const char malformed[] =
     "OPTIONS rtsp://synthetic RTSP/1.0\r\nCSeq: 1\r\nCSeq: 2\r\nMissing\r\n";
+/* normal without its final CRLFs: the last header value runs to the end of the input,
+ * so endCheck starts one byte past messageBuffer's terminator.
+ */
+#define LAST_VALUE_AT_END "OPTIONS rtsp://synthetic RTSP/1.0\r\nCSeq: 7\r\nX-Tag: first"
+/* The fuzz input with the same shape: 58 bytes, SHA-256
+ * 7de7fb2ac74934d1355980bed7ecacab2d37428853ab3b4edc1b255e91a8c280.
+ */
+static const char fuzzed_value_at_end[] =
+    "OPTIOPTIONS rtsp://synthetic RTSP/1.0\r\n\x1a" "SeqONS rt\xf3" "p://syn:";
 
 static int require(int condition, const char* description) {
     if (condition) return 0;
@@ -137,6 +146,51 @@ int polaris_rtsp_oom_control(void) {
     return 0;
 }
 
+static int accepted_end(const char* packet, const char* payload) {
+    RTSP_MESSAGE message = {0};
+    if (begin_control(0)) return 1;
+    int result = fixture_parseRtspMessage(&message, (char*)packet, (int)strlen(packet));
+    if (result != RTSP_ERROR_SUCCESS) {
+        return require(0, "accepted end-of-message form did not parse successfully");
+    }
+    int failed = require(message.type == TYPE_REQUEST &&
+        same(message.message.request.command, "OPTIONS") && message.sequenceNumber == 7 &&
+        same(fixture_getOptionContent(message.options, "X-Tag"), "first"),
+        "end-of-message form changed the request");
+    failed |= require(payload != NULL ?
+        message.payload == message.messageBuffer + (strstr(packet, payload) - packet) &&
+        message.payloadLength == (int)strlen(payload) :
+        message.payload == NULL && message.payloadLength == 0,
+        "end-of-message form changed the payload");
+    fixture_freeMessage(&message);
+    failed |= require(live_allocations == 0, "end-of-message form cleanup leaked an allocation");
+    return failed;
+}
+
+int polaris_rtsp_end_forms_control(void) {
+    /* Each end form the parser accepts, then its near miss: a trailing CR leaves
+     * endCheck on the terminator, still inside messageBuffer.
+     */
+    int failed = accepted_end(LAST_VALUE_AT_END "\r\n\r\n", NULL);
+    failed |= accepted_end(LAST_VALUE_AT_END "\r\n\r\nabcd", "abcd");
+    failed |= accepted_end(LAST_VALUE_AT_END "\r\n\r", NULL);
+    failed |= accepted_end(LAST_VALUE_AT_END "\r\n", NULL);
+    if (begin_control(0)) return 1;
+    failed |= rejected_request(LAST_VALUE_AT_END "\r", RTSP_ERROR_MALFORMED);
+    return failed;
+}
+
+int polaris_rtsp_value_at_end_control(void) {
+    /* Without the bound, endCheck reads the byte just past the parser's
+     * malloc(length + 1) buffer: ASan reports it, otherwise the result depends on it.
+     */
+    if (begin_control(0)) return 1;
+    int failed = rejected_request(fuzzed_value_at_end, RTSP_ERROR_MALFORMED);
+    if (begin_control(0)) return 1;
+    failed |= rejected_request(LAST_VALUE_AT_END, RTSP_ERROR_MALFORMED);
+    return failed;
+}
+
 #ifdef POLARIS_RTSP_OWNERSHIP_STANDALONE
 int main(int argc, char** argv) {
     if (argc == 2) {
@@ -144,8 +198,10 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[1], "duplicate")) return polaris_rtsp_duplicate_control();
         if (!strcmp(argv[1], "malformed")) return polaris_rtsp_malformed_control();
         if (!strcmp(argv[1], "oom")) return polaris_rtsp_oom_control();
+        if (!strcmp(argv[1], "end-forms")) return polaris_rtsp_end_forms_control();
+        if (!strcmp(argv[1], "value-at-end")) return polaris_rtsp_value_at_end_control();
     }
-    fprintf(stderr, "Select synthetic control: normal, duplicate, malformed, oom\n");
+    fprintf(stderr, "Select synthetic control: normal, duplicate, malformed, oom, end-forms, value-at-end\n");
     return 2;
 }
 #endif

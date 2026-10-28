@@ -22,6 +22,7 @@
 #include <src/tailscale_connection.h>
 #include <src/utility.h>
 #include <src/uuid.h>
+#include <src/video.h>
 
 #include <Simple-Web-Server/client_https.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -89,6 +90,9 @@ namespace {
     /// A launch refusal's own code and message (put_launch_refusal), when there is one.
     std::string refusal_code;
     std::string message;
+    int gamesession = -1;
+    std::string session_url;
+    std::string session_token;
   };
 
   launch_reply_t read_reply(const boost::property_tree::ptree &tree) {
@@ -98,6 +102,9 @@ namespace {
       tree.get<std::string>("root.launchPolicy.recommendedAction", ""),
       tree.get<std::string>("root.<xmlattr>.error_code", ""),
       tree.get<std::string>("root.<xmlattr>.status_message", ""),
+      tree.get<int>("root.gamesession", -1),
+      tree.get<std::string>("root.sessionUrl0", ""),
+      tree.get<std::string>("root.sessionToken", ""),
     };
   }
 
@@ -363,6 +370,47 @@ TEST_F(LaunchDesktopSteamTest, LaunchWhileAnotherAppRunsIsRefusedWithoutTouching
   EXPECT_EQ(reply.status, 400);
   EXPECT_TRUE(reply.recommended_action.empty());
   EXPECT_EQ(steam.close_requests.load(), 0);
+}
+
+TEST_F(LaunchDesktopSteamTest, LaunchWithoutAnAppRefusesBeforeCaptureAndPublication) {
+  const auto device = pair_moonlight(std::nullopt);
+  ASSERT_EQ(rtsp_stream::session_snapshot({}).active_sessions, 0);
+  ASSERT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 0);
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  auto cleanup = util::fail_guard([]() {
+    rtsp_stream::terminate_sessions();
+    proc::proc.end_session(false, false);
+    rtsp_stream::set_cleanup_session_probe_for_tests({});
+  });
+
+  // With an authoritative app present, the old fallthrough can prepare capture and
+  // publish successfully instead of being masked by a later "no session" refusal.
+  auto active = std::make_shared<rtsp_stream::launch_session_t>();
+  active->unique_id = device->uuid;
+  active->session_token = "no-app-test-owner";
+  proc::proc.set_active_launch_for_tests(desktop(), active);
+  proc::proc.set_running_app_for_tests(desktop());
+
+  std::atomic<int> capture_calls {0};
+  video::with_capture_preparation_for_tests(
+    [&](const video::config_t &, std::shared_ptr<void> &) {
+      ++capture_calls;
+      return video::capture_preparation_e::ready;
+    },
+    [&]() {
+      for (const auto appid : {"0", "", "-1"}) {
+        SCOPED_TRACE(appid);
+        const auto reply = launch(moonlight, moonlight_launch(appid));
+        EXPECT_EQ(reply.status, 403);
+        EXPECT_EQ(reply.message, "How did you get here?");
+        EXPECT_EQ(reply.gamesession, 0);
+        EXPECT_TRUE(reply.session_url.empty());
+        EXPECT_TRUE(reply.session_token.empty());
+        EXPECT_EQ(capture_calls.load(), 0);
+        EXPECT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 0);
+        EXPECT_EQ(rtsp_stream::session_snapshot({}).active_sessions, 0);
+      }
+    });
 }
 
 TEST_F(LaunchDesktopSteamTest, LaunchesRefusedBeforeTheSteamStepLeaveSteamAlone) {
