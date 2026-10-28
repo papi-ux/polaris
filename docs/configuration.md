@@ -27,11 +27,13 @@ linux_prefer_gpu_native_capture = enabled
 trusted_subnets = ["10.0.0.0/24"]
 encoder = nvenc
 nvenc_split_encode_mode = disabled
-adaptive_bitrate_enabled = enabled
+adaptive_bitrate_enabled = disabled
 max_sessions = 2
 ```
 
 These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto tries it first on AMD only for Private Stream, which checks an exact live frame, and for Gamescope Stream through the portal ([Vulkan Encoder](#vulkan-encoder)).
+
+The example keeps Live Tuning off for the initial stream, matching the default. You can turn it on separately; an existing configuration that enables it stays enabled.
 
 The `encoder` key remains the host-wide default. Clients that advertise the typed session-encoder contract can ask Polaris to keep that default, use Auto, or require one backend for a single game. Polaris accepts only a backend compiled into the running build, validates it again against the live capture route at launch, and restores the host value at teardown. Auto is the only request allowed to fall back; a named backend fails closed instead of silently selecting another encoder.
 
