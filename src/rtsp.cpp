@@ -36,6 +36,7 @@ extern "C" {
 #include "network.h"
 #include "process.h"
 #include "rtsp.h"
+#include "rtsp_content_length.h"
 #include "stream.h"
 #include "stream_bitrate.h"
 #include "sync.h"
@@ -547,22 +548,13 @@ namespace rtsp_stream {
         socket->read_plaintext_payload();
       });
 
-      auto content_length = 0;
-      for (auto option = req->options; option != nullptr; option = option->next) {
-        if ("Content-length"sv == option->option) {
-          BOOST_LOG(debug) << "Found Content-Length: "sv << option->content << " bytes"sv;
-
-          // If content_length > bytes read, then we need to store current data read,
-          // to be appended by the next read.
-          std::string_view content {option->content};
-          auto begin = std::find_if(std::begin(content), std::end(content), [](auto ch) {
-            return (bool) std::isdigit(ch);
-          });
-
-          content_length = util::from_chars(begin, std::end(content));
-          break;
-        }
+      // If content_length > bytes read, then we need to store current data read,
+      // to be appended by the next read.
+      const auto declared = find_content_length(req->options);
+      if (declared.content != nullptr) {
+        BOOST_LOG(debug) << "Found Content-Length: "sv << declared.content << " bytes"sv;
       }
+      auto content_length = declared.length;
 
       if (end - socket->crlf >= content_length) {
         if (end - socket->crlf > content_length) {

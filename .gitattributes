@@ -14,3 +14,6 @@ docs/screenshots export-ignore
 
 # Unified-diff context markers include intentional single-space blank lines.
 packaging/linux/patches/inputtino/*.patch whitespace=-blank-at-eol,-blank-at-eof
+
+# RTSP fuzz seeds are exact wire bytes, including their CRLF line ends.
+tests/fuzz/corpus/rtsp_message/* binary
