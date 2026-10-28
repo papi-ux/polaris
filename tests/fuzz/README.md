@@ -1,10 +1,9 @@
 # Opt-in config/app validator fuzzer
 
-This standalone developer target is the first JSON-validation slice of Polaris #505.
-It is **unbuilt and unrun**: compiler/runtime installation, immutable image identity,
-compile/link success and fuzz execution have not been qualified. Ordinary source CI
-does not compile this opt-in target. It does not complete #505 or establish security,
-package, release or hardware acceptance.
+This standalone developer target exercises the production config/app JSON validators.
+It builds only when explicitly enabled; ordinary source CI does not compile or run it.
+A bounded campaign can find a failure, but a clean run is not an exhaustive security
+guarantee, qualification of a different toolchain, or package or hardware acceptance.
 
 ## Source and behavior
 
@@ -36,15 +35,16 @@ This omits route authentication/content-type/admission, response-only config-key
 preprocessing in `read_config_payload`, persistence, and other JSON route decoders.
 RTSP primitives and handlers, the full typed control IDX/FEC boundary and nvhttp
 query/launch validation still need separately owned targets. Generic JSON syntax
-coverage or Nova XML cannot substitute for those areas. No CI workflow/runner/image
-change is included; a dispatch-only lane is a separately allocated later step.
+coverage or Nova XML cannot substitute for those areas. Keep campaigns separate
+from ordinary per-push builds, using a manual or nightly lane with an explicit
+source, toolchain, time and resource budget.
 
 ## Prerequisites for a separately authorized Linux run
 
 The source currently targets **native Linux x86_64**, LLVM Clang 18 or newer with
 its matching compiler-rt **libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer**
-runtimes, CMake 3.22+, and a C++20 standard library. An installed LLVM 18 toolchain is
-the proposed first candidate, not a confirmed installation. Select the C++ compiler
+runtimes, CMake 3.22+, and a C++20 standard library. Use an installed toolchain
+with those runtimes. Select the C++ compiler
 explicitly with `CMAKE_CXX_COMPILER` or `CXX`. ON configuration performs a small
 compile/link prerequisite check; it does not execute the result or qualify a runtime.
 Use a fresh build directory so a cached prerequisite result cannot stand in for
@@ -53,14 +53,14 @@ current toolchain proof. All actual target sources receive target-local
 sanitizer recovery; the executable links `-fsanitize=fuzzer,address,undefined` with
 IPO disabled. Other platforms and compiler families fail explicitly.
 
-Before any configure/build/run, ROOT must allocate and admit the toolchain: retain
+Before configuring, building or running, record and review the toolchain: retain
 compiler/build and local JSON-package identity, compiler resource-directory runtime
 hashes, installed package metadata and immutable image ID/digest. A familiar image
 tag or successful ordinary source CI proves none of these prerequisites. Do not
 install or fetch missing tools/dependencies as part of this target's invocation.
 
-The following is a **proposed future recipe**, not validation performed for this PR.
-Run from the product root only after that separate admission, setting `fuzz_evidence`
+The following recipe runs one bounded local campaign after those prerequisites
+have been checked. Run from the product root, setting `fuzz_evidence`
 to a new absolute directory outside the checkout. Set `nlohmann_json_DIR` or
 `CMAKE_PREFIX_PATH` to the admitted local package if it is not found in system paths.
 
@@ -88,8 +88,9 @@ per-input timeout and a 1024 MiB RSS limit. It runs one process with no retry or
 parallel fuzz workers; these settings do not guarantee exact wall-clock or host
 resource usage. Keep the first nonzero exit, configure/build/run logs, exact source
 and binary/toolchain/package identities, original corpus hashes, resulting corpus,
-and every crash/timeout/OOM artifact. Stop on a failure; have ROOT file a separate
-issue and retain a reproducer regression rather than fixing parser behavior here.
+and every crash/timeout/OOM artifact. Stop on a failure, file a separate issue
+and keep the reproducer as a regression case. Keep parser behavior fixes separate
+from the harness.
 
 ## Small synthetic seed corpus
 
@@ -97,7 +98,8 @@ Eleven JSON files serialize existing test payloads from base
 `7c51ddc42236abcfa5278c7d2ed88cc8eee96411`. All values are synthetic test inputs;
 there are no private captures, credentials or user data. The three parser boundary
 files below are explicit additions, including one from the upstream number-limit
-documentation. No seed has been parsed or fuzzed for this PR.
+documentation. Keep the original seed bytes separate from the corpus a campaign
+creates, so a later run can distinguish its starting inputs from discovered ones.
 
 Unless noted otherwise, cases are in
 [`tests/unit/test_confighttp_validation.cpp`](../unit/test_confighttp_validation.cpp).
