@@ -194,6 +194,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_pacing.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_trace.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_epoch_authority.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_numeric_decode.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
