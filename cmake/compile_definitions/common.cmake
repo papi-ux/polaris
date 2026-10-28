@@ -174,6 +174,7 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/crypto.h"
         "${CMAKE_SOURCE_DIR}/src/nvhttp.cpp"
         "${CMAKE_SOURCE_DIR}/src/nvhttp.h"
+        "${CMAKE_SOURCE_DIR}/src/nvhttp_encoder_options.cpp"
         "${CMAKE_SOURCE_DIR}/src/httpcommon.cpp"
         "${CMAKE_SOURCE_DIR}/src/httpcommon.h"
         "${CMAKE_SOURCE_DIR}/src/confighttp.cpp"
