@@ -1,0 +1,4 @@
+OPTIONS rtsp://synthetic RTSP/1.0
+CSeq: 1
+CSeq: 2
+Missing

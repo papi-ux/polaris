@@ -1,0 +1,4 @@
+OPTIONS rtsp://synthetic RTSP/1.0
+CSeq: 7
+X-Tag: first
+
