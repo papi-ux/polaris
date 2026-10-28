@@ -2,9 +2,9 @@
 
 These standalone developer targets exercise the production config/app JSON validators,
 the selective-FEC feedback payload parser, the raw GameStream query/key-material
-decoders, and the adapted RTSP message parser with its request Content-length
-decoder, all described below. They build only when explicitly enabled; ordinary source
-CI does not compile or run them.
+decoders, the adapted RTSP message parser with its request Content-length
+decoder, and the typed control-stream message decoders, all described below. They
+build only when explicitly enabled; ordinary source CI does not compile or run them.
 A bounded campaign can find a failure, but a clean run is not an exhaustive security
 guarantee, qualification of a different toolchain, or package or hardware acceptance.
 
@@ -36,11 +36,13 @@ being validated; the harness never executes them.
 
 This omits route authentication/content-type/admission, response-only config-key
 preprocessing in `read_config_payload`, persistence, and other JSON route decoders.
-RTSP framing, dispatch and handlers outside the message slice below, typed control
-IDX decoding and nvhttp query/launch validation outside the key-material slice below
-still need separately owned targets.
-The FEC target below covers only its named payload parser, not the full typed
-control boundary. Generic JSON syntax
+RTSP framing, dispatch and handlers outside the message slice below and nvhttp
+query/launch validation outside the key-material slice below still need separately
+owned targets.
+The FEC target below covers only its named payload parser; the typed control-stream
+decoder target below covers the other typed client->host messages' first byte-level
+decode, but neither covers decryption, the control dispatch loop, session side effects
+or the inner re-dispatch of a decrypted message. Generic JSON syntax
 coverage or Nova XML cannot substitute for those areas. Keep campaigns separate
 from ordinary per-push builds, using a manual or nightly lane with an explicit
 source, toolchain, time and resource budget.
@@ -372,3 +374,102 @@ captures. Added boundaries are not presented as existing test requests.
 
 The empty file remains part of the original corpus identity even when libFuzzer
 counts only nonempty initial files.
+
+## Typed control-stream messages
+
+`fuzz_control_stream` compiles the **unchanged production** `src/control_messages.cpp`
+with the driver and calls the real control-message decoders through `control_messages.h`.
+That source is the single owner of the first byte-level decode each control-thread handler
+in `src/stream.cpp` performs; the handlers were rewritten to call it with no behaviour
+change, and `tests/unit/test_source_safety_contracts.cpp` pins that stream.cpp keeps no
+second copy. There is no networking, ENet peer, session, decryption, input injection,
+thread, configuration or persistence; `utility.h`'s endian helpers (which include
+`nlohmann/json.hpp`, the only dependency) are used unchanged.
+
+The input's first byte selects the message type the dispatcher would route to, and the
+rest is the payload the handler receives after the 2-byte type field is stripped. The
+selector is taken `% 5` across the five decoders; an empty input has no selector and does
+nothing. The driver first calls `control_packet_carries_type` on the reconstructed full
+packet length, as the dispatcher does, then drives the selected decoder and consumes every
+decoded field and cipher view through a volatile result so the decode cannot be optimized
+away. Expected refusals, absent-length drops and bounded empty views are not failures; no
+decoder rule is copied into the driver.
+
+The five decoders and the production handler each reaches:
+
+| Selector | Message | Handler and decoder |
+| --- | --- | --- |
+| `0` | `IDX_LOSS_STATS` (`0x0201`) | `decode_loss_stats`: the fixed int32 record at offsets 0, 1, 3 |
+| `1` | `IDX_INVALIDATE_REF_FRAMES` (`0x0301`) | `decode_invalidate_ref_frames`: the two int64 frame fields |
+| `2` | `IDX_INPUT_DATA` (`0x0206`) | `decode_input_cipher`: `input_control_cipher_fits` and the big-endian declared cipher length |
+| `3` | `IDX_ENCRYPTED` (`0x0001`) | `decode_encrypted_control`: `encrypted_control_header_present`, the LE wrapper length/seq, the runt floor and `encrypted_control_cipher_fits` |
+| `4` | `IDX_EXEC_SERVER_CMD` (`0x3000`) | `decode_server_cmd_index`: the one-byte command index |
+
+The loss-stats and invalidate decoders reproduce the handlers' fixed-size reads exactly,
+including that the handler reads the whole record without first checking the payload is
+long enough; a payload shorter than the record reads past its end just as the handler
+does. The input-data and encrypted decoders reproduce the handlers' own length guards, so
+their cipher views stay inside the bytes that arrived. `decode_server_cmd_index` reads one
+byte, as the handler does after its permission gate. Decoding uses `std::memcpy` into
+host-order scalars so the fuzz build's alignment check does not flag what the production
+packed-struct and `reinterpret_cast` reads did without a diagnostic; the decoded values and
+the bytes touched are identical. Periodic ping, request IDR and the Start A/B messages
+carry no parsed payload and so have no decoder; set-clipboard and file-transfer-nonce only
+check a permission and log, so they are not decoders either. The selective-FEC status
+report (`0x5502`) is the remaining typed client->host message and has its own
+`fuzz_control_fec` target above; it is not duplicated here.
+
+### Build, resource and coverage limits
+
+The default-OFF gate, native Linux x86_64/Clang 18+/C++20 checks, target-local
+ASan/UBSan/libFuzzer flags and disabled IPO are shared with the other targets. This target
+needs only `src/control_messages.cpp`, `src/control_messages.h` and `src/utility.h`, plus
+the already installed `nlohmann_json` package `utility.h` includes; nothing is fetched or
+provisioned, and no product library, socket, session, crypto or server is built. The new
+seam is also in the ordinary production source list and the fast test build
+(`ControlMessageDecoders` and the `ControlStreamDecodersStayAtTheirExtractedSeam`
+contract); only the fuzzer executable and its instrumentation stay outside ordinary builds.
+
+The driver refuses more than 65,536 bytes as a harness resource bound; it is not a new
+control-channel limit, and the wrapper length is a uint16, so a declared cipher length can
+still both fit and overrun within it. After the reviewed-toolchain ON configure, copy only
+`tests/fuzz/corpus/control_stream/*` into a new external absolute `fuzz_evidence` corpus and
+use the existing 60-second, 5-second per-input timeout and 1024 MiB RSS limits:
+
+```sh
+cmake --build "$fuzz_evidence/build" --target fuzz_control_stream --parallel 2 \
+  >"$fuzz_evidence/build.log" 2>&1
+"$fuzz_evidence/build/fuzz_control_stream" "$fuzz_evidence/corpus" \
+  -max_total_time=60 -max_len=65536 -rss_limit_mb=1024 -timeout=5 \
+  -artifact_prefix="$fuzz_evidence/crashes/" -print_final_stats=1 \
+  >"$fuzz_evidence/run.log" 2>&1
+```
+
+Use the same first-failure retention and source/toolchain/binary/corpus identity rules as
+the other targets. Adding this source claims no configure, build or campaign result, and
+these settings do not authorize a run or waive host admission. A crash this target finds is
+filed and fixed as its own issue with the reproducer kept as a regression case, separately
+from this harness; parser behaviour fixes stay out of the harness.
+
+### Nine synthetic control-stream seeds
+
+The byte values below mirror the literals in
+[`tests/unit/test_control_messages.cpp`](../unit/test_control_messages.cpp); each is a
+selector byte followed by a representative valid payload, or a documented boundary. They
+contain no private captures. Every seed's payload is at least as long as its decoder reads,
+so the seed run itself touches only in-bounds bytes.
+
+| File | Selector / payload |
+| --- | --- |
+| `loss-stats.bin` | `0` + int32 LE record `{-7, 123456, 9999, -2024}` |
+| `invalidate-ref-frames.bin` | `1` + int64 LE pair `{-1, INT64_MAX}` |
+| `input-data.bin` | `2` + big-endian length `20` + 20 cipher bytes `0xA0..0xB3` |
+| `input-no-length.bin` | `2` + 3 bytes: boundary too short for the 4-byte length prefix |
+| `encrypted-wrapper.bin` | `3` + LE length `24`, LE seq `0x04030201`, 20 body bytes `0x10..0x23` |
+| `encrypted-runt.bin` | `3` + LE length `23`: boundary below the `16+4+4` floor |
+| `encrypted-short-body.bin` | `3` + LE length `24` with only 2 body bytes: boundary that does not fit |
+| `server-cmd.bin` | `4` + one command-index byte `0x07` |
+| `empty.bin` | Added boundary: zero bytes, no selector |
+
+The empty file remains part of the original corpus identity even when libFuzzer counts only
+nonempty initial files.

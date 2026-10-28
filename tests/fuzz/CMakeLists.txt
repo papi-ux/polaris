@@ -80,6 +80,28 @@ target_compile_options(fuzz_control_fec PRIVATE
 target_link_options(fuzz_control_fec PRIVATE
     -fno-sanitize-recover=all -fsanitize=fuzzer,address,undefined)
 
+# Decode the real typed client->host control-stream payloads, without a session or socket.
+foreach(required_file IN ITEMS src/control_messages.cpp src/control_messages.h src/utility.h)
+    if(NOT EXISTS "${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
+        message(FATAL_ERROR "Missing production source: ${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
+    endif()
+endforeach()
+add_executable(fuzz_control_stream
+    fuzz_control_stream.cpp
+    "${POLARIS_FUZZ_SOURCE_ROOT}/src/control_messages.cpp")
+target_include_directories(fuzz_control_stream PRIVATE "${POLARIS_FUZZ_SOURCE_ROOT}/src")
+# utility.h (endian helpers used by the decoders) includes nlohmann/json.hpp.
+target_link_libraries(fuzz_control_stream PRIVATE nlohmann_json::nlohmann_json)
+target_compile_features(fuzz_control_stream PRIVATE cxx_std_20)
+set_target_properties(fuzz_control_stream PROPERTIES
+    CXX_EXTENSIONS OFF
+    INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_options(fuzz_control_stream PRIVATE
+    -O1 -g -fno-omit-frame-pointer -fno-sanitize-recover=all
+    -fsanitize=fuzzer-no-link,address,undefined)
+target_link_options(fuzz_control_stream PRIVATE
+    -fno-sanitize-recover=all -fsanitize=fuzzer,address,undefined)
+
 # Parse the real raw query and individual client launch fields, without a server.
 foreach(required_file IN ITEMS src/nvhttp_query.cpp src/nvhttp_query.h src/utility.h)
     if(NOT EXISTS "${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")

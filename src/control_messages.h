@@ -1,0 +1,134 @@
+/**
+ * @file src/control_messages.h
+ * @brief Decode the typed control-stream payloads a client sends, without a session or socket.
+ *
+ * The control thread dispatches each inbound control packet to a handler lambda that
+ * reinterprets the raw payload bytes before any side effect. These free functions carry
+ * the length checks and the first byte-level decode of each such message, so the handlers
+ * and an opt-in fuzz target share one owner for that decode instead of a copy. Every
+ * function is total over the bytes that arrived off the wire: it reproduces the handler's
+ * reads exactly, including where a handler reads a fixed-size record without first bounding
+ * the payload, so behaviour is unchanged from the previous inline code.
+ */
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+namespace stream {
+  // The dispatcher consumes this leading type field before a handler sees the payload.
+  inline constexpr std::size_t control_type_field_size = sizeof(std::uint16_t);
+
+  // sizeof(stream::control_encrypted_t): LE 0x0001 header (2) + length (2) + seq (4), packed.
+  // stream.cpp statically asserts this mirrors the packed struct it still defines.
+  inline constexpr std::size_t encrypted_control_header_size = 8;
+
+  // --- Length checks for peer-supplied control packets. Free functions with external
+  // linkage so tests can drive them directly; every one is total, so a caller can hand
+  // them any value that arrived off the wire. ---
+
+  /**
+   * @brief Whether an ENet packet is long enough to hold the type field.
+   *
+   * Below this, `dataLength - sizeof(type)` wraps and yields a payload view
+   * claiming the whole address space.
+   */
+  bool control_packet_carries_type(std::size_t data_length);
+
+  /**
+   * @brief Whether the encrypted control header itself is present.
+   *
+   * The dispatcher consumes the leading type field before the handler sees the
+   * payload, so the header starts two bytes behind it.
+   */
+  bool encrypted_control_header_present(std::size_t payload_size);
+
+  /**
+   * @brief Whether a declared cipher length fits in the bytes that arrived.
+   */
+  bool encrypted_control_cipher_fits(std::size_t payload_size, std::uint16_t declared_length);
+
+  /**
+   * @brief Whether an IDX_INPUT_DATA packet's declared cipher length is usable.
+   *
+   * The length arrives as a signed 32-bit value, so a negative one would widen
+   * to SIZE_MAX when used as a view length.
+   */
+  bool input_control_cipher_fits(std::size_t payload_size, std::int32_t declared_cipher_length);
+
+  // --- First byte-level decode of each typed client->host control message, extracted
+  // verbatim from the control-thread handler lambdas. ---
+
+  /**
+   * @brief IDX_LOSS_STATS: the lost-packet count, elapsed milliseconds and last good frame.
+   *
+   * The handler reads a fixed little-endian int32 record at offsets 0, 1 and 3 with no
+   * length check, so this reproduces those reads unbounded; a payload shorter than 16
+   * bytes reads past its end exactly as the handler does.
+   */
+  struct loss_stats_t {
+    std::int32_t count;
+    std::int32_t time_ms;
+    std::int32_t last_good_frame;
+  };
+
+  loss_stats_t decode_loss_stats(std::string_view payload);
+
+  /**
+   * @brief IDX_INVALIDATE_REF_FRAMES: the first and last frame of the invalidated range.
+   *
+   * Like loss stats, the handler reads two int64 fields with no length check, so a
+   * payload shorter than 16 bytes reads past its end exactly as the handler does.
+   */
+  struct invalidate_ref_frames_t {
+    std::int64_t first_frame;
+    std::int64_t last_frame;
+  };
+
+  invalidate_ref_frames_t decode_invalidate_ref_frames(std::string_view payload);
+
+  /**
+   * @brief IDX_INPUT_DATA: the big-endian declared cipher length and the bounded cipher view.
+   *
+   * `has_length` is false when the payload is too short to carry the 4-byte length prefix;
+   * the handler warns and drops it. `fits` applies input_control_cipher_fits to the decoded
+   * length; `cipher` is the tagged-cipher view only when it fits.
+   */
+  struct input_cipher_t {
+    bool has_length = false;
+    std::int32_t declared_length = 0;
+    bool fits = false;
+    std::string_view cipher {};
+  };
+
+  input_cipher_t decode_input_cipher(std::string_view payload);
+
+  /**
+   * @brief IDX_ENCRYPTED: the wrapper header length/seq and the bounded tagged-cipher view.
+   *
+   * The dispatcher already consumed the 2-byte type field (the header's LE 0x0001), so the
+   * remaining header fields and body live at the start of `payload`: length at [0,2), seq at
+   * [2,6), body at [6,...). `header_present` guards reading the length and seq; `runt` is the
+   * handler's `length < 16 + 4 + 4` floor; `fits` applies encrypted_control_cipher_fits. The
+   * cipher view (header->payload(), length - 4) is set only when present, not runt, and fits.
+   */
+  struct encrypted_control_t {
+    bool header_present = false;
+    std::uint16_t length = 0;
+    std::uint32_t seq = 0;
+    bool runt = false;
+    bool fits = false;
+    std::string_view cipher {};
+  };
+
+  encrypted_control_t decode_encrypted_control(std::string_view payload);
+
+  /**
+   * @brief IDX_EXEC_SERVER_CMD: the one-byte server command index.
+   *
+   * The handler reads a single byte with no length check (after its permission gate), so an
+   * empty payload reads past its end exactly as the handler does.
+   */
+  std::uint8_t decode_server_cmd_index(std::string_view payload);
+}  // namespace stream

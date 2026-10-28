@@ -201,6 +201,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/rtsp.h"
         "${CMAKE_SOURCE_DIR}/src/rtsp_content_length.cpp"
         "${CMAKE_SOURCE_DIR}/src/rtsp_content_length.h"
+        "${CMAKE_SOURCE_DIR}/src/control_messages.cpp"
+        "${CMAKE_SOURCE_DIR}/src/control_messages.h"
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream.h"
         "${CMAKE_SOURCE_DIR}/src/stream_fec.cpp"
