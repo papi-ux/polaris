@@ -1,7 +1,8 @@
-# Opt-in config/app validator fuzzer
+# Opt-in parser fuzzers
 
-This standalone developer target exercises the production config/app JSON validators.
-It builds only when explicitly enabled; ordinary source CI does not compile or run it.
+These standalone developer targets exercise the production config/app JSON validators
+and selective-FEC feedback payload parser. They build only when explicitly enabled;
+ordinary source CI does not compile or run them.
 A bounded campaign can find a failure, but a clean run is not an exhaustive security
 guarantee, qualification of a different toolchain, or package or hardware acceptance.
 
@@ -33,8 +34,9 @@ being validated; the harness never executes them.
 
 This omits route authentication/content-type/admission, response-only config-key
 preprocessing in `read_config_payload`, persistence, and other JSON route decoders.
-RTSP primitives and handlers, the full typed control IDX/FEC boundary and nvhttp
-query/launch validation still need separately owned targets. Generic JSON syntax
+RTSP primitives and handlers, typed control IDX decoding and nvhttp query/launch
+validation still need separately owned targets. The FEC target below covers only
+its named payload parser, not the full typed control boundary. Generic JSON syntax
 coverage or Nova XML cannot substitute for those areas. Keep campaigns separate
 from ordinary per-push builds, using a manual or nightly lane with an explicit
 source, toolchain, time and resource budget.
@@ -122,3 +124,60 @@ Unless noted otherwise, cases are in
 | `empty.json` | Added parser boundary: zero bytes |
 | `truncated.json` | Added parser boundary: truncated object/value |
 | `numeric-overflow.json` | Upstream [Number limits](https://json.nlohmann.me/features/types/number_handling/#number-limits): literal `1E400`, documented parsing `out_of_range.406`; [v3.11.3 parser](https://raw.githubusercontent.com/nlohmann/json/v3.11.3/include/nlohmann/detail/input/parser.hpp), non-finite `value_float` rejection |
+
+## Selective-FEC feedback payloads
+
+`fuzz_control_fec` includes the unchanged production `src/stream_fec_status.h`
+directly and calls `stream::fec_status::parse`. Each input is the raw decrypted
+21-byte payload, excluding the little-endian control header; there is no harness
+prefix. The driver calls the parser with capability flags `0`, `1`, `3` and
+`0xffffffff` to cover the advertised-feature check and unrelated feature bits.
+A volatile result consumes the real refusal and decoded fields, including the
+two derived shard counts, so optimization cannot discard the decoding. No
+parser checks are copied into the driver and expected refusals are not failures.
+The target uses the same target-local instrumentation as the JSON target.
+
+The driver's 64-byte cap and the recipe's `-max_len=64` are fuzz resource bounds.
+They do not change the production parser's exact-size requirement. This target
+has no networking, decryption, session, configuration or persistence. It does not
+exercise `tracker_t`, loss statistics, IDX invalidation/input dispatch, FEC policy,
+actual shard repair, packet delivery or Live Tuning. It is one slice of the
+control-stream area in #505; that area remains incomplete.
+
+The existing standalone ON configure also checks the JSON target's installed
+package prerequisite. After that same reviewed-toolchain configure, build only
+`fuzz_control_fec` for a separate FEC campaign. Use a new external absolute
+`fuzz_evidence` directory with `corpus` and `crashes` subdirectories, and copy only
+`tests/fuzz/corpus/control_fec/*` into its corpus. The build/run part is:
+
+```sh
+cmake --build "$fuzz_evidence/build" --target fuzz_control_fec --parallel 2 \
+  >"$fuzz_evidence/build.log" 2>&1
+"$fuzz_evidence/build/fuzz_control_fec" "$fuzz_evidence/corpus" \
+  -max_total_time=60 -max_len=64 -rss_limit_mb=1024 -timeout=5 \
+  -artifact_prefix="$fuzz_evidence/crashes/" -print_final_stats=1 \
+  >"$fuzz_evidence/run.log" 2>&1
+```
+
+Use the same first-failure retention and source/toolchain/binary/corpus identity
+rules above. A previous JSON campaign does not qualify this target, and adding
+this source does not claim an actual configure, build or fuzz result. Do not rerun
+an unchanged JSON campaign as a substitute.
+
+### FEC seed origins
+
+All twenty binary seeds serialize literal inputs from `tests/unit/test_stream_fec.cpp`
+at `371845d0b53f9ece149981eb61e6a411690e575b`. They contain no private captures.
+`valid-block.bin` is the exact `fec_wire` literal; the others apply the existing
+test mutations or lengths to that literal, except `extra-byte.bin`, which is the
+test's zero-filled 22-byte array. The empty file is retained even though libFuzzer
+normally counts only nonempty starting files.
+
+| Files | Existing `StreamFecStatusParserTests` origin |
+| --- | --- |
+| `valid-block.bin` | `DecodesUnalignedBigEndianPayloadAndReportedBlockFacts` / `fec_wire` |
+| `effective-200-percent.bin`, `effective-66-percent.bin` | `AcceptsEffectivePercentageAbovePolicyCapAndClientRounding` |
+| `parity-free-wide.bin` | `AcceptsParityFreeOversizedDataAndWideCounters` |
+| `zero-data.bin`, `too-many-data.bin`, `too-many-received-data.bin`, `too-many-received-parity.bin`, `bad-block-index.bin`, `zero-block-count.bin`, `too-many-blocks.bin` | `RefusesMalformedDataReceiveCountsAndBlockIdentity` |
+| `parity-mismatch.bin`, `zero-percentage.bin`, `protected-too-large.bin`, `protected-255.bin`, `missing-overflow.bin` | `ChecksClientParityRelationProtectedLimitAndMissingBounds` |
+| `empty.bin`, `legacy-16.bin`, `truncated-20.bin`, `extra-byte.bin` | `RequiresAdvertisedCapabilityAndExactCurrentLength` |
