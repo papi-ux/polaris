@@ -230,7 +230,7 @@ namespace test_utils {
         const bool old_ready = capture->negotiated() && pw_stream_is_driving(source) && added == 2;
         if (old_ready && old_ready_ms < 0) old_ready_ms = elapsed();
         // A driver can receive Start after its follower. Its first trigger
-        // needs that Start to initialize the requested frame size.
+        // needs that Start to initialize its processing quantum.
         const bool ready = old_ready && link_state == PW_LINK_STATE_ACTIVE &&
           access::stream_state(*capture) == PW_STREAM_STATE_STREAMING &&
           pw_stream_get_state(source, nullptr) == PW_STREAM_STATE_STREAMING;
