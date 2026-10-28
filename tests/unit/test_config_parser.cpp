@@ -22,6 +22,8 @@
 #endif
 #include <cstring>
 #include <iterator>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -937,4 +939,80 @@ TEST(ConfigParserTests, PrivateSourcePacingOptInIsStrictAndConsumed) {
   std::unordered_map<std::string, std::string> absent;
   EXPECT_FALSE(config::source_pacing_setting(absent));
   EXPECT_FALSE(config::video_t {}.vrr_source_pacing);
+}
+
+// #542: the decimal decoder overflowed on an integer setting it could not represent. Such a value
+// now keeps the setting it had, as a missing key does. 0 is not a neutral stand-in here:
+// lan_encryption_mode and wan_encryption_mode read it as ENCRYPTION_MODE_NEVER.
+TEST(ConfigParserTests, UnrepresentableIntegerKeepsTheEncryptionMode) {
+  for (const char *value : {"00000000000000000000", "9223372036854775808", "99999999999999999999"}) {
+    std::unordered_map<std::string, std::string> vars {{"lan_encryption_mode", value}, {"wan_encryption_mode", value}};
+    int lan = config::ENCRYPTION_MODE_MANDATORY;
+    int wan = config::ENCRYPTION_MODE_OPPORTUNISTIC;  // wan's shipped default
+    config::int_between_f(vars, "lan_encryption_mode", lan, {0, 2});
+    config::int_between_f(vars, "wan_encryption_mode", wan, {0, 2});
+    EXPECT_EQ(lan, config::ENCRYPTION_MODE_MANDATORY) << value;
+    EXPECT_EQ(wan, config::ENCRYPTION_MODE_OPPORTUNISTIC) << value;
+    EXPECT_TRUE(vars.empty()) << value;
+  }
+
+  std::unordered_map<std::string, std::string> vars {{"lan_encryption_mode", "2"}, {"wan_encryption_mode", "0"}};
+  int lan = config::ENCRYPTION_MODE_NEVER;
+  int wan = config::ENCRYPTION_MODE_OPPORTUNISTIC;
+  config::int_between_f(vars, "lan_encryption_mode", lan, {0, 2});
+  config::int_between_f(vars, "wan_encryption_mode", wan, {0, 2});
+  EXPECT_EQ(lan, config::ENCRYPTION_MODE_MANDATORY);
+  EXPECT_EQ(wan, config::ENCRYPTION_MODE_NEVER);
+}
+
+TEST(ConfigParserTests, UnrepresentableIntegerKeepsAPlainIntegerSetting) {
+  for (const char *value : {"00000000000000000000", "\"99999999999999999999\"", "-9223372036854775808"}) {
+    std::unordered_map<std::string, std::string> vars {{"key_repeat_delay", value}, {"optional_setting", value}};
+    int delay = -1;
+    std::optional<int> unset;
+    config::int_f(vars, "key_repeat_delay", delay);
+    config::int_f(vars, "optional_setting", unset);
+    EXPECT_EQ(delay, -1) << value;
+    EXPECT_FALSE(unset.has_value()) << value;
+    EXPECT_TRUE(vars.empty()) << value;
+  }
+
+  std::unordered_map<std::string, std::string> vars {{"key_repeat_delay", "\"250\""}, {"back_button_timeout", "0x10"}, {"optional_setting", "-3"}};
+  int delay = -1;
+  int timeout = std::numeric_limits<int>::min();
+  std::optional<int> set;
+  config::int_f(vars, "key_repeat_delay", delay);
+  config::int_f(vars, "back_button_timeout", timeout);
+  config::int_f(vars, "optional_setting", set);
+  EXPECT_EQ(delay, 250);
+  EXPECT_EQ(timeout, 16);
+  EXPECT_EQ(set, std::optional<int> {-3});
+}
+
+// keybindings pairs consecutive elements, so dropping a refused element would re-pair the rest:
+// [k1, bad, bad, v2] must not become {k1: v2}. The whole list is refused instead.
+TEST(ConfigParserTests, KeybindingsWithAnUnrepresentableEntryKeepTheirMap) {
+  const std::unordered_map<int, int> prior {{0x10, 0xA0}, {0x11, 0xA2}};
+  for (const char *value : {"[0x51, 0x52, 99999999999999999999, 0x53]", "[0x41, 00000000000000000000, 99999999999999999999, 0x42]"}) {
+#ifndef _WIN32
+    settings_log_capture_t capture;
+#endif
+    std::unordered_map<std::string, std::string> vars {{"keybindings", value}};
+    auto bindings = prior;
+    config::map_int_int_f(vars, "keybindings", bindings);
+    EXPECT_EQ(bindings, prior) << value;
+    EXPECT_EQ(bindings.count(0x41), 0u) << value;
+    EXPECT_EQ(vars.count("keybindings"), 0u) << value;
+#ifndef _WIN32
+    const auto log = capture.text();
+    EXPECT_EQ(occurrences(log, "config: expected keybindings to contain only integers --> keeping its previous value"), 1u) << log;
+    EXPECT_EQ(occurrences(log, "99999999999999999999"), 0u) << log;
+#endif
+  }
+
+  std::unordered_map<std::string, std::string> vars {{"keybindings", "[0x41, 0x42, 67, 68]"}};
+  auto bindings = prior;
+  config::map_int_int_f(vars, "keybindings", bindings);
+  const std::unordered_map<int, int> mapped {{0x10, 0xA0}, {0x11, 0xA2}, {0x41, 0x42}, {67, 68}};
+  EXPECT_EQ(bindings, mapped);
 }
