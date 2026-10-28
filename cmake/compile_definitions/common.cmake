@@ -206,6 +206,7 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stream_fec.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
         "${CMAKE_SOURCE_DIR}/src/video.h"
+        "${CMAKE_SOURCE_DIR}/src/video_formats.cpp"
         "${CMAKE_SOURCE_DIR}/src/vrr_trace.cpp"
         "${CMAKE_SOURCE_DIR}/src/vrr_trace.h"
         "${CMAKE_SOURCE_DIR}/src/vrr_trace_clock.h"
