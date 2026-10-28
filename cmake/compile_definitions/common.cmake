@@ -75,6 +75,12 @@ include_directories(BEFORE SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nv-codec-head
 file(GLOB NVENC_SOURCES CONFIGURE_DEPENDS "src/nvenc/*.cpp" "src/nvenc/*.h")
 list(APPEND PLATFORM_TARGET_FILES ${NVENC_SOURCES})
 
+include("${CMAKE_CURRENT_LIST_DIR}/../dependencies/rtsp_parser.cmake")
+set(POLARIS_RTSP_PARSER_SOURCE "${CMAKE_BINARY_DIR}/generated/moonlight-common-c/RtspParser.c")
+polaris_prepare_rtsp_parser(
+    "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src"
+    "${CMAKE_BINARY_DIR}/generated/moonlight-common-c")
+
 set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/adaptive_bitrate.h"
         "${CMAKE_SOURCE_DIR}/src/adaptive_bitrate.cpp"
@@ -102,7 +108,7 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/owned_child.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Input.h"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Rtsp.h"
-        "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/RtspParser.c"
+        "${POLARIS_RTSP_PARSER_SOURCE}"
         "${CMAKE_SOURCE_DIR}/third-party/moonlight-common-c/src/Video.h"
         "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray.h"
         "${CMAKE_SOURCE_DIR}/src/upnp.cpp"
