@@ -75,7 +75,7 @@ refuses that request with `app_launch_mode_pinned`. Also, `headless_mode = enabl
 | `capture` | empty (automatic) | Capture backend override; explicit Vulkan supports `kms`, `wlr`, and `portal` |
 | `encoder` | `nvenc` / `vaapi` / `vulkan` / `software` | Primary encoder backend; `vulkan` is experimental and strict when selected explicitly |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
-| `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment |
+| `adaptive_bitrate_enabled` | `disabled` | Allow mid-stream bitrate adjustment (Live Tuning). Opt-in; a value already in your config file is kept |
 | `disconnect_resume_timeout_seconds` | `300` | Seconds to keep an app paused after client disconnect for resume |
 | `max_sessions` | `2` | Number of simultaneous sessions or viewers |
 | `enable_pairing` | `enabled` | Accept new clients |
