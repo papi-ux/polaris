@@ -5,10 +5,12 @@
 
 // standard includes
 #include <algorithm>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <sys/stat.h>
 
 // local includes
 #include "file_handler.h"
@@ -33,6 +35,41 @@ namespace file_handler {
     }
 
     return std::filesystem::create_directories(path);
+  }
+
+  bool make_private_directory(const std::filesystem::path &path, std::error_code &error) {
+    error.clear();
+    if (std::filesystem::is_directory(path, error)) {
+      return true;
+    }
+    if (error && error != std::errc::no_such_file_or_directory) {
+      return false;
+    }
+    error.clear();
+    const auto parent = path.parent_path();
+    if (!parent.empty() && parent != path && !make_private_directory(parent, error)) {
+      return false;
+    }
+    // Set the mode at creation, without changing the process-wide umask or
+    // chmod'ing a directory that another process may have created meanwhile.
+    if (::mkdir(path.c_str(), S_IRWXU) == 0) {
+      return true;
+    }
+    const auto failure = errno;
+    if (failure == EEXIST && std::filesystem::is_directory(path, error)) {
+      return true;
+    }
+    if (!error) {
+      error = std::error_code(failure, std::generic_category());
+    }
+    return false;
+  }
+
+  void make_private_directory(const std::filesystem::path &path) {
+    std::error_code error;
+    if (!make_private_directory(path, error)) {
+      throw std::filesystem::filesystem_error("Creating private state directory", path, error);
+    }
   }
 
   bool seed_user_file(const std::filesystem::path &source, const std::filesystem::path &destination) {

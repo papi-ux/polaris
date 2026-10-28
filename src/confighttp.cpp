@@ -1202,7 +1202,29 @@ namespace confighttp {
       return headers;
     }
 
+    bool write_private_state_refusal(resp_https_t response, std::string_view message) {
+      std::lock_guard credential_lock {s_credential_lifecycle_mutex};
+      if (!s_web_sessions) return false;
+      const auto refused = s_web_sessions->last_refusal();
+      if (!refused) return false;
+      const auto described = configuration_store::describe_refusal(refused->path.string(), refused->refusal);
+      nlohmann::json output = {
+        {"status", false},
+        {"code", "private_state_unavailable"},
+        {"error", std::string {message} + " " + described.reason + " " + described.fix},
+        {"path", described.path},
+        {"reason", described.reason},
+        {"fix", described.fix},
+      };
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Cache-Control", "no-store");
+      append_json_security_headers(headers);
+      response->write(SimpleWeb::StatusCode::server_error_service_unavailable, output.dump(), headers);
+      return true;
+    }
+
     void write_session_persistence_error(resp_https_t response, std::string_view message) {
+      if (write_private_state_refusal(response, message)) return;
       nlohmann::json output = {
         {"status", false},
         {"error", message},
@@ -1213,6 +1235,7 @@ namespace confighttp {
     }
 
     void write_session_validation_unavailable(resp_https_t response) {
+      if (write_private_state_refusal(response, "Web UI session validation is temporarily unavailable.")) return;
       nlohmann::json output = {
         {"status", false},
         {"error", "Web UI session validation is temporarily unavailable."},
@@ -11609,6 +11632,20 @@ namespace confighttp {
   }
 
 #ifdef POLARIS_TESTS
+  void with_web_session_store_for_tests(const std::filesystem::path &path, const std::function<void()> &run) {
+    auto previous_store = std::move(s_web_sessions);
+    const auto previous_availability = s_loaded_credentials_available;
+    auto restore = util::fail_guard([&] {
+      s_web_sessions = std::move(previous_store);
+      s_loaded_credentials_available = previous_availability;
+    });
+    s_loaded_credentials_available = true;
+    s_web_sessions = std::make_unique<web_session_store::manager_t>(path,
+      web_session_credential_fingerprint(), web_session_policy());
+    s_web_sessions->load(web_session_clock_now());
+    run();
+  }
+
   void live_tuning_http_for_tests(resp_https_t response, req_https_t request) {
     withCsrf(liveTuning)(response, request);
   }

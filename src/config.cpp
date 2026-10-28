@@ -952,7 +952,7 @@ namespace config {
 
     // Ensure the directories exists
     if (!fs::exists(dir)) {
-      fs::create_directories(dir);
+      file_handler::make_private_directory(dir);
     }
   }
 
@@ -1944,16 +1944,12 @@ namespace config {
 
     bool config_loaded = false;
     try {
-      // Create appdata folder if it does not exist.
-      //
-      // It holds credentials, tokens and session state, and the private-state
-      // guard refuses any directory that is group or other writable. Directory
-      // creation honours the umask, so on a host with umask 002 Polaris would
-      // create this at 0775 and then refuse to write into it, with a failed
-      // credential save as the only symptom. Narrow it on the way in rather
-      // than depending on the umask the user happens to have.
+      // Create every missing appdata component owner-only, including .config
+      // under umask 002. Keep the existing repair of Polaris's own directory
+      // below; existing ancestors retain their modes and the private-state
+      // guard continues to refuse unsafe ones.
       const auto appdata_dir = platf::appdata();
-      file_handler::make_directory(appdata_dir.string());
+      file_handler::make_private_directory(appdata_dir);
       if (std::error_code permissions_error; true) {
         fs::permissions(
           appdata_dir,

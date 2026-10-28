@@ -76,6 +76,31 @@ TEST_F(WebSessionStoreTest, ValidatesExactSha256Hex) {
   EXPECT_FALSE(web_session_store::is_valid_sha256_hex(std::string(64, 'g')));
 }
 
+TEST_F(WebSessionStoreTest, PreservesTheRefusedParentAndClearsItAfterRecovery) {
+  const auto parent = directory / ".config";
+  const auto state = parent / "polaris";
+  std::filesystem::create_directories(state);
+  std::filesystem::permissions(state, std::filesystem::perms::owner_all);
+  std::filesystem::permissions(parent, static_cast<std::filesystem::perms>(0775));
+  web_session_store::manager_t manager(state / "web_sessions.json", fingerprint, policy);
+  EXPECT_EQ(manager.load(at(1000, 0)), web_session_store::load_status_e::io_error);
+  const auto load_refusal = manager.last_refusal();
+  ASSERT_TRUE(load_refusal);
+  EXPECT_EQ(load_refusal->path, state / "web_sessions.json");
+  EXPECT_EQ(load_refusal->refusal.kind, private_state_file::refusal_e::directory_writable);
+  EXPECT_EQ(load_refusal->refusal.directory, parent);
+  EXPECT_FALSE(load_refusal->refusal.holds_file);
+  EXPECT_FALSE(manager.create(digest('a'), at(1000, 0)));
+  ASSERT_TRUE(manager.last_refusal());
+  EXPECT_EQ(manager.last_refusal()->refusal.directory, parent);
+  EXPECT_EQ(manager.size(), 0u);
+
+  std::filesystem::permissions(parent, std::filesystem::perms::owner_all);
+  EXPECT_TRUE(manager.create(digest('a'), at(1001, 1)));
+  EXPECT_FALSE(manager.last_refusal());
+  EXPECT_EQ(manager.validate(digest('a'), at(1001, 1)), web_session_store::validation_status_e::valid);
+}
+
 TEST_F(WebSessionStoreTest, CanonicalizesUppercaseDigestInputs) {
   const auto uppercase_fingerprint = digest('F');
   const auto uppercase_id = digest('A');

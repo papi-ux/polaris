@@ -67,6 +67,7 @@
 #include "misc.h"
 #include "src/config.h"
 #include "src/entry_handler.h"
+#include "src/file_handler.h"
 #include "src/logging.h"
 #include "src/network.h"
 #include "src/platform/common.h"
@@ -564,7 +565,7 @@ namespace platf {
           std::cout << "Migrating config: replacing symlink with real directory" << std::endl;
           fs::remove(config_path, ec);  // remove the symlink itself
           if (!ec) {
-            fs::create_directories(config_path, ec);
+            file_handler::make_private_directory(config_path, ec);
           }
           if (!ec) {
             fs::copy(old_sunshine_path, config_path,
@@ -574,7 +575,7 @@ namespace platf {
         // Case 2: polaris dir doesn't exist at all, sunshine does — copy over.
         else if (explicit_migration && !fs::exists(config_path, ec) && fs::exists(old_sunshine_path, ec)) {
           std::cout << "Migrating config from " << old_sunshine_path << " to " << config_path << std::endl;
-          fs::create_directories(config_path, ec);
+          file_handler::make_private_directory(config_path, ec);
           if (!ec) {
             fs::copy(old_sunshine_path, config_path,
                      fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
@@ -599,7 +600,7 @@ namespace platf {
             std::cout << "Migrating config from "sv << old_config_path << " to "sv << config_path << std::endl;
             if (!ec) {
               // Create the new directory tree if it doesn't already exist
-              fs::create_directories(config_path, ec);
+              file_handler::make_private_directory(config_path, ec);
             }
             if (!ec) {
               // Copy the old directory into the new location
