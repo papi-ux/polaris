@@ -1788,3 +1788,47 @@ TEST(SourceSafetyContracts, BothParsedDoorsUseOwnedAppContextAndResumeRefusesPin
   EXPECT_LT(resume_guard, codec);
   EXPECT_LT(resume_guard, capture);
 }
+
+TEST(SourceSafetyContracts, LaunchKeyDecodersStayAtOriginalEffectBoundaries) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/nvhttp.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  const auto function = source.find("std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(");
+  ASSERT_NE(function, std::string::npos);
+  const auto client = source.find("if (named_cert_p->uuid != http::unique_id) {", function);
+  ASSERT_NE(client, std::string::npos);
+  const auto increment = source.find("launch_session->id = ++session_id_counter;", function);
+  ASSERT_NE(increment, std::string::npos);
+  EXPECT_LT(increment, client);
+  const auto end = source.find("\n    if (profile_worker) {", client);
+  ASSERT_NE(end, std::string::npos);
+  const auto block = source.substr(client, end - client);
+  std::size_t next = 0;
+  for (const std::string marker : {
+         "const auto rikey = decode_client_rikey(args);",
+         "if (rikey.size() != crypto::cipher::key_size) {",
+         "Rejecting launch from [",
+         "return nullptr;",
+         "launch_session->gcm_key.assign(rikey.cbegin(), rikey.cend());",
+         "launch_session->host_audio = host_audio;",
+         "auto corever = decode_client_corever(args);",
+         "if (corever >= 1) {",
+         "launch_session->rtsp_cipher = crypto::cipher::gcm_t {",
+         "launch_session->rtsp_iv_counter = 0;",
+         "launch_session->rtsp_url_scheme =",
+         "RAND_bytes(raw_payload, sizeof(raw_payload));",
+         "launch_session->av_ping_payload = util::hex_vec(raw_payload);",
+         "RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));",
+         "launch_session->iv.resize(16);",
+         "uint32_t prepend_iv = decode_client_iv_prefix(args);",
+         "auto prepend_iv_p = (uint8_t *) &prepend_iv;",
+         "std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));"
+       }) {
+    const auto position = block.find(marker);
+    ASSERT_NE(position, std::string::npos) << marker;
+    EXPECT_GE(position, next) << marker;
+    next = position + marker.size();
+  }
+}

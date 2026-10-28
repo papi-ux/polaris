@@ -4227,18 +4227,6 @@ namespace nvhttp {
     REMOVE  ///< Remove certificate
   };
 
-  std::string get_arg(const args_t &args, const char *name, const char *default_value) {
-    auto it = args.find(name);
-    if (it == std::end(args)) {
-      if (default_value != nullptr) {
-        return std::string(default_value);
-      }
-
-      throw std::out_of_range(name);
-    }
-    return it->second;
-  }
-
   // Helper function to extract command entries from a JSON object.
   cmd_list_t extract_command_entries(const nlohmann::json& j, const std::string& key) {
     cmd_list_t commands;
@@ -5208,6 +5196,8 @@ namespace nvhttp {
     return true;
   }
 
+  static_assert(client_launch_key_bytes == crypto::cipher::key_size);
+
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker,
                                                                   const proc::ctx_t *topology_app,
                                                                   vrr_policy::admission_e vrr_admission) {
@@ -5227,7 +5217,7 @@ namespace nvhttp {
       // OpenSSL's AES-128 contexts read a full key from key.data() regardless
       // of the vector's size, so reject malformed client key material before
       // it can become a session cipher.
-      const auto rikey = util::from_hex_vec(get_arg(args, "rikey"), true);
+      const auto rikey = decode_client_rikey(args);
       if (rikey.size() != crypto::cipher::key_size) {
         BOOST_LOG(warning) << "Rejecting launch from ["sv << named_cert_p->name
                            << "]: rikey decoded to "sv << rikey.size()
@@ -5239,7 +5229,7 @@ namespace nvhttp {
       launch_session->host_audio = host_audio;
 
       // Encrypted RTSP is enabled with client reported corever >= 1
-      auto corever = util::from_view(get_arg(args, "corever", "0"));
+      auto corever = decode_client_corever(args);
       if (corever >= 1) {
         launch_session->rtsp_cipher = crypto::cipher::gcm_t {
           launch_session->gcm_key, false
@@ -5255,7 +5245,7 @@ namespace nvhttp {
       RAND_bytes((unsigned char *) &launch_session->control_connect_data, sizeof(launch_session->control_connect_data));
 
       launch_session->iv.resize(16);
-      uint32_t prepend_iv = util::endian::big<uint32_t>(util::from_view(get_arg(args, "rikeyid")));
+      uint32_t prepend_iv = decode_client_iv_prefix(args);
       auto prepend_iv_p = (uint8_t *) &prepend_iv;
       std::copy(prepend_iv_p, prepend_iv_p + sizeof(prepend_iv), std::begin(launch_session->iv));
     }
