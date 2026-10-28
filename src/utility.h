@@ -544,20 +544,48 @@ namespace util {
     return *reinterpret_cast<std::underlying_type_t<T> *>(&val);
   }
 
-  inline std::int64_t from_chars(const char *begin, const char *end) {
+  /**
+   * Decode a decimal with from_chars' arithmetic, reporting the input that arithmetic cannot represent.
+   *
+   * Each byte adds (byte - '0') at its decimal place and a leading '-' negates the rest. Bytes are not
+   * validated, so a non-digit keeps the contribution it has always had. A step that would leave
+   * std::int64_t -- any input of twenty or more bytes, or digits too large for their place -- has no
+   * defined value and returns std::nullopt. Every other input returns exactly its earlier value.
+   */
+  inline std::optional<std::int64_t> checked_from_chars(const char *begin, const char *end) {
     if (begin == end) {
       return 0;
     }
 
     std::int64_t res {};
     std::int64_t mul = 1;
+    std::int64_t term;
     while (begin != --end) {
-      res += (std::int64_t) (*end - '0') * mul;
-
-      mul *= 10;
+      if (__builtin_mul_overflow((std::int64_t) (*end - '0'), mul, &term) ||
+          __builtin_add_overflow(res, term, &res) ||
+          __builtin_mul_overflow(mul, 10, &mul)) {
+        return std::nullopt;
+      }
     }
 
-    return *begin != '-' ? res + (std::int64_t) (*begin - '0') * mul : -res;
+    if (*begin == '-') {
+      if (__builtin_sub_overflow(0, res, &res)) {
+        return std::nullopt;
+      }
+      return res;
+    }
+
+    if (__builtin_mul_overflow((std::int64_t) (*begin - '0'), mul, &term) ||
+        __builtin_add_overflow(res, term, &res)) {
+      return std::nullopt;
+    }
+    return res;
+  }
+
+  // Input checked_from_chars cannot represent decodes as 0, the value of an empty view, so each caller
+  // takes the path it already takes for a value without digits instead of overflowing.
+  inline std::int64_t from_chars(const char *begin, const char *end) {
+    return checked_from_chars(begin, end).value_or(0);
   }
 
   inline std::int64_t from_view(const std::string_view &number) {

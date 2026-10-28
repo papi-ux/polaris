@@ -495,6 +495,14 @@ namespace config {
    */
   std::string capture_setting(std::unordered_map<std::string, std::string> &vars, std::string current);
 
+#ifdef POLARIS_TESTS
+  // The startup parsers for integer settings, so a test can check what they keep for a refused value.
+  void int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, int &input);
+  void int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::optional<int> &input);
+  void int_between_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, int &input, const std::pair<int, int> &range);
+  void map_int_int_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, std::unordered_map<int, int> &input);
+#endif
+
   int write_config_with_vaapi_settings(const std::string &path, const std::string &contents,
                                      const std::optional<std::string> &expected = std::nullopt);
 
