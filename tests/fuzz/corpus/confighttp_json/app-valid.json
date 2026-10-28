@@ -1,0 +1,1 @@
+{"name":"Nova","uuid":"12345678-1234-1234-1234-1234567890ab","cmd":"/usr/bin/steam","auto-detach":true,"wait-all":true,"exit-timeout":5,"scale-factor":100,"env":{"MANGOHUD":"1"},"prep-cmd":[{"do":"echo start","undo":"echo stop","elevated":false}],"detached":["mangohud --dlsym"],"game-category":"fast_action","source":"manual"}
