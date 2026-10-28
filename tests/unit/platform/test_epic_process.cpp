@@ -816,6 +816,41 @@ TEST_F(EpicProcess, FailedSignalRevokesGrantWithoutFallback) {
   EXPECT_EQ(host->signals, std::vector<int> {77});
 }
 
+TEST_F(EpicProcess, AdmissionRequiresBothGameAndExactPrefixServerAbsentInACompleteSample) {
+  std::string reason;
+  // The requested game can be gone while its exact prefix server still owns the runtime.
+  host->pids = {"42"};
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), false);
+  EXPECT_EQ(reason, "title_runtime_busy");
+  host->pids.clear();
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true);
+  EXPECT_EQ(reason, "title_runtime_absent");
+  host->pids = {"41"};
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), false);
+  host->files.erase("/proc/41/maps");
+  EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host));
+  host->pids.clear();
+  host->add_protected_process();
+  EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host));
+  EXPECT_EQ(reason, "title_runtime_inventory_incomplete");
+  host->pids.clear();
+  host->identities.erase(prefix_path);
+  EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host));
+  auto native = host->title();
+  native.platform = "Linux";
+  host->headers[image] = std::string("\177ELF", 4);
+  EXPECT_EQ(ep::testing::title_runtime_absent(native, reason, host), true);
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/sys/kernel/random/boot_id") {
+      ++host->identities[image].changed_ns;
+    }
+  };
+  EXPECT_FALSE(ep::testing::title_runtime_absent(native, reason, host));
+  EXPECT_EQ(reason, "title_runtime_input_changed");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, EpicObserveInSessionNeverTakesTheDesktopCopy) {
   const auto lease = host->private_tree();
   host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 250);

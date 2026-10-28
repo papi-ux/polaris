@@ -817,6 +817,80 @@ namespace platf::epic {
       }
     }
 
+    std::optional<bool> runtime_absent(const title_t &title, std::string &reason, backend_t &backend) {
+      reason.clear();
+      try {
+        reader_t read {backend};
+        require(token(title.namespace_id) && token(title.item_id) && token(title.artifact_id), "invalid_title_identity");
+        require(title.platform == "Windows" || title.platform == "Linux", "unknown_title_runtime");
+        require(safe_absolute_path(title.install_dir) && safe_absolute_path(title.data_root), "invalid_title_path");
+        const fs::path relative = title.launch_executable;
+        require(!relative.empty() && !relative.is_absolute() && safe_absolute_path(fs::path("/") / relative) &&
+                  title.launch_executable.find('\\') == std::string::npos, "invalid_title_executable");
+        const auto install = read.canonical(title.install_dir);
+        const auto data = read.canonical(title.data_root);
+        const auto image = read.canonical(install / relative);
+        require(inside(image, install) && image != install, "title_image_outside_installation");
+        const auto image_file = read.stat(image);
+        const auto install_file = read.stat(install);
+        const auto data_file = read.stat(data);
+        const auto owner = backend.owner_uid();
+        const bool native = title.platform == "Linux";
+        require(safe_file(image_file, owner, native), "unsafe_title_image");
+        require(S_ISDIR(install_file.mode) && S_ISDIR(data_file.mode) && install_file.inode > 0 && data_file.inode > 0 &&
+                  (install_file.uid == owner || install_file.uid == 0) && data_file.uid == owner &&
+                  ((install_file.mode | data_file.mode) & (S_IWGRP | S_IWOTH)) == 0, "unsafe_title_directory");
+        const auto magic = needed(backend.prefix(image, 4), "unreadable_title_image");
+        require(native ? magic == std::string("\177ELF", 4) : magic.size() == 4 && magic.substr(0, 2) == "MZ", "unsupported_title_image");
+        fs::path prefix_path, server_dir;
+        file_t prefix {};
+        if (!native) {
+          prefix_path = data / "compat/compatdata" / title.artifact_id / "pfx";
+          // A missing prefix cannot be distinguished from an IO failure by this backend.
+          require(read.canonical(prefix_path) == prefix_path, "redirected_title_prefix");
+          prefix = read.stat(prefix_path);
+          require(S_ISDIR(prefix.mode) && prefix.uid == owner && prefix.inode > 0 &&
+                    (prefix.mode & (S_IWGRP | S_IWOTH)) == 0, "unsafe_title_prefix");
+          std::ostringstream server_name;
+          server_name << "server-" << std::hex << prefix.device << '-' << prefix.inode;
+          server_dir = fs::path("/tmp") / (".wine-" + std::to_string(owner)) / server_name.str();
+        }
+        const auto boot = read.boot();
+        auto names = needed(backend.list("/proc", process_limit), "incomplete_process_table");
+        std::sort(names.begin(), names.end());
+        const auto processes = read.table();
+        require(read.uninspected.empty(), "title_runtime_inventory_incomplete");
+        bool busy = false;
+        for (const auto &process : processes) {
+          const auto path = fs::path("/proc") / std::to_string(process.stat.pid);
+          const auto maps = read.read(path / "maps", maps_limit);
+          const auto mapped = image_maps(maps, image);
+          busy = busy || process.exe == image || !mapped.empty() || (!native && process.cwd == server_dir);
+          require(read.unchanged(process) && maps == read.read(path / "maps", maps_limit), "title_runtime_inventory_changed");
+        }
+        for (const auto &process : processes) {
+          require(read.unchanged(process), "title_runtime_inventory_changed");
+        }
+        auto last_names = needed(backend.list("/proc", process_limit), "incomplete_process_table");
+        std::sort(last_names.begin(), last_names.end());
+        require(names == last_names && owner == backend.owner_uid() && boot == read.boot() &&
+                  backend.link("/proc/self/ns/cgroup") == read.group_namespace, "title_runtime_inventory_changed");
+        require(read.canonical(title.install_dir) == install && read.canonical(title.data_root) == data &&
+                  read.canonical(install / relative) == image && same_image(image_file, read.stat(image)) &&
+                  same_file(install_file, read.stat(install)) && same_file(data_file, read.stat(data)), "title_runtime_input_changed");
+        require(native || (read.canonical(prefix_path) == prefix_path && same_image(prefix, read.stat(prefix_path))), "title_prefix_changed");
+        reason = busy ? "title_runtime_busy" : "title_runtime_absent";
+        return !busy;
+      }
+      catch (const refusal_t &error) {
+        reason = error.what();
+      }
+      catch (const std::exception &) {
+        reason = "title_runtime_observation_failed";
+      }
+      return std::nullopt;
+    }
+
     bool same_observation(const observation_t &a, const observation_t &b) {
       return a.available && b.available && !a.revision.empty() && a.revision == b.revision &&
              a.pid == b.pid && a.start_ticks == b.start_ticks && a.runtime == b.runtime;
@@ -1460,6 +1534,10 @@ namespace platf::epic {
     return detail::engine_t::verify_launcher(proof, reason);
   }
 
+  std::optional<bool> title_runtime_absent(const title_t &title, std::string &reason) {
+    return runtime_absent(title, reason, *production_backend());
+  }
+
   std::optional<private_session_t> pin_private_session(
     std::shared_ptr<const vrr_clock::compositor_lease_t> lease, const std::string &generation, std::string &reason) {
     return detail::engine_t::pin_private_session(std::move(lease), generation, reason, production_backend());
@@ -1509,6 +1587,14 @@ namespace platf::epic {
 
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
       return detail::engine_t::prove_launcher(reason, std::move(backend));
+    }
+
+    std::optional<bool> title_runtime_absent(const title_t &title, std::string &reason, std::shared_ptr<backend_t> backend) {
+      if (!backend) {
+        reason = "missing_process_reader";
+        return std::nullopt;
+      }
+      return runtime_absent(title, reason, *backend);
     }
 
     std::optional<private_session_t> pin_private_session(

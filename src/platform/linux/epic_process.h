@@ -88,6 +88,11 @@ namespace platf::epic {
   // Revalidates the retained original file without requiring a launcher or AppImage mount.
   bool verify_launcher(const launcher_proof_t &, std::string &reason);
 
+  // A sampled admission check, never dispatch authority: true means the requested game
+  // and its exact prefix server are absent, false means busy, nullopt means unknown.
+  // Recheck immediately before dispatch; concurrent launches remain possible afterwards.
+  std::optional<bool> title_runtime_absent(const title_t &, std::string &reason);
+
   /**
    * An opaque scope of the caller's validated, published private compositor generation.
    * Its supervisor is derived from the retained lease, never from request-supplied integers.
@@ -165,6 +170,7 @@ namespace platf::epic {
     std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason, std::shared_ptr<backend_t>);
     std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr);
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<bool> title_runtime_absent(const title_t &, std::string &reason, std::shared_ptr<backend_t>);
     std::optional<private_session_t> pin_private_session(
       std::shared_ptr<const vrr_clock::compositor_lease_t>, const std::string &generation, std::string &reason, std::shared_ptr<backend_t>);
     // The actual bounded reader, also usable with inert fixture files (including size-zero procfs).
