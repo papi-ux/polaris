@@ -65,17 +65,22 @@ target_link_options(fuzz_confighttp_json PRIVATE
     -fno-sanitize-recover=all -fsanitize=fuzzer,address,undefined)
 
 # Parse the real raw query and individual client launch fields, without a server.
-foreach(required_file IN ITEMS
-        src/nvhttp_query.cpp src/nvhttp_query.h src/utility.h
-        third-party/Simple-Web-Server/utility.hpp
-        third-party/Simple-Web-Server/status_code.hpp)
+foreach(required_file IN ITEMS src/nvhttp_query.cpp src/nvhttp_query.h src/utility.h)
     if(NOT EXISTS "${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
         message(FATAL_ERROR "Missing production source: ${POLARIS_FUZZ_SOURCE_ROOT}/${required_file}")
     endif()
 endforeach()
+# The pinned SimpleWeb headers come from a gitlink that a plain checkout leaves empty.
+# Require them only when this target builds, so the other targets' configure is unchanged.
+add_custom_target(fuzz_nvhttp_launch_query_headers
+    COMMAND test -f "${POLARIS_FUZZ_SOURCE_ROOT}/third-party/Simple-Web-Server/utility.hpp"
+    COMMAND test -f "${POLARIS_FUZZ_SOURCE_ROOT}/third-party/Simple-Web-Server/status_code.hpp"
+    COMMENT "Requiring materialized pinned third-party/Simple-Web-Server headers"
+    VERBATIM)
 add_executable(fuzz_nvhttp_launch_query
     fuzz_nvhttp_launch_query.cpp
     "${POLARIS_FUZZ_SOURCE_ROOT}/src/nvhttp_query.cpp")
+add_dependencies(fuzz_nvhttp_launch_query fuzz_nvhttp_launch_query_headers)
 target_include_directories(fuzz_nvhttp_launch_query PRIVATE
     "${POLARIS_FUZZ_SOURCE_ROOT}/src"
     "${POLARIS_FUZZ_SOURCE_ROOT}/third-party")
