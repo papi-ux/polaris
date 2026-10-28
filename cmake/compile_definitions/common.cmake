@@ -209,6 +209,7 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/audio.h"
         "${CMAKE_SOURCE_DIR}/src/platform/common.h"
         "${CMAKE_SOURCE_DIR}/src/process.cpp"
+        "${CMAKE_SOURCE_DIR}/src/process_app_identity.cpp"
         "${CMAKE_SOURCE_DIR}/src/process.h"
         "${CMAKE_SOURCE_DIR}/src/posix_child_reaper.h"
         "${CMAKE_SOURCE_DIR}/src/network.cpp"

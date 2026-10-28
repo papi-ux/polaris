@@ -31,7 +31,7 @@
 namespace stream_pacing {
   using namespace std::literals;
 
-  /// The longest the sender waits at once, so a cancelled frame stops within this.
+  /// Maximum requested sleep step before checking cancellation again; scheduling can delay the check.
   inline constexpr std::chrono::nanoseconds k_max_wait_step = 10ms;
 
   /// Inputs past these are no real session, and keep the legacy rate rather than overflow the arithmetic.
@@ -56,7 +56,7 @@ namespace stream_pacing {
     std::uint64_t packets_per_second = 0;
     /// A session rate exactly, which its schedule uses so no rounding of the rate mispaces it. 0 for the legacy rate.
     std::uint64_t bits_per_second = 0;
-    /// Bits in one packet on the wire.
+    /// Bits in a packetization block; encryption prefixes and network/link headers are additional.
     std::uint64_t bits_per_packet = 0;
   };
 
@@ -66,7 +66,8 @@ namespace stream_pacing {
    * @param negotiated_kbps The session's negotiated total, `stream_bitrate::request_t::split_kbps`. 0 when the
    *                        handshake split none, for a client that sent no bitrate or a watcher.
    * @param headroom_percent `wire_pacing_headroom`, the share of the negotiated total to pace at.
-   * @param blocksize Bytes per packet on the wire.
+   * @param blocksize Packetization block bytes, excluding the optional encryption prefix. Existing
+   *                  packetization preconditions, including a nonzero legacy divisor, still apply.
    * @return The legacy rate with wire pacing off, with no negotiated total, or when the session's rate would
    *         not be slower than it. Otherwise the session's own rate.
    */
@@ -113,8 +114,8 @@ namespace stream_pacing {
     return std::chrono::seconds {static_cast<std::int64_t>(whole_seconds)} + std::chrono::nanoseconds {static_cast<std::int64_t>(remainder_ns)};
   }
 
-  /// The most packets sent at once. At its own rate a session sends at most its millisecond's budget, so a send
-  /// is no larger a burst than the rate it is paced at.
+  /// Limit on one send call, based on the nominal millisecond budget. Group gating can still combine
+  /// multiple calls before a wait; this is not a hard aggregate burst bound.
   inline std::size_t send_batch_limit(const rate_t &rate, std::size_t legacy_batch) {
     return rate.session_rate ? std::min(legacy_batch, rate.packets_in_1ms) : legacy_batch;
   }
@@ -128,9 +129,9 @@ namespace stream_pacing {
    * @brief Each session's own schedule on the shared sender.
    *
    * One thread sends every session's video. With wire pacing on, each session keeps the time its next frame
-   * may start, so the time another session's frame is still due to take never delays this one. That time is
-   * also what a duplicate frame of the session is stamped with, as the shared schedule stamps one with pacing
-   * off. A session that has sent nothing for a while is forgotten.
+   * may start without inheriting another session's next-frame timestamp. The shared sender still completes
+   * a frame at a time and can delay other sessions; separate schedules do not provide fairness. That time
+   * also stamps this session's duplicate frames. A session that has sent nothing for a while is forgotten.
    */
   class session_starts_t {
   public:

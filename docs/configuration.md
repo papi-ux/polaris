@@ -631,6 +631,10 @@ Pacing changes when packets leave, not which packets are sent or the protocol th
 needs an update. A session that negotiated no bitrate, and one whose paced rate would not be slower
 than about 80% of 1 Gbps, keeps the usual pacing rate.
 
+The configured rate is a packetization budget: encryption prefixes and network/link headers are
+additional. It limits each send call, but the shared sender can combine calls before waiting; it is
+not a hard one-millisecond burst bound or fair scheduling between sessions.
+
 ```ini
 wire_pacing = enabled
 wire_pacing_headroom = 200
@@ -644,9 +648,10 @@ wire_pacing_headroom = 200
 ### wire_pacing_headroom
 
 The share of the session's negotiated total to pace at, as a percentage from `100` to `1000`. Default:
-`200`, twice the negotiated rate, which leaves room for a keyframe or extra error correction to leave
-without waiting. Lower values smooth the stream more but can delay large frames. Only applies when
-`wire_pacing` is enabled.
+`200`, twice the negotiated rate, provides headroom for large frames and error correction. Lower
+values reduce that budget and can delay large frames. Only applies when `wire_pacing` is enabled.
+Judge the experimental option with the same client and network, comparing latency, confirmed client
+media loss and `clients[].video_queue.evicted_frames`; a lower send budget alone proves no improvement.
 
 ## NVIDIA NVENC Encoder
 
