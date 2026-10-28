@@ -3,13 +3,13 @@ import { computed, onMounted, ref, watch } from 'vue'
 import Button from './Button.vue'
 import { useEpicSession } from '../composables/useEpicSession.js'
 
-// Owner-confirmed control for an active Epic Preview game in Mission Control.
-// The game is unmanaged by default. A signed-in host-console owner may, in two
+// Mirror Desktop's game is unmanaged by default. A signed-in host-console owner may, in two
 // explicit steps, adopt the exact observed game so that ending the session on
 // purpose (End Session in the streaming client, or Disconnect Client here) can
 // close it; otherwise it keeps running and the owner closes it in the Epic
 // launcher. Cancelling sends nothing. This panel never ends or kills a process
-// itself — End stays the existing session action.
+// itself — End stays the existing session action. Private Stream instead owns
+// its whole private session, including the launcher, and has no consent actions.
 const { state, loading, loadError, actionError, acting, load, adopt, release, start } = useEpicSession()
 // The verified session/revision the owner is confirming. An inconclusive poll
 // pauses it and only the same verified revision resumes it; a different game or
@@ -21,6 +21,9 @@ onMounted(() => { start() })
 
 const canAdopt = computed(() => state.available && state.can_adopt && state.state === 'confirmable')
 const isManaged = computed(() => state.available && state.state === 'managed')
+const isPrivate = computed(() => state.state === 'session_managed')
+const privateGameState = computed(() => state.game_state === 'managed' || state.game_state === 'waiting'
+  ? state.game_state : 'unavailable')
 const confirming = computed(() => consent.value !== null)
 const consentPaused = computed(() => confirming.value && (state.state === 'unavailable' || Boolean(loadError.value)))
 const consentMatches = () => state.session_id === consent.value.session_id && state.revision === consent.value.revision
@@ -30,7 +33,7 @@ const runtimeLabel = computed(() =>
 function dropConsent(visibly) { consent.value = null; consentReset.value = visibly }
 // Default (pre) flush sees each poll's whole snapshot, never a half-applied one.
 watch(() => [state.available, state.session_id, state.revision, state.state, state.can_adopt], () => {
-  if (!state.available || isManaged.value) dropConsent(false) // ended, or the grant already exists
+  if (!state.available || isManaged.value || isPrivate.value) dropConsent(false) // ended, granted or session-managed
   else if (consent.value && state.session_id !== consent.value.session_id) dropConsent(true)
   else if (consent.value && state.state !== 'unavailable' && !(canAdopt.value && consentMatches())) dropConsent(true)
 })
@@ -62,12 +65,14 @@ async function leaveRunning() { await release() }
           <div class="text-sm font-semibold text-silver truncate" data-epic-app-name>{{ state.app_name || 'Epic game' }}</div>
           <div class="mt-1 flex flex-wrap items-center gap-1.5">
             <span class="control-chip">Epic (Preview)</span>
-            <span class="control-chip">Mirror Desktop</span>
+            <span class="control-chip">{{ isPrivate ? 'Private Stream' : 'Mirror Desktop' }}</span>
             <span class="control-chip">{{ runtimeLabel }}</span>
           </div>
         </div>
         <span class="meta-pill" data-epic-state>{{
-          isManaged ? 'Close on End: allowed'
+          isPrivate ? (privateGameState === 'managed' ? 'Session-managed'
+            : privateGameState === 'waiting' ? 'Waiting for game' : 'Game unverified')
+          : isManaged ? 'Close on End: allowed'
           : state.state === 'closing' ? 'Closing…'
           : state.state === 'unavailable' ? 'State unavailable'
           : 'Close on End: off'
@@ -81,7 +86,21 @@ async function leaveRunning() { await release() }
       </p>
 
       <!-- Honest state when the backend has an active game it cannot read. -->
-      <p v-if="state.state === 'unavailable'" class="mt-3 text-xs text-warning-bright" data-epic-unavailable>
+      <template v-if="isPrivate">
+        <p v-if="privateGameState === 'unavailable'" class="mt-3 text-xs text-warning-bright" data-epic-private-unavailable>
+          Polaris can't verify the requested game. End still closes the whole private session.
+        </p>
+        <p class="mt-3 text-sm font-semibold text-silver" data-epic-private-session>
+          End Session closes this private session, including Epic.
+        </p>
+        <p class="mt-1 text-xs text-support">Disconnect and Resume keep it running.</p>
+        <details v-if="state.message" class="mt-3 text-xs text-support" data-epic-private-details>
+          <summary class="cursor-pointer text-silver">How ending this session works</summary>
+          <p class="mt-2">{{ state.message }}</p>
+        </details>
+      </template>
+
+      <p v-else-if="state.state === 'unavailable'" class="mt-3 text-xs text-warning-bright" data-epic-unavailable>
         Polaris can't verify this game's current state. It will not switch your permission to another process.
       </p>
 
