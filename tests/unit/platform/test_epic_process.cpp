@@ -7,6 +7,7 @@
 #ifdef __linux__
 
 #include <src/platform/linux/epic_process.h>
+#include <src/vrr_compositor_identity.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -36,10 +37,10 @@ namespace {
   const fs::path prefix_path = data / "compat/compatdata/artifact/pfx";
   const std::string boot = "9dd26721-4424-4907-ab80-4f023729a22f\n";
 
-  std::string stat_line(std::uint64_t pid, std::uint64_t start, char state = 'S') {
+  std::string stat_line(std::uint64_t pid, std::uint64_t start, char state = 'S', std::uint64_t parent = 1) {
     std::ostringstream text;
     // The kernel comm can contain right parentheses, spaces, and left parentheses.
-    text << pid << " (game ) with (parens)) " << state << " 1";
+    text << pid << " (game ) with (parens)) " << state << ' ' << parent;
     for (int field = 2; field < 19; ++field) {
       text << " 0";
     }
@@ -62,6 +63,12 @@ namespace {
   file_t directory(std::uint64_t inode) {
     return {makedev(0, 52), inode, 1000, S_IFDIR | 0755, 4096, 111, 222};
   }
+
+  struct fixture_lease_t final: vrr_clock::compositor_lease_t {
+    fixture_lease_t(): compositor_lease_t({101, 1000, 210}) {}
+    bool published {true};
+    bool current() const override { return published; }
+  };
 
   struct fixture_t final: ep::testing::backend_t {
     std::map<fs::path, std::string> files, headers;
@@ -106,7 +113,7 @@ namespace {
              "4000-5000 r-xp 00001000 " + device + " " + std::to_string(inode) + "     " + escaped(image) + "\n";
     }
 
-    void add_process(std::uint64_t pid, const fs::path &exe, const fs::path &cwd, std::uint64_t start) {
+    void add_process(std::uint64_t pid, const fs::path &exe, const fs::path &cwd, std::uint64_t start, std::uint64_t parent = 1) {
       const auto path = fs::path("/proc") / std::to_string(pid);
       pids.push_back(std::to_string(pid));
       identities[path] = directory(pid);
@@ -114,17 +121,40 @@ namespace {
         identities[exe] = regular(pid * 100);
       }
       identities[path / "exe"] = identities[exe];
-      headers[exe] = std::string("\177ELF", 4);
+      headers[exe] = std::string("\177ELF\0\0\0\0\0\0\0", 11);
       links[path / "exe"] = exe;
       links[path / "cwd"] = cwd;
       links[path / "ns/cgroup"] = "cgroup:[123]";
       links[path / "map_files/1000-2000"] = image;
       links[path / "map_files/4000-5000"] = image;
-      files[path / "stat"] = stat_line(pid, start);
+      files[path / "stat"] = stat_line(pid, start, 'S', parent);
       files[path / "status"] = "Name:\tfixture\nUid:\t1000\t1000\t1000\t1000\n";
       files[path / "cgroup"] = "0::/user.slice/app.slice/epic.scope\n";
       files[path / "maps"] = "9000-a000 rw-p 00000000 00:00 0\n";
       files[path / "mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:34 /@fixture /fixture rw - btrfs /dev/fixture rw\n";
+    }
+
+    std::shared_ptr<fixture_lease_t> private_tree() {
+      add_process(10, "/usr/bin/polaris-fixture", "/fixture/owner", 100);
+      add_process(100, "/usr/bin/polaris-fixture", "/fixture/owner", 200, 10);
+      add_process(101, "/usr/bin/labwc", "/fixture/owner", 210, 100);
+      files["/proc/self/stat"] = files["/proc/10/stat"];
+      for (const int pid : {10, 100, 101}) {
+        files[fs::path("/proc") / std::to_string(pid) / "cgroup"] = files["/proc/self/cgroup"];
+      }
+      return std::make_shared<fixture_lease_t>();
+    }
+
+    void private_game(std::uint64_t pid = 81, std::uint64_t start = 400, std::uint64_t parent = 101) {
+      add_process(pid, runtime / "files/bin/wine64-preloader", install, start, parent);
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      files[path / "maps"] = maps();
+      files[path / "cgroup"] = files["/proc/self/cgroup"];
+    }
+
+    void private_server(std::uint64_t start = 390) {
+      add_process(82, runtime / "files/bin/wineserver", "/tmp/.wine-1000/server-34-e2a1113", start, 101);
+      files["/proc/82/cgroup"] = files["/proc/self/cgroup"];
     }
 
     fs::path fuse_launcher() {
@@ -786,6 +816,142 @@ TEST_F(EpicProcess, FailedSignalRevokesGrantWithoutFallback) {
   EXPECT_EQ(host->signals, std::vector<int> {77});
 }
 
+TEST_F(EpicProcess, EpicObserveInSessionNeverTakesTheDesktopCopy) {
+  const auto lease = host->private_tree();
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 250);
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+  ASSERT_TRUE(session) << error;
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 1U);
+  auto seen = ep::observe_in_session(host->title(), *session, 300);
+  EXPECT_FALSE(seen.available);
+  EXPECT_EQ(seen.reason, "game_not_observed");
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+
+  // No running launcher in the private tree is needed. The desktop game and its
+  // prefix server remain outside; a different in-tree title also supplies no match.
+  host->private_game();
+  host->private_server();
+  host->add_process(86, "/fixture/owner/Games/Other/Other.exe", "/fixture/owner/Games/Other", 410, 101);
+  seen = ep::observe_in_session(host->title(), *session, 300);
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.pid, 81);
+  EXPECT_NE(seen.pid, 41);
+  EXPECT_NE(seen.pid, 86);
+  EXPECT_TRUE(host->opened.empty());
+  host->fd_pid = 81;
+  auto grant = ep::adopt_in_session(host->title(), *session, 300, seen, error);
+  ASSERT_TRUE(grant) << error;
+  EXPECT_TRUE(ep::inspect(*grant).available);
+  EXPECT_EQ(host->opened, std::vector<std::uint64_t> {81});
+  grant.reset();
+  EXPECT_EQ(host->closed, std::vector<int> {77});
+  EXPECT_TRUE(host->signals.empty());
+  host->opened.clear();
+
+  host->private_game(83, 401);
+  seen = ep::observe_in_session(host->title(), *session, 300);
+  EXPECT_FALSE(seen.available);
+  EXPECT_EQ(seen.reason, "ambiguous_game_process");
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateSelectionRefusesPredispatchUnreadableAndStaleGenerationInputs) {
+  const auto lease = host->private_tree();
+  host->private_game();
+  host->private_server();
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+  ASSERT_TRUE(session) << error;
+  ASSERT_TRUE(ep::observe_in_session(host->title(), *session, 300).available);
+  // A kiosk request can precede supervisor/compositor startup; generation ancestry
+  // still requires a fresh descendant, rather than rejecting that valid lower bound.
+  EXPECT_TRUE(ep::observe_in_session(host->title(), *session, 150).available);
+  EXPECT_EQ(ep::observe_in_session(host->title(), *session, 0).reason, "invalid_private_dispatch_bound");
+  host->files["/proc/81/stat"] = stat_line(81, 299, 'S', 101);
+  EXPECT_EQ(ep::observe_in_session(host->title(), *session, 300).reason, "game_predates_private_dispatch");
+  host->files["/proc/81/stat"] = stat_line(81, 400, 'S', 101);
+  host->files.erase("/proc/81/maps");
+  auto seen = ep::observe_in_session(host->title(), *session, 300);
+  EXPECT_FALSE(seen.available);
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  host->files["/proc/81/maps"] = host->maps();
+  host->files["/proc/100/stat"] = stat_line(100, 201, 'S', 10);
+  seen = ep::observe_in_session(host->title(), *session, 300);
+  EXPECT_FALSE(seen.available);
+  EXPECT_EQ(seen.reason, "private_supervisor_changed");
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  host->files["/proc/100/stat"] = stat_line(100, 200, 'S', 10);
+  host->add_protected_process(84);
+  seen = ep::observe_in_session(host->title(), *session, 300);
+  EXPECT_FALSE(seen.available);
+  EXPECT_EQ(seen.reason, "private_process_inventory_incomplete");
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  lease->published = false;
+  seen = ep::observe_in_session(host->title(), *session, 300);
+  EXPECT_FALSE(seen.available);
+  EXPECT_EQ(seen.reason, "private_session_not_current");
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  EXPECT_FALSE(ep::testing::pin_private_session(lease, "retired-generation", error, host));
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateSelectionRequiresAMonotonicKnownAncestryAndFreshPrefixServer) {
+  const auto lease = host->private_tree();
+  host->private_game(81, 400, 83);
+  host->private_server();
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+  ASSERT_TRUE(session) << error;
+  EXPECT_FALSE(ep::observe_in_session(host->title(), *session, 300).available);
+  host->add_process(83, "/bin/sh", "/fixture/owner", 401, 101);
+  EXPECT_EQ(ep::observe_in_session(host->title(), *session, 300).reason, "private_parent_younger_than_child");
+  host->files["/proc/83/stat"] = stat_line(83, 350, 'S', 101);
+  host->files["/proc/82/stat"] = stat_line(82, 299, 'S', 101);
+  const auto seen = ep::observe_in_session(host->title(), *session, 300);
+  EXPECT_EQ(seen.reason, "prefix_server_predates_private_dispatch");
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, RetiredPrivateLeaseDuringPidfdAdoptionClosesWithoutSignalling) {
+  const auto lease = host->private_tree();
+  host->private_game();
+  host->private_server();
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+  ASSERT_TRUE(session) << error;
+  const auto seen = ep::observe_in_session(host->title(), *session, 300);
+  ASSERT_TRUE(seen.available) << seen.reason;
+  host->fd_pid = 81;
+  host->after_open = [&] { lease->published = false; };
+  EXPECT_FALSE(ep::adopt_in_session(host->title(), *session, 300, seen, error));
+  EXPECT_EQ(host->opened, std::vector<std::uint64_t> {81});
+  EXPECT_EQ(host->closed, std::vector<int> {77});
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateGrantRevokesWhenItsSupervisorChangesBeforeClose) {
+  const auto lease = host->private_tree();
+  host->private_game();
+  host->private_server();
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+  ASSERT_TRUE(session) << error;
+  const auto seen = ep::observe_in_session(host->title(), *session, 300);
+  ASSERT_TRUE(seen.available) << seen.reason;
+  host->fd_pid = 81;
+  auto grant = ep::adopt_in_session(host->title(), *session, 300, seen, error);
+  ASSERT_TRUE(grant) << error;
+  host->files["/proc/100/stat"] = stat_line(100, 201, 'S', 10);
+  EXPECT_FALSE(ep::ask_to_close(*grant, 1s).signalled);
+  host->files["/proc/100/stat"] = stat_line(100, 200, 'S', 10);
+  EXPECT_EQ(ep::inspect(*grant).reason, "adoption_revoked");
+  EXPECT_EQ(host->opened, std::vector<std::uint64_t> {81});
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, AnUnreadableOwnerProcessAndNonBtrfsDeviceMismatchAreRefused) {
   host->identities["/proc/41"].uid = 0;
   EXPECT_EQ(observe().reason, "unreadable_owner_process");
@@ -824,6 +990,88 @@ TEST_F(EpicProcess, ALauncherMustBeUniqueOwnedAndOutsideTheService) {
   host->add_process(44, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10004);
   EXPECT_FALSE(ep::testing::desktop_launcher_executable(error, host));
   EXPECT_EQ(error, "ambiguous_desktop_launcher");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, LauncherInventoryDistinguishesCompleteZeroAndCountsEveryOwnerCgroup) {
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 0U);
+  EXPECT_TRUE(error.empty());
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  host->add_process(44, "/opt/epic/EpicGamesLauncher", "/fixture/owner", 10004);
+  host->files["/proc/44/cgroup"] = "0::/user.slice/polaris.service\n";
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 2U);
+  host->add_protected_process(45);
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "launcher_inventory_incomplete");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, LauncherInventoryNeverReportsZeroForAnUnreadableOwnerExecutable) {
+  host->links.erase("/proc/41/exe");
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "unreadable_process_link");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, LauncherInventoryDoesNotCallARenamedUnassociatedAppImageAbsent) {
+  host->fuse_launcher();
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  // The proven runtime and inner launcher are two known process identities.
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, &*proof), 2U);
+  host->pids = {"44"};
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, &*proof), 1U);
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  const fs::path renamed = "/fixture/owner/renamed-runtime";
+  host->add_process(45, renamed, "/fixture/owner", 10005);
+  host->headers[renamed] = std::string("\177ELF\0\0\0\0AI\002", 11);
+  host->pids = {"45"};
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, &*proof));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, RetainedLauncherProofUsesTheOriginalAppImageAfterItsMountDisappears) {
+  const auto appimage = host->fuse_launcher();
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  EXPECT_EQ(proof->path(), appimage);
+  // The launcher, keeper, their descriptors and the mount no longer exist. Only the
+  // already proven original AppImage file remains; no path is inferred from the mount.
+  host->pids.clear();
+  host->files.clear();
+  host->links.clear();
+  host->listings.clear();
+  host->identities.erase("/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher");
+  host->reads.clear();
+  EXPECT_TRUE(ep::verify_launcher(*proof, error)) << error;
+  EXPECT_TRUE(host->reads.empty());
+  host->identities[appimage].inode++;
+  EXPECT_FALSE(ep::verify_launcher(*proof, error));
+  EXPECT_EQ(error, "launcher_file_changed");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, RetainedNativeLauncherProofRechecksMagicAndOwnerWithoutAProcess) {
+  const fs::path exe = "/usr/bin/EpicGamesLauncher";
+  host->add_process(43, exe, "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->pids.clear();
+  EXPECT_TRUE(ep::verify_launcher(*proof, error)) << error;
+  host->headers[exe] = "nope";
+  EXPECT_FALSE(ep::verify_launcher(*proof, error));
+  EXPECT_EQ(error, "unknown_launcher_executable");
+  host->headers[exe] = std::string("\177ELF", 4);
+  host->uid = 1001;
+  EXPECT_FALSE(ep::verify_launcher(*proof, error));
+  EXPECT_EQ(error, "launcher_owner_changed");
   EXPECT_TRUE(host->opened.empty());
   EXPECT_TRUE(host->signals.empty());
 }

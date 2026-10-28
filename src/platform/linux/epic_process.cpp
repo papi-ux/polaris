@@ -6,6 +6,8 @@
 
 #ifdef __linux__
 
+#include "src/vrr_compositor_identity.h"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -520,8 +522,108 @@ namespace platf::epic {
       return base / parts[0];
     }
 
-    observation_t snapshot(const title_t &title, backend_t &backend) {
+    struct private_context_t {
+      std::shared_ptr<const vrr_clock::compositor_lease_t> lease;
+      std::shared_ptr<backend_t> backend;
+      std::string generation, boot;
+      fs::path group_namespace;
+      process_t host, supervisor, compositor;
+    };
+
+    bool session_current(const private_context_t &session) {
+      try {
+        return session.lease && session.lease->current();
+      }
+      catch (const std::exception &) {
+        return false;
+      }
+    }
+
+    process_t session_process(reader_t &read, std::uint64_t pid) {
+      require(pid > 1 && pid <= INT_MAX, "invalid_private_process");
+      if (read.group_namespace.empty()) {
+        read.group_namespace = needed(read.backend.link("/proc/self/ns/cgroup"), "unknown_cgroup_namespace");
+        const auto ns = read.group_namespace.string();
+        require(ns.size() > 9 && ns.compare(0, 8, "cgroup:[") == 0 && ns.back() == ']' &&
+                  number(std::string_view(ns).substr(8, ns.size() - 9)) > 0, "unknown_cgroup_namespace");
+      }
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      const auto identity = parse_stat(read.read(path / "stat"));
+      require(identity.pid == pid && identity.state != 'Z' && identity.state != 'X' && identity.state != 'x' &&
+                check_uid(read.read(path / "status"), read.backend.owner_uid()) && read.stat(path).uid == read.backend.owner_uid(), "private_process_identity_unproven");
+      process_t process {identity, read.link(path / "exe"), read.link(path / "cwd"), read.stat(path / "exe"), cgroup(read.read(path / "cgroup")), {}};
+      require(safe_file(process.image, read.backend.owner_uid(), true) && read.unchanged(process) &&
+                parse_stat(read.read(path / "stat")).parent == identity.parent, "private_process_changed");
+      return process;
+    }
+
+    bool unchanged_session_process(reader_t &read, const process_t &process) {
+      const auto path = fs::path("/proc") / std::to_string(process.stat.pid);
+      return read.unchanged(process) && parse_stat(read.read(path / "stat")).parent == process.stat.parent;
+    }
+
+    void validate_session(reader_t &read, const private_context_t &session) {
+      require(session_current(session), "private_session_not_current");
+      require(session.backend.get() == &read.backend && read.backend.owner_uid() != 0 &&
+                session.lease->process.uid == read.backend.owner_uid() && session.boot == read.boot() &&
+                read.backend.link("/proc/self/ns/cgroup") == session.group_namespace, "private_session_identity_changed");
+      read.group_namespace = session.group_namespace;
+      require(unchanged_session_process(read, session.host) && unchanged_session_process(read, session.supervisor) &&
+                unchanged_session_process(read, session.compositor) && session_current(session), "private_supervisor_changed");
+    }
+
+    private_context_t private_context(std::shared_ptr<const vrr_clock::compositor_lease_t> lease,
+                                      const std::string &generation, std::shared_ptr<backend_t> backend) {
+      require(bool(backend), "missing_process_reader");
+      require(lease && lease->current() && token(generation), "private_session_not_current");
+      require(backend->owner_uid() != 0 && lease->process.uid == backend->owner_uid() &&
+                lease->process.pid > 1 && lease->process.pid <= INT_MAX, "private_compositor_identity_unproven");
+      reader_t read {*backend};
+      const auto boot = read.boot();
+      const auto self = parse_stat(read.read("/proc/self/stat"));
+      const auto host = session_process(read, self.pid);
+      require(host.stat.start == self.start && host.stat.parent == self.parent, "private_host_identity_changed");
+      const auto compositor = session_process(read, static_cast<std::uint64_t>(lease->process.pid));
+      require(compositor.stat.start == lease->process.starttime, "private_compositor_identity_changed");
+      const auto supervisor = session_process(read, compositor.stat.parent);
+      const auto own_group = cgroup(read.read("/proc/self/cgroup"));
+      require(own_group != "/" && host.group == own_group && supervisor.group == own_group && compositor.group == own_group &&
+                supervisor.stat.parent == host.stat.pid && host.stat.start <= supervisor.stat.start &&
+                supervisor.stat.start <= compositor.stat.start && supervisor.exe == host.exe &&
+                same_image(supervisor.image, host.image), "private_supervisor_unproven");
+      private_context_t result {std::move(lease), std::move(backend), generation, boot, read.group_namespace, host, supervisor, compositor};
+      validate_session(read, result);
+      return result;
+    }
+
+    bool in_private_session(reader_t &read, const process_t &process, const private_context_t &session,
+                            std::vector<process_t> &ancestors) {
+      auto current = process.stat;
+      std::set<std::uint64_t> visited;
+      for (std::size_t depth = 0; depth < 4096; ++depth) {
+        require(visited.insert(current.pid).second, "ambiguous_private_ancestry");
+        if (current.parent <= 1) {
+          return false;
+        }
+        if (current.parent == session.supervisor.stat.pid) {
+          require(session.supervisor.stat.start <= current.start, "private_parent_younger_than_child");
+          return true;
+        }
+        auto parent = session_process(read, current.parent);
+        require(parent.stat.start <= current.start, "private_parent_younger_than_child");
+        current = parent.stat;
+        ancestors.push_back(std::move(parent));
+      }
+      throw refusal_t("private_ancestry_too_deep");
+    }
+
+    observation_t snapshot(const title_t &title, backend_t &backend, const private_context_t *session = nullptr,
+                           std::uint64_t not_before_ticks = 0) {
       reader_t read {backend};
+      if (session) {
+        validate_session(read, *session);
+        require(not_before_ticks > 0, "invalid_private_dispatch_bound");
+      }
       require(token(title.namespace_id) && token(title.item_id) && token(title.artifact_id), "invalid_title_identity");
       require(title.platform == "Windows" || title.platform == "Linux", "unknown_title_runtime");
       require(safe_absolute_path(title.install_dir) && safe_absolute_path(title.data_root), "invalid_title_path");
@@ -543,15 +645,29 @@ namespace platf::epic {
       const auto own_group = cgroup(read.read("/proc/self/cgroup"));
       require(own_group != "/", "unknown_polaris_cgroup");
       const auto processes = read.table(image);
+      std::vector<process_t> ancestors;
+      if (session) {
+        require(read.uninspected.empty(), "private_process_inventory_incomplete");
+      }
       const process_t *game = nullptr;
       for (const auto &process : processes) {
         if (!process.maps.empty() || process.exe == image) {
+          if (session) {
+            if (!in_private_session(read, process, *session, ancestors)) {
+              continue;
+            }
+            require(process.stat.start >= not_before_ticks, "game_predates_private_dispatch");
+            require(inside(process.group, session->supervisor.group), "private_process_cgroup_mismatch");
+            require(process.stat.pid != session->host.stat.pid && process.stat.pid != session->supervisor.stat.pid &&
+                      process.stat.pid != session->compositor.stat.pid && process.exe.filename() != "EpicGamesLauncher" &&
+                      process.exe.filename() != "wineserver", "private_game_identity_unproven");
+          }
           require(!game, "ambiguous_game_process");
           game = &process;
         }
       }
       require(game != nullptr, "game_not_observed");
-      require(!game->maps.empty() && game->cwd == install && !service_cgroup(game->group, own_group), "game_identity_incomplete");
+      require(!game->maps.empty() && game->cwd == install && (session || !service_cgroup(game->group, own_group)), "game_identity_incomplete");
       require(safe_file(game->image, backend.owner_uid(), true), "unsafe_game_executable");
       const auto process_path = fs::path("/proc") / std::to_string(game->stat.pid);
       require(same_image(image_file, read.stat(process_path / "root" / image.relative_path())), "game_process_root_mismatch");
@@ -567,6 +683,14 @@ namespace platf::epic {
       digest.add(title.platform);
       digest.add(backend.owner_uid());
       digest.add(boot);
+      if (session) {
+        digest.add("epic-private-candidate-v1");
+        digest.add(session->generation);
+        digest.process(session->host);
+        digest.process(session->supervisor);
+        digest.process(session->compositor);
+        digest.add(not_before_ticks);
+      }
       // The confirmation describes this exact observation, including its inspection limits.
       // A changed protected set invalidates consent; none of these rows can supply a target.
       std::sort(read.uninspected.begin(), read.uninspected.end(), [](const auto &a, const auto &b) {
@@ -614,8 +738,15 @@ namespace platf::epic {
         const auto server_dir = fs::path("/tmp") / (".wine-" + std::to_string(backend.owner_uid())) / server_name.str();
         for (const auto &process : processes) {
           if (process.cwd == server_dir) {
+            if (session) {
+              if (!in_private_session(read, process, *session, ancestors)) {
+                continue;
+              }
+              require(process.stat.start >= not_before_ticks, "prefix_server_predates_private_dispatch");
+              require(inside(process.group, session->supervisor.group), "private_process_cgroup_mismatch");
+            }
             require(!server, "ambiguous_prefix_server");
-            require(runtime(process.exe, base, "wineserver") == game_runtime && !service_cgroup(process.group, own_group), "prefix_runtime_mismatch");
+            require(runtime(process.exe, base, "wineserver") == game_runtime && (session || !service_cgroup(process.group, own_group)), "prefix_runtime_mismatch");
             require(safe_file(process.image, backend.owner_uid(), true) && read.canonical(process.exe) == process.exe, "unsafe_prefix_runtime");
             server = &process;
           }
@@ -653,12 +784,30 @@ namespace platf::epic {
       for (const auto &process : read.uninspected) {
         require(read.still_uninspected(process), "protected_process_changed");
       }
-      return {true, "owner_confirmation_required", digest.finish(), native ? "native" : "proton", game->stat.pid, game->stat.start, read.uninspected.size()};
+      if (session) {
+        // Parent edges are identity too: reparenting cannot retain private authority.
+        require(unchanged_session_process(read, *game) && (!server || unchanged_session_process(read, *server)), "private_ancestry_changed");
+        digest.add(game->stat.parent);
+        if (server) {
+          digest.add(server->stat.parent);
+        }
+        std::sort(ancestors.begin(), ancestors.end(), [](const auto &a, const auto &b) {
+          return a.stat.pid < b.stat.pid;
+        });
+        for (const auto &ancestor : ancestors) {
+          require(unchanged_session_process(read, ancestor), "private_ancestry_changed");
+          digest.process(ancestor);
+          digest.add(ancestor.stat.parent);
+        }
+        validate_session(read, *session);
+      }
+      return {true, session ? "private_candidate_requires_dispatch_authority" : "owner_confirmation_required", digest.finish(), native ? "native" : "proton", game->stat.pid, game->stat.start, read.uninspected.size()};
     }
 
-    observation_t safe_snapshot(const title_t &title, backend_t &backend) {
+    observation_t safe_snapshot(const title_t &title, backend_t &backend, const private_context_t *session = nullptr,
+                                std::uint64_t not_before_ticks = 0) {
       try {
-        return snapshot(title, backend);
+        return snapshot(title, backend, session, not_before_ticks);
       }
       catch (const refusal_t &error) {
         return {false, error.what(), "", "unknown", 0, 0};
@@ -968,7 +1117,13 @@ namespace platf::epic {
              read.read(proc / "fdinfo" / keeper.fuse_fd.filename(), 4096) == keeper.fuse_info;
     }
 
-    fs::path launcher_path(backend_t &backend) {
+    struct launcher_image_t {
+      fs::path path;
+      file_t file;
+      bool appimage;
+    };
+
+    launcher_image_t launcher_path(backend_t &backend) {
       reader_t read {backend};
       const auto boot = read.boot();
       const auto own_group = cgroup(read.read("/proc/self/cgroup"));
@@ -991,7 +1146,9 @@ namespace platf::epic {
       auto executable_file = launcher->image;
       std::optional<fs::path> backing_source;
       std::optional<appimage_keeper_t> keeper;
+      bool appimage = false;
       if (mount.point.filename().string().compare(0, 7, ".mount_") == 0 || mount.type.compare(0, 4, "fuse") == 0 || mount.type == "squashfs") {
+        appimage = true;
         // Do not guess Desktop/Downloads paths or use an unpacked AppImage binary without its runtime.
         const fs::path source = mount.source;
         if (safe_absolute_path(source)) {
@@ -1017,14 +1174,26 @@ namespace platf::epic {
                 (!keeper || unchanged_keeper(read, *keeper, *launcher, mount)) &&
                 same_image(executable_file, read.stat(executable)) &&
                 image_mount(read.read(proc / "mountinfo", mount_limit), launcher->exe).identity == mount.identity, "desktop_launcher_changed");
-      return executable;
+      return {executable, executable_file, appimage};
     }
   }  // namespace
+
+  struct launcher_proof_t::state_t {
+    launcher_image_t image;
+    std::uint64_t owner;
+    std::shared_ptr<backend_t> backend;
+  };
+
+  struct private_session_t::state_t {
+    private_context_t context;
+  };
 
   struct adopted_game_t::state_t {
     title_t title;
     observation_t observation;
     std::shared_ptr<backend_t> backend;
+    std::optional<private_context_t> session;
+    std::uint64_t not_before_ticks {0};
     int fd {-1};
     mutable std::mutex mutex;
     mutable bool revoked {false};
@@ -1045,8 +1214,9 @@ namespace platf::epic {
         revoked = true;
         return {false, status == exit_state_t::exited ? "adopted_game_exited" : "retained_pidfd_unavailable", "", "unknown", 0, 0};
       }
-      auto current = safe_snapshot(title, *backend);
-      if (!same_observation(observation, current) || backend->wait(fd, std::chrono::milliseconds::zero()) != exit_state_t::alive || backend->pidfd_pid(fd) != observation.pid) {
+      auto current = safe_snapshot(title, *backend, session ? &*session : nullptr, not_before_ticks);
+      if (!same_observation(observation, current) || backend->wait(fd, std::chrono::milliseconds::zero()) != exit_state_t::alive || backend->pidfd_pid(fd) != observation.pid ||
+          (session && !session_current(*session))) {
         revoked = true;
         return {false, current.available ? "adopted_game_identity_changed" : current.reason, "", "unknown", 0, 0};
       }
@@ -1057,9 +1227,135 @@ namespace platf::epic {
 
   namespace detail {
     struct engine_t {
-      static std::unique_ptr<adopted_game_t> adopt(const title_t &title, const observation_t &observation, std::string &error, std::shared_ptr<backend_t> backend) {
+      static std::optional<std::size_t> launcher_instances(
+        std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher) {
+        reason.clear();
+        try {
+          require(bool(backend), "missing_process_reader");
+          if (known_launcher && !verify_launcher(*known_launcher, reason)) {
+            return std::nullopt;
+          }
+          reader_t read {*backend};
+          const auto boot = read.boot();
+          const auto table = read.table();
+          require(read.uninspected.empty(), "launcher_inventory_incomplete");
+          std::size_t count = 0;
+          for (const auto &process : table) {
+            require(read.unchanged(process), "launcher_inventory_changed");
+            const auto header = needed(backend->prefix(process.exe, 11), "launcher_census_unresolved");
+            bool known_image = false;
+            if (known_launcher) {
+              const auto &image = known_launcher->state_->image;
+              known_image = process.exe == image.path && same_image(process.image, image.file);
+            }
+            // AppImages may be renamed and their runtime may precede the inner launcher.
+            // Never turn such a readable but unassociated runtime into a proven zero.
+            const bool appimage_marker = header.substr(0, 4) == std::string("\177ELF", 4) && header.substr(8, 2) == "AI";
+            require(!appimage_marker || known_image, "launcher_census_unresolved");
+            require(read.unchanged(process), "launcher_inventory_changed");
+            count += process.exe.filename() == "EpicGamesLauncher" || known_image;
+          }
+          require(boot == read.boot(), "launcher_inventory_changed");
+          if (known_launcher && !verify_launcher(*known_launcher, reason)) {
+            return std::nullopt;
+          }
+          return count;
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "launcher_inventory_failed";
+        }
+        return std::nullopt;
+      }
+
+      static std::optional<private_session_t> pin_private_session(
+        std::shared_ptr<const vrr_clock::compositor_lease_t> lease, const std::string &generation,
+        std::string &reason, std::shared_ptr<backend_t> backend) {
+        reason.clear();
+        try {
+          auto context = private_context(std::move(lease), generation, std::move(backend));
+          auto state = std::make_shared<private_session_t::state_t>(private_session_t::state_t {std::move(context)});
+          return private_session_t(std::move(state));
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "private_session_proof_failed";
+        }
+        return std::nullopt;
+      }
+
+      static observation_t observe_in_session(const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks) {
+        if (!session.state_) {
+          return {false, "missing_private_session", "", "unknown", 0, 0};
+        }
+        const auto &context = session.state_->context;
+        return safe_snapshot(title, *context.backend, &context, not_before_ticks);
+      }
+
+      static std::unique_ptr<adopted_game_t> adopt_in_session(
+        const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks,
+        const observation_t &observation, std::string &error) {
+        if (!session.state_) {
+          error = "missing_private_session";
+          return nullptr;
+        }
+        const auto &context = session.state_->context;
+        return adopt(title, observation, error, context.backend, context, not_before_ticks);
+      }
+
+      static std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
+        reason.clear();
+        try {
+          require(bool(backend), "missing_process_reader");
+          const auto owner = backend->owner_uid();
+          auto image = launcher_path(*backend);
+          require(owner != 0 && owner == backend->owner_uid(), "launcher_owner_changed");
+          auto state = std::make_shared<launcher_proof_t::state_t>(launcher_proof_t::state_t {std::move(image), owner, backend});
+          return launcher_proof_t(std::move(state));
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "launcher_proof_failed";
+        }
+        return std::nullopt;
+      }
+
+      static bool verify_launcher(const launcher_proof_t &proof, std::string &reason) {
+        reason.clear();
+        try {
+          require(bool(proof.state_), "missing_launcher_proof");
+          const auto &state = *proof.state_;
+          reader_t read {*state.backend};
+          const auto &image = state.image;
+          require(state.owner != 0 && state.owner == state.backend->owner_uid(), "launcher_owner_changed");
+          require(safe_absolute_path(image.path) && read.canonical(image.path) == image.path &&
+                    safe_file(image.file, state.owner, true) && (!image.appimage || image.file.uid == state.owner) &&
+                    same_image(image.file, read.stat(image.path)), "launcher_file_changed");
+          const auto header = needed(state.backend->prefix(image.path, image.appimage ? 11 : 4), "unreadable_launcher_executable");
+          require(header.substr(0, 4) == std::string("\177ELF", 4) &&
+                    (!image.appimage || header.substr(8, 3) == std::string("AI\002", 3)), "unknown_launcher_executable");
+          require(read.canonical(image.path) == image.path && same_image(image.file, read.stat(image.path)), "launcher_file_changed");
+          return true;
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "launcher_verification_failed";
+        }
+        return false;
+      }
+
+      static std::unique_ptr<adopted_game_t> adopt(const title_t &title, const observation_t &observation, std::string &error, std::shared_ptr<backend_t> backend,
+                                                std::optional<private_context_t> session = std::nullopt, std::uint64_t not_before_ticks = 0) {
         error.clear();
-        auto current = safe_snapshot(title, *backend);
+        auto current = safe_snapshot(title, *backend, session ? &*session : nullptr, not_before_ticks);
         if (!same_observation(current, observation)) {
           error = current.available ? "stale_observation" : current.reason;
           return nullptr;
@@ -1068,6 +1364,8 @@ namespace platf::epic {
         state->title = title;
         state->observation = current;
         state->backend = std::move(backend);
+        state->session = std::move(session);
+        state->not_before_ticks = not_before_ticks;
         state->fd = state->backend->open_pidfd(current.pid);
         if (state->fd < 0) {
           error = "pidfd_open_failed";
@@ -1088,6 +1386,14 @@ namespace platf::epic {
   adopted_game_t::~adopted_game_t() = default;
   adopted_game_t::adopted_game_t(adopted_game_t &&) noexcept = default;
   adopted_game_t &adopted_game_t::operator=(adopted_game_t &&) noexcept = default;
+
+  launcher_proof_t::launcher_proof_t(std::shared_ptr<const state_t> state): state_(std::move(state)) {}
+
+  private_session_t::private_session_t(std::shared_ptr<const state_t> state): state_(std::move(state)) {}
+
+  std::filesystem::path launcher_proof_t::path() const {
+    return state_ ? state_->image.path : std::filesystem::path {};
+  }
 
   observation_t observe(const title_t &title) {
     return safe_snapshot(title, *production_backend());
@@ -1142,6 +1448,33 @@ namespace platf::epic {
     return desktop_launcher_executable(reason).has_value();
   }
 
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher) {
+    return detail::engine_t::launcher_instances(reason, production_backend(), known_launcher);
+  }
+
+  std::optional<launcher_proof_t> prove_launcher(std::string &reason) {
+    return detail::engine_t::prove_launcher(reason, production_backend());
+  }
+
+  bool verify_launcher(const launcher_proof_t &proof, std::string &reason) {
+    return detail::engine_t::verify_launcher(proof, reason);
+  }
+
+  std::optional<private_session_t> pin_private_session(
+    std::shared_ptr<const vrr_clock::compositor_lease_t> lease, const std::string &generation, std::string &reason) {
+    return detail::engine_t::pin_private_session(std::move(lease), generation, reason, production_backend());
+  }
+
+  observation_t observe_in_session(const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks) {
+    return detail::engine_t::observe_in_session(title, session, not_before_ticks);
+  }
+
+  std::unique_ptr<adopted_game_t> adopt_in_session(
+    const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks,
+    const observation_t &observation, std::string &error) {
+    return detail::engine_t::adopt_in_session(title, session, not_before_ticks, observation, error);
+  }
+
   namespace testing {
     observation_t observe(const title_t &title, std::shared_ptr<backend_t> backend) {
       return backend ? safe_snapshot(title, *backend) : observation_t {false, "missing_process_reader", "", "unknown", 0, 0};
@@ -1159,7 +1492,7 @@ namespace platf::epic {
       reason.clear();
       try {
         require(bool(backend), "missing_process_reader");
-        return launcher_path(*backend);
+        return launcher_path(*backend).path;
       }
       catch (const refusal_t &error) {
         reason = error.what();
@@ -1168,6 +1501,20 @@ namespace platf::epic {
         reason = "desktop_launcher_observation_failed";
       }
       return std::nullopt;
+    }
+
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher) {
+      return detail::engine_t::launcher_instances(reason, std::move(backend), known_launcher);
+    }
+
+    std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
+      return detail::engine_t::prove_launcher(reason, std::move(backend));
+    }
+
+    std::optional<private_session_t> pin_private_session(
+      std::shared_ptr<const vrr_clock::compositor_lease_t> lease, const std::string &generation,
+      std::string &reason, std::shared_ptr<backend_t> backend) {
+      return detail::engine_t::pin_private_session(std::move(lease), generation, reason, std::move(backend));
     }
 
     std::optional<std::string> read_bounded(const fs::path &path, std::size_t limit) {

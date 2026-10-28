@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+namespace vrr_clock {
+  class compositor_lease_t;
+}
+
 namespace platf::epic {
   struct title_t {
     std::string namespace_id, item_id, artifact_id;
@@ -39,7 +43,7 @@ namespace platf::epic {
     struct engine_t;
   }
 
-  /** An owner consent grant, not a launch/URI causality claim. Destruction only closes the pidfd. */
+  /** An authorized exact-game grant; Mirror needs owner consent. Not URI causality. Destruction only closes the pidfd. */
   class adopted_game_t {
   public:
     ~adopted_game_t();
@@ -64,6 +68,52 @@ namespace platf::epic {
   close_result_t ask_to_close(adopted_game_t &, std::chrono::milliseconds timeout);
   bool desktop_launcher_running(std::string &reason);
   std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason);
+
+  /** A previously proven original executable, never a guessed path or mounted inner ELF. */
+  class launcher_proof_t {
+  public:
+    std::filesystem::path path() const;
+
+  private:
+    struct state_t;
+    explicit launcher_proof_t(std::shared_ptr<const state_t>);
+    std::shared_ptr<const state_t> state_;
+    friend struct detail::engine_t;
+  };
+
+  // Counts process identities, not logical UI instances. Unlike Mirror presence, nullopt is
+  // unknown. An unassociated AppImage runtime cannot establish absence, even if renamed.
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr);
+  std::optional<launcher_proof_t> prove_launcher(std::string &reason);
+  // Revalidates the retained original file without requiring a launcher or AppImage mount.
+  bool verify_launcher(const launcher_proof_t &, std::string &reason);
+
+  /**
+   * An opaque scope of the caller's validated, published private compositor generation.
+   * Its supervisor is derived from the retained lease, never from request-supplied integers.
+   */
+  class private_session_t {
+  public:
+    private_session_t(const private_session_t &) = default;
+    private_session_t &operator=(const private_session_t &) = default;
+
+  private:
+    struct state_t;
+    explicit private_session_t(std::shared_ptr<const state_t>);
+    std::shared_ptr<const state_t> state_;
+    friend struct detail::engine_t;
+  };
+
+  // Only pass the runtime lease obtained for this exact validated generation and socket.
+  std::optional<private_session_t> pin_private_session(
+    std::shared_ptr<const vrr_clock::compositor_lease_t>, const std::string &generation, std::string &reason);
+  // The trusted caller records a nonzero dispatch bound in /proc start-time ticks. It may
+  // precede supervisor startup when the URI is its kiosk client; ancestry also fences birth.
+  observation_t observe_in_session(const title_t &, const private_session_t &, std::uint64_t not_before_ticks);
+  // Ancestry/time identify candidates, not URI causation. The caller must separately establish
+  // dispatch/exclusivity authority; neither a different title nor an arbitrary session is adoptable.
+  std::unique_ptr<adopted_game_t> adopt_in_session(
+    const title_t &, const private_session_t &, std::uint64_t not_before_ticks, const observation_t &, std::string &error);
 
   /**
    * Explicit, per-call fixture dependencies. Production never installs a global override.
@@ -113,6 +163,10 @@ namespace platf::epic {
     observation_t observe(const title_t &, std::shared_ptr<backend_t>);
     std::unique_ptr<adopted_game_t> adopt(const title_t &, const observation_t &, std::string &error, std::shared_ptr<backend_t>);
     std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr);
+    std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<private_session_t> pin_private_session(
+      std::shared_ptr<const vrr_clock::compositor_lease_t>, const std::string &generation, std::string &reason, std::shared_ptr<backend_t>);
     // The actual bounded reader, also usable with inert fixture files (including size-zero procfs).
     std::optional<std::string> read_bounded(const std::filesystem::path &, std::size_t limit);
   }
