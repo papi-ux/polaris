@@ -2612,7 +2612,7 @@
         "receiver": "encoder"
       },
       "polaris_emitter": {
-        "file": "src/nvhttp.cpp",
+        "file": "src/nvhttp_encoder_options.cpp",
         "function": "encoder_backend_options_json",
         "style": "initializer_list",
         "declaration": "options.push_back({"
