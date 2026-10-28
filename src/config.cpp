@@ -981,9 +981,10 @@ namespace config {
     // If that integer is in hexadecimal
     if (val.size() >= 2 && val.substr(0, 2) == "0x"sv) {
       input = util::from_hex<int>(val.substr(2));
-    } else {
-      input = util::from_view(val);
+    } else if (const auto value = util::checked_from_chars(val.data(), val.data() + val.size())) {
+      input = *value;
     }
+    // Otherwise a decimal with no 64-bit value keeps the setting it had, as a missing key does.
 
     vars.erase(it);
   }
@@ -1005,9 +1006,10 @@ namespace config {
     // If that integer is in hexadecimal
     if (val.size() >= 2 && val.substr(0, 2) == "0x"sv) {
       input = util::from_hex<int>(val.substr(2));
-    } else {
-      input = util::from_view(val);
+    } else if (const auto value = util::checked_from_chars(val.data(), val.data() + val.size())) {
+      input = *value;
     }
+    // Otherwise a decimal with no 64-bit value keeps the setting it had, as a missing key does.
 
     vars.erase(it);
   }
@@ -1238,6 +1240,7 @@ namespace config {
     // The framerate list must be cleared before adding values from the file configuration.
     // If the list is not cleared, then the specified parameters do not affect the behavior of the sunshine server.
     // That is, if you set only 30 fps in the configuration file, it will not work because by default, during initialization the list includes 10, 30, 60, 90 and 120 fps.
+    auto previous = input;
     input.clear();
     for (auto &el : list) {
       ::std::string_view val = el;
@@ -1252,8 +1255,13 @@ namespace config {
       // If the integer is a hexadecimal
       if (val.size() >= 2 && val.substr(0, 2) == "0x"sv) {
         tmp = util::from_hex<int>(val.substr(2));
+      } else if (const auto value = util::checked_from_chars(val.data(), val.data() + val.size())) {
+        tmp = *value;
       } else {
-        tmp = util::from_view(val);
+        // Refuse the whole list: dropping one element would re-pair every later keybindings entry.
+        BOOST_LOG(warning) << "config: expected "sv << name << " to contain only integers --> keeping its previous value"sv;
+        input = std::move(previous);
+        return;
       }
       input.emplace_back(tmp);
     }
