@@ -133,6 +133,7 @@ namespace test_utils {
       if (loop) pw_thread_loop_lock(loop);
       auto unlock = util::fail_guard([&] { if (loop) pw_thread_loop_unlock(loop); });
       const auto capture_state = access::stream_state(*capture);
+      const auto producer_state = source ? pw_stream_get_state(source, nullptr) : PW_STREAM_STATE_UNCONNECTED;
       std::size_t write_total = 0;
       for (const auto &[buffer, times] : writes) write_total += times;
       std::ostringstream out;
@@ -140,6 +141,7 @@ namespace test_utils {
           << " link_listeners=" << link_listeners_added << " link_infos=" << link_infos
           << " link_state=" << static_cast<int>(link_state) << '/' << pw_link_state_as_string(link_state)
           << " stream_state=" << static_cast<int>(capture_state) << '/' << pw_stream_state_as_string(capture_state)
+          << " producer_state=" << static_cast<int>(producer_state) << '/' << pw_stream_state_as_string(producer_state)
           << " driving=" << (source && pw_stream_is_driving(source))
           << " negotiated=" << capture->negotiated() << " running=" << capture->running()
           << " completed=" << completed << " submitted=" << submitted << " empty=" << empty
@@ -215,7 +217,7 @@ namespace test_utils {
       if (link) add_link_listeners();
       pw_thread_loop_unlock(access::loop(*capture));
       // Ready means the graph the capture will actually read from: the real
-      // link reports ACTIVE and the capture stream reports STREAMING, within
+      // link reports ACTIVE and both producer and capture report STREAMING, within
       // the same two-second budget as the negotiated/driving/two-buffer
       // conditions. The predicate also keeps, as plain milliseconds, when each
       // stage was first seen; it formats and prints nothing and takes no lock
@@ -227,7 +229,11 @@ namespace test_utils {
       return link && wait([&] {
         const bool old_ready = capture->negotiated() && pw_stream_is_driving(source) && added == 2;
         if (old_ready && old_ready_ms < 0) old_ready_ms = elapsed();
-        const bool ready = old_ready && link_state == PW_LINK_STATE_ACTIVE && access::stream_state(*capture) == PW_STREAM_STATE_STREAMING;
+        // A driver can receive Start after its follower. Its first trigger
+        // needs that Start to initialize its processing quantum.
+        const bool ready = old_ready && link_state == PW_LINK_STATE_ACTIVE &&
+          access::stream_state(*capture) == PW_STREAM_STATE_STREAMING &&
+          pw_stream_get_state(source, nullptr) == PW_STREAM_STATE_STREAMING;
         if (ready && ready_ms < 0) ready_ms = elapsed();
         return ready;
       }) && !failed;
