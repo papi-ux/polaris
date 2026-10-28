@@ -8065,6 +8065,8 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_code", 403);
       tree.put("root.<xmlattr>.status_message", "How did you get here?");
       tree.put("root.gamesession", 0);
+
+      return;
     }
 
     if (!launch_session_raised) {
