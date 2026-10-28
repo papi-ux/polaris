@@ -15,11 +15,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     return 0;
   }
   const char *begin = size ? reinterpret_cast<const char *>(data) : "";
-  nlohmann::json payload;
-  try {
-    payload = nlohmann::json::parse(begin, begin + size);
-  } catch (const nlohmann::json::parse_error &) {
-    // Malformed JSON is an expected parser rejection. Validator exceptions remain visible.
+  auto payload = nlohmann::json::parse(begin, begin + size, nullptr, false);
+  if (payload.is_discarded()) {
+    // Parser rejection, including numeric overflow, is an expected input outcome.
     return 0;
   }
 

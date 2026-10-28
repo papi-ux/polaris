@@ -20,12 +20,17 @@ dependencies are the C++ standard library and an already installed
 `nlohmann_json::nlohmann_json` package, version 3.11 or newer. There is no download
 or FetchContent fallback, product-library link, server instance or configuration write.
 
-Each syntactically accepted JSON value reaches both `validate_config_payload` and
+Each value accepted by the JSON parser reaches both `validate_config_payload` and
 `validate_app_payload`. Only a config value that passes validation reaches
 `normalize_write_only_secret_payload`; app validation sees the original value.
-Only `nlohmann::json::parse_error` is caught, around parsing alone. Unexpected
-validator exceptions and sanitizer failures remain failures. Command/path strings
-in seeds are only values being validated; the harness never executes them.
+Parsing uses `allow_exceptions=false` and returns on `is_discarded()`, so expected
+parse rejection includes the documented numeric-overflow case `1E400`, not only
+syntax errors. See upstream [number limits](https://json.nlohmann.me/features/types/number_handling/#number-limits),
+the [parse return contract](https://json.nlohmann.me/api/basic_json/parse/#return-value),
+and the [v3.11.3 parser implementation](https://raw.githubusercontent.com/nlohmann/json/v3.11.3/include/nlohmann/detail/input/parser.hpp).
+No catch surrounds the validators or normalization: unexpected validator exceptions
+and sanitizer failures remain visible. Command/path strings in seeds are only values
+being validated; the harness never executes them.
 
 This omits route authentication/content-type/admission, response-only config-key
 preprocessing in `read_config_payload`, persistence, and other JSON route decoders.
@@ -88,10 +93,11 @@ issue and retain a reproducer regression rather than fixing parser behavior here
 
 ## Small synthetic seed corpus
 
-The JSON files serialize existing test payloads from base
+Eleven JSON files serialize existing test payloads from base
 `7c51ddc42236abcfa5278c7d2ed88cc8eee96411`. All values are synthetic test inputs;
-there are no private captures, credentials or user data. The two parser boundary
-files below are explicitly new. No seed has been parsed or fuzzed for this PR.
+there are no private captures, credentials or user data. The three parser boundary
+files below are explicit additions, including one from the upstream number-limit
+documentation. No seed has been parsed or fuzzed for this PR.
 
 Unless noted otherwise, cases are in
 [`tests/unit/test_confighttp_validation.cpp`](../unit/test_confighttp_validation.cpp).
@@ -113,3 +119,4 @@ Unless noted otherwise, cases are in
 | `app-mode-invalid.json` | Same case, `rejected[] = Host_Default` |
 | `empty.json` | Added parser boundary: zero bytes |
 | `truncated.json` | Added parser boundary: truncated object/value |
+| `numeric-overflow.json` | Upstream [Number limits](https://json.nlohmann.me/features/types/number_handling/#number-limits): literal `1E400`, documented parsing `out_of_range.406`; [v3.11.3 parser](https://raw.githubusercontent.com/nlohmann/json/v3.11.3/include/nlohmann/detail/input/parser.hpp), non-finite `value_float` rejection |
