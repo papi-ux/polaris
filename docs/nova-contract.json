@@ -2583,6 +2583,7 @@
             "style": "qt_json",
             "reads": [
               "available",
+              "label",
               "session_overridable",
               "value"
             ]
