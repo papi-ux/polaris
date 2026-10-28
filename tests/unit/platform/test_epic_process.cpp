@@ -994,6 +994,23 @@ TEST_F(EpicProcess, PrivateCensusExcludesOnlyProtectedTasksProvedOutsideTheGener
   EXPECT_EQ(observe().reason, "unreadable_owner_process");
   EXPECT_FALSE(ep::testing::launcher_instances(error, host));
   EXPECT_EQ(error, "unreadable_owner_process");
+  // After its outside proof, the same task may run a readable file and stays outside.
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/81/mountinfo") {
+      host->denied_links.erase("/proc/43/exe");
+      host->links["/proc/43/exe"] = "/usr/bin/ssh-agent";
+    }
+  };
+  EXPECT_TRUE(ep::inspect(*grant).available);
+  // But if task 45 exits after its proof and a new task inside the generation reuses its PID,
+  // the final bookend refuses.
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/81/mountinfo") {
+      host->files["/proc/45/stat"] = stat_line(45, 600, 'S', 101);
+    }
+  };
+  EXPECT_EQ(ep::inspect(*grant).reason, "protected_process_changed");
+  EXPECT_FALSE(ep::ask_to_close(*grant, 1s).signalled);
   EXPECT_EQ(host->opened, std::vector<std::uint64_t> {81});
   EXPECT_TRUE(host->signals.empty());
 }

@@ -339,6 +339,18 @@ namespace platf::epic {
                same_file(process.directory, stat(path)) && !exe.target && exe.permission_denied;
       }
 
+      /**
+       * The same private protected task: its stat, owner status and pinned proc directory, which
+       * may be owner- or root-owned. What it executes now is not part of its identity.
+       */
+      bool still_same_task(const uninspected_t &process) {
+        const auto path = fs::path("/proc") / std::to_string(process.identity.pid);
+        const auto current = parse_stat(read(path / "stat"));
+        return current.pid == process.identity.pid && current.start == process.identity.start &&
+               current.state != 'Z' && current.state != 'X' && current.state != 'x' &&
+               check_uid(read(path / "status"), backend.owner_uid()) && same_file(process.directory, stat(path));
+      }
+
       std::vector<process_t> launchers() {
         // This is a presence-only prerequisite, never game selection or signal authority. An
         // unrelated protected desktop process cannot supply a launcher or an AppImage proof.
@@ -932,10 +944,11 @@ namespace platf::epic {
                 image_mount(read.read(process_path / "mountinfo", mount_limit), image).identity == mount.identity &&
                 read.canonical(title.install_dir) == install && read.canonical(title.data_root) == data &&
                 same_file(install_file, read.stat(install)) && same_file(data_file, read.stat(data)) && boot == read.boot(), "game_changed_during_observation");
-      // A task proved outside a generation cannot join it, whatever it does next; its proof
-      // bookended its own stat. The owner-consent set stays exact.
+      // The owner-consent set stays exact. A task proved outside a generation cannot join it,
+      // whatever it runs next, but its PID could now name a new task inside, so it must still be
+      // the same task.
       for (const auto &process : read.uninspected) {
-        require(session || read.still_uninspected(process), "protected_process_changed");
+        require(session ? read.still_same_task(process) : read.still_uninspected(process), "protected_process_changed");
       }
       if (session) {
         // Parent edges are identity too: reparenting cannot retain private authority.
