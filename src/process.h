@@ -1122,6 +1122,8 @@ namespace proc {
     // Called only by the authenticated host web console. No paired-client mutation route.
     std::pair<int, nlohmann::json> epic_session_control(const std::string &action = {},
       const std::string &session_id = {}, const std::string &revision = {}, bool confirmed = false);
+    // Best-effort, in-memory original-file proof from authenticated official-provider discovery.
+    void remember_epic_launcher();
     std::pair<int, nlohmann::json> desktop_steam_control(const std::string &unique_id, bool can_launch,
       const std::string &action = {}, const std::string &revision = {}, bool confirm_game_quit = false);
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
@@ -1424,6 +1426,13 @@ namespace proc {
     std::optional<epic_library::installation_t> _epic_title;
     std::unique_ptr<platf::epic::adopted_game_t> _epic_grant;
     std::string _epic_grant_revision;
+    std::optional<platf::epic::launcher_proof_t> _epic_launcher_proof;
+    std::optional<platf::epic::private_session_t> _epic_private_session;
+    std::uint64_t _epic_private_request_ticks = 0;
+    std::uint64_t _epic_private_birth_upper_ticks = 0;
+    bool _epic_private_requested = false;
+    bool _epic_private_grant_retired = false;
+    platf::epic::observation_t retain_epic_private_game(); // Caller holds the lifecycle mutex.
     std::vector<pidfd_handle_t> _detached_child_pidfds;
     bool _detached_child_authority_complete = true;
     bool _session_used_cage_compositor = false;
