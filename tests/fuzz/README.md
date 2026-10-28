@@ -1,8 +1,9 @@
 # Opt-in parser fuzzers
 
 These standalone developer targets exercise the production config/app JSON validators,
-the selective-FEC feedback payload parser, and the raw GameStream query/key-material
-decoders described below. They build only when explicitly enabled; ordinary source
+the selective-FEC feedback payload parser, the raw GameStream query/key-material
+decoders, and the adapted RTSP message parser with its request Content-length
+decoder, all described below. They build only when explicitly enabled; ordinary source
 CI does not compile or run them.
 A bounded campaign can find a failure, but a clean run is not an exhaustive security
 guarantee, qualification of a different toolchain, or package or hardware acceptance.
@@ -35,8 +36,9 @@ being validated; the harness never executes them.
 
 This omits route authentication/content-type/admission, response-only config-key
 preprocessing in `read_config_payload`, persistence, and other JSON route decoders.
-RTSP primitives and handlers, typed control IDX decoding and nvhttp query/launch
-validation outside the key-material slice below still need separately owned targets.
+RTSP framing, dispatch and handlers outside the message slice below, typed control
+IDX decoding and nvhttp query/launch validation outside the key-material slice below
+still need separately owned targets.
 The FEC target below covers only its named payload parser, not the full typed
 control boundary. Generic JSON syntax
 coverage or Nova XML cannot substitute for those areas. Keep campaigns separate
@@ -268,6 +270,105 @@ as such; added boundaries are not presented as existing full test requests.
 | `empty-fields.query` | Added boundary: valid key with explicit empty corever/rikeyid |
 | `odd-key.query` | Added boundary: prepend convertible f to the 32-zero key; its leftmost character is ignored |
 | `percent-and-duplicates.query` | Added boundary: percent-encoded zero key and equivalent duplicate/case key, raw percent in an unrelated name, unrelated truncated percent value; no duplicate winner assumption |
+
+The empty file remains part of the original corpus identity even when libFuzzer
+counts only nonempty initial files.
+
+## Raw RTSP request messages
+
+`fuzz_rtsp_message` passes the raw input bytes to the production `parseRtspMessage`
+and releases a parsed message with the production `freeMessage`. It compiles the
+**same adapted build-tree copy** of moonlight-common-c's `RtspParser.c` as the product:
+the standalone configure includes `cmake/dependencies/rtsp_parser.cmake` and calls
+`polaris_prepare_rtsp_parser`, so the four pinned input hashes, the duplicate-node
+ownership adaptation and the copied header closure are the product's own. The
+unadapted third-party file is never compiled. The input is the message exactly as
+`src/rtsp.cpp` passes it, plaintext or already decrypted, without a fuzzer prefix or
+the encrypted-RTSP header.
+
+After a successful parse, the driver reads what `print_msg` and the request path read
+for that message type: protocol, message buffer, request command and target or
+response status, every header name and value, and each payload byte. It then calls
+`rtsp_stream::find_content_length`, the plaintext Content-length lookup extracted from
+`handle_plaintext_payload`. A volatile result consumes those reads. Parse rejection
+is an expected outcome; no parser rule is copied into the driver.
+
+The extraction keeps the loop, the exact case-sensitive `Content-length` name, the
+first matching node, the skip to the first digit, `util::from_chars` and its narrowing
+to `int`. The product still logs the found value and then compares the received payload
+with the declared length at its original statement. `RtspContentLength` pins the
+decoding, and a source contract pins the call between the successful parse and the
+payload completeness check. These are compatibility facts, not admission rules:
+`Content-Length` and other spellings are ignored, `-5` reads as 5, bytes after the
+first digit keep the from_chars arithmetic (`12abc` is 17451), a value from_chars
+cannot represent is 0, and a value above `INT_MAX` wraps.
+
+### Build, resource and coverage limits
+
+The default-OFF gate, native Linux x86_64/Clang 18+/C++20 checks, target-local
+ASan/UBSan/libFuzzer flags and disabled IPO are shared with the other targets; the
+same flags also compile the C parser copy. This target requires the pinned
+`third-party/moonlight-common-c` gitlink to be materialized before configure. Without
+it, the other targets' configure is unchanged, C is not enabled, and building
+`fuzz_rtsp_message` fails with a message. With it, configure enables C using the C
+driver installed beside the selected Clang C++ compiler, or the explicitly selected
+`CMAKE_C_COMPILER`, requires the same Clang version, and fails on any pinned input hash
+difference, as the product build does. `utility.h` also needs the installed
+nlohmann_json package. Nothing is fetched or provisioned; there is no product library,
+socket, session, crypto or server. The new helper is also in the ordinary production
+source list and the fast test build; only the fuzzer stays outside ordinary builds.
+
+The driver refuses more than 2,048 bytes and the recipe uses `-max_len=2048`. This is
+a harness resource bound. It equals the 2,048-byte RTSP receive buffer that bounds
+every plaintext or decrypted message the product parses, and adds no RTSP limit. After
+the reviewed-toolchain ON configure, copy only `tests/fuzz/corpus/rtsp_message/*` into
+a new external absolute `fuzz_evidence` corpus and use the existing 60-second,
+5-second per-input timeout and 1024 MiB RSS limits:
+
+```sh
+cmake --build "$fuzz_evidence/build" --target fuzz_rtsp_message --parallel 2 \
+  >"$fuzz_evidence/build.log" 2>&1
+"$fuzz_evidence/build/fuzz_rtsp_message" "$fuzz_evidence/corpus" \
+  -max_total_time=60 -max_len=2048 -rss_limit_mb=1024 -timeout=5 \
+  -artifact_prefix="$fuzz_evidence/crashes/" -print_final_stats=1 \
+  >"$fuzz_evidence/run.log" 2>&1
+```
+
+Use the same first-failure retention and source/toolchain/binary/corpus identity
+rules, and also keep the gitlink commit and the four pinned input hashes. Adding this
+source claims no configure, build or campaign result, and these settings do not
+authorize a run or waive host admission.
+
+This covers the message parser and the plaintext Content-length decoder only. It does
+not exercise socket reads, the plaintext header-terminator search and buffering across
+reads, encrypted-RTSP header and length checks, AES-GCM decryption, launch-session
+admission, the command lookup in `handle_msg`, or any handler: `OPTIONS`, `DESCRIBE`,
+`SETUP` target parsing, `ANNOUNCE` SDP attribute parsing and conversion, and `PLAY`.
+Those need a server, socket or launch session, or a larger extraction.
+`serializeRtspMessage` formats host responses rather than received bytes. This is one
+slice of the RTSP area in #505; it supplies no full #505, security, package, hardware,
+device or release acceptance.
+
+### Exactly eight synthetic RTSP seeds
+
+The fixture origins are literals in
+[`tests/fixtures/rtsp_option_ownership.c`](../fixtures/rtsp_option_ownership.c) at
+`61349e606322c48b28f1e3cc8b6df4bb399490ad`, run by `RtspOptionOwnershipTests`. No other
+RTSP message literal exists under `tests/unit`, and the pinned moonlight-common-c has
+no parser tests. Files are exact wire bytes with CRLF line ends and no added trailing
+newline; `.gitattributes` keeps them out of text conversion. They contain no private
+captures. Added boundaries are not presented as existing test requests.
+
+| File | Origin or explicitly added boundary |
+| --- | --- |
+| `fixture-normal.rtsp` | Exact `normal` literal, `NormalHeadersReleaseTheirParserAllocations` |
+| `fixture-duplicate.rtsp` | Exact `duplicate` literal, `DuplicatesKeepFirstOrderLastValueAndCaseSensitiveOwnership` |
+| `fixture-malformed.rtsp` | Exact `malformed` literal, `MalformedTailReleasesHeadersIncludingDuplicates` |
+| `empty.rtsp` | Added boundary: zero bytes |
+| `single-crlf-end.rtsp` | Added boundary: `fixture-normal` without its final CRLF, the parser's single-CRLF end form |
+| `content-length-payload.rtsp` | Added boundary: `fixture-normal`'s request line and CSeq, then `Content-length: 4` and the synthetic payload `abcd` |
+| `rfc-spelling.rtsp` | Added boundary: the same request spelled `Content-Length`, which the exact-name lookup ignores |
+| `response.rtsp` | Added boundary: response first line `RTSP/1.0 200 OK` with `fixture-normal`'s CSeq |
 
 The empty file remains part of the original corpus identity even when libFuzzer
 counts only nonempty initial files.

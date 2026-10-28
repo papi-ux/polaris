@@ -1,0 +1,5 @@
+OPTIONS rtsp://synthetic RTSP/1.0
+CSeq: 7
+Content-length: 4
+
+abcd

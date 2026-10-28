@@ -1832,3 +1832,42 @@ TEST(SourceSafetyContracts, LaunchKeyDecodersStayAtOriginalEffectBoundaries) {
     next = position + marker.size();
   }
 }
+
+TEST(SourceSafetyContracts, RtspContentLengthStaysAtThePlaintextPayloadBoundary) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/rtsp.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  // The lookup has one owner, the extracted helper the fuzz target also calls.
+  EXPECT_EQ(source.find("\"Content-length\"sv"), std::string::npos);
+  const auto function = source.find("static void handle_plaintext_payload(");
+  ASSERT_NE(function, std::string::npos);
+  const auto end = source.find("static void handle_read_plaintext(", function);
+  ASSERT_NE(end, std::string::npos);
+  const auto block = source.substr(function, end - function);
+  std::size_t next = 0;
+  for (const std::string marker : {
+         "auto end = socket->begin + bytes;",
+         "msg_t req {new msg_t::element_type {}};",
+         "if (auto status = parseRtspMessage(req.get(), socket->msg_buf.data(), (std::size_t) (end - socket->msg_buf.data()))) {",
+         "respond(socket->sock, *socket->session, nullptr, 400, \"BAD REQUEST\", 0, {});",
+         "sock_close.disable();",
+         "socket->read_plaintext_payload();",
+         "const auto declared = find_content_length(req->options);",
+         "if (declared.content != nullptr) {",
+         "BOOST_LOG(debug) << \"Found Content-Length: \"sv << declared.content << \" bytes\"sv;",
+         "auto content_length = declared.length;",
+         "if (end - socket->crlf >= content_length) {",
+         "if (end - socket->crlf > content_length) {",
+         "fg.disable();",
+         "print_msg(req.get());",
+         "socket->handle_data(std::move(req));",
+         "socket->begin = end;"
+       }) {
+    const auto position = block.find(marker);
+    ASSERT_NE(position, std::string::npos) << marker;
+    EXPECT_GE(position, next) << marker;
+    next = position + marker.size();
+  }
+}
