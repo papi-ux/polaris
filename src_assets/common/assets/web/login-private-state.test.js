@@ -8,7 +8,7 @@ import { readConfigOrNull } from './config-cache.js'
 import { initializeWebUiAuthState } from './auth-state.js'
 import { probeWebUiAuth } from './router-helpers.js'
 
-const absoluteHome = '/home/ubuntu'
+const absoluteHome = '/var/home/example'
 const parent = '~/.config'
 const reason = `A folder on the way to it, ${parent}, is writable by group or other users (mode 0775), so Polaris will not keep private state there.`
 const fix = `Restrict it with "chmod 700 ${parent}"; a umask of 002 is enough to leave it group writable.`
