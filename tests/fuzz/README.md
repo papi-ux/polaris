@@ -236,13 +236,13 @@ fresh external corpus, build only `fuzz_nvhttp_launch_query`, and use the existi
 limits, preserving the first failure and all exact source/tool/binary/corpus
 identities. These settings do not authorize a run or waive host admission.
 
-**Preparation only: compile, tests, native and fuzz execution are UNRUN.** The
-current manual selector admits only JSON/FEC and needs a separately owned ROOT
-extension before this target can use that lane. Do not replay unchanged JSON
-campaign 2758 as a substitute. The known signed-arithmetic overflow in unchanged
-`util::from_chars` is tracked separately in Polaris #542; it is not fixed here,
-and there is no long-numeric seed or undefined-overflow expected result. Preserve
-any actual first finding for that separate work.
+The manual campaign lane can select this target, and ordinary source CI builds and
+tests the extraction; it still does not compile or run the fuzzer. The first
+60-second campaign on this target stopped on an undefined-behaviour signed overflow
+in `util::from_chars`, reached through `rikeyid`. That decoder is fixed separately
+by checked decoding, which this branch now includes, so a new campaign on this
+source is its own run with its own first outcome. Do not replay an unchanged JSON
+campaign as a substitute.
 
 This covers only raw query parsing and the three named client-key field decoders.
 It does not exercise route/auth/presence admission, crypto or RNG, session/worker
