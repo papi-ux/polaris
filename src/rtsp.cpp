@@ -36,6 +36,7 @@ extern "C" {
 #include "network.h"
 #include "process.h"
 #include "rtsp.h"
+#include "rtsp_handler_parsing.h"
 #include "stream.h"
 #include "stream_bitrate.h"
 #include "sync.h"
@@ -745,7 +746,8 @@ namespace rtsp_stream {
       if (!dispatch_control_command(
             session,
             [&]() {
-              auto func = _map_cmd_cb.find(req->message.request.command);
+              auto command = dispatch_command(*req);
+              auto func = command.empty() ? std::end(_map_cmd_cb) : _map_cmd_cb.find(command);
               if (func != std::end(_map_cmd_cb)) {
                 func->second(this, sock, session, std::move(req));
               } else {
@@ -1670,10 +1672,7 @@ namespace rtsp_stream {
     auto seqn_str = std::to_string(req->sequenceNumber);
     seqn.content = const_cast<char *>(seqn_str.c_str());
 
-    std::string_view target {req->message.request.target};
-    auto begin = std::find(std::begin(target), std::end(target), '=') + 1;
-    auto end = std::find(begin, std::end(target), '/');
-    std::string_view type {begin, (size_t) std::distance(begin, end)};
+    std::string_view type = setup_stream_type({req->message.request.target});
 
     std::uint16_t port;
     if (type == "audio"sv) {
@@ -1769,11 +1768,7 @@ namespace rtsp_stream {
         auto pos = line.find(':');
 
         auto name = line.substr(2, pos - 2);
-        auto val = line.substr(pos + 1);
-
-        if (val[val.size() - 1] == ' ') {
-          val = val.substr(0, val.size() - 1);
-        }
+        auto val = announce_attribute_value(line.substr(pos + 1));
         args.emplace(name, val);
       }
     }
