@@ -1836,3 +1836,98 @@ TEST(LiveTuningPolicy, AHoldNoBetterThanTheRateAboveSettlesUnderTheRatesThatLost
   EXPECT_FALSE(policy.ceiling_is_queue());
   EXPECT_EQ(policy.background_loss(), 0.0);
 }
+
+TEST(LiveTuningPolicy, ANoRoomHeavySampleDoesNotReplaceAUsableHoldWithAPersistentlyLossyOne) {
+  // #575 review 2: 5400 kbps over a tail drop at 2025 kbps (and at 2000), losing 1 - link/rate of the frames over it,
+  // with the floor clean. The first step's 37.5% had no room for a deep sample, so the probe sampled as far as it
+  // may, the stop at 2500 over the floor. That lost 19%, much less, and was judged helped: 2500 became the hold's
+  // lower bound at 19-21% for the whole run, and the floor under it was never tried. Its helped sample, still losing
+  // clearly over 10%, takes the floor at once, at 41 s, not twelve hold reports later.
+  for (const int link : {2025, 2000}) {
+    SCOPED_TRACE(link);
+    live_tuning_policy::policy_t policy {5400, FLOOR};
+    double lost = 0;  // seconds 100-299, to within the carried fraction of a frame
+    const auto targets = run_rp6(2000, [&](int second, int kbps) {
+      const double share = second < 30 ? 0.0 : std::max(0.0, 1.0 - static_cast<double>(link) / kbps);
+      if (second >= 100 && second < 300) {
+        lost += 120.0 * share;
+      }
+      return share;
+    }, policy, 120.0);
+    EXPECT_EQ(*std::min_element(targets.begin(), targets.begin() + 45), FLOOR);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_LE(policy.target_kbps(), link * 1.06);
+    EXPECT_LE(lost, 0.05 * 24000);
+    EXPECT_EQ(policy.background_loss(), 0.0);
+  }
+}
+
+TEST(LiveTuningPolicy, HeavyLossAtTheRequestDoesNotLearnAnUntestedCleanFloorAsBackground) {
+  // #575 review 2: 8000 kbps losing 42 of 120 frames above a 2200 kbps link, 35% at every rate the probe tried. The
+  // deep sample's one report at 4000 was no lighter than the first step's and not clearly over 20% on its own, so the
+  // loss was learned as background and the stream stayed at its request, losing 35%, with the floor clean. 457eeef9
+  // took the floor and held 2180.
+  live_tuning_policy::policy_t policy {8000, FLOOR};
+  double lost = 0;  // seconds 100-299
+  const auto targets = run_rp6(2000, [&](int second, int kbps) {
+    const double share = second >= 30 && kbps > 2200 ? 0.35 : 0.0;
+    if (second >= 100 && second < 300) {
+      lost += 120.0 * share;
+    }
+    return share;
+  }, policy, 120.0);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_LE(policy.target_kbps(), 2200 * 1.06);
+  EXPECT_LE(lost, 0.05 * 24000);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, AHoldByTheFloorThatKeepsLosingHeavilySamplesTheFloor) {
+  // 6500 kbps over a tail drop at the floor. The first step's sample at 2500, the stop over the floor, helped but
+  // still lost 20% on too few frames to call that more than background, and became the hold's lower bound: the stream
+  // held about 2640, losing 21%, over a clean floor. Twelve reports of the hold losing clearly over 10% sample it.
+  live_tuning_policy::policy_t policy {6500, FLOOR};
+  double lost = 0;  // seconds 100-299
+  const auto targets = run_rp6(300, [&](int second, int kbps) {
+    const double share = second < 30 ? 0.0 : std::max(0.0, 1.0 - static_cast<double>(FLOOR) / kbps);
+    if (second >= 100) {
+      lost += 120.0 * share;
+    }
+    return share;
+  }, policy, 120.0);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_LE(policy.target_kbps(), FLOOR * 1.06);
+  EXPECT_LE(lost, 0.01 * 24000);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, WhatBackgroundCostsByTheFloorDoesNotTakeTheStreamThere) {
+  // 9% lost at and under 2400 kbps, what background under 3% on the wire costs this close to the floor, and 17% above
+  // it. The first step from 4000 to 2400 helps after four reports, and its hold keeps losing 9%, but no more than the
+  // floor would: it holds there, retrying 2477, and never samples the floor. Loss clearly over 10% there would.
+  live_tuning_policy::policy_t policy {4000, FLOOR};
+  const auto targets = run_rp6(300, [](int second, int kbps) {
+    return second < 30 ? 0.0 : kbps > 2400 ? 0.17 : 0.09;
+  }, policy, 120.0);
+  EXPECT_GT(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_TRUE(std::all_of(targets.begin() + 60, targets.end(), [](int t) {
+    return t == 2400 || t == 2477;
+  }));
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, HeavyLossInShortReportsIsNotLearnedBeforeTheFloorEither) {
+  // 30 frames a report, 35% of them lost above a 2100 kbps link. Every rate the probe tries loses 35%, but on so few
+  // frames that the loss is not clearly over 20%: it must still not be learned as background before the floor has
+  // been sampled. 457eeef9 learned it too and stayed at its request.
+  live_tuning_policy::policy_t policy {3800, FLOOR};
+  const auto targets = run_rp6(300, [](int second, int kbps) {
+    return second >= 30 && kbps > 2100 ? 0.35 : 0.0;
+  }, policy, 30.0);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_LE(policy.target_kbps(), 2100);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}

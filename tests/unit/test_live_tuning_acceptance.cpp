@@ -11,7 +11,7 @@
  *
  * After the frozen bench, a wire layer under the same policy: packets, FEC blocks and sends as the RP6 measured
  * them, so loss on the network can be judged in packet terms. It leaves the 26 cells as they are. Last, links close
- * to the floor, each compared exactly with the policy at staging 457eeef9.
+ * to the floor and a wider search of static links, each compared exactly with the policy at staging 457eeef9.
  */
 
 #include "src/live_tuning_policy.h"
@@ -919,35 +919,46 @@ namespace {
   }
 
   struct near_floor_run_t {
-    double lost = 0;
+    double lost = 0;  ///< in seconds 100-299
+    double lost_to_end = 0;  ///< from second 100 to the end of the run
     int final = 0;
     int lowest = 0;
     double background = 0;
     live_tuning_policy::state_e state = live_tuning_policy::state_e::normal;
   };
 
-  near_floor_run_t near_floor_run(const near_floor_t &row) {
-    live_tuning_policy::policy_t policy {row.request, row.floor};
+  /// One link: frames a report, and for a "step" the share of them lost above it. 300 s unless given.
+  near_floor_run_t link_run(
+    const std::string &shape,
+    int request,
+    int link,
+    int floor,
+    double frames,
+    double step_share,
+    int seconds = 300
+  ) {
+    live_tuning_policy::policy_t policy {request, floor};
     near_floor_run_t run;
-    run.lowest = row.request;
+    run.lowest = request;
     double carry = 0;
-    for (int i = 0; i < 300; ++i) {
+    for (int i = 0; i < seconds; ++i) {
       const int kbps = policy.target_kbps();
       double share = 0;
       if (i >= 30) {
-        share = row.shape == "tail" ? std::max(0.0, 1.0 - static_cast<double>(row.link) / kbps) : kbps > row.link ? 0.8 : 0.0;
+        share = shape == "tail" ? std::max(0.0, 1.0 - static_cast<double>(link) / kbps) : kbps > link ? step_share : 0.0;
       }
-      const double owed = 120.0 * share + carry;
+      const double owed = frames * share + carry;
       const double lost = std::floor(owed);
       carry = owed - lost;
       for (int k = 0; k < 10; ++k) {
         if (k == 5) {
-          policy.report(std::int64_t {i} * 1000 + 500, 120.0, lost);
+          policy.report(std::int64_t {i} * 1000 + 500, frames, lost);
         }
         policy.rtt(std::int64_t {i} * 1000 + 100 * k + 50, 3.0);
       }
       if (i >= 100) {
-        run.lost += lost;
+        run.lost += i < 300 ? lost : 0.0;
+        run.lost_to_end += lost;
       }
       run.lowest = std::min(run.lowest, policy.target_kbps());
     }
@@ -955,6 +966,10 @@ namespace {
     run.background = policy.background_loss();
     run.state = policy.state();
     return run;
+  }
+
+  near_floor_run_t near_floor_run(const near_floor_t &row) {
+    return link_run(row.shape, row.request, row.link, row.floor, 120.0, 0.8);
   }
 
 }  // namespace
@@ -989,8 +1004,8 @@ TEST(LiveTuningAcceptance, LinksCloseToTheFloorDoNoWorseThanStaging457eeef9) {
   // One named exception, ROOT's decision on 2026-10-29: 3200 kbps over a 2450 kbps tail drop. Later in the episode a
   // descent from the hold at 2529 stops at 2500, a 1% step that cannot tell the link's loss from background, where
   // 457eeef9 stepped to the clean floor. Sending such a step to the floor instead puts wire runs under 3% loss on it
-  // (WireLossUnderThreePercentNeverReachesTheFloor), so this row is bounded: no learned background, at most 5% lost,
-  // and settled within one bisect step (the policy's 1.06) of its link.
+  // (WireLossUnderThreePercentNeverReachesTheFloor), so this row is bounded: a hold with no learned background, at
+  // most 5% lost, and settled within one bisect step (the policy's 1.06) of its link.
   const auto reference = near_floor_reference();
   ASSERT_EQ(reference.size(), 141u);
   int same = 0;
@@ -1006,6 +1021,7 @@ TEST(LiveTuningAcceptance, LinksCloseToTheFloorDoNoWorseThanStaging457eeef9) {
     if (row.shape == "tail" && row.request == 3200 && row.link == 2450) {
       RecordProperty(name, "lost=" + std::to_string(static_cast<int>(run.lost)) + ";final=" + std::to_string(run.final) +
                              ";staging_lost=" + std::to_string(static_cast<int>(row.lost)) + ";staging_final=" + std::to_string(row.final));
+      EXPECT_EQ(run.state, live_tuning_policy::state_e::hold);
       EXPECT_EQ(run.background, 0.0);
       EXPECT_LE(run.lost, 0.05 * k_near_floor_frames);
       EXPECT_LE(run.final, row.link * 1.06);
@@ -1013,11 +1029,129 @@ TEST(LiveTuningAcceptance, LinksCloseToTheFloorDoNoWorseThanStaging457eeef9) {
     }
     EXPECT_LE(run.lost, row.lost + k_near_floor_margin) << run.final << " kbps at the end; staging " << row.final;
     if (run.final < row.final) {
-      EXPECT_LE(run.lost, row.lost - k_near_floor_margin) << run.final << " kbps at the end; staging " << row.final;
+      EXPECT_LT(run.lost, row.lost - k_near_floor_margin) << run.final << " kbps at the end; staging " << row.final;
     }
   }
   RecordProperty("near_floor_rows", static_cast<int>(reference.size()));
   RecordProperty("near_floor_same_as_457eeef9", same);
   RecordProperty("near_floor_less_loss_than_457eeef9", less);
   RecordProperty("near_floor_more_loss_than_457eeef9", more);
+}
+
+namespace {
+
+  /**
+   * #575 review 2's wide static-link search: 3158 tail drops, requests 2600-6500 kbps every 50 over links 2000-3000
+   * every 25, at 120 frames a report; and 1953 steps, 20 requests from 2001 to 32016 kbps over 14 links from 2000 to
+   * 6000, losing 35, 50 or 80% of the frames above the link, at 30, 120 and 1200 frames a report. The floor is 2000
+   * and the timing is the near-floor harness's. Each row is compared exactly with the policy at staging 457eeef9, from
+   * tests/fixtures/live-tuning-static-links-457eeef9.txt.
+   */
+  struct static_link_t {
+    std::string shape;  ///< "tail" or "step", as for near_floor_t
+    double frames = 0;  ///< a report
+    int request = 0;
+    int link = 0;
+    int floor = 0;
+    double share = 0;  ///< a step's loss above the link
+    double lost = 0;  ///< in seconds 100-299, of 200 reports
+    int final = 0;  ///< the target after 300 s
+  };
+
+  std::vector<static_link_t> static_link_reference() {
+    std::ifstream input(std::string(POLARIS_SOURCE_DIR) + "/tests/fixtures/live-tuning-static-links-457eeef9.txt");
+    std::vector<static_link_t> rows;
+    for (std::string line; std::getline(input, line);) {
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
+      std::istringstream fields(line);
+      static_link_t row;
+      std::string share;
+      fields >> row.shape >> row.frames >> row.request >> row.link >> row.floor >> share >> row.lost >> row.final;
+      row.share = row.shape == "step" ? std::stod(share) : 0.0;
+      rows.push_back(row);
+    }
+    return rows;
+  }
+
+  std::string static_link_family(const static_link_t &row) {
+    auto name = "static_links_" + row.shape + "_" + std::to_string(static_cast<int>(row.frames)) + "_frames";
+    if (row.shape == "step") {
+      name += "_" + std::to_string(static_cast<int>(std::lround(row.share * 100))) + "pct";
+    }
+    return name;
+  }
+
+}  // namespace
+
+TEST(LiveTuningAcceptance, AWideStaticLinkSearchDoesNoWorseThanStaging457eeef9) {
+  // Every row: at most 0.1 points more loss than 457eeef9 in seconds 100-299, and never back at the request with 20% or
+  // more learned as background where 457eeef9 ended at or under the link, where nothing is lost. Every row is recorded.
+  // Three named rows, ROOT's decision on 2026-10-29:
+  // - 3250 kbps over a 2475 kbps tail drop is the near-floor sweep's 3200 over 2450 again: a descent from the hold at
+  //   2549 stops at 2500, a 2% step losing 1%, where 457eeef9 stepped to the clean floor. Both are bounded as there: a
+  //   hold with no learned background, at most 5% lost, within the policy's 1.06 of the link.
+  // - 32016 kbps over a step at the floor, at 120 frames and 35% and at 30 frames and 50%: the floor hold 457eeef9 ends
+  //   in, retrying the same loss every 23 s, but reached 6 s later, so one more retry lands in seconds 100-299. Bounded
+  //   to 457eeef9's final rate, a hold with no learned background, at most one retry's two reports more lost there,
+  //   and over seconds 100-2999 no more lost than 457eeef9 lost: 10584 and 3780 frames.
+  const auto reference = static_link_reference();
+  ASSERT_EQ(reference.size(), 5111u);
+  const auto named = [](const static_link_t &row) {
+    return row.shape == "tail" && row.frames == 120 &&
+           ((row.request == 3200 && row.link == 2450) || (row.request == 3250 && row.link == 2475));
+  };
+  const std::map<std::tuple<double, int, int, double>, double> retry_phase {
+    {{120, 32016, 2000, 0.35}, 10584},
+    {{30, 32016, 2000, 0.5}, 3780},
+  };
+  int same = 0;
+  int less = 0;
+  int more = 0;
+  std::map<std::string, std::string> recorded;
+  for (const auto &row : reference) {
+    const auto family = static_link_family(row);
+    SCOPED_TRACE(family + "_" + std::to_string(row.request) + "_over_" + std::to_string(row.link));
+    const auto run = link_run(row.shape, row.request, row.link, row.floor, row.frames, row.share);
+    const double frames = 200 * row.frames;
+    const double margin = 0.001 * frames;
+    same += run.lost == row.lost && run.final == row.final;
+    less += run.lost < row.lost - margin;
+    more += run.lost > row.lost + margin;
+    auto &entry = recorded[family];
+    entry += (entry.empty() ? "" : ";") + std::to_string(row.request) + "/" + std::to_string(row.link) + "=" +
+             std::to_string(static_cast<int>(run.lost)) + "," + std::to_string(run.final);
+    if (run.background > 0.0) {
+      entry += ",bg" + std::to_string(static_cast<int>(std::lround(run.background * 1000)));
+    }
+    if (named(row)) {
+      EXPECT_EQ(run.state, live_tuning_policy::state_e::hold);
+      EXPECT_EQ(run.background, 0.0);
+      EXPECT_LE(run.lost, 0.05 * frames);
+      EXPECT_LE(run.final, row.link * 1.06);
+      continue;
+    }
+    const auto phase = retry_phase.find({row.frames, row.request, row.link, row.share});
+    if (phase != retry_phase.end()) {
+      EXPECT_EQ(run.final, row.final);
+      EXPECT_EQ(run.state, live_tuning_policy::state_e::hold);
+      EXPECT_EQ(run.background, 0.0);
+      EXPECT_LE(run.lost, row.lost + 2 * std::ceil(row.frames * row.share));
+      const auto long_run = link_run(row.shape, row.request, row.link, row.floor, row.frames, row.share, 3000);
+      EXPECT_LE(long_run.lost_to_end, phase->second);
+      continue;
+    }
+    EXPECT_LE(run.lost, row.lost + margin) << run.final << " kbps at the end; staging " << row.final;
+    if (row.final <= row.link) {
+      EXPECT_FALSE(run.final >= row.request && run.background >= 0.2) << run.background << " learned at the request";
+    }
+  }
+  for (const auto &[family, rows] : recorded) {
+    RecordProperty(family, rows);
+  }
+  RecordProperty("static_links_rows", static_cast<int>(reference.size()));
+  RecordProperty("static_links_same_as_457eeef9", same);
+  RecordProperty("static_links_less_loss_than_457eeef9", less);
+  RecordProperty("static_links_more_loss_than_457eeef9", more);
 }
