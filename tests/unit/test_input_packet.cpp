@@ -29,6 +29,7 @@ extern "C" {
 // local includes
 #include "src/config.h"
 #include "src/input.h"
+#include "src/process.h"
 #include "src/retained_gamepad.h"
 #include "src/utility.h"
 
@@ -449,4 +450,32 @@ TEST(RetainedGamepadTest, RetiredAppCannotBeClaimedEvenWithoutAnActiveStream) {
   EXPECT_EQ(pad.acquire("owner"), 0U);
   EXPECT_FALSE(static_cast<bool>(pad.access(0)));
   EXPECT_EQ(neutralized, 1);
+}
+
+// #567: systemctl stop landed while a private launch was executing. The launch finished during
+// shutdown, so its app still held the controller when main released input and then ended the
+// app, and retiring the controller wrote the pad through the released context (SIGSEGV at 0x70).
+TEST(RetainedGamepadTest, StopDuringLaunchRetiresTheControllerBeforeInputIsReleased) {
+#ifdef __linux__
+  // The stop below must not manage the host's displays or start a compositor.
+  auto restore_display_config = util::fail_guard(
+    [auto_manage = config::video.linux_display.auto_manage_displays,
+     use_cage = config::video.linux_display.use_cage_compositor]() {
+      config::video.linux_display.auto_manage_displays = auto_manage;
+      config::video.linux_display.use_cage_compositor = use_cage;
+    });
+  config::video.linux_display.auto_manage_displays = false;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+  auto input_guard = input::init();
+  auto retained = input::retained_gamepad_for_tests(0, "owner");
+  ASSERT_TRUE(retained);
+  proc::proc_t process {boost::process::v1::environment {}, {}};
+  process.set_retained_gamepad_for_tests(retained);
+
+  // main destroys input's guard first, then proc's, whose stop ends the app.
+  input_guard.reset();
+  EXPECT_EQ(retained->acquire("owner"), 0U) << "input was released while the controller was still live";
+  process.terminate(false, false);
+  EXPECT_EQ(retained->acquire("owner"), 0U);
 }

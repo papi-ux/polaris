@@ -1319,6 +1319,8 @@ namespace proc {
      *        starting anything. clear_running_app_for_tests() leaves the host with no app again.
      */
     void set_running_app_for_tests(const ctx_t &app);
+    /// Hand the app a private controller, as execute() does before a launch's commands run.
+    void set_retained_gamepad_for_tests(std::shared_ptr<input::retained_gamepad_t> retained);
     /// Adopt a real, already-exited child for running() cleanup tests; never spawns a process.
     void set_exited_app_child_for_tests(boost::process::v1::child child);
     void clear_running_app_for_tests();
