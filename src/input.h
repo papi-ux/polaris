@@ -71,6 +71,8 @@ namespace input {
   std::shared_ptr<input_t> alloc_queue_for_tests();
   std::size_t queued_input_packet_count_for_tests(const std::shared_ptr<input_t> &input);
   bool batch_input_packets_for_tests(std::vector<std::uint8_t> &dest, const std::vector<std::uint8_t> &src);
+  /// The lease preallocate_gamepad() hands a private launch, without creating the device.
+  std::shared_ptr<retained_gamepad_t> retained_gamepad_for_tests(int id, const std::string &owner);
 #endif
 
   struct touch_port_t: public platf::touch_port_t {

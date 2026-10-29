@@ -13341,6 +13341,12 @@ namespace proc {
     placebo = true;
   }
 
+  void proc_t::set_retained_gamepad_for_tests(std::shared_ptr<input::retained_gamepad_t> retained) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _retained_gamepad = std::move(retained);
+  }
+
   void proc_t::set_exited_app_child_for_tests(boost::process::v1::child child) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);

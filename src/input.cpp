@@ -124,6 +124,9 @@ namespace input {
   static int preallocated_gamepad_id {-1};
   static safe::mail_t preallocated_gamepad_mail;
   static platf::feedback_queue_t preallocated_gamepad_feedback_queue;
+  // The private app's controller writes through platf_input, and main ends that app after input's
+  // deinit. There is at most one: preallocation refuses while any pad exists.
+  static std::weak_ptr<retained_gamepad_t> retained_gamepad_lease;
 
   void update_controller_diagnostics(bool created,
                                      int controller_number,
@@ -274,6 +277,16 @@ namespace input {
     return true;
   }
 
+  // Called with preallocated_gamepad_mutex held.
+  static std::shared_ptr<retained_gamepad_t> retain_preallocated_gamepad(int id, const std::string &retained_owner) {
+    auto retained = std::make_shared<retained_gamepad_t>(
+      id, boost::to_lower_copy(retained_owner),
+      [](int pad) { platf::gamepad_update(platf_input, pad, {}); },
+      [](int pad) { task_pool.push([pad]() { free_gamepad(platf_input, pad); }); });
+    retained_gamepad_lease = retained;
+    return retained;
+  }
+
   std::shared_ptr<retained_gamepad_t> preallocate_gamepad(int client_controller_type, const std::string &retained_owner) {
     if (!config::input.controller) {
       return {};
@@ -313,10 +326,7 @@ namespace input {
     platf::gamepad_update(platf_input, id, {});
     BOOST_LOG(info) << "ControllerNumber [0] preallocated before app launch"sv;
     if (!retained_owner.empty()) {
-      auto retained = std::make_shared<retained_gamepad_t>(
-        id, boost::to_lower_copy(retained_owner),
-        [](int pad) { platf::gamepad_update(platf_input, pad, {}); },
-        [](int pad) { task_pool.push([pad]() { free_gamepad(platf_input, pad); }); });
+      auto retained = retain_preallocated_gamepad(id, retained_owner);
       preallocated_controller_number = -1;
       preallocated_gamepad_id = -1;
       preallocated_gamepad_mail.reset();
@@ -2094,6 +2104,15 @@ namespace input {
   class deinit_t: public platf::deinit_t {
   public:
     ~deinit_t() override {
+      // main ends the running app only after this, and a private app still holds its controller,
+      // as one whose launch finished during shutdown did (#567). Retire it while platf_input
+      // exists, so ending the app no longer writes through a released context.
+      std::shared_ptr<retained_gamepad_t> retained;
+      {
+        std::scoped_lock lock {preallocated_gamepad_mutex};
+        retained = retained_gamepad_lease.lock();
+      }
+      if (retained) retained->retire();
       platf_input.reset();
     }
   };
@@ -2205,6 +2224,11 @@ namespace input {
     auto source = src;
     return batch(reinterpret_cast<PNV_INPUT_HEADER>(dest.data()),
                  reinterpret_cast<PNV_INPUT_HEADER>(source.data())) == batch_result_e::batched;
+  }
+
+  std::shared_ptr<retained_gamepad_t> retained_gamepad_for_tests(int id, const std::string &owner) {
+    std::scoped_lock lock {preallocated_gamepad_mutex};
+    return retain_preallocated_gamepad(id, owner);
   }
 #endif
 }  // namespace input
