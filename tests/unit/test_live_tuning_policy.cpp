@@ -24,6 +24,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1620,20 +1621,20 @@ namespace {
     return out;
   }
 
-  /// A second at a time from t=0: the share of 124 frames each rate loses, carried so it loses exactly that, in a
-  /// report at 500 ms, and a 3 ms RTT every 100 ms. Returns the target each second.
+  /// A second at a time from t=0: the share of the frames (124, the RP6's, unless given) each rate loses, carried so it
+  /// loses exactly that, in a report at 500 ms, and a 3 ms RTT every 100 ms. Returns the target each second.
   std::vector<int> run_rp6(int seconds, const std::function<double(int second, int target)> &share,
-                           live_tuning_policy::policy_t &policy) {
+                           live_tuning_policy::policy_t &policy, double frames = 124.0) {
     std::vector<int> targets;
     double carry = 0.0;
     for (int i = 0; i < seconds; ++i) {
       const std::int64_t t0 = std::int64_t {i} * 1000;
-      const double owed = 124.0 * share(i, policy.target_kbps()) + carry;
+      const double owed = frames * share(i, policy.target_kbps()) + carry;
       const double lost = std::floor(owed);
       carry = owed - lost;
       for (int k = 0; k < 10; ++k) {
         if (k == 5) {
-          policy.report(t0 + 500, 124.0, lost);
+          policy.report(t0 + 500, frames, lost);
         }
         policy.rtt(t0 + 100 * k + 50, 3.0);
       }
@@ -1723,4 +1724,61 @@ TEST(LiveTuningPolicy, ABackgroundLearnedUnderLossIsJudgedOnTheReportsAfterIt) {
   ASSERT_TRUE(learned);
   EXPECT_GE(lowest, 0.055);
   EXPECT_EQ(policy.target_kbps(), RP6_BASE);
+}
+
+TEST(LiveTuningPolicy, ANearFloorProbeSamplesTheFloorBeforeItJudgesHeavyLoss) {
+  // #575 review: 3000 kbps over a 2200 kbps link that loses 96 of 120 frames above it, with the floor at 2000. The first
+  // step stopped a climb step above the floor, at 2500, had no room for a deep sample under it, and judged the 80% there
+  // rate-independent: back to 3000, losing it as background. A fresh first step lands on the floor, as at 457eeef9.
+  {
+    live_tuning_policy::policy_t policy {3000, FLOOR};
+    const auto targets = run_rp6(300, [](int second, int kbps) {
+      return second >= 30 && kbps > 2200 ? 0.8 : 0.0;
+    }, policy, 120.0);
+    EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_EQ(policy.target_kbps(), 2103);
+    EXPECT_EQ(policy.ceiling_kbps(), 2213);
+    EXPECT_EQ(policy.background_loss(), 0.0);
+  }
+  // Later in an episode the stop holds, and clearly heavy loss there samples the floor before any verdict: the request
+  // settles under a 3000 kbps link, which falls to 2200 at 150 s. Judged at 2500, the loss sent the stream back to its
+  // request with 80% learned as background.
+  {
+    live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+    const auto targets = run_rp6(300, [](int second, int kbps) {
+      return second >= 30 && kbps > (second < 150 ? 3000 : 2200) ? 0.8 : 0.0;
+    }, policy);
+    EXPECT_EQ(*std::min_element(targets.begin() + 150, targets.end()), FLOOR);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_EQ(policy.target_kbps(), 2114);
+    EXPECT_EQ(policy.ceiling_kbps(), 2236);
+    EXPECT_EQ(policy.background_loss(), 0.0);
+  }
+}
+
+TEST(LiveTuningPolicy, AHalvingThatTruncatesOntoTheFloorStopsAboveItFirst) {
+  // #575 review: the floor step was judged before truncation, so 2000.5 kbps passed as above the floor and became it.
+  // From a 32008 kbps request the deep sample is 4001, and heavy loss there halves it to 2000.5; from 32016, to 2001.
+  const auto share = [](int second, int kbps) {
+    return second < 30 ? 0.0 : kbps > 10000 ? 0.5 : kbps > 2500 ? 0.4 : 0.0;
+  };
+  for (const auto &[request, deep, halved] : std::vector<std::tuple<int, int, int>> {{32008, 4001, 2500}, {32016, 4002, 2001}}) {
+    SCOPED_TRACE(request);
+    live_tuning_policy::policy_t policy {request, FLOOR};
+    auto targets = run_rp6(40, share, policy);
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+    ASSERT_GE(targets.size(), 4u);
+    EXPECT_EQ(targets[2], deep);
+    EXPECT_EQ(targets[3], halved);
+  }
+  // A fresh first step from 3334 kbps, 2000.4, still lands on the floor: nothing above it has been measured, as at
+  // 457eeef9, where a request this close to its floor always stepped onto it.
+  live_tuning_policy::policy_t policy {3334, FLOOR};
+  auto targets = run_rp6(40, [](int second, int) {
+    return second < 30 ? 0.0 : 0.05;
+  }, policy, 120.0);
+  targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+  ASSERT_GE(targets.size(), 2u);
+  EXPECT_EQ(targets[1], FLOOR);
 }

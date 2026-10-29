@@ -10,7 +10,8 @@
  * not encoder, counter or device evidence.
  *
  * After the frozen bench, a wire layer under the same policy: packets, FEC blocks and sends as the RP6 measured
- * them, so loss on the network can be judged in packet terms. It leaves the 26 cells as they are.
+ * them, so loss on the network can be judged in packet terms. It leaves the 26 cells as they are. Last, links close
+ * to the floor, each compared exactly with the policy at staging 457eeef9.
  */
 
 #include "src/live_tuning_policy.h"
@@ -26,7 +27,9 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -873,4 +876,148 @@ TEST(LiveTuningAcceptance, WireRecoveryIsRecordedAsATarget) {
     }
     RecordProperty(std::string("wire_recovery_") + (batch == 5 ? "pacer_on" : "pacer_off") + "_s", wire_spread(recovery));
   }
+}
+
+namespace {
+
+  /**
+   * Links close to the floor (#575 review): requests from 1.3 to 2.2 times their floor, where a probe's first step
+   * reaches the floor or nearly, over a link that loses frames above it. 120 frames a report at 500 ms, a 3 ms RTT
+   * every 100 ms and loss from second 30, carried so each report loses exactly its share. No draws, so each row is
+   * compared exactly with the policy at staging 457eeef9, from tests/fixtures/live-tuning-near-floor-457eeef9.txt.
+   */
+  struct near_floor_t {
+    std::string shape;  ///< "tail": 1 - link/rate of the frames over it; "step": 96 of 120 above it
+    int request = 0;
+    int link = 0;
+    int floor = 0;
+    double lost = 0;  ///< frames lost in seconds 100-299, of k_near_floor_frames
+    int final = 0;  ///< the target after 300 s
+  };
+
+  constexpr double k_near_floor_frames = 24000;
+  constexpr double k_near_floor_margin = 24;  // 0.1 points of k_near_floor_frames
+
+  std::vector<near_floor_t> near_floor_reference() {
+    std::ifstream input(std::string(POLARIS_SOURCE_DIR) + "/tests/fixtures/live-tuning-near-floor-457eeef9.txt");
+    std::vector<near_floor_t> rows;
+    for (std::string line; std::getline(input, line);) {
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
+      std::istringstream fields(line);
+      near_floor_t row;
+      fields >> row.shape >> row.request >> row.link >> row.floor >> row.lost >> row.final;
+      rows.push_back(row);
+    }
+    return rows;
+  }
+
+  std::string near_floor_name(const near_floor_t &row) {
+    return "near_floor_" + row.shape + "_" + std::to_string(row.request) + "_over_" + std::to_string(row.link) + "_floor_" +
+           std::to_string(row.floor);
+  }
+
+  struct near_floor_run_t {
+    double lost = 0;
+    int final = 0;
+    int lowest = 0;
+    double background = 0;
+    live_tuning_policy::state_e state = live_tuning_policy::state_e::normal;
+  };
+
+  near_floor_run_t near_floor_run(const near_floor_t &row) {
+    live_tuning_policy::policy_t policy {row.request, row.floor};
+    near_floor_run_t run;
+    run.lowest = row.request;
+    double carry = 0;
+    for (int i = 0; i < 300; ++i) {
+      const int kbps = policy.target_kbps();
+      double share = 0;
+      if (i >= 30) {
+        share = row.shape == "tail" ? std::max(0.0, 1.0 - static_cast<double>(row.link) / kbps) : kbps > row.link ? 0.8 : 0.0;
+      }
+      const double owed = 120.0 * share + carry;
+      const double lost = std::floor(owed);
+      carry = owed - lost;
+      for (int k = 0; k < 10; ++k) {
+        if (k == 5) {
+          policy.report(std::int64_t {i} * 1000 + 500, 120.0, lost);
+        }
+        policy.rtt(std::int64_t {i} * 1000 + 100 * k + 50, 3.0);
+      }
+      if (i >= 100) {
+        run.lost += lost;
+      }
+      run.lowest = std::min(run.lowest, policy.target_kbps());
+    }
+    run.final = policy.target_kbps();
+    run.background = policy.background_loss();
+    run.state = policy.state();
+    return run;
+  }
+
+}  // namespace
+
+TEST(LiveTuningAcceptance, CongestionCloseToTheFloorSettlesUnderTheLinkAsStaging457eeef9Did) {
+  // #575 review: a request this close to its floor had its first step stop a climb step above the floor, 95981 kbps
+  // of a 100000 request over a 76785 PyroWave floor, with no room for a deep sample under it. The stream took its
+  // link's loss for background and stayed at its request, losing 36.7% over a 1900 kbps link, 19.2% over 2100, and
+  // 20% over an 80000 kbps link. A fresh first step lands on the floor again, and the stream settles under the link.
+  const auto reference = near_floor_reference();
+  for (const auto &[shape, request, link, floor] : std::vector<std::tuple<std::string, int, int, int>> {
+         {"tail", 3000, 1900, 2000},
+         {"tail", 2600, 2100, 2000},
+         {"tail", 100000, 80000, 76785},
+       }) {
+    const auto row = std::find_if(reference.begin(), reference.end(), [&](const near_floor_t &r) {
+      return r.shape == shape && r.request == request && r.link == link && r.floor == floor;
+    });
+    ASSERT_NE(row, reference.end());
+    SCOPED_TRACE(near_floor_name(*row));
+    const auto run = near_floor_run(*row);
+    EXPECT_EQ(run.lowest, floor);
+    EXPECT_EQ(run.state, live_tuning_policy::state_e::hold);
+    EXPECT_LE(run.final, std::max(link, floor));
+    EXPECT_EQ(run.background, 0.0);
+    EXPECT_LE(run.lost, row->lost + k_near_floor_margin);
+  }
+}
+
+TEST(LiveTuningAcceptance, LinksCloseToTheFloorDoNoWorseThanStaging457eeef9) {
+  // Every row: at most 0.1 points more loss than 457eeef9, and no lower final rate unless the loss is lower by more.
+  // One named exception, ROOT's decision on 2026-10-29: 3200 kbps over a 2450 kbps tail drop. Later in the episode a
+  // descent from the hold at 2529 stops at 2500, a 1% step that cannot tell the link's loss from background, where
+  // 457eeef9 stepped to the clean floor. Sending such a step to the floor instead puts wire runs under 3% loss on it
+  // (WireLossUnderThreePercentNeverReachesTheFloor), so this row is bounded: no learned background, at most 5% lost,
+  // and settled within one bisect step (the policy's 1.06) of its link.
+  const auto reference = near_floor_reference();
+  ASSERT_EQ(reference.size(), 141u);
+  int same = 0;
+  int less = 0;
+  int more = 0;
+  for (const auto &row : reference) {
+    const auto name = near_floor_name(row);
+    SCOPED_TRACE(name);
+    const auto run = near_floor_run(row);
+    same += run.lost == row.lost && run.final == row.final;
+    less += run.lost < row.lost - k_near_floor_margin;
+    more += run.lost > row.lost + k_near_floor_margin;
+    if (row.shape == "tail" && row.request == 3200 && row.link == 2450) {
+      RecordProperty(name, "lost=" + std::to_string(static_cast<int>(run.lost)) + ";final=" + std::to_string(run.final) +
+                             ";staging_lost=" + std::to_string(static_cast<int>(row.lost)) + ";staging_final=" + std::to_string(row.final));
+      EXPECT_EQ(run.background, 0.0);
+      EXPECT_LE(run.lost, 0.05 * k_near_floor_frames);
+      EXPECT_LE(run.final, row.link * 1.06);
+      continue;
+    }
+    EXPECT_LE(run.lost, row.lost + k_near_floor_margin) << run.final << " kbps at the end; staging " << row.final;
+    if (run.final < row.final) {
+      EXPECT_LE(run.lost, row.lost - k_near_floor_margin) << run.final << " kbps at the end; staging " << row.final;
+    }
+  }
+  RecordProperty("near_floor_rows", static_cast<int>(reference.size()));
+  RecordProperty("near_floor_same_as_457eeef9", same);
+  RecordProperty("near_floor_less_loss_than_457eeef9", less);
+  RecordProperty("near_floor_more_loss_than_457eeef9", more);
 }
