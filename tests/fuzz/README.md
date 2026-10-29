@@ -380,11 +380,12 @@ counts only nonempty initial files.
 `fuzz_control_stream` compiles the **unchanged production** `src/control_messages.cpp`
 with the driver and calls the real control-message decoders through `control_messages.h`.
 That source is the single owner of the first byte-level decode each control-thread handler
-in `src/stream.cpp` performs; the handlers were rewritten to call it with no behaviour
-change, and `tests/unit/test_source_safety_contracts.cpp` pins that stream.cpp keeps no
-second copy. There is no networking, ENet peer, session, decryption, input injection,
-thread, configuration or persistence; `utility.h`'s endian helpers (which include
-`nlohmann/json.hpp`, the only dependency) are used unchanged.
+in `src/stream.cpp` performs; the handlers call it, and
+`tests/unit/test_source_safety_contracts.cpp` pins that stream.cpp keeps no second copy and
+that each fixed-record handler drops a short payload before acting on it. There is no
+networking, ENet peer, session, decryption, input injection, thread, configuration or
+persistence; `utility.h`'s endian helpers (which include `nlohmann/json.hpp`, the only
+dependency) are used unchanged.
 
 The input's first byte selects the message type the dispatcher would route to, and the
 rest is the payload the handler receives after the 2-byte type field is stripped. The
@@ -392,32 +393,36 @@ selector is taken `% 5` across the five decoders; an empty input has no selector
 nothing. The driver first calls `control_packet_carries_type` on the reconstructed full
 packet length, as the dispatcher does, then drives the selected decoder and consumes every
 decoded field and cipher view through a volatile result so the decode cannot be optimized
-away. Expected refusals, absent-length drops and bounded empty views are not failures; no
-decoder rule is copied into the driver.
+away. Expected refusals, absent records, absent-length drops and bounded empty views are not
+failures; the driver consumes a decoded field only when its decoder reports it present, and
+no decoder rule is copied into the driver.
 
 The five decoders and the production handler each reaches:
 
 | Selector | Message | Handler and decoder |
 | --- | --- | --- |
-| `0` | `IDX_LOSS_STATS` (`0x0201`) | `decode_loss_stats`: the fixed int32 record at offsets 0, 1, 3 |
-| `1` | `IDX_INVALIDATE_REF_FRAMES` (`0x0301`) | `decode_invalidate_ref_frames`: the two int64 frame fields |
+| `0` | `IDX_LOSS_STATS` (`0x0201`) | `decode_loss_stats`: the fixed int32 record at offsets 0, 1, 3 (16 bytes) |
+| `1` | `IDX_INVALIDATE_REF_FRAMES` (`0x0301`) | `decode_invalidate_ref_frames`: the two int64 frame fields (16 bytes) |
 | `2` | `IDX_INPUT_DATA` (`0x0206`) | `decode_input_cipher`: `input_control_cipher_fits` and the big-endian declared cipher length |
 | `3` | `IDX_ENCRYPTED` (`0x0001`) | `decode_encrypted_control`: `encrypted_control_header_present`, the LE wrapper length/seq, the runt floor and `encrypted_control_cipher_fits` |
-| `4` | `IDX_EXEC_SERVER_CMD` (`0x3000`) | `decode_server_cmd_index`: the one-byte command index |
+| `4` | `IDX_EXEC_SERVER_CMD` (`0x3000`) | `decode_server_cmd_index`: the one-byte command index (1 byte) |
 
-The loss-stats and invalidate decoders reproduce the handlers' fixed-size reads exactly,
-including that the handler reads the whole record without first checking the payload is
-long enough; a payload shorter than the record reads past its end just as the handler
-does. The input-data and encrypted decoders reproduce the handlers' own length guards, so
-their cipher views stay inside the bytes that arrived. `decode_server_cmd_index` reads one
-byte, as the handler does after its permission gate. Decoding uses `std::memcpy` into
-host-order scalars so the fuzz build's alignment check does not flag what the production
-packed-struct and `reinterpret_cast` reads did without a diagnostic; the decoded values and
-the bytes touched are identical. Periodic ping, request IDR and the Start A/B messages
-carry no parsed payload and so have no decoder; set-clipboard and file-transfer-nonce only
-check a permission and log, so they are not decoders either. The selective-FEC status
-report (`0x5502`) is the remaining typed client->host message and has its own
-`fuzz_control_fec` target above; it is not duplicated here.
+The loss-stats, invalidate and server-command decoders read a fixed-size record: 16 bytes
+for loss stats (offset 3 ends at byte 16, although slot 2 is skipped), 16 for the two
+invalidate frame fields and 1 for the command index. Each reports the record absent when
+the payload is shorter and reads nothing in that case; its handler logs a warning and drops
+the packet before any other effect, the server-command handler only after its permission
+gate. A payload holding the whole record decodes to the same values the handlers' earlier
+inline reads produced. The input-data and encrypted decoders reproduce the handlers' own
+length guards, so their cipher views stay inside the bytes that arrived. Decoding uses
+`std::memcpy` into host-order scalars so the fuzz build's alignment check does not flag what
+the production packed-struct and `reinterpret_cast` reads did without a diagnostic; for a
+payload that holds its record, the decoded values and the bytes touched are identical.
+Periodic ping, request IDR and the Start A/B messages carry no parsed payload and so have no
+decoder; set-clipboard and file-transfer-nonce only check a permission and log, so they are
+not decoders either. The selective-FEC status report (`0x5502`) is the remaining typed
+client->host message and has its own `fuzz_control_fec` target above; it is not duplicated
+here.
 
 ### Build, resource and coverage limits
 
@@ -449,7 +454,9 @@ Use the same first-failure retention and source/toolchain/binary/corpus identity
 the other targets. Adding this source claims no configure, build or campaign result, and
 these settings do not authorize a run or waive host admission. A crash this target finds is
 filed and fixed as its own issue with the reproducer kept as a regression case, separately
-from this harness; parser behaviour fixes stay out of the harness.
+from this harness; parser behaviour fixes stay out of the harness. The first smoke run's
+invalidate-ref-frames over-read reproducer is such a case: it lives in
+`tests/unit/test_control_messages.cpp`, not in the seed corpus below.
 
 ### Nine synthetic control-stream seeds
 

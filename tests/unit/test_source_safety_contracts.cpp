@@ -1894,13 +1894,23 @@ TEST(SourceSafetyContracts, ControlStreamDecodersStayAtTheirExtractedSeam) {
     std::string::npos
   );
 
-  // Each handler decodes through its seam, in the dispatcher's installation order.
+  // Each handler decodes through its seam, in the dispatcher's installation order. The three
+  // fixed-record handlers drop a payload too short for the record before logging or acting on
+  // it, and the server-command handler applies its permission gate before that check.
   std::size_t next = 0;
   for (const std::string marker : {
          "const auto decoded = decode_loss_stats(payload);",
+         "if (!decoded.present) {",
+         "\"type [IDX_LOSS_STATS]\"sv",
          "const auto frames = decode_invalidate_ref_frames(payload);",
+         "if (!frames.present) {",
+         "\"type [IDX_INVALIDATE_REF_FRAMES]\"sv",
+         "stream_stats::record_invalidate_ref_frames_request();",
          "const auto decoded = decode_input_cipher(payload);",
-         "uint8_t cmdIndex = decode_server_cmd_index(payload);",
+         "session->permission & crypto::PERM::server_cmd",
+         "const auto command = decode_server_cmd_index(payload);",
+         "if (!command.present) {",
+         "uint8_t cmdIndex = command.index;",
          "const auto wrapper = decode_encrypted_control(payload);"
        }) {
     const auto position = source.find(marker);

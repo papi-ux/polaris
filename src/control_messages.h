@@ -6,9 +6,9 @@
  * reinterprets the raw payload bytes before any side effect. These free functions carry
  * the length checks and the first byte-level decode of each such message, so the handlers
  * and an opt-in fuzz target share one owner for that decode instead of a copy. Every
- * function is total over the bytes that arrived off the wire: it reproduces the handler's
- * reads exactly, including where a handler reads a fixed-size record without first bounding
- * the payload, so behaviour is unchanged from the previous inline code.
+ * function is total over the bytes that arrived off the wire: a fixed-size record is read
+ * only when the payload is long enough to hold it, and a payload that is long enough decodes
+ * to exactly the values the previous inline reads produced.
  */
 #pragma once
 
@@ -23,6 +23,13 @@ namespace stream {
   // sizeof(stream::control_encrypted_t): LE 0x0001 header (2) + length (2) + seq (4), packed.
   // stream.cpp statically asserts this mirrors the packed struct it still defines.
   inline constexpr std::size_t encrypted_control_header_size = 8;
+
+  // The fixed records the loss-stats, invalidate-ref-frames and server-command handlers read.
+  // Loss stats reads int32 offsets 0, 1 and 3, so it needs all four slots even though it
+  // skips slot 2.
+  inline constexpr std::size_t loss_stats_record_size = 4 * sizeof(std::int32_t);
+  inline constexpr std::size_t invalidate_ref_frames_record_size = 2 * sizeof(std::int64_t);
+  inline constexpr std::size_t server_cmd_record_size = sizeof(std::uint8_t);
 
   // --- Length checks for peer-supplied control packets. Free functions with external
   // linkage so tests can drive them directly; every one is total, so a caller can hand
@@ -63,14 +70,15 @@ namespace stream {
   /**
    * @brief IDX_LOSS_STATS: the lost-packet count, elapsed milliseconds and last good frame.
    *
-   * The handler reads a fixed little-endian int32 record at offsets 0, 1 and 3 with no
-   * length check, so this reproduces those reads unbounded; a payload shorter than 16
-   * bytes reads past its end exactly as the handler does.
+   * The handler reads a fixed little-endian int32 record at offsets 0, 1 and 3.
+   * `present` is false when the payload is shorter than loss_stats_record_size; the handler
+   * warns and drops it, and nothing past the payload is read.
    */
   struct loss_stats_t {
-    std::int32_t count;
-    std::int32_t time_ms;
-    std::int32_t last_good_frame;
+    bool present = false;
+    std::int32_t count = 0;
+    std::int32_t time_ms = 0;
+    std::int32_t last_good_frame = 0;
   };
 
   loss_stats_t decode_loss_stats(std::string_view payload);
@@ -78,12 +86,13 @@ namespace stream {
   /**
    * @brief IDX_INVALIDATE_REF_FRAMES: the first and last frame of the invalidated range.
    *
-   * Like loss stats, the handler reads two int64 fields with no length check, so a
-   * payload shorter than 16 bytes reads past its end exactly as the handler does.
+   * The handler reads two int64 fields. `present` is false when the payload is shorter
+   * than invalidate_ref_frames_record_size; the handler warns and drops it.
    */
   struct invalidate_ref_frames_t {
-    std::int64_t first_frame;
-    std::int64_t last_frame;
+    bool present = false;
+    std::int64_t first_frame = 0;
+    std::int64_t last_frame = 0;
   };
 
   invalidate_ref_frames_t decode_invalidate_ref_frames(std::string_view payload);
@@ -127,8 +136,13 @@ namespace stream {
   /**
    * @brief IDX_EXEC_SERVER_CMD: the one-byte server command index.
    *
-   * The handler reads a single byte with no length check (after its permission gate), so an
-   * empty payload reads past its end exactly as the handler does.
+   * The handler reads a single byte after its permission gate. `present` is false for an
+   * empty payload; the handler warns and drops it.
    */
-  std::uint8_t decode_server_cmd_index(std::string_view payload);
+  struct server_cmd_index_t {
+    bool present = false;
+    std::uint8_t index = 0;
+  };
+
+  server_cmd_index_t decode_server_cmd_index(std::string_view payload);
 }  // namespace stream

@@ -54,18 +54,24 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
 
   switch (selector % 5u) {
     case 0: {
-      // IDX_LOSS_STATS: fixed int32 record read without a length guard.
+      // IDX_LOSS_STATS: the fixed int32 record, or absent when the payload is shorter.
       const auto stats = stream::decode_loss_stats(payload);
-      result ^= static_cast<std::uint32_t>(stats.count);
-      result ^= static_cast<std::uint32_t>(stats.time_ms);
-      result ^= static_cast<std::uint32_t>(stats.last_good_frame);
+      result ^= stats.present ? 2u : 0u;
+      if (stats.present) {
+        result ^= static_cast<std::uint32_t>(stats.count);
+        result ^= static_cast<std::uint32_t>(stats.time_ms);
+        result ^= static_cast<std::uint32_t>(stats.last_good_frame);
+      }
       break;
     }
     case 1: {
-      // IDX_INVALIDATE_REF_FRAMES: two int64 fields read without a length guard.
+      // IDX_INVALIDATE_REF_FRAMES: the two int64 fields, or absent when the payload is shorter.
       const auto frames = stream::decode_invalidate_ref_frames(payload);
-      result ^= static_cast<std::uint64_t>(frames.first_frame);
-      result ^= static_cast<std::uint64_t>(frames.last_frame);
+      result ^= frames.present ? 2u : 0u;
+      if (frames.present) {
+        result ^= static_cast<std::uint64_t>(frames.first_frame);
+        result ^= static_cast<std::uint64_t>(frames.last_frame);
+      }
       break;
     }
     case 2: {
@@ -93,8 +99,12 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
       break;
     }
     case 4: {
-      // IDX_EXEC_SERVER_CMD: the one-byte command index read without a length guard.
-      result ^= stream::decode_server_cmd_index(payload);
+      // IDX_EXEC_SERVER_CMD: the one-byte command index, or absent for an empty payload.
+      const auto command = stream::decode_server_cmd_index(payload);
+      result ^= command.present ? 2u : 0u;
+      if (command.present) {
+        result ^= command.index;
+      }
       break;
     }
   }

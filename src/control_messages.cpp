@@ -2,12 +2,12 @@
  * @file src/control_messages.cpp
  * @brief Preserve the control-thread handlers' length checks and first byte-level decode.
  *
- * Each decoder reproduces exactly what its handler lambda in stream.cpp read inline. Reads
- * are done with std::memcpy into host-order scalars so the fuzz build's alignment checks do
- * not flag what the packed-struct and reinterpret_cast reads performed without diagnostic;
- * the decoded values and the bytes touched are identical to the handler's. No bounds check
- * is added or removed: a handler that read a fixed record without a length guard is mirrored
- * reading the same bytes, so an over-read remains an over-read.
+ * Each decoder reproduces what its handler lambda in stream.cpp read inline. Reads are done
+ * with std::memcpy into host-order scalars so the fuzz build's alignment checks do not flag
+ * what the packed-struct and reinterpret_cast reads performed without diagnostic; for a
+ * payload that holds its record, the decoded values and the bytes touched are identical to
+ * the handler's. A fixed-size record is read only when the payload holds all of it; a shorter
+ * payload is reported as absent so the handler drops it before reading past what arrived.
  */
 #include "control_messages.h"
 #include "utility.h"
@@ -39,9 +39,13 @@ namespace stream {
   }
 
   loss_stats_t decode_loss_stats(std::string_view payload) {
+    loss_stats_t stats;
+    if (payload.size() < loss_stats_record_size) {
+      return stats;
+    }
+    stats.present = true;
     // Handler: int32_t *stats = (int32_t *) payload.data(); stats[0], stats[1], stats[3].
     const char *base = payload.data();
-    loss_stats_t stats {};
     std::memcpy(&stats.count, base + 0 * sizeof(std::int32_t), sizeof(std::int32_t));
     std::memcpy(&stats.time_ms, base + 1 * sizeof(std::int32_t), sizeof(std::int32_t));
     std::memcpy(&stats.last_good_frame, base + 3 * sizeof(std::int32_t), sizeof(std::int32_t));
@@ -49,9 +53,13 @@ namespace stream {
   }
 
   invalidate_ref_frames_t decode_invalidate_ref_frames(std::string_view payload) {
+    invalidate_ref_frames_t frames;
+    if (payload.size() < invalidate_ref_frames_record_size) {
+      return frames;
+    }
+    frames.present = true;
     // Handler: std::int64_t *frames = (std::int64_t *) payload.data(); frames[0], frames[1].
     const char *base = payload.data();
-    invalidate_ref_frames_t frames {};
     std::memcpy(&frames.first_frame, base + 0 * sizeof(std::int64_t), sizeof(std::int64_t));
     std::memcpy(&frames.last_frame, base + 1 * sizeof(std::int64_t), sizeof(std::int64_t));
     return frames;
@@ -115,10 +123,14 @@ namespace stream {
     return result;
   }
 
-  std::uint8_t decode_server_cmd_index(std::string_view payload) {
+  server_cmd_index_t decode_server_cmd_index(std::string_view payload) {
+    server_cmd_index_t command;
+    if (payload.size() < server_cmd_record_size) {
+      return command;
+    }
+    command.present = true;
     // Handler: uint8_t cmdIndex = *(uint8_t*)payload.data();
-    std::uint8_t index;
-    std::memcpy(&index, payload.data(), sizeof(index));
-    return index;
+    std::memcpy(&command.index, payload.data(), sizeof(command.index));
+    return command;
   }
 }  // namespace stream

@@ -1379,6 +1379,12 @@ namespace stream {
 
     server->map(packetTypes[IDX_LOSS_STATS], [&](session_t *session, const std::string_view &payload) {
       const auto decoded = decode_loss_stats(payload);
+      if (!decoded.present) {
+        BOOST_LOG(warning) << "Control: loss stats packet carries "sv << payload.size()
+                           << " bytes, too few for its "sv << loss_stats_record_size << "-byte record"sv;
+        return;
+      }
+
       auto count = decoded.count;
       std::chrono::milliseconds t {decoded.time_ms};
 
@@ -1437,6 +1443,12 @@ namespace stream {
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
       const auto frames = decode_invalidate_ref_frames(payload);
+      if (!frames.present) {
+        BOOST_LOG(warning) << "Control: invalidate ref frames packet carries "sv << payload.size()
+                           << " bytes, too few for its "sv << invalidate_ref_frames_record_size << "-byte record"sv;
+        return;
+      }
+
       auto firstFrame = frames.first_frame;
       auto lastFrame = frames.last_frame;
 
@@ -1501,7 +1513,13 @@ namespace stream {
         return;
       }
 
-      uint8_t cmdIndex = decode_server_cmd_index(payload);
+      const auto command = decode_server_cmd_index(payload);
+      if (!command.present) {
+        BOOST_LOG(warning) << "Control: server command packet is too small to carry a command index"sv;
+        return;
+      }
+
+      uint8_t cmdIndex = command.index;
 
       if (cmdIndex < config::sunshine.server_cmds.size()) {
         const auto& cmd = config::sunshine.server_cmds[cmdIndex];
