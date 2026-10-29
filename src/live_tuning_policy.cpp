@@ -16,6 +16,7 @@ namespace live_tuning_policy {
     constexpr double MIN_LOSS = 0.002;  // the smallest loss rate any test assumes
     constexpr double REACT_EXCESS = 0.015;  // loss this far over the expected level is worth a probe
     constexpr double MILD_LOSS = 0.045;  // deep-sample loss not clearly this far over the background is rate-independent
+    constexpr double HEAVY_LOSS = 0.2;  // loss this heavy is the link's, whatever a lower rate shows
     constexpr double ABSORB_EXCESS = 0.02;  // while backing off, loss this close to the background only updates it
     constexpr double CLIMB_LOSSY = 0.03;  // a raise is lossy at this much loss over its floor
     constexpr double FIRST_STEP = 0.6;
@@ -221,6 +222,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
+    measured_.clear();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
     queue_hold_below_.reset();
@@ -236,9 +238,85 @@ namespace live_tuning_policy {
     set_target(kbps, why, now_ms);
   }
 
+  void policy_t::note_measured(int kbps, double expected, double lost) {
+    auto &[frames, lst] = measured_[kbps];
+    frames += expected;
+    lst += lost;
+  }
+
+  // The lowest rate from which everything measured above kbps, pooled from the top, lost significantly more.
+  std::optional<int> policy_t::lossier_above(int kbps, std::pair<double, double> &above) const {
+    const auto here = measured_.find(kbps);
+    if (here == measured_.end() || here->second.first <= 0.0) {
+      return std::nullopt;
+    }
+    std::optional<int> ceiling;
+    std::pair<double, double> pooled {0.0, 0.0};
+    for (auto it = measured_.rbegin(); it != measured_.rend() && it->first > kbps; ++it) {
+      pooled.first += it->second.first;
+      pooled.second += it->second.second;
+      if (z_lower(here->second.second, here->second.first, pooled.second, pooled.first, std::max(2.0, disp())) >= 2.0) {
+        ceiling = it->first;
+        above = pooled;
+      }
+    }
+    return ceiling;
+  }
+
+  bool policy_t::clearly_over(double lost, double frames, double level) const {
+    const double r = frames > 0.0 ? lost / frames : 0.0;
+    const double se = std::sqrt(std::max(r, 1e-4) * std::max(2.0, disp()) / std::max(frames, 1.0));
+    return r - 2.0 * se > level;
+  }
+
+  // Where a loss probe may step from here, given what it lost here; nullopt when it may not go lower.
+  std::optional<int> policy_t::loss_step(double kbps, double lost, double frames) const {
+    if (kbps > floor_) {
+      return static_cast<int>(kbps);
+    }
+    // A probe that would reach the floor first stops a climb step above it, to compare with the rate above.
+    const int near_floor = static_cast<int>(floor_ * CLIMB_STEP);
+    if (target_ > near_floor) {
+      return near_floor;
+    }
+    // The floor itself takes clearly heavy loss, or loss that still falls with the rate here: nothing measured
+    // above this episode, or the nearest rate above lost significantly more.
+    const auto above = measured_.upper_bound(target_);
+    if (clearly_over(lost, frames, HEAVY_LOSS) || above == measured_.end() ||
+        z_lower(lost, frames, above->second.second, above->second.first, std::max(2.0, disp())) >= 2.0) {
+      return static_cast<int>(kbps);
+    }
+    return std::nullopt;
+  }
+
   void policy_t::rate_independent(double rate, std::int64_t now_ms, std::string_view why) {
+    std::pair<double, double> above {0.0, 0.0};
+    if (const auto ceiling = lossier_above(target_, above)) {
+      // A higher rate this episode lost significantly more: the loss depends on the rate above here.
+      // Settle on the highest measured rate under that ceiling that loses no more than this one.
+      const auto &here = measured_.at(target_);
+      int settle = target_;
+      for (const auto &[kbps, stats] : measured_) {
+        if (kbps > target_ && kbps < *ceiling &&
+            z_lower(here.second, here.first, stats.second, stats.first, std::max(2.0, disp())) < 2.0) {
+          settle = kbps;
+        }
+      }
+      const auto &at = measured_.at(settle);
+      lo_loss_ = at.second / at.first;
+      hi_ = *ceiling;
+      hi_is_queue_ = false;
+      hi_loss_ = above.second / above.first;
+      hi_stats_ = above;
+      hi_rechecked_ = false;
+      enter_hold(now_ms, settle);
+      return;
+    }
     hold_failed_kbps_.reset();
     background_ = std::max(background_, rate);
+    // Whether this background goes again is judged on the reports after it was learned.
+    normal_stats_ = {0.0, 0.0};
+    normal_reports_ = 0;
     reset_baseline(background_);
     backoff_ = BACKOFF_REPORTS;
     to_normal(now_ms, std::max(r0_, episode_start_), why);
@@ -254,6 +332,10 @@ namespace live_tuning_policy {
     fec_revert();
     if (state_ == state_e::normal) {
       episode_start_ = target_;
+      measured_.clear();
+      for (const auto &[expected, lost] : run_) {
+        note_measured(target_, expected, lost);
+      }
     }
     if (state_ == state_e::hold) {
       hold_failed_kbps_ = target_;
@@ -288,7 +370,13 @@ namespace live_tuning_policy {
       hi_stats_.second += lost;
     }
     state_ = state_e::descend;
-    set_target(target_ * FIRST_STEP, why, now_ms);
+    const auto step = loss_step(target_ * FIRST_STEP, hi_stats_.second, hi_stats_.first);
+    if (!step) {
+      // No room to probe under this rate: judge it here.
+      rate_independent(l0_, now_ms, "rate_independent");
+      return;
+    }
+    set_target(*step, why, now_ms);
     test_ = make_sprt(l0_, std::max(l0_ / 3.0, MIN_LOSS), 0, 0);
   }
 
@@ -323,11 +411,19 @@ namespace live_tuning_policy {
       const auto [frames, lost] = deep_stats_;
       const double r = frames > 0.0 ? lost / frames : 0.0;
       const double se = std::sqrt(std::max(r, 1e-4) * std::max(2.0, disp()) / std::max(frames, 1.0));
-      if (r - 2.0 * se - background_ <= MILD_LOSS) {
+      // Heavy loss far down that is no lighter than at the first step does not depend on the rate either.
+      const bool lighter = z_lower(lost, frames, hi_stats_.second, hi_stats_.first, std::max(2.0, disp())) >= 2.0;
+      if (r - 2.0 * se - background_ <= MILD_LOSS || (!lighter && !clearly_over(lost, frames, HEAVY_LOSS))) {
         // The same loss far under the rate, not clearly heavier: it does not depend on the rate.
         rate_independent(probe_rate(), now_ms, "rate_independent");
         return;
       }
+    }
+    if (phase_ == phase_e::down && !clearly_over(test_->lost(), test_->frames(), HEAVY_LOSS) &&
+        z_lower(test_->lost(), test_->frames(), hi_stats_.second, hi_stats_.first, std::max(2.0, disp())) < 2.0) {
+      // Halving no longer lightens the loss: below here it does not depend on the rate.
+      rate_independent(probe_rate(), now_ms, "rate_independent");
+      return;
     }
     // Heavy loss even far down: keep halving, as far as the floor.
     phase_ = phase_e::down;
@@ -338,7 +434,12 @@ namespace live_tuning_policy {
       enter_hold(now_ms, target_);
       return;
     }
-    set_target(target_ * STEP, "descend", now_ms);
+    const auto step = loss_step(target_ * STEP, hi_stats_.second, hi_stats_.first);
+    if (!step) {
+      enter_hold(now_ms, target_);
+      return;
+    }
+    set_target(*step, "descend", now_ms);
     test_ = make_sprt(hi_loss_, std::max(hi_loss_ / 3.0, MIN_LOSS), 0, 0);
   }
 
@@ -538,6 +639,9 @@ namespace live_tuning_policy {
     if (backoff_ > 0) {
       --backoff_;
     }
+    if (state_ != state_e::normal) {
+      note_measured(target_, expected, lost);
+    }
     fec_report(expected, lost, fec_first);
     const auto st = state_;
     if (st == state_e::descend) {
@@ -563,7 +667,7 @@ namespace live_tuning_policy {
       if (loss > p_background() + REACT_EXCESS) {
         rtt_cut_lossy_ = true;
       }
-      if (loss > std::max(0.2, p_background() + MILD_LOSS)) {
+      if (loss > std::max(HEAVY_LOSS, p_background() + MILD_LOSS)) {
         // Heavy loss is stronger evidence than the queue: the loss probe takes it from here.
         state_ = state_e::hold;
         run_ = {{expected, lost}, {expected, lost}};
@@ -614,6 +718,12 @@ namespace live_tuning_policy {
       if (++hold_reports_ >= HOLD_CHECK_REPORTS) {
         const auto [frames, lst] = hold_stats_;
         const double rate = lst / frames;
+        if (target_ > floor_ && clearly_over(lst, frames, HEAVY_LOSS)) {
+          // Heavy loss that stays at a hold is the link's: probe under it, on this hold's evidence.
+          run_ = {hold_stats_};
+          begin_descent(now_ms, "descend_heavy_at_hold", rate);
+          return;
+        }
         const auto [hf, hl] = hi_stats_;
         const bool real_loss = !hi_is_queue_ && hf > 0.0 && hl / hf >= background_ + REACT_EXCESS;
         if (hi_ && real_loss && z_lower(lst, frames, hl, hf, std::max(2.0, disp())) < 2.0) {
@@ -839,6 +949,7 @@ namespace live_tuning_policy {
 
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
     fec_revert();
+    measured_.clear();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
     queue_hold_below_.reset();
@@ -883,6 +994,7 @@ namespace live_tuning_policy {
 
   void policy_t::rebase(int base_kbps, int floor_kbps) {
     fec_revert();
+    measured_.clear();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
     queue_hold_below_.reset();
