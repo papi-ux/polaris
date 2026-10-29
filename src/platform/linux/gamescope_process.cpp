@@ -385,7 +385,13 @@ namespace stream_runtime::gamescope_process {
       return false;
     }
 
-    using socket_inode_map_t = std::unordered_map<std::string, std::optional<std::uint64_t>>;
+    struct unix_socket_rows_t {
+      std::optional<std::uint64_t> listener;
+      bool ambiguous = false;
+    };
+
+    // Every pathname with a /proc/net/unix row, whether or not it selects a listener.
+    using socket_inode_map_t = std::unordered_map<std::string, unix_socket_rows_t>;
 
     std::optional<socket_inode_map_t> read_unix_socket_inodes(
       const fs::path &proc_net_unix
@@ -411,17 +417,27 @@ namespace stream_runtime::gamescope_process {
         }
         std::string path;
         std::getline(row >> std::ws, path);
-        const auto inode = parse_integer<std::uint64_t>(inode_text);
-        if (inode && !path.empty()) {
-          const auto [entry, inserted] = inodes.emplace(path, *inode);
-          if (!inserted) {
-            // An unlinked old listener and a rebound successor can coexist in
-            // /proc/net/unix with the same pathname. Path identity is
-            // ambiguous in that state, so fail closed instead of selecting a
-            // row based on kernel iteration order.
-            entry->second.reset();
-          }
+        if (path.empty()) {
+          continue;
         }
+        auto &rows = inodes[path];
+        const auto inode = parse_integer<std::uint64_t>(inode_text);
+        // Every connection made through the pathname adds a row carrying the
+        // listener's path: queued (02, inode 0) until accepted, then connected
+        // (03). Those rows are clients, not bound generations.
+        if (inode && flags == "00000000" && (state == "02" || state == "03")) {
+          continue;
+        }
+        // An unlinked old listener and a rebound successor can coexist in
+        // /proc/net/unix with the same pathname. Path identity is ambiguous in
+        // that state, or with any row other than the single listener (flags
+        // 00010000, state 01), so fail closed instead of selecting a row based
+        // on kernel iteration order.
+        if (!inode || flags != "00010000" || state != "01" || rows.listener) {
+          rows.ambiguous = true;
+          continue;
+        }
+        rows.listener = *inode;
       }
       return inodes;
     }
@@ -545,10 +561,10 @@ namespace stream_runtime::gamescope_process {
       const fs::path &path
     ) {
       const auto found = inodes.find(path.string());
-      if (found == inodes.end() || !found->second) {
+      if (found == inodes.end() || found->second.ambiguous) {
         return std::nullopt;
       }
-      return *found->second;
+      return found->second.listener;
     }
 
   }  // namespace
@@ -832,7 +848,7 @@ namespace stream_runtime::gamescope_process {
         continue;
       }
       // Routing by pathname is authoritative only when the kernel exposes one
-      // unambiguous inode for that X socket. Duplicate rows can represent an
+      // unambiguous listener for that X socket. A second listener can be an
       // unlinked predecessor plus a successor rebind.
       const auto inode = inode_for_path(*x11_inodes, entry.path());
       if (!inode) {

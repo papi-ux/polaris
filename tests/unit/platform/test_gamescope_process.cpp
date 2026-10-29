@@ -105,6 +105,13 @@ namespace {
                    std::to_string(inode) + " " + path.string() + "\n";
     }
 
+    // Kernel shapes on the listener's path: connected (flags 00000000, state 03),
+    // queued (00000000, 02, inode 0), bound but not listening (00000000, 01).
+    void add_unix_row(const std::string &flags, const std::string &state, std::uint64_t inode, const std::string &path) {
+      unix_rows += "0000000000000000: 00000003 00000000 " + flags + " 0001 " + state + " " +
+                   std::to_string(inode) + " " + path + "\n";
+    }
+
     void set_cgroup(int pid, const std::string &cgroup) const {
       std::ofstream(proc / std::to_string(pid) / "cgroup") << cgroup << '\n';
     }
@@ -135,6 +142,33 @@ namespace {
       .x11_socket_dir = tree.x11,
     };
   }
+
+  // gamescope 410 can hold gamescope-0 as 500 and the server end of a
+  // connection as 510; its Xwayland 411 can hold X4 as 604 and a connection as
+  // 614. Each test supplies the /proc/net/unix rows.
+  struct owned_socket_tree_t {
+    fake_proc_tree_t tree;
+    fs::path gamescope_socket = tree.runtime / "gamescope-0";
+    fs::path x4 = tree.x11 / "X4";
+    gp::marker_t marker {
+      .pid = 410, .start_time = 9001, .role = "runtime", .executable = "/usr/bin/gamescope"
+    };
+
+    owned_socket_tree_t() {
+      std::ofstream(gamescope_socket).put('\n');
+      std::ofstream(x4).put('\n');
+      tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend=headless"}, {500, 510});
+      tree.add_process(411, 410, 9002, {"/usr/bin/Xwayland", ":4"}, {604, 614});
+    }
+
+    bool owns_gamescope_socket() const {
+      return gp::process_tree_owns_socket(marker, gamescope_socket, paths_for(tree));
+    }
+
+    std::optional<std::string> x11_display() const {
+      return gp::discover_owned_x11_display(marker, paths_for(tree));
+    }
+  };
 }  // namespace
 
 TEST(GamescopeProcessOwnershipTests, MarkerRequiresExactGenerationRoleAndHeadlessGamescopeIdentity) {
@@ -356,6 +390,145 @@ TEST(GamescopeProcessOwnershipTests, FailsClosedOnDuplicateSocketPathRows) {
   EXPECT_TRUE(gp::socket_has_live_holder(gamescope_socket, paths_for(tree)));
   EXPECT_FALSE(gp::remove_orphan_socket(gamescope_socket, paths_for(tree)));
   EXPECT_TRUE(fs::exists(gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, SelectsTheSingleListeningRow) {
+  owned_socket_tree_t owned;
+  owned.tree.add_unix_socket(500, owned.gamescope_socket);
+  owned.tree.add_unix_socket(604, owned.x4);
+  owned.tree.flush_unix_sockets();
+
+  EXPECT_TRUE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::optional<std::string>(":4"));
+}
+
+TEST(GamescopeProcessOwnershipTests, PathnameConnectionsDoNotHideTheListener) {
+  owned_socket_tree_t owned;
+  // Wayland clients always connect by pathname, and so does an X client that
+  // cannot reach the abstract socket. Each connection adds a row carrying the
+  // listener's path: queued with inode 0 until accepted, then connected.
+  owned.tree.add_unix_socket(500, owned.gamescope_socket);
+  owned.tree.add_unix_row("00000000", "03", 510, owned.gamescope_socket.string());
+  owned.tree.add_unix_row("00000000", "03", 511, owned.gamescope_socket.string());
+  owned.tree.add_unix_row("00000000", "02", 0, owned.gamescope_socket.string());
+  owned.tree.add_unix_socket(604, owned.x4);
+  owned.tree.add_unix_row("00000000", "03", 614, owned.x4.string());
+  owned.tree.add_unix_row("00000000", "03", 615, owned.x4.string());
+  owned.tree.add_unix_row("00000000", "02", 0, owned.x4.string());
+  owned.tree.flush_unix_sockets();
+
+  EXPECT_TRUE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::optional<std::string>(":4"));
+  // A connection still references the pathname, so it is never reclaimable.
+  std::ofstream(owned.gamescope_socket.string() + ".lock").put('\n');
+  EXPECT_TRUE(gp::socket_has_live_holder(owned.gamescope_socket, paths_for(owned.tree)));
+  EXPECT_FALSE(gp::remove_orphan_socket(owned.gamescope_socket, paths_for(owned.tree)));
+  EXPECT_TRUE(fs::exists(owned.gamescope_socket));
+}
+
+TEST(GamescopeProcessOwnershipTests, AConnectionBeforeTheFinalCheckKeepsTheListener) {
+  owned_socket_tree_t owned;
+  owned.tree.add_unix_socket(500, owned.gamescope_socket);
+  owned.tree.add_unix_socket(604, owned.x4);
+  owned.tree.flush_unix_sockets();
+  auto paths = paths_for(owned.tree);
+  paths.before_socket_ownership_return_for_tests = [&]() {
+    owned.tree.add_unix_row("00000000", "03", 510, owned.gamescope_socket.string());
+    owned.tree.flush_unix_sockets();
+  };
+  paths.before_x11_return_for_tests = [&]() {
+    owned.tree.add_unix_row("00000000", "03", 614, owned.x4.string());
+    owned.tree.flush_unix_sockets();
+  };
+
+  EXPECT_TRUE(gp::process_tree_owns_socket(owned.marker, owned.gamescope_socket, paths));
+  EXPECT_EQ(gp::discover_owned_x11_display(owned.marker, paths), std::optional<std::string>(":4"));
+}
+
+TEST(GamescopeProcessOwnershipTests, ASecondListenerFailsClosedBesideConnections) {
+  owned_socket_tree_t owned;
+  // An unlinked listener and its rebound successor are both listening rows.
+  owned.tree.add_unix_socket(500, owned.gamescope_socket);
+  owned.tree.add_unix_row("00000000", "03", 510, owned.gamescope_socket.string());
+  owned.tree.add_unix_row("00010000", "01", 501, owned.gamescope_socket.string());
+  owned.tree.add_unix_socket(604, owned.x4);
+  owned.tree.add_unix_row("00000000", "03", 614, owned.x4.string());
+  owned.tree.add_unix_row("00010000", "01", 605, owned.x4.string());
+  owned.tree.flush_unix_sockets();
+
+  EXPECT_FALSE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::nullopt);
+  EXPECT_TRUE(gp::socket_has_live_holder(owned.gamescope_socket, paths_for(owned.tree)));
+
+  // A successor that binds before the final check is refused as well.
+  owned.tree.unix_rows.clear();
+  owned.tree.add_unix_socket(500, owned.gamescope_socket);
+  owned.tree.add_unix_socket(604, owned.x4);
+  owned.tree.flush_unix_sockets();
+  auto paths = paths_for(owned.tree);
+  paths.before_socket_ownership_return_for_tests = [&]() {
+    owned.tree.add_unix_row("00010000", "01", 501, owned.gamescope_socket.string());
+    owned.tree.flush_unix_sockets();
+  };
+  paths.before_x11_return_for_tests = [&]() {
+    owned.tree.add_unix_row("00010000", "01", 605, owned.x4.string());
+    owned.tree.flush_unix_sockets();
+  };
+  EXPECT_FALSE(gp::process_tree_owns_socket(owned.marker, owned.gamescope_socket, paths));
+  EXPECT_EQ(gp::discover_owned_x11_display(owned.marker, paths), std::nullopt);
+}
+
+TEST(GamescopeProcessOwnershipTests, AbstractRowsNeverStandInForThePathname) {
+  owned_socket_tree_t owned;
+  // Xwayland also listens on the abstract name "@/tmp/.X11-unix/X<n>", where
+  // most X clients connect. Its rows never carry the pathname.
+  const auto abstract_gamescope = "@" + owned.gamescope_socket.string();
+  const auto abstract_x4 = "@" + owned.x4.string();
+  owned.tree.add_unix_row("00010000", "01", 520, abstract_gamescope);
+  owned.tree.add_unix_row("00000000", "03", 521, abstract_gamescope);
+  owned.tree.add_unix_row("00010000", "01", 624, abstract_x4);
+  owned.tree.add_unix_row("00000000", "03", 625, abstract_x4);
+  owned.tree.add_unix_row("00000000", "03", 626, abstract_x4);
+  owned.tree.flush_unix_sockets();
+
+  EXPECT_FALSE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::nullopt);
+
+  owned.tree.add_unix_socket(500, owned.gamescope_socket);
+  owned.tree.add_unix_socket(604, owned.x4);
+  owned.tree.flush_unix_sockets();
+  EXPECT_TRUE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::optional<std::string>(":4"));
+}
+
+TEST(GamescopeProcessOwnershipTests, OnlyAListeningRowCanBeSelected) {
+  owned_socket_tree_t owned;
+  // A connection without its listener, held by the owned processes: nothing
+  // can connect through the pathname any more.
+  owned.tree.add_unix_row("00000000", "03", 510, owned.gamescope_socket.string());
+  owned.tree.add_unix_row("00000000", "03", 614, owned.x4.string());
+  owned.tree.flush_unix_sockets();
+  EXPECT_FALSE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::nullopt);
+  EXPECT_TRUE(gp::socket_has_live_holder(owned.gamescope_socket, paths_for(owned.tree)));
+
+  // Bound but not listening.
+  owned.tree.unix_rows.clear();
+  owned.tree.add_unix_row("00000000", "01", 500, owned.gamescope_socket.string());
+  owned.tree.add_unix_row("00000000", "01", 604, owned.x4.string());
+  owned.tree.flush_unix_sockets();
+  EXPECT_FALSE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::nullopt);
+
+  // Any other row shape beside the listener fails closed.
+  owned.tree.unix_rows.clear();
+  owned.tree.add_unix_socket(500, owned.gamescope_socket);
+  owned.tree.add_unix_row("00000000", "04", 0, owned.gamescope_socket.string());
+  owned.tree.add_unix_socket(604, owned.x4);
+  owned.tree.add_unix_row("00000000", "04", 0, owned.x4.string());
+  owned.tree.flush_unix_sockets();
+  EXPECT_FALSE(owned.owns_gamescope_socket());
+  EXPECT_EQ(owned.x11_display(), std::nullopt);
 }
 
 TEST(GamescopeProcessOwnershipTests, ReclaimsFilesystemResidueWithoutListener) {
