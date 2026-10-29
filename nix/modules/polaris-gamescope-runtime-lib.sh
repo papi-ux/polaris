@@ -412,15 +412,26 @@ polaris_pid_related_to_root() {
 }
 
 polaris_unique_unix_socket_inode() {
-  local wanted="$1" inode path count=0 selected=
+  local wanted="$1" flags state inode path selected=
   [ -r "$(polaris_proc_net_unix)" ] || return 1
-  while read -r _ _ _ _ _ _ inode path _; do
+  # /proc/net/unix columns: num ref protocol flags type state inode path …
+  # Every connection made through the pathname adds a row carrying the
+  # listener's path: queued (02, inode 0) until accepted, then connected (03).
+  # Those rows are clients, not bound generations. Select the single listening
+  # row (flags 00010000, state 01) and refuse a second listener or any other
+  # row shape, which may be an unlink/rebind generation.
+  while read -r _ _ _ flags _ state inode path _; do
     [ "$path" = "$wanted" ] || continue
     case "$inode" in ''|*[!0-9]*) return 1 ;; esac
-    count=$((count + 1))
+    case "$flags:$state" in
+      00000000:02|00000000:03) continue ;;
+      00010000:01) ;;
+      *) return 1 ;;
+    esac
+    [ -z "$selected" ] || return 1
     selected="$inode"
   done <"$(polaris_proc_net_unix)" || return 1
-  [ "$count" -eq 1 ] || return 1
+  [ -n "$selected" ] || return 1
   printf '%s\n' "$selected"
 }
 

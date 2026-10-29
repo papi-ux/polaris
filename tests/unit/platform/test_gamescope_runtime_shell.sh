@@ -646,6 +646,68 @@ if polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle >/de
 fi
 mv "$work/unix.unique" "$POLARIS_PROC_NET_UNIX"
 
+# Each connection made through an X pathname adds a row carrying the listener's
+# path: queued (02, inode 0) until accepted, then connected (03). A client that
+# cannot use the abstract socket must not hold a single owned listener closed.
+cp "$POLARIS_PROC_NET_UNIX" "$work/unix.unique"
+[ "$(polaris_unique_unix_socket_inode "$POLARIS_X11_SOCKET_DIR/X4")" = 604 ] ||
+  fail "single X listener was not selected"
+printf '0000000000000000: 00000003 00000000 00000000 0001 03 640 %s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000002 00000000 00000000 0001 03 641 %s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000003 00000000 00000000 0001 02 0 %s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+[ "$(polaris_unique_unix_socket_inode "$POLARIS_X11_SOCKET_DIR/X4")" = 604 ] ||
+  fail "accepted pathname connections hid the single X listener"
+[ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
+  fail "accepted pathname connections held the owned Xwayland gate closed"
+rm -f "$work/run/polaris-gamescope.env"
+polaris_write_runtime_env "$work/run/polaris-gamescope.pid" gamescope-0 idle "$work/run" ||
+  fail "accepted pathname connections blocked runtime env publication"
+grep -qx 'DISPLAY=:4' "$work/run/polaris-gamescope.env" ||
+  fail "accepted pathname connections changed the published display"
+
+# A second listening generation stays ambiguous with or without connections.
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 605 %s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+if polaris_unique_unix_socket_inode "$POLARIS_X11_SOCKET_DIR/X4" >/dev/null \
+    || polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle >/dev/null; then
+  fail "second X listener was accepted beside pathname connections"
+fi
+cp "$work/unix.unique" "$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 605 %s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+if polaris_unique_unix_socket_inode "$POLARIS_X11_SOCKET_DIR/X4" >/dev/null \
+    || polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle >/dev/null; then
+  fail "two X listeners on one pathname were accepted"
+fi
+
+# Abstract-socket rows carry an @-prefixed name and never match the pathname.
+cp "$work/unix.unique" "$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000002 00000000 00010000 0001 01 614 @%s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000003 00000000 00000000 0001 03 650 @%s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+printf '0000000000000000: 00000003 00000000 00000000 0001 03 651 @%s\n' \
+  "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+[ "$(polaris_unique_unix_socket_inode "$POLARIS_X11_SOCKET_DIR/X4")" = 604 ] ||
+  fail "abstract-socket rows changed the selected X listener"
+[ "$(polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle)" = :4 ] ||
+  fail "abstract-socket clients held the owned Xwayland gate closed"
+
+# A held socket that is not listening, whether not yet listening or a leftover
+# connection after its listener closed, cannot accept a client on that display.
+for shape in '00000000 0001 01' '00000000 0001 03'; do
+  grep -vF " 604 $POLARIS_X11_SOCKET_DIR/X4" "$work/unix.unique" >"$POLARIS_PROC_NET_UNIX"
+  printf '0000000000000000: 00000002 00000000 %s 604 %s\n' \
+    "$shape" "$POLARIS_X11_SOCKET_DIR/X4" >>"$POLARIS_PROC_NET_UNIX"
+  if polaris_discover_xwayland_display "$work/run/polaris-gamescope.pid" idle >/dev/null; then
+    fail "non-listening X socket [$shape] was published as a display"
+  fi
+done
+mv "$work/unix.unique" "$POLARIS_PROC_NET_UNIX"
+
 # Exact valid ownership is signalled by process group and only its runtime
 # metadata/socket are removed. The unrelated host X display survives.
 polaris_stop_marked_gamescope "$work/run/polaris-gamescope.pid" idle "$work/run" ||
