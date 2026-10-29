@@ -3,7 +3,8 @@
  * @brief Replays of Live Tuning's loss and queue policy against its replay bench.
  *
  * The golden replays come from tools/tests/live_tuning_policy_reference.py. The scenario tests below say what
- * each replay is for, and the statistical ones run seeds the reference never saw.
+ * each replay is for, and the statistical ones run seeds the reference never saw. The RP6 replays read the client
+ * reports two loss runs recorded on 2026-10-29, from tests/fixtures.
  */
 
 #include "src/live_tuning_policy.h"
@@ -18,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -1557,4 +1559,168 @@ TEST(LiveTuningPolicyFec, ParityStateNeverChangesTheRateDecisions) {
     EXPECT_EQ(fec.background, plain.background);
     EXPECT_EQ(fec.highest_fec, mode == 2 ? 15 : 10);
   }
+}
+
+namespace {
+
+  constexpr int RP6_BASE = 25987;
+
+  struct recorded_report_t {
+    std::int64_t at_ms;  ///< arrival, from the loss rule's install
+    double expected;
+    double lost;
+  };
+
+  /// A recorded RP6 run from tests/fixtures: every client media interval the host accepted, and its frames.
+  std::vector<recorded_report_t> rp6_trace(const std::string &name) {
+    std::ifstream input(std::filesystem::path(POLARIS_SOURCE_DIR) / "tests/fixtures" / name);
+    std::vector<recorded_report_t> reports;
+    for (std::string line; std::getline(input, line);) {
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
+      std::istringstream fields(line);
+      recorded_report_t report {};
+      fields >> report.at_ms >> report.expected >> report.lost;
+      reports.push_back(report);
+    }
+    return reports;
+  }
+
+  struct replayed_t {
+    std::vector<std::pair<std::int64_t, int>> targets;  ///< every 100 ms
+    std::vector<std::pair<std::int64_t, int>> changes;
+    int last = 0;  ///< after the final report
+  };
+
+  /// Open loop: each recorded report at its arrival, and the run's 3 ms ENet RTT every 100 ms.
+  replayed_t replay_rp6(const std::vector<recorded_report_t> &reports) {
+    live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+    replayed_t out;
+    std::size_t next = 0;
+    int last = policy.target_kbps();
+    const std::int64_t first = reports.front().at_ms - 1000;
+    for (std::int64_t now = first; now <= reports.back().at_ms; ++now) {
+      const bool poll = (now - first) % 100 == 0;
+      if (poll) {
+        policy.rtt(now, 3.0);
+      }
+      for (; next < reports.size() && reports[next].at_ms == now; ++next) {
+        policy.report(now, reports[next].expected, reports[next].lost);
+      }
+      if (policy.target_kbps() != last) {
+        last = policy.target_kbps();
+        out.changes.emplace_back(now, last);
+      }
+      if (poll) {
+        out.targets.emplace_back(now, last);
+      }
+    }
+    out.last = last;
+    return out;
+  }
+
+  /// A second at a time from t=0: the share of 124 frames each rate loses, carried so it loses exactly that, in a
+  /// report at 500 ms, and a 3 ms RTT every 100 ms. Returns the target each second.
+  std::vector<int> run_rp6(int seconds, const std::function<double(int second, int target)> &share,
+                           live_tuning_policy::policy_t &policy) {
+    std::vector<int> targets;
+    double carry = 0.0;
+    for (int i = 0; i < seconds; ++i) {
+      const std::int64_t t0 = std::int64_t {i} * 1000;
+      const double owed = 124.0 * share(i, policy.target_kbps()) + carry;
+      const double lost = std::floor(owed);
+      carry = owed - lost;
+      for (int k = 0; k < 10; ++k) {
+        if (k == 5) {
+          policy.report(t0 + 500, 124.0, lost);
+        }
+        policy.rtt(t0 + 100 * k + 50, 3.0);
+      }
+      targets.push_back(policy.target_kbps());
+    }
+    return targets;
+  }
+
+}  // namespace
+
+TEST(LiveTuningPolicyReplays, Rp6PacerOffLossKeepsTheRequestAfterOneDeepSample) {
+  // 26CE arm B, Live Tuning on with the pacer off, under 1 in 50 skbs dropped: the device took the floor at +6.2 s on
+  // one deep-sample report (18 of 126 frames) and stayed under half its request until +49.4 s. Its loss does not
+  // depend on the rate, and arm A's reports are the same loss at the request with Live Tuning off.
+  for (const std::string name : {"live-tuning-rp6-26ce-arm-b.txt", "live-tuning-rp6-26ce-arm-a.txt"}) {
+    SCOPED_TRACE(name);
+    const auto replayed = replay_rp6(rp6_trace(name));
+    int at_floor = 0;
+    int below_half = 0;
+    std::optional<int> at_10s;
+    for (const auto &[at, kbps] : replayed.targets) {
+      at_floor += kbps <= FLOOR;
+      below_half += at >= 0 && at < 180000 && kbps < RP6_BASE / 2.0;
+      if (!at_10s && at >= 10000) {
+        at_10s = kbps;
+      }
+    }
+    EXPECT_EQ(at_floor, 0);
+    // No more than 1% of the bench's 400 s run below half.
+    EXPECT_LE(below_half, 40);
+    if (name.find("arm-b") != std::string::npos) {
+      // The device was back at its request only at +49.4 s.
+      EXPECT_EQ(at_10s, RP6_BASE);
+    }
+  }
+}
+
+TEST(LiveTuningPolicyReplays, Rp6PacerOnLossDoesNotTakeItsDeepSampleToTheFloor) {
+  // B464 arm D, Live Tuning on with the pacer on: the loss grows with the rate, so a recorded report holds only at the
+  // rate it was recorded at. The replay makes the device's first two decisions on the same reports, then its deep
+  // sample at 4000 kbps (55 of 741 frames, 7.4%, against 12.7% at 15592 and 17.6% at the request) must lead neither
+  // to the floor, where the device went, nor back to the request.
+  const auto replayed = replay_rp6(rp6_trace("live-tuning-rp6-b464-arm-d.txt"));
+  ASSERT_GE(replayed.changes.size(), 2u);
+  EXPECT_EQ(replayed.changes[0].second, 15592);
+  EXPECT_NEAR(static_cast<double>(replayed.changes[0].first), 1510.0, 50.0);
+  EXPECT_EQ(replayed.changes[1].second, 4000);
+  EXPECT_NEAR(static_cast<double>(replayed.changes[1].first), 5540.0, 50.0);
+  EXPECT_GT(replayed.last, FLOOR);
+  EXPECT_LT(replayed.last, RP6_BASE);
+}
+
+TEST(LiveTuningPolicy, LossThatFallsWithTheRateStaysUnderTheRatesThatLostMore) {
+  // Arm D's loss by rate, from its reports: 17.6% at its request, 12.7% at 15592, 7.4% at 4000 and about 5% at the
+  // floor. A rate-independent result there jumps back to the request, which lost the most.
+  const auto share = [](int second, int kbps) {
+    if (second < 30) {
+      return 0.0;
+    }
+    return kbps >= 20000 ? 0.176 : kbps >= 10000 ? 0.127 : kbps > 2500 ? 0.0742 : 0.05;
+  };
+  live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+  const auto targets = run_rp6(210, share, policy);
+  const auto cut = std::find_if(targets.begin(), targets.end(), [](int t) {
+    return t < RP6_BASE;
+  });
+  ASSERT_NE(cut, targets.end());
+  EXPECT_EQ(std::count(cut, targets.end(), RP6_BASE), 0);
+  EXPECT_EQ(std::count_if(targets.begin(), targets.end(), [](int t) {
+    return t <= FLOOR;
+  }), 0);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, ABackgroundLearnedUnderLossIsJudgedOnTheReportsAfterIt) {
+  // 6% lost at every rate from second 30. The 30 clean reports before it are not evidence that it has gone.
+  live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+  double lowest = 1.0;
+  bool learned = false;
+  run_rp6(400, [&](int second, int) {
+    learned = learned || policy.background_loss() > 0.0;
+    if (learned) {
+      lowest = std::min(lowest, policy.background_loss());
+    }
+    return second < 30 ? 0.0 : 0.06;
+  }, policy);
+  ASSERT_TRUE(learned);
+  EXPECT_GE(lowest, 0.055);
+  EXPECT_EQ(policy.target_kbps(), RP6_BASE);
 }
