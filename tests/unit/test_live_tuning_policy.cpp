@@ -1591,17 +1591,21 @@ namespace {
   struct replayed_t {
     std::vector<std::pair<std::int64_t, int>> targets;  ///< every 100 ms
     std::vector<std::pair<std::int64_t, int>> changes;
-    int last = 0;  ///< after the final report
+    int last = 0;  ///< after the final report replayed
+    live_tuning_policy::state_e state = live_tuning_policy::state_e::normal;  ///< likewise
+    std::optional<int> ceiling;
+    bool ceiling_is_queue = false;
   };
 
-  /// Open loop: each recorded report at its arrival, and the run's 3 ms ENet RTT every 100 ms.
-  replayed_t replay_rp6(const std::vector<recorded_report_t> &reports) {
+  /// Open loop: each recorded report at its arrival, and the run's 3 ms ENet RTT every 100 ms, up to and including
+  /// the report at until_ms if given.
+  replayed_t replay_rp6(const std::vector<recorded_report_t> &reports, std::optional<std::int64_t> until_ms = std::nullopt) {
     live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
     replayed_t out;
     std::size_t next = 0;
     int last = policy.target_kbps();
     const std::int64_t first = reports.front().at_ms - 1000;
-    for (std::int64_t now = first; now <= reports.back().at_ms; ++now) {
+    for (std::int64_t now = first; now <= until_ms.value_or(reports.back().at_ms); ++now) {
       const bool poll = (now - first) % 100 == 0;
       if (poll) {
         policy.rtt(now, 3.0);
@@ -1618,6 +1622,9 @@ namespace {
       }
     }
     out.last = last;
+    out.state = policy.state();
+    out.ceiling = policy.ceiling_kbps();
+    out.ceiling_is_queue = policy.ceiling_is_queue();
     return out;
   }
 
@@ -1676,15 +1683,25 @@ TEST(LiveTuningPolicyReplays, Rp6PacerOnLossDoesNotTakeItsDeepSampleToTheFloor) 
   // B464 arm D, Live Tuning on with the pacer on: the loss grows with the rate, so a recorded report holds only at the
   // rate it was recorded at. The replay makes the device's first two decisions on the same reports, then its deep
   // sample at 4000 kbps (55 of 741 frames, 7.4%, against 12.7% at 15592 and 17.6% at the request) must lead neither
-  // to the floor, where the device went, nor back to the request.
-  const auto replayed = replay_rp6(rp6_trace("live-tuning-rp6-b464-arm-d.txt"));
+  // to the floor, where the device went, nor back to the request. The replay stops at that decision, +12.55 s: it is
+  // the last on reports recorded at the rate the policy chose, and later behaviour is the pacer-on wire model's.
+  constexpr std::int64_t deep_decision_ms = 12549;
+  const auto reports = rp6_trace("live-tuning-rp6-b464-arm-d.txt");
+  ASSERT_TRUE(std::any_of(reports.begin(), reports.end(), [](const recorded_report_t &r) {
+    return r.at_ms == deep_decision_ms;
+  }));
+  const auto replayed = replay_rp6(reports, deep_decision_ms);
   ASSERT_GE(replayed.changes.size(), 2u);
   EXPECT_EQ(replayed.changes[0].second, 15592);
   EXPECT_NEAR(static_cast<double>(replayed.changes[0].first), 1510.0, 50.0);
   EXPECT_EQ(replayed.changes[1].second, 4000);
   EXPECT_NEAR(static_cast<double>(replayed.changes[1].first), 5540.0, 50.0);
-  EXPECT_GT(replayed.last, FLOOR);
-  EXPECT_LT(replayed.last, RP6_BASE);
+  // It holds the deep sample, under the first step's rate, which lost significantly more.
+  EXPECT_EQ(replayed.changes.size(), 2u);
+  EXPECT_EQ(replayed.last, 4000);
+  EXPECT_EQ(replayed.state, live_tuning_policy::state_e::hold);
+  EXPECT_EQ(replayed.ceiling, 15592);
+  EXPECT_FALSE(replayed.ceiling_is_queue);
 }
 
 TEST(LiveTuningPolicy, LossThatFallsWithTheRateStaysUnderTheRatesThatLostMore) {
@@ -1781,4 +1798,41 @@ TEST(LiveTuningPolicy, AHalvingThatTruncatesOntoTheFloorStopsAboveItFirst) {
   targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
   ASSERT_GE(targets.size(), 2u);
   EXPECT_EQ(targets[1], FLOOR);
+}
+
+TEST(LiveTuningPolicy, HalvingStopsWhereItNoLongerLightensTheLoss) {
+  // From #575's review: half the frames lost from 100000 kbps up, 32% from 30000 and 20.5% under it. The deep sample
+  // at 33623 halves on to 16811 and 8405, and 8405 loses no less than 16811: under 16811 the loss does not depend on
+  // the rate, and the stream holds there, under the rates that lost more, rather than halving on towards the floor.
+  live_tuning_policy::policy_t policy {BASE, FLOOR};
+  const auto targets = run(40, [](int i, int target) {
+    const double share = target >= 100000 ? 0.5 : target >= 30000 ? 0.32 : 0.205;
+    return std::pair<double, double> {1200, i < 30 ? 0.0 : 1200 * share};
+  }, {}, {}, &policy);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), 8405);
+  EXPECT_EQ(policy.target_kbps(), 8405);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_EQ(policy.ceiling_kbps(), 16811);
+  EXPECT_FALSE(policy.ceiling_is_queue());
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, AHoldNoBetterThanTheRateAboveSettlesUnderTheRatesThatLostMore) {
+  // 18% lost above 12000 kbps, 7.5% down to 6000 and 5% under it. The search holds 11096 under 11577, which retried
+  // lossy, and at 91 s the hold's twelve reports are no better than 11577's: rate-independent, once a jump back to the
+  // request, where the episode had measured 18%. The rates above lost more, so the stream settles there again: the
+  // same hold and ceiling, its retry wait started afresh, and no background learned.
+  live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+  const auto targets = run_rp6(111, [](int second, int kbps) {
+    return second < 30 ? 0.0 : kbps > 12000 ? 0.18 : kbps > 6000 ? 0.075 : 0.05;
+  }, policy);
+  EXPECT_EQ(targets[78], 11096);
+  // Without the settlement the hold would retry 11577 at 99 s, twenty reports after it began.
+  EXPECT_TRUE(std::all_of(targets.begin() + 78, targets.end(), [](int t) {
+    return t == 11096;
+  }));
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_EQ(policy.ceiling_kbps(), 11577);
+  EXPECT_FALSE(policy.ceiling_is_queue());
+  EXPECT_EQ(policy.background_loss(), 0.0);
 }
