@@ -108,6 +108,13 @@ export default defineConfig({
         // The release this console was built with. A host process older than its own
         // console is running a binary the package no longer installs; see update-center.js.
         __POLARIS_CONSOLE_VERSION__: JSON.stringify(process.env.POLARIS_CONSOLE_VERSION || ''),
+        // vue-i18n checks these at runtime and falls back to exactly these values.
+        // Stating them at build time keeps that behavior and lets the unused
+        // devtools and flag-probing paths drop out of the initial bundle.
+        __VUE_I18N_FULL_INSTALL__: true,
+        __VUE_I18N_LEGACY_API__: true,
+        __INTLIFY_DROP_MESSAGE_COMPILER__: false,
+        __INTLIFY_PROD_DEVTOOLS__: false,
     },
     build: {
         target: 'es2020',
