@@ -206,6 +206,11 @@ set(TEST_FAST_SOURCES
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TEST_SUPPORT_SOURCES
         ${CMAKE_SOURCE_DIR}/src/platform/linux/capture_producer_sync.cpp)
+    # update_status.cpp reads the host update helper through the container host adapter. Its
+    # process runner is replaced by a failing fixture so misc.cpp stays out of the fast target.
+    list(APPEND TEST_SUPPORT_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_host.cpp
+        ${CMAKE_SOURCE_DIR}/tests/fixtures/process_argv_capture_refusal.cpp)
     list(APPEND TEST_FAST_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_producer_sync.cpp)
     if(POLARIS_ENABLE_VULKAN)
@@ -677,6 +682,12 @@ configure_polaris_test_target(${PROJECT_NAME}
     ${TEST_SUPPORT_SOURCES}
     ${TEST_FAST_SOURCES}
 )
+# Release links with --gc-sections, which drops unreferenced code together with its undefined
+# references, so a missing fast support source only failed Debug builds. Keeping every section
+# makes a Release build of this target fail the same way.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(${PROJECT_NAME} PRIVATE -Wl,--no-gc-sections)
+endif()
 
 # Compile the instrumented parser as C, privately to the selected fast test path.
 # Keep allocator hooks and private symbol prefixes out of production targets.
