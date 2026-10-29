@@ -28,9 +28,12 @@
  *   whatever the first step lost: it halves on, until halving no longer lightens it.
  *   When reports stop before the first step is judged, perhaps because the link is overloaded, the probe takes
  *   its deep sample after 1.5 s, once, and goes no further until reports return.
- * - A probe that would reach the floor stops a climb step above it first. It takes the floor only for loss
- *   clearly over 20%, or loss that still falls with the rate there: nothing measured above it yet, or the
- *   nearest rate above lost significantly more. With no room left, the rate is judged where it is.
+ * - A probe step is judged at the whole rate it would set. A fresh descent's first step, with nothing measured
+ *   above it, takes the floor when it would reach it, as it always did: a request close over its floor steps
+ *   onto it. Within an episode, a probe that would reach the floor stops a climb step above it first, and takes
+ *   the floor only for loss clearly over 20%, or loss that still falls with the rate there: the nearest rate
+ *   above lost significantly more. With no room left for its deep sample, a first step under clearly heavy loss
+ *   samples the floor that way before the rate is judged where it is.
  * - Every judged report since the stream left its request is kept by rate. A rate-independent result goes back
  *   to where the episode started, learns that loss as background, and does not probe again at that level for
  *   1200 reports, only if no higher rate measured in the episode lost significantly more. Otherwise the loss
@@ -76,7 +79,10 @@
  * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second, and replays two
  * RP6 loss runs; tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells
  * pass, and the four that need a congestion signal while reports stop stay named as unmet. Under its wire layer,
- * loss under 3% on the wire never reaches the floor.
+ * none of 40 seeded 400 s runs at a 25987 kbps request and a 2000 kbps floor reaches the floor, with whole sends
+ * dropped, the pacer off or on, or single packets dropped, at 1, 2 and 2.9%. That holds for those modelled runs,
+ * not for other requests, floors, clients or loss. Over 141 synthetic links close to the floor it does no worse
+ * than the policy at staging 457eeef9, but for one named tail drop.
  */
 #pragma once
 

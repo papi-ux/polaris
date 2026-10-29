@@ -271,20 +271,28 @@ namespace live_tuning_policy {
 
   // Where a loss probe may step from here, given what it lost here; nullopt when it may not go lower.
   std::optional<int> policy_t::loss_step(double kbps, double lost, double frames) const {
-    if (kbps > floor_) {
-      return static_cast<int>(kbps);
+    // Judge the rate the step would set: half of 4001 is 2000.5, which is the floor.
+    const int step = static_cast<int>(kbps);
+    if (step > floor_) {
+      return step;
     }
-    // A probe that would reach the floor first stops a climb step above it, to compare with the rate above.
+    // A fresh descent has nothing measured above it to compare a stop with, as when the request sits close over its
+    // floor: it takes the floor.
+    const auto above = measured_.upper_bound(target_);
+    if (above == measured_.end()) {
+      return step;
+    }
+    // Within an episode, a probe that would reach the floor first stops a climb step above it, to compare with the
+    // rate above.
     const int near_floor = static_cast<int>(floor_ * CLIMB_STEP);
     if (target_ > near_floor) {
       return near_floor;
     }
-    // The floor itself takes clearly heavy loss, or loss that still falls with the rate here: nothing measured
-    // above this episode, or the nearest rate above lost significantly more.
-    const auto above = measured_.upper_bound(target_);
-    if (clearly_over(lost, frames, HEAVY_LOSS) || above == measured_.end() ||
+    // The floor itself takes clearly heavy loss, or loss that still falls with the rate here: the nearest rate above
+    // lost significantly more.
+    if (clearly_over(lost, frames, HEAVY_LOSS) ||
         z_lower(lost, frames, above->second.second, above->second.first, std::max(2.0, disp())) >= 2.0) {
-      return static_cast<int>(kbps);
+      return step;
     }
     return std::nullopt;
   }
@@ -394,10 +402,18 @@ namespace live_tuning_policy {
       hi_ = target_;
       hi_loss_ = std::max(rate, l0_ * 0.5);
       hi_stats_ = {test_->frames(), test_->lost()};
-      const double deep = std::max<double>(2.0 * floor_, r0_ / PROBE_DEPTH);
+      double deep = std::max<double>(2.0 * floor_, r0_ / PROBE_DEPTH);
       if (deep >= target_ * 0.9) {
-        rate_independent(probe_rate(), now_ms, "rate_independent");
-        return;
+        // No room for the deep sample. Clearly heavy loss here may be a link's that the floor is under: sample the
+        // floor, as far as a probe may go, before judging the rate here.
+        const auto step = target_ > floor_ && clearly_over(hi_stats_.second, hi_stats_.first, HEAVY_LOSS) ?
+                            loss_step(floor_, hi_stats_.second, hi_stats_.first) :
+                            std::nullopt;
+        if (!step) {
+          rate_independent(probe_rate(), now_ms, "rate_independent");
+          return;
+        }
+        deep = *step;
       }
       phase_ = phase_e::deep;
       deep_stats_ = {0.0, 0.0};
