@@ -179,6 +179,12 @@ namespace crypto {
     }
 
     int gcm_t::decrypt(const std::string_view &tagged_cipher, std::vector<std::uint8_t> &plaintext, aes_t *iv) {
+      // The input leads with its tag, so a shorter one has no tag to verify
+      // and would make the substr below throw.
+      if (tagged_cipher.size() < tag_size) {
+        return -1;
+      }
+
       if (!decrypt_ctx && init_decrypt_gcm(decrypt_ctx, &key, iv, padding)) {
         return -1;
       }
