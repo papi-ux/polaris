@@ -480,8 +480,11 @@ TEST_F(DesktopSteamShutdownRequestTest, ReturningGameModeRefusesBeforeTheDelayed
   start_client(500000);
   ASSERT_FALSE(HasFatalFailure());
   platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+  // Game Mode is back once the returning Steam owns the command receiver. Scan for
+  // that receiver itself: the client writes listener-ready only after its open(),
+  // so a scan keyed on the marker can miss a receiver the request already saw.
   platf::game_mode_host::set_session_scan_for_tests([&]() {
-    return std::filesystem::exists(root / "listener-ready");
+    return proc::steam_instance_pipe_listener_active_for_tests(fifo.string());
   });
   auto restore_scan = util::fail_guard([]() {
     platf::game_mode_host::set_session_live_for_tests(false);
@@ -489,7 +492,10 @@ TEST_F(DesktopSteamShutdownRequestTest, ReturningGameModeRefusesBeforeTheDelayed
   });
   EXPECT_FALSE(proc::request_desktop_steam_shutdown_for_private_stream());
   expect_no_bootstrap();
-  EXPECT_TRUE(std::filesystem::exists(root / "listener-ready"));
+  // The refusal can return before the client writes its marker.
+  EXPECT_TRUE(wait_until([&]() {
+    return std::filesystem::exists(root / "listener-ready");
+  }));
   EXPECT_FALSE(std::filesystem::exists(root / "remote-called"));
   EXPECT_TRUE(proc::desktop_steam_proc_scan_only_pid_for_tests(client.pid));
 }
