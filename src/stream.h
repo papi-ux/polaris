@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -145,6 +146,7 @@ namespace stream {
     /** Observe and abort before any singleton host transport/capture starts. */
     void set_host_start_abort_hook_for_tests(std::function<void()> hook);
     unsigned exchange_active_count_for_tests(unsigned count);
+    unsigned exchange_active_host_count_for_tests(unsigned count);
     void set_state_for_tests(session_t &session, state_e state);
     /** What the control thread would send as it retires this session once it is stopping. */
     std::optional<std::uint32_t> control_termination_code_for_tests(session_t &session);
@@ -153,6 +155,36 @@ namespace stream {
     bool control_ended_for_tests(session_t &session);
     std::chrono::steady_clock::time_point register_control_session_for_tests(session_t &session);
     stream_packets::destination_t packet_destination_for_tests(session_t &session);
+
+    /** Whether the session has claimed a connected control peer. */
+    bool control_connected_for_tests(const session_t &session);
+
+    /**
+     * A control server on loopback, driven turn by turn the way the control thread drives it, so
+     * real ENet clients can read what the host sends as a stream ends.
+     */
+    class control_wire_for_tests_t {
+    public:
+      control_wire_for_tests_t();
+      ~control_wire_for_tests_t();
+      control_wire_for_tests_t(const control_wire_for_tests_t &) = delete;
+      control_wire_for_tests_t &operator=(const control_wire_for_tests_t &) = delete;
+
+      /** The loopback port the control server listens on, or 0 when it could not bind. */
+      std::uint16_t port() const;
+      /** Publishes a session for a loopback client without session ids, matched by its address. */
+      void publish(session_t &session);
+      /** Services the control server once, as the control thread does after each turn. */
+      void service(std::chrono::milliseconds timeout);
+      /** The control thread's turn for a published session; true once it was retired. */
+      bool turn(session_t &session, bool host_running);
+      /** Peers told their stream ended that have neither gone nor been dropped yet. */
+      std::size_t retiring_peers() const;
+
+    private:
+      struct impl_t;
+      std::unique_ptr<impl_t> impl;
+    };
 #ifdef __linux__
     std::shared_ptr<multiseat::input::worker_launch_connection_t>
     worker_connection_for_tests(const session_t &session);
@@ -164,6 +196,8 @@ namespace stream {
 #endif
 #endif
     unsigned active_count();
+    /** Active sessions that stream the host's own app, rather than a Space worker's. */
+    unsigned active_host_count();
     inline bool send(session_t& session, const std::string_view &payload);
   }  // namespace session
 }  // namespace stream

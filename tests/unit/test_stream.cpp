@@ -3,6 +3,7 @@
  * @brief Test src/stream.*
  */
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -11,6 +12,8 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
+#include <src/confighttp.h>
+#include <src/process.h>
 #include <src/stream_start_outcome.h>
 #include <src/stream.h>
 #include <src/rtsp.h>
@@ -19,6 +22,7 @@
 #include <src/utility.h>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace stream {
@@ -847,6 +851,78 @@ TEST(ProcSessionLifecycleTests, TerminatedAppDoesNotPublishStreamEndedWhileClien
 TEST(ProcSessionLifecycleTests, AlreadyIdleTerminateDoesNotPublishDuplicateStreamEnded) {
   EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "idle"));
 }
+
+#ifdef __linux__
+namespace {
+  /// Gives the subject an app whose real owned child has already exited, for running() to clean up.
+  void adopt_exited_app(proc::proc_t &subject) {
+    proc::ctx_t app;
+    app.id = "568";
+    subject.set_running_app_for_tests(app);
+    boost::process::v1::child child {"/bin/true"};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
+    while (child.running() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    }
+    ASSERT_FALSE(child.running()) << "the fixture child must exit within its bound";
+    subject.set_exited_app_child_for_tests(std::move(child));
+  }
+}  // namespace
+
+/**
+ * An app that exits during a stream stops the session status saying "streaming" when the host
+ * starts ending the stream, before the client's control stream closes.
+ *
+ * Nothing said so: the status read "streaming" through the whole teardown and after the client's
+ * control stream had closed. Nova checked the host as soon as its stream dropped, read a live
+ * session and relaunched the app the host had just ended (#568, Nova #409).
+ */
+TEST(ProcSessionLifecycleTests, AnAppThatExitsDuringAStreamStopsTheStatusSayingStreaming) {
+  proc::proc_t subject;
+  ASSERT_NO_FATAL_FAILURE(adopt_exited_app(subject));
+
+  // The stream of that app is live: its session has not ended yet.
+  const auto sessions = stream::session::exchange_active_count_for_tests(1);
+  const auto host_sessions = stream::session::exchange_active_host_count_for_tests(1);
+  confighttp::set_session_state(confighttp::session_state_e::streaming);
+  auto restore = util::fail_guard([&]() {
+    stream::session::exchange_active_host_count_for_tests(host_sessions);
+    stream::session::exchange_active_count_for_tests(sessions);
+    confighttp::set_session_state(confighttp::session_state_e::idle);
+    subject.clear_running_app_for_tests();
+  });
+
+  ASSERT_EQ(subject.running(), 0) << "the exited app was not cleaned up";
+
+  EXPECT_NE(confighttp::get_session_state(), "streaming")
+    << "the status still reports a live stream the host is ending, which Nova reconnects and relaunches into";
+  EXPECT_EQ(confighttp::get_session_state(), "tearing_down")
+    << "the status should say the host is ending the stream until the stream itself has ended";
+}
+
+/**
+ * The host ending a Space worker's stream is not this app's to announce: an app exiting with no
+ * stream of its own leaves the status alone.
+ */
+TEST(ProcSessionLifecycleTests, AnAppThatExitsWithNoStreamOfItsOwnLeavesTheStatusAlone) {
+  proc::proc_t subject;
+  ASSERT_NO_FATAL_FAILURE(adopt_exited_app(subject));
+
+  // One live stream, a Space worker's, which does not stream the host's app.
+  const auto sessions = stream::session::exchange_active_count_for_tests(1);
+  const auto host_sessions = stream::session::exchange_active_host_count_for_tests(0);
+  confighttp::set_session_state(confighttp::session_state_e::streaming);
+  auto restore = util::fail_guard([&]() {
+    stream::session::exchange_active_host_count_for_tests(host_sessions);
+    stream::session::exchange_active_count_for_tests(sessions);
+    confighttp::set_session_state(confighttp::session_state_e::idle);
+    subject.clear_running_app_for_tests();
+  });
+
+  ASSERT_EQ(subject.running(), 0) << "the exited app was not cleaned up";
+  EXPECT_EQ(confighttp::get_session_state(), "streaming") << "the worker's live stream was reported as ending";
+}
+#endif
 
 TEST(ProcSessionLifecycleTests, StreamingTerminateWaitsForStreamJoinToPublishStreamEnded) {
   EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "streaming"));

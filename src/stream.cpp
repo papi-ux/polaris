@@ -408,6 +408,69 @@ namespace stream {
       enet_host_flush(_host.get());
     }
 
+    /**
+     * Closes the connection of a peer that was just sent a termination, without losing it.
+     *
+     * A disconnect sent in the same turn as the termination reaches a Moonlight client in the same
+     * receive batch, and ENet's handling of that disconnect discards the termination the client has
+     * received but not yet read. The client logged an unexpected disconnect (error -1) instead of the
+     * host's graceful end, and Nova reconnected and relaunched the app the host had ended (#568).
+     * The peer is disconnected once it has acknowledged everything sent to it, or dropped at the
+     * deadline, so a client that stopped answering cannot keep it.
+     */
+    void retire_peer_after_termination(net::peer_t peer, std::chrono::steady_clock::time_point deadline) {
+      enet_peer_disconnect_later(peer, 0);
+      _retiring_peers.push_back({peer, deadline});
+    }
+
+    /**
+     * Whether the event came from a retiring peer, which belongs to no session any more.
+     *
+     * Its traffic must never reach get_session(), which would let it claim a pending session.
+     */
+    bool consume_retiring_peer_event(ENetEvent &event) {
+      const auto retiring = std::find_if(std::begin(_retiring_peers), std::end(_retiring_peers), [&event](const auto &candidate) {
+        return candidate.peer == event.peer;
+      });
+      if (retiring == std::end(_retiring_peers)) {
+        return false;
+      }
+
+      if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+        enet_packet_destroy(event.packet);
+      } else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+        // ENet has reset the peer and may hand it to the next connection.
+        _retiring_peers.erase(retiring);
+      }
+      return true;
+    }
+
+    /// Drops every retiring peer whose deadline has passed.
+    void expire_retiring_peers(std::chrono::steady_clock::time_point now) {
+      std::erase_if(_retiring_peers, [now](const auto &retiring) {
+        if (now < retiring.deadline) {
+          return false;
+        }
+        enet_peer_disconnect_now(retiring.peer, 0);
+        return true;
+      });
+    }
+
+    /// Services retiring peers until each has gone or reached its deadline.
+    void drain_retiring_peers() {
+      while (!_retiring_peers.empty()) {
+        expire_retiring_peers(std::chrono::steady_clock::now());
+        if (_retiring_peers.empty()) {
+          break;
+        }
+        iterate(5ms);
+      }
+    }
+
+    bool has_retiring_peers() const {
+      return !_retiring_peers.empty();
+    }
+
     // Callbacks
     std::unordered_map<std::uint16_t, std::function<void(session_t *, const std::string_view &)>> _map_type_cb;
 
@@ -416,6 +479,15 @@ namespace stream {
 
     // ENet peer to session mapping for sessions with a peer connected
     sync_util::sync_t<std::map<net::peer_t, session_t *>> _peer_to_session;
+
+    struct retiring_peer_t {
+      net::peer_t peer;
+      std::chrono::steady_clock::time_point deadline;
+    };
+
+    // Peers told their stream ended, until they disconnect or their deadline passes. Only the
+    // control thread touches them, like every other ENet call.
+    std::vector<retiring_peer_t> _retiring_peers;
 
     ENetAddress _addr;
     net::host_t _host;
@@ -918,6 +990,10 @@ namespace stream {
     auto res = enet_host_service(_host.get(), &event, timeout.count());
 
     if (res > 0) {
+      if (consume_retiring_peer_event(event)) {
+        return;
+      }
+
       auto session = get_session(event.peer, event.data);
       if (!session) {
         BOOST_LOG(warning) << "Rejected connection from ["sv << platf::from_sockaddr((sockaddr *) &event.peer->address.address) << "]: it's not properly set up"sv;
@@ -1329,8 +1405,9 @@ namespace stream {
 
   // ENet, sequence numbers and control encryption are owned by the control
   // thread. Stop callers only request termination; they never send it directly.
-  void send_control_termination(control_server_t *server, session_t *session, std::uint32_t code) {
-    if (!session->control.peer) return;
+  // Returns whether the termination was queued, which ENet allows only on a connected peer.
+  bool send_control_termination(control_server_t *server, session_t *session, std::uint32_t code) {
+    if (!session->control.peer) return false;
 
     control_terminate_t plaintext {};
     plaintext.header.type = packetTypes[IDX_TERMINATION];
@@ -1342,9 +1419,57 @@ namespace stream {
     auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
     if (server->send(payload, session->control.peer)) {
       BOOST_LOG(warning) << "Couldn't send control termination";
+      return false;
     }
-    // Flush before disconnecting the peer in the same control-thread turn.
     server->flush();
+    return true;
+  }
+
+  /// How long a peer that was sent a termination has to acknowledge it before it is dropped.
+  constexpr auto control_termination_linger = 500ms;
+
+  /**
+   * The control thread's turn for one published session as it ends: true once the session is
+   * retired, after which the caller erases it from the published list and raises controlEnd.
+   *
+   * A session whose host app has exited is stopped gracefully. A stopping session is told how its
+   * stream ended when it has an answer, and its peer is then given until the linger to read it; a
+   * stop that only disconnects still closes the connection at once.
+   */
+  bool retire_ending_control_session(control_server_t *server, session_t *session, bool host_running, std::chrono::steady_clock::time_point now) {
+    if (session::stops_when_host_exits(*session, host_running, session->control.peer != nullptr)) {
+      session::graceful_stop(*session);
+    }
+
+    if (now > session->pingTimeout) {
+      auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
+      BOOST_LOG(info) << address << ": Ping Timeout"sv;
+      session::stop(*session);
+    }
+
+    if (session->state.load(std::memory_order_acquire) != session::state_e::STOPPING) {
+      return false;
+    }
+
+    const auto code = control_termination_code(*session);
+    const bool told = code && send_control_termination(server, session, *code);
+
+    if (session->control.peer) {
+      {
+        auto ptslg = server->_peer_to_session.lock();
+        server->_peer_to_session->erase(session->control.peer);
+      }
+
+      // A peer that was not told is no live connection of this session's to keep: ENet may
+      // already have reset it after the client's own disconnect, ready for the next connection.
+      if (told) {
+        server->retire_peer_after_termination(session->control.peer, now + control_termination_linger);
+      } else {
+        enet_peer_disconnect_now(session->control.peer, 0);
+      }
+    }
+
+    return true;
   }
 
   void controlBroadcastThread(control_server_t *server) {
@@ -1667,31 +1792,8 @@ namespace stream {
 
           auto session = *pos;
 
-          if (session::stops_when_host_exits(*session, host_running, session->control.peer != nullptr)) {
-            session::graceful_stop(*session);
-          }
-
-          if (now > session->pingTimeout) {
-            auto address = session->control.peer ? platf::from_sockaddr((sockaddr *) &session->control.peer->address.address) : session->control.expected_peer_address;
-            BOOST_LOG(info) << address << ": Ping Timeout"sv;
-            session::stop(*session);
-          }
-
-          if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
-            if (const auto code = control_termination_code(*session)) {
-              send_control_termination(server, session, *code);
-            }
+          if (retire_ending_control_session(server, session, host_running, now)) {
             pos = server->_sessions->erase(pos);
-
-            if (session->control.peer) {
-              {
-                auto ptslg = server->_peer_to_session.lock();
-                server->_peer_to_session->erase(session->control.peer);
-              }
-
-              enet_peer_disconnect_now(session->control.peer, 0);
-            }
-
             session->controlEnd.raise(true);
             continue;
           }
@@ -1726,24 +1828,39 @@ namespace stream {
       // available until broadcaster shutdown; host exit stops only its own
       // connected sessions above, while pending peers retain their timeout.
 
-      // Use a short timeout during active streaming for responsive feedback/HDR dispatch.
+      // Use a short timeout during active streaming for responsive feedback/HDR dispatch, and
+      // while a peer told its stream ended has a deadline to keep.
       // When idle, use a longer timeout to reduce unnecessary CPU wakeups.
-      server->iterate(has_active_session ? 5ms : 100ms);
+      server->expire_retiring_peers(std::chrono::steady_clock::now());
+      server->iterate(has_active_session || server->has_retiring_peers() ? 5ms : 100ms);
     }
 
     // Retire every remaining session before acknowledging final control use.
-    auto lg = server->_sessions.lock();
-    while (!server->_sessions->empty()) {
-      auto session = server->_sessions->back();
-      send_control_termination(server, session, control_termination_code(*session).value_or(termination_closed));
-      server->_sessions->pop_back();
-      if (session->control.peer) {
-        auto peers = server->_peer_to_session.lock();
-        server->_peer_to_session->erase(session->control.peer);
+    {
+      const auto deadline = std::chrono::steady_clock::now() + control_termination_linger;
+      auto lg = server->_sessions.lock();
+      while (!server->_sessions->empty()) {
+        auto session = server->_sessions->back();
+        const bool told = send_control_termination(server, session, control_termination_code(*session).value_or(termination_closed));
+        server->_sessions->pop_back();
+        if (session->control.peer) {
+          {
+            auto peers = server->_peer_to_session.lock();
+            server->_peer_to_session->erase(session->control.peer);
+          }
+          if (told) {
+            server->retire_peer_after_termination(session->control.peer, deadline);
+          }
+        }
+        session->shutdown_event->raise(true);
+        session->controlEnd.raise(true);
       }
-      session->shutdown_event->raise(true);
-      session->controlEnd.raise(true);
     }
+
+    // The broadcast's ENet host goes with this thread and disconnects every peer at once. Give the
+    // peers told above, and any still retiring from an earlier turn, until their deadline to read
+    // their termination first.
+    server->drain_retiring_peers();
   }
 
   void recvThread(broadcast_ctx_t &ctx) {
@@ -2824,6 +2941,10 @@ namespace stream {
       return running_sessions.load(std::memory_order_relaxed);
     }
 
+    unsigned active_host_count() {
+      return running_host_sessions.load(std::memory_order_relaxed);
+    }
+
     session_profile_t profile(const session_t &session) {
       return session_profile_t {
         .device_name = session.device_name,
@@ -2852,6 +2973,10 @@ namespace stream {
 
     unsigned exchange_active_count_for_tests(unsigned count) {
       return running_sessions.exchange(count);
+    }
+
+    unsigned exchange_active_host_count_for_tests(unsigned count) {
+      return running_host_sessions.exchange(count);
     }
 
     bool abort_host_start_for_tests() {
@@ -2884,6 +3009,61 @@ namespace stream {
 
     void set_state_for_tests(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
+    }
+
+    bool control_connected_for_tests(const session_t &session) {
+      return session.control.peer != nullptr;
+    }
+
+    struct control_wire_for_tests_t::impl_t {
+      control_server_t server;
+    };
+
+    control_wire_for_tests_t::control_wire_for_tests_t():
+        impl {std::make_unique<impl_t>()} {
+      impl->server.bind(net::IPV4, 0);
+    }
+
+    control_wire_for_tests_t::~control_wire_for_tests_t() = default;
+
+    std::uint16_t control_wire_for_tests_t::port() const {
+      if (!impl->server._host) {
+        return 0;
+      }
+      ENetAddress address {};
+      if (enet_socket_get_address(impl->server._host->socket, &address)) {
+        return 0;
+      }
+      // from_sockaddr_ex() keeps the port in network byte order.
+      return util::endian::big<std::uint16_t>(platf::from_sockaddr_ex((sockaddr *) &address.address).first);
+    }
+
+    void control_wire_for_tests_t::publish(session_t &session) {
+      session.control.expected_peer_address = "127.0.0.1";
+      impl->server.register_session(session);
+    }
+
+    void control_wire_for_tests_t::service(std::chrono::milliseconds timeout) {
+      impl->server.expire_retiring_peers(std::chrono::steady_clock::now());
+      impl->server.iterate(timeout);
+    }
+
+    bool control_wire_for_tests_t::turn(session_t &session, bool host_running) {
+      auto lg = impl->server._sessions.lock();
+      const auto pos = std::find(std::begin(*impl->server._sessions), std::end(*impl->server._sessions), &session);
+      if (pos == std::end(*impl->server._sessions)) {
+        return true;
+      }
+      if (!retire_ending_control_session(&impl->server, &session, host_running, std::chrono::steady_clock::now())) {
+        return false;
+      }
+      impl->server._sessions->erase(pos);
+      session.controlEnd.raise(true);
+      return true;
+    }
+
+    std::size_t control_wire_for_tests_t::retiring_peers() const {
+      return impl->server._retiring_peers.size();
     }
 
     std::optional<std::uint32_t> control_termination_code_for_tests(session_t &session) {

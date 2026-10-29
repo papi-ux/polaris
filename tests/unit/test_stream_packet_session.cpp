@@ -16,6 +16,7 @@
 #include <boost/log/sinks/text_ostream_backend.hpp>
 #include <boost/smart_ptr/make_shared_object.hpp>
 #include <boost/smart_ptr/shared_ptr.hpp>
+#include <enet/enet.h>
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -646,4 +647,243 @@ TEST(StreamPacketSessionTests, StopRequestCannotAcknowledgeControlThreadCompleti
     // packet. Only that thread may acknowledge its final use.
     EXPECT_FALSE(stream::session::control_ended_for_tests(*session));
   }
+}
+
+namespace {
+  // packetTypes[IDX_TERMINATION], which moonlight-common-c reads as the host ending the stream.
+  constexpr std::uint16_t termination_type = 0x0109;
+  // NVST_DISCONN_SERVER_TERMINATED_CLOSED, which moonlight-common-c reports as
+  // ML_ERROR_GRACEFUL_TERMINATION once the stream has shown a frame.
+  constexpr std::uint32_t graceful_termination = 0x80030023u;
+
+  /**
+   * The first thing a Moonlight client's control stream reads as its stream ends: the host's
+   * termination, or ENet's disconnect, which moonlight-common-c reports as "Control stream received
+   * unexpected disconnect event" (error -1).
+   */
+  struct client_end_t {
+    std::optional<std::uint32_t> termination;
+    bool unexpected_disconnect = false;
+  };
+
+  /**
+   * moonlight-common-c's ignoreDisconnectIntercept: it holds back a disconnect that arrives on its
+   * own so pending receives are read first. It recognises only a disconnect of this exact size.
+   */
+  int ignore_disconnect_intercept(ENetHost *host, ENetEvent *event) {
+    if (host->receivedDataLength == sizeof(ENetProtocolHeader) + sizeof(ENetProtocolDisconnect)) {
+      const auto *disconnect = reinterpret_cast<const ENetProtocolDisconnect *>(host->receivedData + sizeof(ENetProtocolHeader));
+      if ((disconnect->header.command & ENET_PROTOCOL_COMMAND_MASK) == ENET_PROTOCOL_COMMAND_DISCONNECT) {
+        if (event) {
+          event->type = ENET_EVENT_TYPE_NONE;
+        }
+        return 1;
+      }
+    }
+    return 0;
+  }
+
+  /// A loopback client set up the way moonlight-common-c sets up its control stream.
+  class moonlight_control_client_t {
+  public:
+    explicit moonlight_control_client_t(std::uint16_t port):
+        host {enet_host_create(AF_INET, nullptr, 1, 0x30, 0, 0)} {
+      if (!host) {
+        return;
+      }
+      host->intercept = ignore_disconnect_intercept;
+      ENetAddress address {};
+      enet_address_set_host(&address, "127.0.0.1");
+      enet_address_set_port(&address, port);
+      peer = enet_host_connect(host, &address, 0x30, 0);
+    }
+
+    ~moonlight_control_client_t() {
+      if (host) {
+        enet_host_destroy(host);
+      }
+    }
+
+    moonlight_control_client_t(const moonlight_control_client_t &) = delete;
+    moonlight_control_client_t &operator=(const moonlight_control_client_t &) = delete;
+
+    /// Connects, through the host's own control handling, to the session waiting for it.
+    bool connect(stream::session::control_wire_for_tests_t &wire, const stream::session_t &session) {
+      if (!peer) {
+        return false;
+      }
+      bool connected = false;
+      const auto deadline = std::chrono::steady_clock::now() + 2s;
+      while (std::chrono::steady_clock::now() < deadline && !(connected && stream::session::control_connected_for_tests(session))) {
+        wire.service(1ms);
+        ENetEvent event;
+        if (enet_host_service(host, &event, 1) > 0 && event.type == ENET_EVENT_TYPE_CONNECT) {
+          connected = true;
+        }
+      }
+      return connected && stream::session::control_connected_for_tests(session);
+    }
+
+    /// A reliable message on the control channel, as the client's periodic ping is.
+    void send_reliable() {
+      const std::uint8_t ping[] {0x00, 0x02, 0x04, 0x00, 0, 0, 0, 0};
+      enet_peer_send(peer, 0, enet_packet_create(ping, sizeof(ping), ENET_PACKET_FLAG_RELIABLE));
+      enet_host_flush(host);
+    }
+
+    /**
+     * Reads the control stream as moonlight-common-c's receive thread does, until whatever ends it.
+     *
+     * The thread is woken by the host's first datagram and reads the socket a moment later, by
+     * which time the host's next datagram has arrived too: on loopback, as on a LAN, they are sent
+     * microseconds apart. The wait makes that the case every time.
+     */
+    client_end_t read_end(stream::session::control_wire_for_tests_t &wire) {
+      std::this_thread::sleep_for(50ms);
+      client_end_t end;
+      const auto deadline = std::chrono::steady_clock::now() + 2s;
+      while (std::chrono::steady_clock::now() < deadline) {
+        ENetEvent event;
+        if (enet_host_service(host, &event, 0) > 0) {
+          if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+            end.unexpected_disconnect = true;
+            return end;
+          }
+          if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+            const auto *data = event.packet->data;
+            const auto size = event.packet->dataLength;
+            // The host's control header is a little-endian type and length; the code is big-endian.
+            if (size >= 8 && (data[0] | data[1] << 8) == termination_type) {
+              end.termination = std::uint32_t {data[4]} << 24 | std::uint32_t {data[5]} << 16 |
+                                std::uint32_t {data[6]} << 8 | std::uint32_t {data[7]};
+              enet_packet_destroy(event.packet);
+              // What moonlight-common-c does next: it marks its peer gone at once and stops reading.
+              enet_peer_disconnect_now(peer, 0);
+              return end;
+            }
+            enet_packet_destroy(event.packet);
+          }
+        }
+        wire.service(1ms);
+      }
+      return end;
+    }
+
+  private:
+    ENetHost *host = nullptr;
+    ENetPeer *peer = nullptr;
+  };
+
+  /// Services the host until its retiring peers have gone, or the deadline passes.
+  bool wait_for_no_retiring_peers(stream::session::control_wire_for_tests_t &wire, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (wire.retiring_peers() > 0 && std::chrono::steady_clock::now() < deadline) {
+      wire.service(1ms);
+    }
+    return wire.retiring_peers() == 0;
+  }
+}  // namespace
+
+/**
+ * A stream the host ends because its app exited reaches the client as a graceful termination.
+ *
+ * The control thread sent the termination and disconnected the peer in the same turn. Both
+ * datagrams reached the RP6 in one receive batch, ENet's handling of the disconnect discarded the
+ * termination the client had not read yet, and moonlight-common-c logged "Control stream received
+ * unexpected disconnect event" (error -1) on every host-side End (#568). Nova took -1 for a dropped
+ * connection, found the host still reporting a stream and relaunched the app the host had just ended.
+ */
+TEST(StreamControlTerminationTests, AStreamTheHostEndsBecauseItsAppExitedReachesTheClientAsAGracefulTermination) {
+  stream::session::control_wire_for_tests_t wire;
+  ASSERT_NE(wire.port(), 0) << "the loopback control server could not bind";
+  auto session = make_session();
+  wire.publish(*session);
+  moonlight_control_client_t client {wire.port()};
+  ASSERT_TRUE(client.connect(wire, *session)) << "the client never claimed its session's control stream";
+  stream::session::set_state_for_tests(*session, stream::session::state_e::RUNNING);
+
+  // The control thread's turn after the host's app has exited.
+  ASSERT_TRUE(wire.turn(*session, false)) << "a stream whose app exited was not ended";
+  EXPECT_TRUE(stream::session::control_ended_for_tests(*session)) << "the session's cleanup waits for its client";
+
+  const auto end = client.read_end(wire);
+  EXPECT_FALSE(end.unexpected_disconnect)
+    << "the client read a disconnect before the termination, the -1 Nova reconnects and relaunches after";
+  EXPECT_EQ(end.termination, std::optional<std::uint32_t> {graceful_termination})
+    << "the client never read that the host ended the stream on purpose";
+  EXPECT_TRUE(wait_for_no_retiring_peers(wire, 200ms))
+    << "the host kept the connection after the client had read its termination and left";
+}
+
+/**
+ * A stop that only disconnects, as when the client leaves or stops answering, still closes the
+ * connection at once and says nothing more.
+ */
+TEST(StreamControlTerminationTests, AStopThatOnlyDisconnectsStillClosesTheConnectionAtOnce) {
+  stream::session::control_wire_for_tests_t wire;
+  ASSERT_NE(wire.port(), 0) << "the loopback control server could not bind";
+  auto session = make_session();
+  wire.publish(*session);
+  moonlight_control_client_t client {wire.port()};
+  ASSERT_TRUE(client.connect(wire, *session)) << "the client never claimed its session's control stream";
+  stream::session::set_state_for_tests(*session, stream::session::state_e::RUNNING);
+
+  stream::session::stop(*session);
+  ASSERT_TRUE(wire.turn(*session, true));
+  EXPECT_EQ(wire.retiring_peers(), 0u) << "a stop with nothing to tell the client now keeps its connection";
+
+  const auto end = client.read_end(wire);
+  EXPECT_TRUE(end.unexpected_disconnect) << "the client was not disconnected";
+  EXPECT_EQ(end.termination, std::nullopt) << "a stop nobody asked to be graceful now sends a termination";
+}
+
+/**
+ * A client that never reads its termination is dropped at the linger deadline, so a host-side End
+ * cannot wait on a client that stopped answering (#424 keeps every End bounded).
+ */
+TEST(StreamControlTerminationTests, AClientThatNeverReadsItsTerminationIsDroppedAtTheDeadline) {
+  stream::session::control_wire_for_tests_t wire;
+  ASSERT_NE(wire.port(), 0) << "the loopback control server could not bind";
+  auto session = make_session();
+  wire.publish(*session);
+  moonlight_control_client_t client {wire.port()};
+  ASSERT_TRUE(client.connect(wire, *session)) << "the client never claimed its session's control stream";
+  stream::session::set_state_for_tests(*session, stream::session::state_e::RUNNING);
+
+  const auto ended = std::chrono::steady_clock::now();
+  ASSERT_TRUE(wire.turn(*session, false));
+  EXPECT_TRUE(stream::session::control_ended_for_tests(*session)) << "the session's cleanup waits for its client";
+  EXPECT_EQ(wire.retiring_peers(), 1u) << "the host closed the connection before the client could read its termination";
+
+  // The client never services its connection again, so it acknowledges nothing.
+  EXPECT_TRUE(wait_for_no_retiring_peers(wire, 2s)) << "a client that never answers keeps its connection";
+  const auto held = std::chrono::steady_clock::now() - ended;
+  EXPECT_GE(held, 450ms) << "the client was dropped before its deadline";
+  EXPECT_LT(held, 1500ms) << "the connection outlived its deadline";
+}
+
+/**
+ * Traffic still arriving from a connection the host has told its stream ended cannot claim another
+ * session from the same address, such as the one a reconnecting client is about to connect to.
+ */
+TEST(StreamControlTerminationTests, AnEndedConnectionCannotClaimTheNextSessionFromItsAddress) {
+  stream::session::control_wire_for_tests_t wire;
+  ASSERT_NE(wire.port(), 0) << "the loopback control server could not bind";
+  auto ended = make_session();
+  wire.publish(*ended);
+  moonlight_control_client_t client {wire.port()};
+  ASSERT_TRUE(client.connect(wire, *ended)) << "the client never claimed its session's control stream";
+  stream::session::set_state_for_tests(*ended, stream::session::state_e::RUNNING);
+  ASSERT_TRUE(wire.turn(*ended, false));
+
+  auto next = make_session();
+  wire.publish(*next);
+  // A ping the client sent before it read its termination.
+  client.send_reliable();
+  const auto deadline = std::chrono::steady_clock::now() + 200ms;
+  while (std::chrono::steady_clock::now() < deadline) {
+    wire.service(1ms);
+  }
+  EXPECT_FALSE(stream::session::control_connected_for_tests(*next))
+    << "the ended connection's traffic claimed the next session from its address";
 }

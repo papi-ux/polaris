@@ -708,6 +708,24 @@ namespace proc {
       confighttp::emit_session_event("stream_ended", "All sessions ended");
     }
 
+    /**
+     * Says the host is ending a stream before its teardown starts, when nothing has said so yet.
+     *
+     * A requested End publishes tearing_down before it stops anything. The app exiting by itself,
+     * and every other end that comes through terminate() alone, published nothing: the session
+     * status read "streaming" through the whole teardown, after the client's control stream had
+     * closed. Nova checked the host after that close, read a live session and relaunched the app
+     * the host had just ended (#568, Nova #409). The stream's own end still publishes idle.
+     */
+    void publish_host_ending_stream_if_needed() {
+      if (stream::session::active_host_count() == 0 || confighttp::get_session_state() != "streaming"sv) {
+        return;
+      }
+
+      confighttp::set_session_state(confighttp::session_state_e::tearing_down);
+      confighttp::emit_session_event("stream_stopping", "The host is ending the session");
+    }
+
     std::string generate_session_token() {
       std::array<unsigned char, 16> raw {};
       RAND_bytes(raw.data(), raw.size());
@@ -12587,6 +12605,7 @@ namespace proc {
     stream::session::cancel_disconnect_resume_timeout();
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    publish_host_ending_stream_if_needed();
     // Retirement can race HTTP publication. Cancel the exact prepared request
     // (which may be a distinct Resume object) before clearing its app record.
     // RTSP handoff/start already share this atomic state, without lock nesting.
