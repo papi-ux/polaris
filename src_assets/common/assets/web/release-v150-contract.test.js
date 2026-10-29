@@ -260,8 +260,8 @@ describe('v1.5.0 release contract', () => {
     expect(loss).toContain('in two of three reports, each losing 3% of its frames or more')
     expect(loss).toContain('Live Tuning treats a sustained rise in round trip time as queue evidence and lowers the bitrate while checking whether it drains.')
     expect(loss).toContain('Doctor takes no bitrate step of its own for sustained loss.')
-    // Its checks are a replay bench and unit tests, and the notes say what they do not cover.
-    expect(notes).toContain('not yet in a stream on a Steam Deck or a Retroid Pocket 6')
+    // The RP6 stream checks now cover the loss-handling limit; the pause limit remains.
+    expect(notes).toContain('dropped to its 2 Mbps floor within seconds and took about 45 seconds to return to the requested rate with the wire pacer off, while loss continued')
     expect(notes).toContain("A link that shrinks while the client's media reports pause can go unnoticed without fresh congestion evidence")
   })
 })
