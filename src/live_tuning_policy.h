@@ -33,12 +33,16 @@
  *   onto it. Within an episode, a probe that would reach the floor stops a climb step above it first, and takes
  *   the floor only for loss clearly over 20%, or loss that still falls with the rate there: the nearest rate
  *   above lost significantly more. With no room left for its deep sample, a first step under clearly heavy loss
- *   samples the floor that way before the rate is judged where it is.
+ *   samples the floor that way before the rate is judged where it is. A probe step at most a climb step over the
+ *   floor that helped but still loses clearly over 10%, more than background under 3% costs there, samples the
+ *   floor before it can bound a hold, and so does a loss hold there whose own twelve reports do.
  * - Every judged report since the stream left its request is kept by rate. A rate-independent result goes back
  *   to where the episode started, learns that loss as background, and does not probe again at that level for
  *   1200 reports, only if no higher rate measured in the episode lost significantly more. Otherwise the loss
  *   depends on the rate above: the stream holds at the highest measured rate that lost no more, under the
- *   lowest one that did. A background that has gone is judged only on reports after it was learned.
+ *   lowest one that did. Loss over 20% is learned only once the episode has looked under it, at the floor or at
+ *   a rate that lost 20% or less: until then the floor is sampled first. A background that has gone is judged
+ *   only on reports after it was learned.
  * - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
  *   the measured burstiness. An undecided descent test counts as not having helped.
  * - A hold retries the rate above it after 8 reports, then every 20. Loss ceilings climb from there when
@@ -81,8 +85,10 @@
  * pass, and the four that need a congestion signal while reports stop stay named as unmet. Under its wire layer,
  * none of 40 seeded 400 s runs at a 25987 kbps request and a 2000 kbps floor reaches the floor, with whole sends
  * dropped, the pacer off or on, or single packets dropped, at 1, 2 and 2.9%. That holds for those modelled runs,
- * not for other requests, floors, clients or loss. Over 141 synthetic links close to the floor it does no worse
- * than the policy at staging 457eeef9, but for one named tail drop.
+ * not for other requests, floors, clients or loss. Over 141 synthetic links close to the floor and the 5111 static
+ * links of a wider search it does no worse than the policy at staging 457eeef9, but for named rows: two tail drops
+ * just over 2450 kbps, whose loss a 1-2% step down to the stop over the floor cannot tell from background, and two
+ * floor holds reached 6 s later, with one retry more in the judged window.
  */
 #pragma once
 
@@ -244,6 +250,7 @@ namespace live_tuning_policy {
     bool clearly_over(double lost, double frames, double level) const;
     std::optional<int> loss_step(double kbps, double lost, double frames) const;
     double probe_rate() const;
+    void sample_floor(std::int64_t now_ms, std::pair<double, double> here);
 
     void begin_descent(std::int64_t now_ms, std::string_view why, double l0);
     void descend_result(bool helped, std::int64_t now_ms);

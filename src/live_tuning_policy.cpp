@@ -17,6 +17,10 @@ namespace live_tuning_policy {
     constexpr double REACT_EXCESS = 0.015;  // loss this far over the expected level is worth a probe
     constexpr double MILD_LOSS = 0.045;  // deep-sample loss not clearly this far over the background is rate-independent
     constexpr double HEAVY_LOSS = 0.2;  // loss this heavy is the link's, whatever a lower rate shows
+    // Background under 3% on the wire costs about three frames a loss: at most about 9% of frames near the floor,
+    // where the RP6 measured 4.4-6.3% at 2-4 Mbps. Loss clearly over this there is more than background; a hold's
+    // twelve reports of 9% at burstiness 3 are clearly over only about 6.3%.
+    constexpr double NEAR_FLOOR_LOSS = 0.1;
     constexpr double ABSORB_EXCESS = 0.02;  // while backing off, loss this close to the background only updates it
     constexpr double CLIMB_LOSSY = 0.03;  // a raise is lossy at this much loss over its floor
     constexpr double FIRST_STEP = 0.6;
@@ -320,6 +324,21 @@ namespace live_tuning_policy {
       enter_hold(now_ms, settle);
       return;
     }
+    // Heavy loss is learned only once the episode has looked under it, at the floor or at a rate that lost no more
+    // than 20%. Observed, not clearly over: 30 frames a report cannot clear two standard errors at 35%.
+    const bool looked_under = std::any_of(measured_.begin(), measured_.end(), [&](const auto &rate_stats) {
+      const auto &[kbps, stats] = rate_stats;
+      return kbps <= floor_ || stats.second / stats.first <= HEAVY_LOSS;
+    });
+    if (rate > HEAVY_LOSS && target_ > floor_ && !looked_under) {
+      std::pair<double, double> here {0.0, 0.0};
+      for (auto it = measured_.lower_bound(target_); it != measured_.end(); ++it) {
+        here.first += it->second.first;
+        here.second += it->second.second;
+      }
+      sample_floor(now_ms, here);
+      return;
+    }
     hold_failed_kbps_.reset();
     background_ = std::max(background_, rate);
     // Whether this background goes again is judged on the reports after it was learned.
@@ -329,6 +348,19 @@ namespace live_tuning_policy {
     backoff_ = BACKOFF_REPORTS;
     to_normal(now_ms, std::max(r0_, episode_start_), why);
     fec_open_episode();
+  }
+
+  void policy_t::sample_floor(std::int64_t now_ms, std::pair<double, double> here) {
+    // Judged as a deep sample is, against what the rate it left lost.
+    state_ = state_e::descend;
+    phase_ = phase_e::deep;
+    hi_ = target_;
+    hi_is_queue_ = false;
+    hi_stats_ = here;
+    hi_loss_ = here.first > 0.0 ? here.second / here.first : l0_;
+    deep_stats_ = {0.0, 0.0};
+    set_target(floor_, "descend_floor", now_ms);
+    test_ = make_sprt(hi_loss_, std::max(hi_loss_ / 3.0, MIN_LOSS), 0, 0);
   }
 
   double policy_t::probe_rate() const {
@@ -390,6 +422,14 @@ namespace live_tuning_policy {
 
   void policy_t::descend_result(bool helped, std::int64_t now_ms) {
     if (helped) {
+      const bool floor_measured = !measured_.empty() && measured_.begin()->first <= floor_;
+      if (target_ > floor_ && target_ <= static_cast<int>(floor_ * CLIMB_STEP) && !floor_measured &&
+          clearly_over(test_->lost(), test_->frames(), NEAR_FLOOR_LOSS)) {
+        // Lighter here, but this close over the floor still losing more than background costs: the floor under it
+        // may be clean, so sample it before this rate bounds a hold.
+        sample_floor(now_ms, {test_->frames(), test_->lost()});
+        return;
+      }
       lo_ = target_;
       lo_loss_ = test_->rate();
       state_ = state_e::verify_hi;
@@ -738,6 +778,12 @@ namespace live_tuning_policy {
           // Heavy loss that stays at a hold is the link's: probe under it, on this hold's evidence.
           run_ = {hold_stats_};
           begin_descent(now_ms, "descend_heavy_at_hold", rate);
+          return;
+        }
+        if (!hi_is_queue_ && target_ > floor_ && target_ <= static_cast<int>(floor_ * CLIMB_STEP) &&
+            (measured_.empty() || measured_.begin()->first > floor_) && clearly_over(lst, frames, NEAR_FLOOR_LOSS)) {
+          // This close over the floor, a hold losing more than background costs: the floor under it may be clean.
+          sample_floor(now_ms, hold_stats_);
           return;
         }
         const auto [hf, hl] = hi_stats_;
