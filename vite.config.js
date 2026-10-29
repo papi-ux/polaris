@@ -3,7 +3,6 @@ import fs from 'fs';
 import { resolve } from 'path'
 import { defineConfig } from 'vite'
 import { ViteEjsPlugin } from "vite-plugin-ejs";
-import { codecovVitePlugin } from "@codecov/vite-plugin";
 import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
 import process from 'process'
@@ -103,12 +102,6 @@ export default defineConfig({
                 fs.writeFileSync(indexPath, html);
             },
         },
-        // The Codecov vite plugin should be after all other plugins
-        codecovVitePlugin({
-            enableBundleAnalysis: process.env.CODECOV_TOKEN !== undefined,
-            bundleName: "polaris",
-            uploadToken: process.env.CODECOV_TOKEN,
-        }),
     ],
     root: resolve(assetsSrcPath),
     define: {
