@@ -17,3 +17,6 @@ packaging/linux/patches/inputtino/*.patch whitespace=-blank-at-eol,-blank-at-eof
 
 # RTSP fuzz seeds are exact wire bytes, including their CRLF line ends.
 tests/fuzz/corpus/rtsp_message/* binary
+
+# Control-stream fuzz seeds are raw typed-message payload bytes.
+tests/fuzz/corpus/control_stream/* binary

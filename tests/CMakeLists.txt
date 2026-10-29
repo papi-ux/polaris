@@ -87,6 +87,7 @@ set(TEST_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/fixtures/rtsp_option_ownership.c
     ${CMAKE_SOURCE_DIR}/src/rtsp_content_length.cpp
     ${CMAKE_SOURCE_DIR}/src/rtsp_handler_parsing.cpp
+    ${CMAKE_SOURCE_DIR}/src/control_messages.cpp
     ${CMAKE_SOURCE_DIR}/src/web_session_store.cpp
     ${CMAKE_SOURCE_DIR}/src/beat_times.cpp
     ${CMAKE_SOURCE_DIR}/src/display_planner.cpp
@@ -140,6 +141,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rtsp_option_ownership.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rtsp_content_length.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_rtsp_handler_parsing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_control_messages.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_workers.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_worker_admission.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
