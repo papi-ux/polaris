@@ -481,6 +481,21 @@ namespace platf::epic {
                a.group == b.group && a.credentials == b.credentials;
       }
 
+      /** Every fact a protected task was set aside by, so the census end can require all of them again. */
+      struct role_t {
+        std::string name;
+        std::vector<lineage_t> chain;
+      };
+
+      static bool same_role(const role_t &a, const role_t &b) {
+        return a.name == b.name && a.chain.size() == b.chain.size() &&
+               std::equal(a.chain.begin(), a.chain.end(), b.chain.begin(), same_lineage);
+      }
+
+      std::vector<role_t> roles;
+      std::string placed_group;
+
+
       /**
        * D-A (B), papi's 2026-10-29 decision on #420. At private admission a protected owner task,
        * whose executable, maps and links the owner cannot read, counts as "not Epic" only when its
@@ -504,33 +519,34 @@ namespace platf::epic {
        * reused, mixed-credential or changed link leaves it unproven. The task's stat and status
        * names must agree and must not look like Epic, an AppImage, Wine, Proton or a Windows game;
        * that screen can only refuse. Anything else, including any application placement, refuses.
+       * recheck_placed() requires the whole proof again at the census end.
        *
        * This is the owner-visible residual papi accepted, not a proof of absence. If it is ever
        * wrong, a hidden desktop launcher receives the request and the game opens on the desktop:
        * the in-session ownership check stays the backstop, so Private shows "Game unverified", End
        * closes only the private session, and nothing outside that session is signalled.
        */
-      bool session_role(const uninspected_t &task, const std::string &own_group) {
+      std::optional<role_t> session_role(const uninspected_t &task, const std::string &own_group) {
         try {
           const auto owner = backend.owner_uid();
           const auto path = fs::path("/proc") / std::to_string(task.identity.pid);
           const auto name = stat_name(read(path / "stat"));
           if (status_name(read(path / "status")) != name || !unrelated_name(name)) {
-            return false;
+            return std::nullopt;
           }
           std::vector<lineage_t> chain {lineage(task.identity.pid)};
           if (chain[0].identity.start != task.identity.start || chain[0].credentials != credentials_t::owner) {
-            return false;
+            return std::nullopt;
           }
           std::set<std::uint64_t> visited {task.identity.pid};
           while (chain.back().identity.parent != 1) {
             const auto parent = chain.back().identity.parent;
             if (parent <= 1 || chain.size() >= 64 || !visited.insert(parent).second) {
-              return false;
+              return std::nullopt;
             }
             auto next = lineage(parent);
             if (next.identity.start > chain.back().identity.start) {
-              return false;
+              return std::nullopt;
             }
             chain.push_back(std::move(next));
           }
@@ -560,17 +576,17 @@ namespace platf::epic {
               break;
           }
           if (!placed) {
-            return false;
+            return std::nullopt;
           }
           for (const auto &edge : chain) {
             if (!same_lineage(edge, lineage(edge.identity.pid))) {
-              return false;
+              return std::nullopt;
             }
           }
-          return true;
+          return role_t {name, std::move(chain)};
         }
         catch (const refusal_t &) {
-          return false;
+          return std::nullopt;
         }
       }
 
@@ -579,17 +595,27 @@ namespace platf::epic {
         if (uninspected.empty()) {
           return;
         }
-        const auto own_group = cgroup(read("/proc/self/cgroup"));
+        placed_group = cgroup(read("/proc/self/cgroup"));
         for (const auto &task : uninspected) {
-          require(session_role(task, own_group), reason);
+          auto role = session_role(task, placed_group);
+          require(role.has_value(), reason);
+          roles.push_back(std::move(*role));
         }
       }
 
-      // A set-aside task must still be the same protected task when the census ends: one that
-      // exits, is reused or becomes readable (by running something else) was never checked.
+      // A set-aside task must still be the same protected task when the census ends, and every fact
+      // that set it aside must still hold: its names and their veto, and each lineage edge's parent,
+      // cgroup and credentials. One that exits, is reused, becomes readable or changes its role
+      // meanwhile was never checked.
       void recheck_placed(const char *reason) {
-        for (const auto &task : uninspected) {
-          require(still_uninspected(task), reason);
+        if (uninspected.empty()) {
+          return;
+        }
+        require(roles.size() == uninspected.size() && cgroup(read("/proc/self/cgroup")) == placed_group, reason);
+        for (std::size_t i = 0; i < uninspected.size(); ++i) {
+          require(still_uninspected(uninspected[i]), reason);
+          const auto again = session_role(uninspected[i], placed_group);
+          require(again && same_role(*again, roles[i]), reason);
         }
       }
 
@@ -1413,6 +1439,7 @@ namespace platf::epic {
         return error ? std::nullopt : std::make_optional(result);
       }
 
+
       std::optional<file_t> stat(const fs::path &path) override {
         struct stat value {};
         if (::stat(path.c_str(), &value) != 0) {
@@ -1981,6 +2008,7 @@ namespace platf::epic {
     const observation_t &observation, std::string &error) {
     return detail::engine_t::adopt_in_session(title, session, not_before_ticks, observation, error);
   }
+
 
   namespace testing {
     observation_t observe(const title_t &title, std::shared_ptr<backend_t> backend) {

@@ -1637,6 +1637,75 @@ TEST_F(EpicProcess, LauncherInventoryKnowsTheRetainedFileByIdentityAndBookendsTh
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, Peer582RoleFactsChangedAtFinalBookendMustRemainUnknown) {
+  for (const bool runtime_census : {false, true}) {
+    host = std::make_shared<fixture_t>();
+    host->pids.clear();
+    host->desktop_session_host();
+    int stat_reads = 0;
+    host->after_read = [&](const fs::path &path) {
+      // owner census first+bookend, role name, initial+final lineage, final census bookend.
+      if (path == "/proc/5157/stat" && ++stat_reads == 6) {
+        host->files["/proc/5157/stat"] = stat_line(5157, 2905, 'S', 1784, "EpicGamesLaunch");
+        host->files["/proc/5157/status"] = "Name:\tEpicGamesLaunch\nUid:\t1000\t1000\t1000\t1000\n";
+        host->files["/proc/5157/cgroup"] = "0::" + host->manager + "/app.slice/app-epic.service\n";
+      }
+    };
+    if (runtime_census) {
+      const auto result = ep::testing::title_runtime_absent(host->title(), error, host);
+      EXPECT_FALSE(result.has_value()) << "runtime absence stayed definite after role facts changed";
+    } else {
+      const auto result = ep::testing::launcher_instances(error, host);
+      EXPECT_FALSE(result.has_value()) << "launcher census stayed definite after role facts changed";
+    }
+    EXPECT_GE(stat_reads, 6);
+    EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, PrivateAdmissionRequiresEveryRoleFactAgainAtTheCensusEnd) {
+  // Each change keeps the task the same protected task (pid, start, owner, denied exe) and lands
+  // after its role was proved, at the census's own final bookend.
+  struct change_t {
+    const char *what;
+    std::function<void(fixture_t &)> apply;
+  };
+  const std::vector<change_t> changes {
+    {"its name, to one the veto refuses", [](fixture_t &h) {
+       h.files["/proc/5157/stat"] = stat_line(5157, 2905, 'S', 1784, "wineserver");
+       h.files["/proc/5157/status"] = "Name:\twineserver\nUid:\t1000\t1000\t1000\t1000\n";
+     }},
+    {"its status name alone", [](fixture_t &h) { h.files["/proc/5157/status"] = "Name:\tssh-agent2\nUid:\t1000\t1000\t1000\t1000\n"; }},
+    {"its cgroup, to another service", [](fixture_t &h) { h.files["/proc/5157/cgroup"] = "0::" + h.manager + "/app.slice/other.service\n"; }},
+    {"its parent, reparented to PID 1", [](fixture_t &h) { h.files["/proc/5157/stat"] = stat_line(5157, 2905, 'S', 1, "ssh-agent"); }},
+    {"an ancestor's credentials", [](fixture_t &h) { h.files["/proc/1784/status"] = "Name:\tsystemd\nUid:\t1000\t0\t0\t0\n"; }},
+    {"a login session's root parent, replaced", [](fixture_t &h) { h.files["/proc/561444/stat"] = stat_line(561444, 26805729, 'S', 1, "sshd-session"); }},
+  };
+  for (const auto &change : changes) {
+    for (const bool runtime_census : {false, true}) {
+      host = std::make_shared<fixture_t>();
+      host->pids.clear();
+      host->desktop_session_host();
+      // Placement reads Polaris's own cgroup once, and the final bookend reads it again first.
+      int self_reads = 0;
+      bool changed = false;
+      host->after_read = [&](const fs::path &path) {
+        if (path == "/proc/self/cgroup" && ++self_reads == 2 && !changed) {
+          changed = true;
+          change.apply(*host);
+        }
+      };
+      std::string reason;
+      const auto result = runtime_census ? ep::testing::title_runtime_absent(host->title(), reason, host).has_value() :
+                                           ep::testing::launcher_instances(reason, host).has_value();
+      EXPECT_TRUE(changed) << change.what;
+      EXPECT_FALSE(result) << change.what << (runtime_census ? " (runtime)" : " (launcher)");
+      EXPECT_EQ(reason, runtime_census ? "title_runtime_inventory_changed" : "launcher_inventory_changed") << change.what;
+      EXPECT_TRUE(host->signals.empty());
+    }
+  }
+}
+
 TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks) {
   auto pattern = (fs::temp_directory_path() / "polaris-epic-reader-XXXXXX").string();
   const auto made = mkdtemp(pattern.data());
