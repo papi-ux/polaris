@@ -7,20 +7,37 @@ function webSource(relativePath) {
 }
 
 describe('Dashboard Doctor layout', () => {
-  it('separates a long diagnosis from confidence and optimizer metadata', () => {
+  it('says what is happening, what to try and one action before anything deeper', () => {
     const dashboard = webSource('views/DashboardView.vue')
     const headline = dashboard.indexOf('{{ doctorHeadline }}')
-    const metadata = dashboard.indexOf('data-dashboard-doctor-meta')
-    const confidence = dashboard.indexOf('{{ doctorConfidenceLabel }}')
-    const optimizer = dashboard.indexOf('{{ autoQuality.compactLabel }}')
+    const step = dashboard.indexOf('data-doctor-try')
+    const action = dashboard.indexOf('data-doctor-action')
+    const deeper = dashboard.indexOf('data-doctor-more')
+    const details = dashboard.indexOf('<DoctorDetails')
 
     expect(headline).toBeGreaterThan(-1)
-    expect(metadata).toBeGreaterThan(headline)
+    expect(step).toBeGreaterThan(headline)
+    expect(action).toBeGreaterThan(step)
+    expect(deeper).toBeGreaterThan(action)
+    expect(details).toBeGreaterThan(deeper)
+  })
+
+  it('keeps confidence, evidence and Explain one level down, in that order', () => {
+    const details = webSource('components/DoctorDetails.vue')
+    const template = details.slice(details.indexOf('<template>'))
+    const metadata = template.indexOf('data-dashboard-doctor-meta')
+    const confidence = template.indexOf('dashboard.doctor_confidence')
+    const optimizer = template.indexOf('autoQuality.compactLabel')
+    const evidence = template.indexOf('data-doctor-evidence')
+    const explain = template.indexOf('data-doctor-explain')
+
+    expect(metadata).toBeGreaterThan(-1)
     expect(confidence).toBeGreaterThan(metadata)
     expect(optimizer).toBeGreaterThan(confidence)
-    expect(dashboard).toContain('data-dashboard-doctor-meta')
-    expect(dashboard).toContain('role="list" aria-label="Doctor confidence and Live Tuning status"')
-    expect(dashboard.match(/role="listitem"/g)).toHaveLength(3)
-    expect(dashboard).toContain('class="mt-3 flex flex-wrap items-center gap-2"')
+    expect(evidence).toBeGreaterThan(optimizer)
+    expect(explain).toBeGreaterThan(evidence)
+    expect(template).toContain('role="list" aria-label="Doctor confidence and Live Tuning status"')
+    expect(template.match(/role="listitem"/g)).toHaveLength(2)
+    expect(webSource('views/DashboardView.vue')).not.toContain('doctor_confidence')
   })
 })

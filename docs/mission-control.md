@@ -33,10 +33,19 @@ checked on the connected device.
 
 ## While a stream is live
 
-The header names the client that owns the session, or how many clients are watching, along with
-the running app and how long it has been up. The pill beside it is the capture path in use, in the
-same words the Audio/Video page uses; [Launch modes and capture paths](launch-modes.md#check-what-your-stream-is-using)
-explains how to read it.
+The **live session card** comes first: the game and its cover, the device playing it, how long the
+stream has run, and **Disconnect Client** and **End**. On a phone its actions sit below the details at the
+card's full width; from tablet width they sit beside them. Anything the host has not reported is
+left out rather than filled in.
+
+The connection chip appears only when the host confirms it from its own Tailscale peer status:
+**Tailscale · direct**, **DERP relay** or **peer relay**. Any other stream, including one on the
+local network, has no chip, because an address alone does not establish how a client connected. The
+chip describes the peer, not the route video and audio take, and a relay is not a quality verdict.
+
+The stage below it shows the capture path in use, in the same words the Audio/Video page uses;
+[Launch modes and capture paths](launch-modes.md#check-what-your-stream-is-using) explains how to
+read it.
 
 **Live summary strip**:
 
@@ -52,17 +61,23 @@ explains how to read it.
 The small pills at the end of the strip count dropped frames, duplicated frames, and frames that
 missed their target interval. Live charts under the tiles pause when reduced motion is on.
 
-**Doctor** sits under the strip: a headline, a confidence chip, the Auto Quality state, a
-recommendation, and at most one safe action with a confirmation. What the verdicts and actions
-mean is in [Fix a bad stream with Doctor](doctor.md).
+**Doctor** sits under the strip: what is happening, what to try, and at most one safe action.
+**Why Doctor says this** opens the confidence, the Auto Quality state, what should happen next and
+the readings behind the finding. What the verdicts and actions mean is in
+[Fix a bad stream with Doctor](doctor.md).
 
 **Display Preview** shows a low-rate view of the host capture display, inside the browser.
 Expand it to inspect a frame; hide it to save host work. The preview is diagnostic only and does
 not change the stream.
 
-**Disconnect Client** ends the active session after a confirmation. This can close a game Polaris
-manages, including an Epic game whose owner granted close permission. To keep a game running for
-Resume, use **Disconnect** in Nova or Moonlight instead.
+**Disconnect Client** ends the active session for that device after a confirmation. It needs the one
+pairing record the stream names, so it is not offered when two devices share a name. This can close
+a game Polaris manages, including an Epic game whose owner granted close permission. To keep a game
+running for Resume, use **Disconnect** in Nova or Moonlight instead.
+
+**End** ends the session after a confirmation, the same action as **Terminate** in the Library. It
+appears where the host names the running app, and not while a Space is active; a Space keeps its own
+controls on the Spaces page.
 
 ## While the host is idle
 

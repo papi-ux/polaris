@@ -3959,6 +3959,75 @@ TEST(StreamStatsDoctorTests, GradesEncoderTimeAgainstTheActiveFpsBudget) {
   EXPECT_EQ(sixty_fps.at("traffic_light"), "amber");
 }
 
+TEST(StreamStatsDoctorTests, GivesAStepThatIsNotTheHeadlineForAnIssueWithNoneOfItsOwn) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.capture_source_fps = 60.0;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 2.0;
+  stats.latency_ms = 4.0;
+
+  const auto recommended = stream_stats::build_doctor_json(stats, {
+    {"primary_issue", "decoder_path"}, {"grade", "watch"}, {"summary", "This device is having a harder time decoding this codec than expected."},
+    {"recommendations", {"This device is having a harder time decoding this codec than expected.", "Use HEVC for the next launch if AV1 keeps hitching on this client."}},
+  });
+  EXPECT_EQ(recommended.at("primary_issue"), "decoder_path");
+  EXPECT_EQ(recommended.at("recommendation").at("body"), "Use HEVC for the next launch if AV1 keeps hitching on this client.");
+
+  const auto bare = stream_stats::build_doctor_json(stats, {
+    {"primary_issue", "decoder_path"}, {"grade", "watch"}, {"summary", "This device is having a harder time decoding this codec than expected."},
+  });
+  EXPECT_EQ(bare.at("recommendation").at("body"), "Lower the stream's resolution or frame rate, then check again.");
+  EXPECT_NE(bare.at("recommendation").at("body"), bare.at("summary"));
+}
+
+TEST(StreamStatsTests, ReportsHowLongTheStreamHasRunByTheHostClock) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.session_generation = 7;
+  stream_stats::client_stats_t own {};
+  own.session_generation = 7;
+  own.started_at = std::chrono::system_clock::now() - std::chrono::seconds(90);
+  stream_stats::client_stats_t other {};
+  other.session_generation = 6;
+  other.started_at = std::chrono::system_clock::now() - std::chrono::seconds(4000);
+  stats.clients = {other, own};
+
+  const auto elapsed = nlohmann::json::parse(stats.to_json()).at("session_elapsed_s").get<std::int64_t>();
+  EXPECT_GE(elapsed, 90);
+  EXPECT_LT(elapsed, 120);
+
+  // A clock that moved back never reads as a negative time.
+  stats.clients.back().started_at = std::chrono::system_clock::now() + std::chrono::hours(1);
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("session_elapsed_s"), 0);
+}
+
+TEST(StreamStatsTests, LeavesElapsedTimeOutWhenTheHostHoldsNoStartForThisStream) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.session_generation = 7;
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+
+  stream_stats::client_stats_t other {};
+  other.session_generation = 6;
+  other.started_at = std::chrono::system_clock::now();
+  stats.clients = {other};
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+
+  stream_stats::client_stats_t unstarted {};
+  unstarted.session_generation = 7;
+  stats.clients = {unstarted};
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+
+  stats.clients.front().started_at = std::chrono::system_clock::now();
+  stats.streaming = false;
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+}
+
 TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkEvidence) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -3981,7 +4050,11 @@ TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkE
   );
 
   EXPECT_EQ(doctor.at("primary_issue"), "frame_pacing");
-  EXPECT_EQ(doctor.at("summary"), "Frame pacing telemetry needs attention.");
+  EXPECT_EQ(doctor.at("summary"), "Frames are not leaving the host at a steady pace, so motion may look uneven.");
+  // The step is concrete, not the headline again and not a path name.
+  EXPECT_EQ(doctor.at("recommendation").at("body"),
+            "Cap the game's frame rate at the stream's frame rate, or lower its graphics settings, then check again.");
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Cap the game's frame rate");
   EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
 
   bool saw_fps_gap = false;
@@ -4108,7 +4181,7 @@ TEST(StreamStatsDoctorTests, SuppressesUnconfirmedPacingSummaryWhenCurrentWindow
   );
 
   EXPECT_EQ(doctor.at("primary_issue"), "none");
-  EXPECT_EQ(doctor.at("summary"), "Streaming telemetry looks ready.");
+  EXPECT_EQ(doctor.at("summary"), "This stream looks healthy.");
   EXPECT_EQ(
     doctor.at("confidence").at("basis"),
     "live_evidence_overrode_unconfirmed_pacing"
@@ -4146,7 +4219,7 @@ TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClea
 
   EXPECT_EQ(doctor.at("version"), 2);
   EXPECT_EQ(doctor.at("primary_issue"), "none");
-  EXPECT_EQ(doctor.at("summary"), "Streaming telemetry looks ready.");
+  EXPECT_EQ(doctor.at("summary"), "This stream looks healthy.");
   EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
   ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
   EXPECT_EQ(doctor.at("suppressed_findings").at(0).at("id"), "stale_network_jitter");
@@ -4300,9 +4373,9 @@ TEST(StreamStatsDoctorTests, ControlChannelFindingSaysOnlyWhatTheWindowJudged) {
   // A client that sends no media reports: RTT is judged, loss is not, and nothing says it cleared.
   const auto unreported = judged_doctor(stats);
   EXPECT_EQ(unreported.at("primary_issue"), "control_channel_observation");
-  EXPECT_EQ(unreported.at("summary"), "Control-channel retries were observed, but no video frame loss is measured.");
+  EXPECT_EQ(unreported.at("summary"), "Some control messages had to be resent. Video frame loss is not measured, so this says nothing about the picture.");
   EXPECT_EQ(unreported.at("recommendation").at("body"),
-            "The reliable control channel retried packets, but no video frame loss is measured, and round trip time over "
+            "Some control messages had to be resent, but no video frame loss is measured, and round trip time over "
             "the last 20 seconds stays below network pressure, so Doctor changes nothing for this.");
 
   // Its reports arriving and judged light, with Live Tuning owning the bitrate.
@@ -4313,9 +4386,9 @@ TEST(StreamStatsDoctorTests, ControlChannelFindingSaysOnlyWhatTheWindowJudged) {
   stats.adaptive_bitrate_enabled = true;
   const auto reported = judged_doctor(stats);
   EXPECT_EQ(reported.at("primary_issue"), "control_channel_observation");
-  EXPECT_EQ(reported.at("summary"), "Control-channel retries were observed, but video frame loss stays below network pressure.");
+  EXPECT_EQ(reported.at("summary"), "Some control messages had to be resent, but video frame loss stays low.");
   EXPECT_EQ(reported.at("recommendation").at("body"),
-            "The reliable control channel retried packets, but video frame loss and round trip time over the last 20 "
+            "Some control messages had to be resent, but video frame loss and round trip time over the last 20 "
             "seconds stay below network pressure, so Doctor changes nothing for this. Live Tuning keeps adjusting the "
             "live bitrate on its own.");
   const auto *loss = find_evidence_row(reported, "packet_loss");

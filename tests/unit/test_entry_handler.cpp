@@ -8,15 +8,23 @@
 
 #include <src/entry_handler.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <thread>
+
+#ifndef _WIN32
+  #include <fcntl.h>
+  #include <unistd.h>
+#endif
 
 TEST(EntryHandlerTests, TheTestLogIsScopedToThisBinaryNotSharedAcrossTargets) {
   // Issue #414: every test binary logged to one shared file, and test_logging.cpp
@@ -110,6 +118,82 @@ namespace {
     probe_sigint_count.fetch_add(1);
   }
 }  // namespace
+
+TEST(EntryHandlerTests, VersionConstellationIsSevenStarsWithPolarisMarked) {
+  const auto art = args::version_constellation();
+  EXPECT_EQ(std::count(art.begin(), art.end(), '*'), 7);
+  EXPECT_NE(art.find("(*) Polaris"), std::string_view::npos);
+  EXPECT_EQ(art.find("Polaris"), art.rfind("Polaris"));
+  EXPECT_EQ(art.back(), '\n');
+  EXPECT_TRUE(std::all_of(art.begin(), art.end(), [](unsigned char c) {
+    return c == '\n' || (c >= 0x20 && c < 0x7f);
+  }));
+  // Small enough for a narrow terminal.
+  std::size_t line_start = 0;
+  while (line_start < art.size()) {
+    const auto line_end = art.find('\n', line_start);
+    EXPECT_LE(line_end - line_start, 40u);
+    line_start = line_end + 1;
+  }
+}
+
+#ifndef _WIN32
+TEST(EntryHandlerTests, VersionPrintsNothingExtraWhenStdoutIsNotATerminal) {
+  // CaptureStdout points fd 1 at a file, as a script's redirect does.
+  testing::internal::CaptureStdout();
+  EXPECT_EQ(args::version(), 0);
+  std::fflush(stdout);
+  EXPECT_EQ(testing::internal::GetCapturedStdout(), "");
+}
+
+TEST(EntryHandlerTests, InteractiveTerminalIsOnlyATerminal) {
+  int pipe_ends[2] {-1, -1};
+  ASSERT_EQ(pipe(pipe_ends), 0);
+  EXPECT_FALSE(args::is_interactive_terminal(pipe_ends[0]));
+  EXPECT_FALSE(args::is_interactive_terminal(pipe_ends[1]));
+  close(pipe_ends[0]);
+  close(pipe_ends[1]);
+  EXPECT_FALSE(args::is_interactive_terminal(pipe_ends[0]));
+
+  const int controller = posix_openpt(O_RDWR | O_NOCTTY);
+  ASSERT_GE(controller, 0) << "this test needs a pseudo-terminal";
+  ASSERT_EQ(grantpt(controller), 0);
+  ASSERT_EQ(unlockpt(controller), 0);
+  const int terminal = open(ptsname(controller), O_RDWR | O_NOCTTY);
+  ASSERT_GE(terminal, 0);
+  EXPECT_TRUE(args::is_interactive_terminal(terminal));
+  close(terminal);
+  close(controller);
+}
+
+TEST(EntryHandlerTests, VersionDrawsTheConstellationOnATerminal) {
+  const int controller = posix_openpt(O_RDWR | O_NOCTTY);
+  ASSERT_GE(controller, 0) << "this test needs a pseudo-terminal";
+  ASSERT_EQ(grantpt(controller), 0);
+  ASSERT_EQ(unlockpt(controller), 0);
+  const int terminal = open(ptsname(controller), O_RDWR | O_NOCTTY);
+  ASSERT_GE(terminal, 0);
+
+  std::fflush(stdout);
+  const int saved_stdout = dup(STDOUT_FILENO);
+  ASSERT_GE(saved_stdout, 0);
+  ASSERT_EQ(dup2(terminal, STDOUT_FILENO), STDOUT_FILENO);
+  const int result = args::version();
+  std::fflush(stdout);
+  dup2(saved_stdout, STDOUT_FILENO);
+  close(saved_stdout);
+  close(terminal);
+
+  EXPECT_EQ(result, 0);
+  std::string shown(4096, '\0');
+  const auto count = read(controller, shown.data(), shown.size());
+  close(controller);
+  ASSERT_GT(count, 0);
+  shown.resize(static_cast<std::size_t>(count));
+  EXPECT_NE(shown.find("(*) Polaris"), std::string::npos);
+  EXPECT_NE(shown.find("Ursa Minor"), std::string::npos);
+}
+#endif
 
 TEST(LifetimeTests, ServiceUnitComesFromTheCgroupLeaf) {
   EXPECT_EQ(lifetime::systemd_service_unit_from_cgroup(

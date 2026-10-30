@@ -1242,6 +1242,17 @@ namespace stream_stats {
     j["streaming"] = streaming;
     // Match separately collected network evidence to this process and stream.
     j["stream_instance_id"] = streaming ? stream_instance_id(session_generation) : std::string {};
+    // How long this stream has run by the host's clock, so a console opened mid-stream and a browser
+    // with a wrong clock read the same time. Absent when the host holds no start for this stream.
+    if (streaming && session_generation != 0) {
+      const auto own = std::find_if(clients.begin(), clients.end(), [this](const client_stats_t &client) {
+        return client.session_generation == session_generation;
+      });
+      if (own != clients.end() && own->started_at != std::chrono::system_clock::time_point {}) {
+        const auto elapsed = std::chrono::system_clock::now() - own->started_at;
+        j["session_elapsed_s"] = std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
+      }
+    }
     j["client_name"] = client_name;
     j["client_ip"] = client_ip;
     // "nova" or "moonlight" for the stream client_name names; empty when nothing says which.
@@ -2791,6 +2802,22 @@ namespace stream_stats {
              std::to_string(static_cast<int>(network_judge_t::k_rtt_fail_ms)) + " ms.";
     }
 
+    /// What to try for an issue with no step of its own: the host's first recommendation that says
+    /// more than the headline already did, then the given step. Repeating the headline tells nobody
+    /// what to do.
+    std::string doctor_next_step(const nlohmann::json &health, const std::string &headline, const std::string &otherwise) {
+      const auto recommendations = health.find("recommendations");
+      if (recommendations != health.end() && recommendations->is_array()) {
+        for (const auto &recommendation : *recommendations) {
+          if (recommendation.is_string() && !recommendation.get_ref<const std::string &>().empty() &&
+              recommendation.get_ref<const std::string &>() != headline) {
+            return recommendation.get<std::string>();
+          }
+        }
+      }
+      return otherwise;
+    }
+
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
                                          const std::string &summary,
                                          const nlohmann::json &health,
@@ -2807,12 +2834,12 @@ namespace stream_stats {
 
       if (primary_issue == "none") {
         title = "Keep playing";
-        body = "Streaming telemetry looks ready. Keep this page open if you are trying to catch an intermittent problem.";
+        body = "Nothing needs changing. Keep this page open if you are trying to catch a problem that comes and goes.";
         next_step = "Keep monitoring";
         expected = "No recovery action should be needed right now.";
       } else if (primary_issue == "cadence_collecting") {
         title = "Keep streaming";
-        body = "Polaris needs fresh cadence evidence before it can grade pacing. No quality change is needed for missing evidence.";
+        body = "Keep playing while Polaris takes a fresh measurement. Nothing needs changing yet.";
         next_step = "Keep monitoring";
         expected = "A fresh measurement can distinguish source cadence from delivery pressure.";
       } else if (primary_issue == "network_jitter") {
@@ -2847,20 +2874,20 @@ namespace stream_stats {
           next_step = "Recheck Live Tuning";
           expected = "The loss should clear at the bitrate Live Tuning settles on. It tries a higher bitrate again about every 20 seconds and climbs back toward your request when the link allows.";
         } else if (live_bitrate_tunable) {
-          body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
+          body = "Video is being lost or delayed on the network. Doctor can lower the bitrate one step and check whether that clears it.";
           next_step = "Fix and verify";
           expected = "Packet loss and latency should return to the stable range without changing encoder or display settings.";
         } else if (!single_session_scope) {
-          body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
+          body = "Doctor can only change the bitrate of a stream with no other viewers. Disconnect the other viewers, reconnect this stream, then check again.";
           next_step = "Reconnect one stream";
           expected = "No other encoder can be changed by this stream's Auto Fix.";
         } else {
-          body = "Current sustained loss or latency evidence confirms network pressure, but this encoder cannot change bitrate during a live stream. Lower the paired or client bitrate for the next launch.";
+          body = "Video is being lost or delayed on the network, and this encoder cannot change bitrate during a stream. Lower the bitrate in your client before the next one.";
           next_step = "Lower next-stream bitrate";
           expected = "The next stream should start at a bitrate the network can sustain.";
         }
       } else if (primary_issue == "network_observation") {
-        body = "Doctor sees a debounced network warning, but current loss and latency do not justify reducing quality. Recheck the live path before changing bitrate.";
+        body = "The latest loss and latency readings do not call for lower quality. Check again before changing the bitrate.";
         next_step = "Recheck network";
         expected = "Doctor will either clear the warning or gather direct evidence before offering a bitrate change.";
       } else if (primary_issue == "control_channel_observation") {
@@ -2873,7 +2900,7 @@ namespace stream_stats {
           network.loss_judged ? "video frame loss" + window + " stays below network pressure" :
           network.rtt_judged ? "no video frame loss is measured, and round trip time" + window + " stays below network pressure" :
           std::string {"neither video frame loss nor round trip time is judged yet"};
-        body = "The reliable control channel retried packets, but " + judged + ", so Doctor changes nothing for this.";
+        body = "Some control messages had to be resent, but " + judged + ", so Doctor changes nothing for this.";
         if (auto_safe_managing) {
           body += " Live Tuning keeps adjusting the live bitrate on its own.";
         }
@@ -2881,19 +2908,19 @@ namespace stream_stats {
         expected = "Sustained video frame loss or RTT pressure must appear before Doctor recommends a network recovery action.";
       } else if (primary_issue == "quality_reduced_live") {
         if (auto_safe_managing) {
-          body = "The current network is clean and Live Tuning is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
+          body = "The network looks clean and Live Tuning is already holding the bitrate or bringing it back up. Doctor checks on it without changing the bitrate as well.";
           next_step = "Recheck Live Tuning";
           expected = "Live Tuning should recover quality gradually while keeping the stream inside the measured network budget.";
         } else if (live_bitrate_tunable) {
-          body = "The current network is clean, and the live adaptive target is below this stream's effective launch ceiling. Doctor can retry quality gradually and verify every step.";
+          body = "The network looks clean and the bitrate has room to rise. Doctor can raise it a step at a time and check each one.";
           next_step = "Restore and verify";
           expected = "Bitrate should climb toward the capability-validated launch ceiling while Doctor stops immediately if live loss or latency returns.";
         } else if (!single_session_scope) {
-          body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
+          body = "Doctor can only change the bitrate of a stream with no other viewers. Disconnect the other viewers, reconnect this stream, then check again.";
           next_step = "Reconnect one stream";
           expected = "No other encoder can be changed by this stream's Auto Fix.";
         } else {
-          body = "The current network is clean, but this encoder cannot restore bitrate during the active stream. Doctor will not change the next launch.";
+          body = "The network looks clean, but this encoder cannot raise the bitrate during a stream. Doctor will not change your next launch.";
           next_step = "Keep current settings";
           expected = "Any later launch remains governed only by the user's selected preset and capability validation.";
         }
@@ -2914,7 +2941,7 @@ namespace stream_stats {
           next_step = "Raise and verify";
           expected = "Fewer frames should hit PyroWave's byte ceiling while loss and latency stay in range.";
         } else if (!single_session_scope) {
-          body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
+          body = "Doctor can only change the bitrate of a stream with no other viewers. Disconnect the other viewers, reconnect this stream, then check again.";
           next_step = "Reconnect one stream";
           expected = "No other encoder can be changed by this stream's Auto Fix.";
         } else {
@@ -2929,7 +2956,7 @@ namespace stream_stats {
         next_step = "Use a lower mode or HEVC";
         expected = "A smaller or slower picture needs fewer bits, and HEVC needs fewer for the same picture.";
       } else if (primary_issue == "steam_input_conflict") {
-        body = "Local Steam Input settings can claim the Polaris Xbox virtual controller while strict isolation prevents Steam from creating its replacement controller. Disable Steam Input for Xbox controllers in Steam Settings, and set any per-game Force On overrides to Default or Disable.";
+        body = "Steam Input can take over the Polaris Xbox controller, which leaves the game with no controller. In Steam Settings, turn off Steam Input for Xbox controllers, and set any per-game Force On overrides to Default or Disable.";
         next_step = "Adjust Steam Input";
         expected = "Proton games should read the Polaris virtual controller directly without a per-game workaround.";
       } else if (primary_issue == "encoder_load") {
@@ -2937,26 +2964,30 @@ namespace stream_stats {
         // bitrate, so a lower bitrate softens the picture and gives the encoder nothing back.
         body = pyrowave.active ?
           "Lower the resolution or FPS to give PyroWave more frame time. Its encode takes as long at any bitrate, so a lower bitrate would only soften the picture." :
-          "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
+          "Lower the resolution, frame rate or bitrate so the encoder has more time for each frame.";
         next_step = "Lower stream load";
         expected = "Encode time should fall back under the low-latency budget.";
       } else if (primary_issue == "host_render_limited") {
-        body = "Lower the game render preset, render resolution, or stream FPS before tuning bitrate.";
+        body = "Lower the game's graphics settings or the stream's frame rate. Changing the bitrate will not help here.";
         next_step = "Lower game/FPS target";
         expected = "Game frames should arrive on pace with the stream target.";
+      } else if (primary_issue == "frame_pacing") {
+        body = "Cap the game's frame rate at the stream's frame rate, or lower its graphics settings, then check again.";
+        next_step = "Cap the game's frame rate";
+        expected = "Motion should even out, and Doctor's next reading should come back steady.";
       } else if (primary_issue == "capture_missing" || primary_issue == "no_active_stream") {
-        body = "Start or resume the affected stream so Polaris can classify the real capture and encode path.";
+        body = "Start or resume the stream so Polaris can see how it is captured and encoded.";
         next_step = "Start stream";
         expected = "Doctor can switch from readiness hints to live telemetry evidence.";
       } else if (primary_issue.find("capture") != std::string::npos ||
                  primary_issue.find("shm") != std::string::npos ||
                  primary_issue.find("dmabuf") != std::string::npos ||
                  primary_issue == "nvenc_cuda_disabled") {
-        body = health.value("summary", summary);
+        body = doctor_next_step(health, summary, "Lower the stream's frame rate first: it gives this capture path more time for each frame.");
         next_step = "Review capture evidence";
         expected = "Advanced evidence will show whether the host is on GPU-native, DMA-BUF, SHM/system-memory, or CPU-copy fallback.";
       } else {
-        body = health.value("summary", summary);
+        body = doctor_next_step(health, summary, "Lower the stream's resolution or frame rate, then check again.");
         next_step = health.value("relaunch_recommended", false) ? "Plan safe relaunch" : "Open Advanced";
         expected = "The recommended change should target the loudest deterministic signal first.";
       }
@@ -3486,23 +3517,23 @@ namespace stream_stats {
         "% of recent frames fill its byte budget.";
     }
     const std::string summary =
-      primary_issue == "none" ? "Streaming telemetry looks ready." :
+      primary_issue == "none" ? "This stream looks healthy." :
       primary_issue == "stream_failed_to_start" ? failed_start_summary(*failed_start) :
-      primary_issue == "no_active_stream" ? "No active stream is running, so Doctor cannot verify the live path yet." :
-      primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
-      primary_issue == "cadence_collecting" ? "Cadence evidence is pending or stale; keep streaming while Polaris collects it." :
-      primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
-      primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
+      primary_issue == "no_active_stream" ? "Nothing is streaming, so Doctor has nothing to check yet." :
+      primary_issue == "capture_missing" ? "Polaris has not seen how this stream is captured yet, so it is too soon to change any settings." :
+      primary_issue == "cadence_collecting" ? "Polaris is still measuring how smoothly this stream runs." :
+      primary_issue == "network_jitter" ? "The network is struggling to carry this stream." :
+      primary_issue == "network_observation" ? "The network looked unsteady, but not enough for Doctor to change anything yet." :
       primary_issue == "control_channel_observation" ?
         (loss_judged ?
-          "Control-channel retries were observed, but video frame loss stays below network pressure." :
-          "Control-channel retries were observed, but no video frame loss is measured.") :
-      primary_issue == "quality_reduced_live" ? "The reversible live bitrate target is below the capability-validated launch ceiling and current network evidence is clean." :
+          "Some control messages had to be resent, but video frame loss stays low." :
+          "Some control messages had to be resent. Video frame loss is not measured, so this says nothing about the picture.") :
+      primary_issue == "quality_reduced_live" ? "The bitrate is below what this stream can use, and the network looks clean now." :
       primary_issue == "pyrowave_starved" ? pyrowave_summary + " The network is clean." :
       primary_issue == "pyrowave_needs_more_than_allowed" ? pyrowave_limit_summary :
-      primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
-      primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
-      primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
+      primary_issue == "steam_input_conflict" ? "Steam Input settings on this PC can take over the controller Polaris makes for the game." :
+      primary_issue == "encoder_load" ? "The host's video encoder is taking too long on each frame." :
+      primary_issue == "frame_pacing" ? "Frames are not leaving the host at a steady pace, so motion may look uneven." :
       health.contains("summary") && !suppressed_stale_network_finding &&
         !health_claims_unconfirmed_frame_pacing ? health.value("summary", std::string {}) :
       capture_path_reason_message(capture_reason);
