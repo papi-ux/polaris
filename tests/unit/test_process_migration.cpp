@@ -3348,6 +3348,56 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationCleanupLeavesUnownedControlProces
   EXPECT_EQ(control_guard.terminate_and_reap(&control_status), control);
 }
 
+TEST(ProcessRuntimeConfigTests, EpicPrivateSweepTakesATokenBearerOnlyInsideTheSessionCgroup) {
+#ifdef __linux__
+  // #582 finding 1. After the compositor stops, a private Epic session's exact sweep counts a
+  // token-bearing process only inside the session's cgroup. One child stands for both shapes:
+  // fenced on its own cgroup it is the session's; fenced on another it is an outsider handed the
+  // token (systemd-run --user --unit=desktop-app --setenv=POLARIS_SESSION_INSTANCE_ID=...).
+  const std::string token = "epic-private-cgroup-fence-582";
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+    execl("/bin/sleep", "sleep", "60", static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  linux_child_guard_t guard {child};
+  const auto directory = "/proc/" + std::to_string(child) + '/';
+  bool ready = false;
+  for (int i = 0; i < 40 && !ready; ++i) {
+    std::ifstream environ_file(directory + "environ", std::ios::binary);
+    const std::string environ((std::istreambuf_iterator<char>(environ_file)), std::istreambuf_iterator<char>());
+    ready = environ.find("POLARIS_SESSION_INSTANCE_ID=" + token + '\0') != std::string::npos;
+    if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  ASSERT_TRUE(ready) << "the token-bearing child did not finish exec";
+  std::ifstream cgroup_file(directory + "cgroup");
+  std::string line, cgroup;
+  while (std::getline(cgroup_file, line)) {
+    if (line.rfind("0::", 0) == 0) cgroup = line.substr(3);
+  }
+  ASSERT_FALSE(cgroup.empty());
+
+  int status = 0;
+  // Outside the fence it is never captured or signalled, and the sweep is still complete.
+  EXPECT_TRUE(proc::terminate_fenced_exact_generation_processes_for_tests(
+    token, std::string {"/user.slice/user-1000.slice/user@1000.service/app.slice/desktop-app.service"}));
+  EXPECT_EQ(guard.wait(&status, WNOHANG), 0) << "an outsider handed the token was signalled";
+  // A fence that could not be read contains nothing.
+  EXPECT_TRUE(proc::terminate_fenced_exact_generation_processes_for_tests(token, std::string {}));
+  EXPECT_EQ(guard.wait(&status, WNOHANG), 0);
+  // Inside the session's cgroup the same process is the session's, and the sweep ends it.
+  EXPECT_TRUE(proc::terminate_fenced_exact_generation_processes_for_tests(token, cgroup));
+  EXPECT_EQ(guard.wait(&status, 0), child);
+  EXPECT_TRUE(WIFSIGNALED(status));
+  // The production fence is this process's own cgroup, or nothing at the root.
+  EXPECT_EQ(proc::epic_private_session_cgroup_for_tests(), cgroup == "/" ? std::string {} : cgroup);
+#else
+  GTEST_SKIP() << "Linux-only exact-generation sweep";
+#endif
+}
+
 TEST(ProcessRuntimeConfigTests, NonCageDetachedGenerationCleanupTerminatesExactChild) {
 #ifdef __linux__
   const std::string token = "non-cage-detached-generation-cleanup";

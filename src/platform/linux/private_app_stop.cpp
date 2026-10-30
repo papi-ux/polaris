@@ -226,12 +226,18 @@ namespace private_app_stop {
     return outcome;
   }
 
+  bool in_session_cgroup(std::string_view cgroup, std::string_view session_cgroup) {
+    return !session_cgroup.empty() && cgroup.starts_with(session_cgroup) &&
+           (cgroup.size() == session_cgroup.size() || cgroup[session_cgroup.size()] == '/' || session_cgroup.back() == '/');
+  }
+
   session_processes_t classify(
     const std::vector<process_facts_t> &facts,
     const fsi::process_t &supervisor,
     std::string_view token,
     const fsi::instances_t &instances,
-    uid_t uid
+    uid_t uid,
+    std::optional<std::string_view> session_cgroup
   ) {
     session_processes_t result;
     std::map<pid_t, const process_facts_t *> by_pid;
@@ -337,7 +343,8 @@ namespace private_app_stop {
           fact.comm == "Xwayland") {
         continue;
       }
-      const bool carries_token = fact.environ && fsi::environ_carries_token(*fact.environ, token);
+      const bool carries_token = fact.environ && fsi::environ_carries_token(*fact.environ, token) &&
+                                 (!session_cgroup || in_session_cgroup(fact.cgroup, *session_cgroup));
       if (!carries_token && !descends_from_supervisor(fact)) {
         continue;
       }

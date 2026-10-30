@@ -604,6 +604,12 @@ namespace proc {
   );
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id);
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id, std::chrono::milliseconds graceful_timeout);
+  // The exact sweep with an Epic private session's cgroup fence (#582), and that fence for this process.
+  bool terminate_fenced_exact_generation_processes_for_tests(
+    std::string_view session_instance_id,
+    const std::optional<std::string> &session_cgroup
+  );
+  std::string epic_private_session_cgroup_for_tests();
   bool exact_generation_transient_capture_failure_retries_for_tests(
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid

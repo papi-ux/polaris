@@ -119,13 +119,15 @@ it may have opened on the desktop, while a game born inside the window can still
 
 Disconnect and Resume preserve the private session. **End closes the whole owned private
 session**, including its newly started Epic launcher and any additional games opened inside it;
-an existing desktop launcher or outside game is not part of that authority. When the exact
-requested game is retained, Polaris asks it to close through its pidfd first. Within the existing
-five-second Epic close budget, a confirmed exit can leave up to two seconds of launcher grace
-before ordinary private-session teardown. This is an allowed grace period, not evidence that
-Epic cloud synchronization completed. If the game cannot be retained or graceful exit is not
-confirmed, the status says so; ending the session does not prove exact-game graceful closure.
-There is no individual game group/prefix/wineserver or forced-kill fallback.
+an existing desktop launcher or outside game is not part of that authority. A process carrying
+the session's token counts only inside its supervisor tree or Polaris's own cgroup; one elsewhere
+is left running and logged. When the exact requested game is retained, Polaris asks it to close
+through its pidfd first. Within the existing five-second Epic close budget, a confirmed exit can
+leave up to two seconds of launcher grace before ordinary private-session teardown. This is an
+allowed grace period, not evidence that Epic cloud synchronization completed. If the game cannot
+be retained or graceful exit is not confirmed, the status says so; ending the session does not
+prove exact-game graceful closure. There is no individual game group/prefix/wineserver or
+forced-kill fallback.
 
 The owner-controlled Alan Wake 2 launch/display/process-tree, sign-in availability,
 Disconnect/Resume, End order, launcher settle and save-integrity checks remain later gates.

@@ -581,6 +581,34 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   EXPECT_EQ(body.find("portal::release_global_capture("), std::string::npos);
 }
 
+TEST(EpicPrivateSessionContractTests, EveryTeardownSweepOfAPrivateEpicSessionCarriesItsCgroupFence) {
+  // #582 finding 1: the private app stop, the exact sweep after the compositor stop and the next
+  // launch's re-validation of a retained generation all fence a private Epic session's token by
+  // its own cgroup. No other session's call changes.
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto body_of = [&](const char *signature, const char *next) {
+    const auto start = source.find(signature);
+    const auto end = start == std::string::npos ? std::string::npos : source.find(next, start + 1);
+    return start == std::string::npos || end == std::string::npos ? std::string {} : source.substr(start, end - start);
+  };
+  const std::string fence = "_epic_private_requested ? std::make_optional(epic_private_session_cgroup()) : std::nullopt";
+  const auto stop_apps = body_of("void proc_t::stop_private_session_apps_before_compositor(", "\n  void proc_t::finalize_isolated_session_runtime(");
+  ASSERT_FALSE(stop_apps.empty());
+  const auto guard = stop_apps.find("if (_epic_private_requested) {");
+  ASSERT_NE(guard, std::string::npos);
+  EXPECT_NE(stop_apps.find("request.session_cgroup = epic_private_session_cgroup();", guard), std::string::npos);
+  const auto generation = body_of("void proc_t::terminate_isolated_session_generation(", "\n  void proc_t::finish_isolated_session_generation_cleanup(");
+  ASSERT_FALSE(generation.empty());
+  EXPECT_NE(generation.find("&sweep,\n      " + fence), std::string::npos);
+  const auto revalidate = source.find("\"re-validated at next launch\"sv");
+  ASSERT_NE(revalidate, std::string::npos);
+  EXPECT_NE(source.substr(revalidate, 400).find(fence), std::string::npos);
+  // Both classifications of the app stop take the request's fence.
+  EXPECT_EQ(std::string::npos, source.find("classify(facts, request.supervisor, token, instances, getuid());"));
+  EXPECT_EQ(std::string::npos, source.find("classify(read_process_facts(reader), request.supervisor, token, instances, getuid());"));
+}
+
 TEST(EpicPrivateSessionContractTests, AMissingOrUnreadablePrefixIsStatedWithoutClaimingTheGameWasNeverPlayed) {
   // #582 finding 6: title_prefix_unavailable covers a missing prefix and an unreadable one alike.
   const auto source = read_source_for_contract("src/process.cpp");

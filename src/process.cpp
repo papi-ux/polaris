@@ -1848,6 +1848,8 @@ namespace proc {
       std::vector<pidfd_handle_t> flatpak_sandboxes;
       /// What kept the capture from completing, so the log can name it.
       std::vector<unattributed_process_t> unattributed;
+      /// Processes carrying the token outside the fence's session cgroup, which are not the session's.
+      std::vector<unattributed_process_t> outside_session_cgroup;
       bool capture_complete = true;
       bool retryable_capture_failure = false;
       bool hard_capture_failure = false;
@@ -1918,8 +1920,33 @@ namespace proc {
       return readdir(directory);
     }
 
+    /**
+     * Whether a process the token names is the session's. Unfenced, the token alone decides. With a
+     * session cgroup (an Epic private session's, Polaris's own), the process must also be inside it:
+     * after the compositor stops, the supervisor tree is gone and its cgroup is what remains of the
+     * session's membership. An unread cgroup is never inside.
+     */
+    bool isolated_session_cgroup_member(
+      const proc_file_read_result_t &cgroup,
+      const std::optional<std::string> &session_cgroup
+    ) {
+      return !session_cgroup || (cgroup.ok() && private_app_stop::in_session_cgroup(
+        flatpak_session_instances::cgroup_from_proc(cgroup.bytes), *session_cgroup));
+    }
+
+    /**
+     * An Epic private session's membership fence: Polaris's own cgroup, which pinning proved its
+     * supervisor and compositor share. Unreadable, or the root, it contains nothing.
+     */
+    std::string epic_private_session_cgroup() {
+      const auto own = read_proc_status_file_result(getpid(), "cgroup");
+      auto group = own.ok() ? flatpak_session_instances::cgroup_from_proc(own.bytes) : std::string {};
+      return group == "/" ? std::string {} : group;
+    }
+
     isolated_session_process_snapshot_t isolated_session_process_snapshot(
-      std::string_view session_instance_id
+      std::string_view session_instance_id,
+      const std::optional<std::string> &session_cgroup = std::nullopt
     ) {
       isolated_session_process_snapshot_t snapshot;
 #ifdef POLARIS_TESTS
@@ -2075,6 +2102,20 @@ namespace proc {
         if (!environment_before_matches) {
           continue;
         }
+        const auto cgroup_before = session_cgroup ? read_proc_status_file_result(pid, "cgroup") : proc_file_read_result_t {};
+        if (session_cgroup && !cgroup_before.ok()) {
+          if (process_vanished_during_proc_read(cgroup_before.error)) {
+            snapshot.mark_retryable_failure();
+          } else {
+            snapshot.mark_hard_failure(pid, "its cgroup could not be read");
+          }
+          continue;
+        }
+        if (!isolated_session_cgroup_member(cgroup_before, session_cgroup)) {
+          // Handed the token, but outside the session: never captured, never signalled.
+          snapshot.outside_session_cgroup.push_back({pid, flatpak_session_instances::cgroup_from_proc(cgroup_before.bytes)});
+          continue;
+        }
 #ifdef POLARIS_TESTS
         if (pid == forced_isolated_session_capture_failure_pid) {
           snapshot.mark_hard_failure();
@@ -2134,6 +2175,12 @@ namespace proc {
                                      environ_after.bytes,
                                      session_instance_id
                                    );
+        if (session_cgroup) {
+          // The fence is part of the capture's identity: a process that moved while it was captured
+          // is no longer known to be the session's.
+          const auto cgroup_after = read_proc_status_file_result(pid, "cgroup");
+          environment_matches = environment_matches && cgroup_after.ok() && cgroup_after.bytes == cgroup_before.bytes;
+        }
 #ifdef POLARIS_TESTS
         if (pid == forced_live_post_capture_ambiguity_pid && !forced_live_post_capture_token_hidden) {
           environment_matches = false;
@@ -2173,14 +2220,15 @@ namespace proc {
 
     isolated_session_process_snapshot_t isolated_session_process_snapshot_after_quiescence(
       std::string_view session_instance_id,
-      std::string_view reason
+      std::string_view reason,
+      const std::optional<std::string> &session_cgroup = std::nullopt
     ) {
       constexpr int max_attempts = 4;
       constexpr auto retry_delay = 50ms;
       std::vector<pidfd_handle_t> retained_owned;
       std::vector<pidfd_handle_t> unresolved_ambiguous;
       for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        auto snapshot = isolated_session_process_snapshot(session_instance_id);
+        auto snapshot = isolated_session_process_snapshot(session_instance_id, session_cgroup);
         for (auto &owned : retained_owned) {
           if (pidfd_has_exited(owned)) {
             continue;
@@ -2276,7 +2324,8 @@ namespace proc {
       std::string_view reason,
       std::vector<pidfd_handle_t> *tracked_detached_children = nullptr,
       std::chrono::milliseconds graceful_timeout = std::chrono::milliseconds(2s),
-      isolated_sweep_report_t *sweep = nullptr
+      isolated_sweep_report_t *sweep = nullptr,
+      const std::optional<std::string> &session_cgroup = std::nullopt
     ) {
       if (session_instance_id.empty()) {
         return false;
@@ -2291,7 +2340,7 @@ namespace proc {
         );
       }
       for (int pass = 0; pass < 2; ++pass) {
-        auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
+        auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason, session_cgroup);
         if (!snapshot.capture_complete) {
           BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
           const auto unattributed = log_unattributed_processes(snapshot, reason);
@@ -2357,9 +2406,13 @@ namespace proc {
         }
       }
 
-      const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
+      const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason, session_cgroup);
       if (sweep && !final_snapshot.capture_complete) {
         sweep->capture_complete = false;
+      }
+      for (const auto &outside : final_snapshot.outside_session_cgroup) {
+        BOOST_LOG(warning) << "process: left pid="sv << outside.pid << " running: it carries the session token outside the session's cgroup ("sv
+                           << outside.reason << ") "sv << reason;
       }
       if (tracked_detached_children != nullptr) {
         direct_child_reap_complete = reap_tracked_detached_children(
@@ -3013,6 +3066,8 @@ namespace proc {
       bool immediate = false;
       /// A Steam context's app was stopped by the Steam lane just before, which keeps its own fact.
       bool steam_context = false;
+      /// An Epic private session's own cgroup: the token alone admits nothing outside it.
+      std::optional<std::string> session_cgroup;
       std::vector<std::string> launched_app_ids;
       std::filesystem::path runtime_dir;
       private_app_stop::timings_t timings;
@@ -3078,7 +3133,7 @@ namespace proc {
       }
 
       const auto facts = read_process_facts(reader);
-      const auto session = private_app_stop::classify(facts, request.supervisor, token, instances, getuid());
+      const auto session = private_app_stop::classify(facts, request.supervisor, token, instances, getuid(), request.session_cgroup);
       if (!session.launch_chain.empty()) {
         BOOST_LOG(info) << "process: private app stop: leaving "sv << session.launch_chain.size()
                         << " process(es) that ran the launcher to exit with it"sv;
@@ -3198,7 +3253,7 @@ namespace proc {
       const auto track_new_app_processes = [&]() {
         std::vector<fsi::process_t> added;
         std::vector<fsi::process_t> added_backstop;
-        const auto fresh = private_app_stop::classify(read_process_facts(reader), request.supervisor, token, instances, getuid());
+        const auto fresh = private_app_stop::classify(read_process_facts(reader), request.supervisor, token, instances, getuid(), request.session_cgroup);
         for (const auto &process : fresh.session) {
           if (tracked.insert({process.pid, process.start_time}).second) {
             added.push_back(process);
@@ -7213,6 +7268,17 @@ namespace proc {
     return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv);
   }
 
+  bool terminate_fenced_exact_generation_processes_for_tests(
+    std::string_view session_instance_id,
+    const std::optional<std::string> &session_cgroup
+  ) {
+    return terminate_isolated_session_processes(session_instance_id, "during fenced exact-generation test"sv, nullptr, std::chrono::milliseconds(2s), nullptr, session_cgroup);
+  }
+
+  std::string epic_private_session_cgroup_for_tests() {
+    return epic_private_session_cgroup();
+  }
+
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id, std::chrono::milliseconds graceful_timeout) {
     return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv, nullptr, graceful_timeout);
   }
@@ -8934,11 +9000,15 @@ namespace proc {
       // with their tree, and once the snapshot completes the retained
       // processes (if any) are terminated right here.
       const bool retained_session_owned_cage = _session_used_cage_compositor;
+      // A retained private Epic generation keeps its cgroup fence (#582).
       const bool generation_reaped = !_session_instance_id.empty() &&
                                      terminate_isolated_session_processes(
                                        _session_instance_id,
                                        "re-validated at next launch"sv,
-                                       retained_session_owned_cage ? nullptr : &_detached_child_pidfds
+                                       retained_session_owned_cage ? nullptr : &_detached_child_pidfds,
+                                       std::chrono::milliseconds(2s),
+                                       nullptr,
+                                       _epic_private_requested ? std::make_optional(epic_private_session_cgroup()) : std::nullopt
                                      );
       const bool reaped = generation_reaped &&
                           (retained_session_owned_cage || _detached_child_authority_complete);
@@ -12628,6 +12698,10 @@ namespace proc {
     request.immediate = immediate;
     request.steam_context = context_uses_steam(_app);
     request.runtime_dir = private_session_runtime_dir();
+    if (_epic_private_requested) {
+      // #582: an outside process handed this token is not the private Epic session's.
+      request.session_cgroup = epic_private_session_cgroup();
+    }
     if (auto app_id = private_session_attach::flatpak_run_app_id(_app.cmd)) {
       request.launched_app_ids.push_back(std::move(*app_id));
     }
@@ -12727,12 +12801,15 @@ namespace proc {
       std::chrono::seconds(_app.exit_timeout)
     );
     isolated_sweep_report_t sweep;
+    // A private Epic session's token counts only inside its own cgroup; every other session keeps
+    // the token alone, as before.
     const bool isolated_cleanup_complete = terminate_isolated_session_processes(
       _session_instance_id,
       reason,
       (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr,
       graceful_timeout,
-      &sweep
+      &sweep,
+      _epic_private_requested ? std::make_optional(epic_private_session_cgroup()) : std::nullopt
     );
     const bool detached_authority_complete =
       _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;

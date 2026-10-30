@@ -154,21 +154,28 @@ namespace private_app_stop {
     std::vector<flatpak_session_instances::process_t> launch_chain;
   };
 
+  /// Whether a cgroup is the session's own or below it. An empty session cgroup contains nothing.
+  bool in_session_cgroup(std::string_view cgroup, std::string_view session_cgroup);
+
   /**
    * @brief Sort the session's processes outside any Flatpak instance.
    *
    * A process is the session's when it carries the token in a readable environ or descends from
-   * the supervisor through parents no younger than their children. Of those, the compositor and
-   * what it runs for its own sake, the launch chains of the session's Flatpak sandboxes, anything
-   * in a Flatpak scope or in a pid namespace below the host's, any bwrap a Flatpak record names, any
-   * zero-byte-environ bwrap, and any process of another user are never in T.
+   * the supervisor through parents no younger than their children. With a session cgroup (an Epic
+   * private session's, Polaris's own), the token counts only for a process inside that cgroup: an
+   * outside process handed the token is not the session's, and only descent admits beyond it. Of
+   * those, the compositor and what it runs for its own sake, the launch chains of the session's
+   * Flatpak sandboxes, anything in a Flatpak scope or in a pid namespace below the host's, any
+   * bwrap a Flatpak record names, any zero-byte-environ bwrap, and any process of another user are
+   * never in T.
    */
   session_processes_t classify(
     const std::vector<process_facts_t> &facts,
     const flatpak_session_instances::process_t &supervisor,
     std::string_view token,
     const flatpak_session_instances::instances_t &instances,
-    uid_t uid
+    uid_t uid,
+    std::optional<std::string_view> session_cgroup = std::nullopt
   );
 
   /// The launcher's processes it ran for the game, which the settle waits for: its app processes
