@@ -186,6 +186,117 @@ namespace platf::epic {
       return owned;
     }
 
+    bool token(const std::string &value) {
+      return !value.empty() && value.size() <= 256 && std::all_of(value.begin(), value.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+      });
+    }
+
+    enum class credentials_t { owner, root, other };
+
+    /** All four status UIDs, classified without refusing a mix: lineage needs root as well as the owner. */
+    credentials_t credentials(const std::string &text, std::uint64_t owner) {
+      std::optional<credentials_t> result;
+      std::istringstream stream(text);
+      std::string line;
+      while (std::getline(stream, line)) {
+        if (line.compare(0, 4, "Uid:") == 0) {
+          require(!result, "ambiguous_process_uid");
+          const auto ids = words(line.substr(4));
+          require(ids.size() == 4, "incomplete_process_uid");
+          const auto all = [&ids](std::uint64_t uid) {
+            return std::all_of(ids.begin(), ids.end(), [uid](const auto &id) { return number(id) == uid; });
+          };
+          result = all(owner) ? credentials_t::owner : all(0) ? credentials_t::root : credentials_t::other;
+        }
+      }
+      require(result.has_value(), "missing_process_uid");
+      return *result;
+    }
+
+    // The kernel task name in stat, which may itself contain spaces and parentheses.
+    std::string stat_name(const std::string &text) {
+      const auto left = text.find('(');
+      const auto right = text.rfind(')');
+      require(left != std::string::npos && right != std::string::npos && right > left, "malformed_process_stat");
+      return text.substr(left + 1, right - left - 1);
+    }
+
+    std::optional<std::string> status_name(const std::string &text) {
+      std::istringstream stream(text);
+      std::string line;
+      while (std::getline(stream, line)) {
+        if (line.compare(0, 5, "Name:") == 0) {
+          const auto first = line.find_first_not_of(" \t", 5);
+          return first == std::string::npos ? std::string {} : line.substr(first);
+        }
+      }
+      return std::nullopt;
+    }
+
+    /**
+     * Only ever refuses. A task whose own name could be Epic, an AppImage, Wine, Proton or a
+     * Windows game is never placed by session_role(), whatever its placement says. A name is
+     * chosen by the task itself, so it never admits on its own.
+     */
+    bool unrelated_name(std::string name) {
+      std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : static_cast<char>(c);
+      });
+      for (const char *marker : {"epic", "appimage", "wine", "proton"}) {
+        if (name.find(marker) != std::string::npos) {
+          return false;
+        }
+      }
+      return !name.empty() && !(name.size() >= 4 && name.compare(name.size() - 4, 4, ".exe") == 0);
+    }
+
+    enum class placement_t { none, user_manager, user_service, login_session };
+
+    /**
+     * Where a unified cgroup puts a task among the roles admission may set aside, all inside this
+     * owner's user slice. systemd and logind assign these units; the task does not name them.
+     */
+    placement_t placement(const std::string &group, std::uint64_t owner) {
+      const auto uid = std::to_string(owner);
+      std::vector<std::string> parts;
+      for (const auto &part : fs::path(group).relative_path()) {
+        parts.push_back(part.string());
+      }
+      if (parts.size() < 3 || parts[0] != "user.slice" || parts[1] != "user-" + uid + ".slice") {
+        return placement_t::none;
+      }
+      const auto ends = [](const std::string &text, std::string_view suffix) {
+        return text.size() > suffix.size() && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+      };
+      if (parts.size() == 3) {
+        // A logind login session: session-<id>.scope directly under the user slice.
+        const auto &scope = parts[2];
+        return scope.compare(0, 8, "session-") == 0 && ends(scope, ".scope") && token(scope.substr(8, scope.size() - 14)) ?
+                 placement_t::login_session :
+                 placement_t::none;
+      }
+      if (parts[2] != "user@" + uid + ".service") {
+        return placement_t::none;
+      }
+      if (parts.size() == 4) {
+        return parts[3] == "init.scope" ? placement_t::user_manager : placement_t::none;
+      }
+      // A service unit of the user manager. Application launches (app-*), transient runs (run-*)
+      // and D-Bus activations (dbus-*) are not session services, and nothing nests below a unit.
+      const auto &slice = parts[3];
+      const auto &unit = parts[4];
+      if (parts.size() != 5 || (slice != "session.slice" && slice != "background.slice" && slice != "app.slice") || !ends(unit, ".service")) {
+        return placement_t::none;
+      }
+      for (const char *prefix : {"app-", "run-", "dbus-"}) {
+        if (unit.compare(0, std::string_view(prefix).size(), prefix) == 0) {
+          return placement_t::none;
+        }
+      }
+      return placement_t::user_service;
+    }
+
     struct map_t {
       std::string range;
       std::uint64_t major, minor, inode;
@@ -349,6 +460,137 @@ namespace platf::epic {
         return current.pid == process.identity.pid && current.start == process.identity.start &&
                current.state != 'Z' && current.state != 'X' && current.state != 'x' &&
                check_uid(read(path / "status"), backend.owner_uid()) && same_file(process.directory, stat(path));
+      }
+
+      struct lineage_t {
+        stat_t identity;
+        std::string group;
+        credentials_t credentials;
+      };
+
+      // World-readable facts only: stat, status credentials and the unified cgroup, never PID 1.
+      lineage_t lineage(std::uint64_t pid) {
+        const auto path = fs::path("/proc") / std::to_string(pid);
+        const auto identity = parse_stat(read(path / "stat"));
+        require(identity.pid == pid && identity.state != 'Z' && identity.state != 'X' && identity.state != 'x', "protected_lineage_unproven");
+        return {identity, cgroup(read(path / "cgroup")), credentials(read(path / "status"), backend.owner_uid())};
+      }
+
+      static bool same_lineage(const lineage_t &a, const lineage_t &b) {
+        return a.identity.pid == b.identity.pid && a.identity.start == b.identity.start && a.identity.parent == b.identity.parent &&
+               a.group == b.group && a.credentials == b.credentials;
+      }
+
+      /**
+       * D-A (B), papi's 2026-10-29 decision on #420. At private admission a protected owner task,
+       * whose executable, maps and links the owner cannot read, counts as "not Epic" only when its
+       * world-readable kernel facts mark it as an unrelated session or system process. Those facts
+       * are its stat (name, parent, start time), its status (name, credentials) and its unified
+       * cgroup, and the same for each ancestor; never maps, exe, cwd, argv or environ. With U the
+       * owner's slice /user.slice/user-<uid>.slice and M its manager U/user@<uid>.service, exactly
+       * three roles qualify:
+       *
+       *  1. The user manager itself, M/init.scope: a child of PID 1, or a child of that scope's
+       *     owner-credentialed child of PID 1 ("systemd --user" and its "(sd-pam)").
+       *  2. A user service, M/{session,background,app}.slice/<unit>.service, other than an
+       *     application launch (app-*), a transient run (run-*) or a D-Bus activation (dbus-*).
+       *     Every ancestor up to the user manager is owner-credentialed in that same unit, so the
+       *     manager started it rather than an application ("kwin_wayland", "ssh-agent").
+       *  3. A login session, U/session-<id>.scope, whose parent is root in that same scope and whose
+       *     ancestors are all root up to PID 1 (an SSH login's unprivileged "sshd-session").
+       *
+       * Polaris's own service, or anything inside its cgroup, never qualifies. Each ancestor is no
+       * younger than its child, and every edge is read again before the role counts; a vanished,
+       * reused, mixed-credential or changed link leaves it unproven. The task's stat and status
+       * names must agree and must not look like Epic, an AppImage, Wine, Proton or a Windows game;
+       * that screen can only refuse. Anything else, including any application placement, refuses.
+       *
+       * This is the owner-visible residual papi accepted, not a proof of absence. If it is ever
+       * wrong, a hidden desktop launcher receives the request and the game opens on the desktop:
+       * the in-session ownership check stays the backstop, so Private shows "Game unverified", End
+       * closes only the private session, and nothing outside that session is signalled.
+       */
+      bool session_role(const uninspected_t &task, const std::string &own_group) {
+        try {
+          const auto owner = backend.owner_uid();
+          const auto path = fs::path("/proc") / std::to_string(task.identity.pid);
+          const auto name = stat_name(read(path / "stat"));
+          if (status_name(read(path / "status")) != name || !unrelated_name(name)) {
+            return false;
+          }
+          std::vector<lineage_t> chain {lineage(task.identity.pid)};
+          if (chain[0].identity.start != task.identity.start || chain[0].credentials != credentials_t::owner) {
+            return false;
+          }
+          std::set<std::uint64_t> visited {task.identity.pid};
+          while (chain.back().identity.parent != 1) {
+            const auto parent = chain.back().identity.parent;
+            if (parent <= 1 || chain.size() >= 64 || !visited.insert(parent).second) {
+              return false;
+            }
+            auto next = lineage(parent);
+            if (next.identity.start > chain.back().identity.start) {
+              return false;
+            }
+            chain.push_back(std::move(next));
+          }
+          const auto &group = chain[0].group;
+          const auto manager_scope = "/user.slice/user-" + std::to_string(owner) + ".slice/user@" + std::to_string(owner) + ".service/init.scope";
+          const auto owned_in = [&chain](std::size_t i, const std::string &unit) {
+            return chain[i].credentials == credentials_t::owner && chain[i].group == unit;
+          };
+          bool placed = false;
+          switch (service_cgroup(group, own_group) ? placement_t::none : placement(group, owner)) {
+            case placement_t::user_manager:
+              placed = chain.size() == 1 || (chain.size() == 2 && owned_in(1, group));
+              break;
+            case placement_t::user_service:
+              placed = chain.size() >= 2 && owned_in(chain.size() - 1, manager_scope);
+              for (std::size_t i = 1; placed && i + 1 < chain.size(); ++i) {
+                placed = owned_in(i, group);
+              }
+              break;
+            case placement_t::login_session:
+              placed = chain.size() >= 2 && chain[1].group == group;
+              for (std::size_t i = 1; placed && i < chain.size(); ++i) {
+                placed = chain[i].credentials == credentials_t::root;
+              }
+              break;
+            case placement_t::none:
+              break;
+          }
+          if (!placed) {
+            return false;
+          }
+          for (const auto &edge : chain) {
+            if (!same_lineage(edge, lineage(edge.identity.pid))) {
+              return false;
+            }
+          }
+          return true;
+        }
+        catch (const refusal_t &) {
+          return false;
+        }
+      }
+
+      /** Admission sets aside the protected tasks the census recorded, each by session_role(), or refuses. */
+      void place_protected(const char *reason) {
+        if (uninspected.empty()) {
+          return;
+        }
+        const auto own_group = cgroup(read("/proc/self/cgroup"));
+        for (const auto &task : uninspected) {
+          require(session_role(task, own_group), reason);
+        }
+      }
+
+      // A set-aside task must still be the same protected task when the census ends: one that
+      // exits, is reused or becomes readable (by running something else) was never checked.
+      void recheck_placed(const char *reason) {
+        for (const auto &task : uninspected) {
+          require(still_uninspected(task), reason);
+        }
       }
 
       std::vector<process_t> launchers() {
@@ -567,12 +809,6 @@ namespace platf::epic {
         return row;
       }
     };
-
-    bool token(const std::string &value) {
-      return !value.empty() && value.size() <= 256 && std::all_of(value.begin(), value.end(), [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
-      });
-    }
 
     struct digest_t {
       std::string bytes;
@@ -1012,8 +1248,11 @@ namespace platf::epic {
         file_t prefix {};
         if (!native) {
           prefix_path = data / "compat/compatdata" / title.artifact_id / "pfx";
-          // A missing prefix cannot be distinguished from an IO failure by this backend.
-          require(read.canonical(prefix_path) == prefix_path, "redirected_title_prefix");
+          // A title that has never run has no prefix yet, so its first play is in Mirror Desktop
+          // (N3). This backend cannot tell a missing prefix from an IO failure; both are unknown.
+          const auto resolved = backend.canonical(prefix_path);
+          require(resolved.has_value(), "title_prefix_unavailable");
+          require(*resolved == prefix_path, "redirected_title_prefix");
           prefix = read.stat(prefix_path);
           require(S_ISDIR(prefix.mode) && prefix.uid == owner && prefix.inode > 0 &&
                     (prefix.mode & (S_IWGRP | S_IWOTH)) == 0, "unsafe_title_prefix");
@@ -1028,7 +1267,8 @@ namespace platf::epic {
         // readable task gets the stable negative the game observation already relies on, so a
         // Flatpak, a deleted host path or a foreign namespace elsewhere cannot make this unknown.
         const auto processes = read.table(image);
-        require(read.uninspected.empty(), "title_runtime_inventory_incomplete");
+        // A protected task can be neither row only by its session or system role (D-A (B)).
+        read.place_protected("title_runtime_inventory_incomplete");
         bool busy = false;
         for (const auto &process : processes) {
           busy = busy || process.exe == image || !process.maps.empty() || (!native && process.cwd == server_dir);
@@ -1039,6 +1279,7 @@ namespace platf::epic {
           require(read.unchanged(process) && image_maps(read.read(path / "maps", maps_limit), image).empty() == process.maps.empty(),
                   "title_runtime_inventory_changed");
         }
+        read.recheck_placed("title_runtime_inventory_changed");
         auto last_names = needed(backend.list("/proc", process_limit), "incomplete_process_table");
         std::sort(last_names.begin(), last_names.end());
         require(names == last_names && owner == backend.owner_uid() && boot == read.boot() &&
@@ -1490,7 +1731,8 @@ namespace platf::epic {
           reader_t read {*backend};
           const auto boot = read.boot();
           const auto tasks = read.owner_tasks();
-          require(read.uninspected.empty(), "launcher_inventory_incomplete");
+          // A protected task is not a launcher only by its session or system role (D-A (B)).
+          read.place_protected("launcher_inventory_incomplete");
           std::size_t count = 0;
           for (const auto &task : tasks) {
             const auto path = fs::path("/proc") / std::to_string(task.identity.pid);
@@ -1516,6 +1758,7 @@ namespace platf::epic {
             require(read.unchanged(process), "launcher_inventory_changed");
             count += named || known_image;
           }
+          read.recheck_placed("launcher_inventory_changed");
           require(boot == read.boot(), "launcher_inventory_changed");
           if (known_launcher && !verify_launcher(*known_launcher, reason)) {
             return std::nullopt;

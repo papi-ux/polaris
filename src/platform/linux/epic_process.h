@@ -82,7 +82,10 @@ namespace platf::epic {
   };
 
   // Counts process identities, not logical UI instances. Unlike Mirror presence, nullopt is
-  // unknown. An unassociated AppImage runtime cannot establish absence, even if renamed.
+  // unknown. An unassociated AppImage runtime cannot establish absence, even if renamed. A
+  // protected (unreadable) task counts as not Epic only when its world-readable stat, status
+  // and cgroup facts, and its ancestors', place it as the user manager, a user service or a
+  // login session (D-A (B), see session_role); any other protected task leaves this unknown.
   std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr);
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
   // Revalidates the retained original file without requiring a launcher or AppImage mount.
@@ -91,6 +94,8 @@ namespace platf::epic {
   // A sampled admission check, never dispatch authority: true means the requested game
   // and its exact prefix server are absent, false means busy, nullopt means unknown.
   // Recheck immediately before dispatch; concurrent launches remain possible afterwards.
+  // Protected tasks are set aside by the same role rule as launcher_instances. A title with
+  // no prefix yet reports "title_prefix_unavailable": play it once in Mirror Desktop first.
   std::optional<bool> title_runtime_absent(const title_t &, std::string &reason);
 
   /**

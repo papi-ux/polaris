@@ -37,10 +37,11 @@ namespace {
   const fs::path prefix_path = data / "compat/compatdata/artifact/pfx";
   const std::string boot = "9dd26721-4424-4907-ab80-4f023729a22f\n";
 
-  std::string stat_line(std::uint64_t pid, std::uint64_t start, char state = 'S', std::uint64_t parent = 1) {
+  std::string stat_line(std::uint64_t pid, std::uint64_t start, char state = 'S', std::uint64_t parent = 1,
+                        const std::string &name = "game ) with (parens)") {
     std::ostringstream text;
     // The kernel comm can contain right parentheses, spaces, and left parentheses.
-    text << pid << " (game ) with (parens)) " << state << ' ' << parent;
+    text << pid << " (" << name << ") " << state << ' ' << parent;
     for (int field = 2; field < 19; ++field) {
       text << " 0";
     }
@@ -244,6 +245,52 @@ namespace {
       return denied_links.count(path) ? ep::testing::link_result_t {std::nullopt, true} :
         ep::testing::link_result_t {link(path), false};
     }
+
+    /**
+     * A task as the host shows it: the same name in stat and status, all four UIDs and its unified
+     * cgroup. A protected task's executable link is denied; a root task never enters an owner census.
+     */
+    void add_task(std::uint64_t pid, const std::string &name, std::uint64_t start, std::uint64_t parent,
+                  const std::string &group, std::uint64_t task_uid = 1000, bool protected_task = false) {
+      add_process(pid, "/usr/bin/" + name, "/", start, parent);
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      const auto id = std::to_string(task_uid);
+      files[path / "stat"] = stat_line(pid, start, 'S', parent, name);
+      files[path / "status"] = "Name:\t" + name + "\nUid:\t" + id + "\t" + id + "\t" + id + "\t" + id + "\n";
+      files[path / "cgroup"] = "0::" + group + "\n";
+      if (protected_task) {
+        links.erase(path / "exe");
+        denied_links.insert(path / "exe");
+      }
+    }
+
+    void drop(std::uint64_t pid) {
+      pids.erase(std::remove(pids.begin(), pids.end(), std::to_string(pid)), pids.end());
+    }
+
+    /**
+     * pc-papi's eight protected owner tasks and their ancestors, as read on 2026-10-30: every
+     * one's exe link is denied, while its stat, status and cgroup stay world-readable.
+     */
+    void desktop_session_host() {
+      files["/proc/self/cgroup"] = "0::" + manager + "/app.slice/polaris.service\n";
+      add_task(1784, "systemd", 1293, 1, manager + "/init.scope", 1000, true);
+      add_task(1827, "(sd-pam)", 1295, 1784, manager + "/init.scope", 1000, true);
+      add_task(4954, "kwin_wayland_wr", 2784, 1784, manager + "/session.slice/plasma-kwin_wayland.service");
+      add_task(4966, "kwin_wayland", 2785, 4954, manager + "/session.slice/plasma-kwin_wayland.service", 1000, true);
+      add_task(5148, "polkit-kde-auth", 2905, 1784, manager + "/background.slice/plasma-polkit-agent.service", 1000, true);
+      add_task(5157, "ssh-agent", 2905, 1784, manager + "/app.slice/ssh-agent.service", 1000, true);
+      add_task(561444, "sshd-session", 26805728, 1, user + "/session-1061.scope", 0);
+      add_task(561538, "sshd-session", 26805742, 561444, user + "/session-1061.scope", 1000, true);
+      add_task(561872, "sshd-session", 26805784, 1, user + "/session-1062.scope", 0);
+      add_task(561981, "sshd-session", 26805797, 561872, user + "/session-1062.scope", 1000, true);
+      add_task(3652675, "sshd", 70119596, 1, "/system.slice/sshd.service", 0);
+      add_task(1941259, "sshd-session", 72641468, 3652675, user + "/session-6028.scope", 0);
+      add_task(1941372, "sshd-session", 72641483, 1941259, user + "/session-6028.scope", 1000, true);
+    }
+
+    const std::string user = "/user.slice/user-1000.slice";
+    const std::string manager = user + "/user@1000.service";
 
     void add_protected_process(std::uint64_t pid = 43, std::uint64_t start = 10003, std::uint64_t parent = 1) {
       add_process(pid, "/usr/lib/systemd/systemd", "/fixture/owner", start, parent);
@@ -872,6 +919,183 @@ TEST_F(EpicProcess, AdmissionCensusesStayDefiniteBesideUnrelatedFlatpakAndDelete
   host->identities.erase("/app/bin/EpicGamesLauncher");
   EXPECT_FALSE(ep::testing::launcher_instances(error, host));
   EXPECT_EQ(error, "unreadable_file_identity");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateAdmissionSetsAsideTheRealHostsProtectedSessionAndSystemTasks) {
+  std::string reason;
+  host->pids.clear();
+  host->desktop_session_host();
+  // Before D-A (B) these eight protected owner tasks left both admission censuses unknown.
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 0U);
+  EXPECT_TRUE(error.empty()) << error;
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true);
+  EXPECT_EQ(reason, "title_runtime_absent");
+  // Setting them aside never hides a readable launcher, the game or its prefix server.
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 80000000, 1784);
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 1U);
+  host->drop(43);
+  host->pids.push_back("42");
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), false);
+  EXPECT_EQ(reason, "title_runtime_busy");
+  // Mirror consent is unchanged: the same eight stay disclosed as uninspected, never placed.
+  host->pids.push_back("41");
+  const auto seen = observe();
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.uninspected_process_count, 8U);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateAdmissionRefusesAProtectedTaskOutsideTheSessionAndSystemRoles) {
+  std::string reason;
+  host->pids.clear();
+  host->desktop_session_host();
+  const auto refuses = [&](const char *placement) {
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host)) << placement;
+    EXPECT_EQ(error, "launcher_inventory_incomplete") << placement;
+    EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host)) << placement;
+    EXPECT_EQ(reason, "title_runtime_inventory_incomplete") << placement;
+  };
+  // Started by the user manager, but as an application, a transient run or a D-Bus activation.
+  host->add_task(7001, "helper", 90000000, 1784, host->manager + "/app.slice/app-org.kde.konsole@a1.service", 1000, true);
+  refuses("application launch unit");
+  for (const auto &group : {
+         host->manager + "/app.slice/app-flatpak-com.example.App-77.scope",
+         host->manager + "/app.slice/run-r1.service",
+         host->manager + "/session.slice/dbus-:1.2-org.example.Helper@0.service",
+         host->manager + "/app.slice/polaris.service",
+         host->manager + "/session.slice/helper.service/nested",
+         host->manager + "/init.scope/nested",
+         host->user + "/session-6028.scope/nested",
+         std::string("/user.slice/user-1001.slice/user@1001.service/session.slice/helper.service"),
+         std::string("/system.slice/helper.service"),
+         std::string("/user.slice/app.slice/epic.scope"),
+       }) {
+    host->files["/proc/7001/cgroup"] = "0::" + group + "\n";
+    refuses(group.c_str());
+  }
+  // The same task in a session service's placement is set aside.
+  host->files["/proc/7001/cgroup"] = "0::" + host->manager + "/session.slice/helper.service\n";
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true) << reason;
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateAdmissionRefusesAProtectedTaskWhoseLineageIsNotItsRole) {
+  host->pids.clear();
+  host->desktop_session_host();
+  const auto unknown = [&](const char *lineage) {
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host)) << lineage;
+    EXPECT_EQ(error, "launcher_inventory_incomplete") << lineage;
+  };
+  const auto service = host->manager + "/session.slice/plasma-kwin_wayland.service";
+  // A session service's unit, reached from an application rather than from the user manager.
+  host->add_task(7100, "konsole", 90000000, 1784, host->manager + "/app.slice/app-org.kde.konsole@a1.service");
+  host->add_task(7101, "helper", 90000100, 7100, service, 1000, true);
+  unknown("service unit under an application");
+  // Under a task of its own unit it is set aside, as kwin_wayland is under its wrapper.
+  host->files["/proc/7101/stat"] = stat_line(7101, 90000100, 'S', 4954, "helper");
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+  // A reused parent PID, younger than its child, or a vanished parent is unproven.
+  host->files["/proc/7101/stat"] = stat_line(7101, 2000, 'S', 4954, "helper");
+  unknown("parent younger than child");
+  host->files["/proc/7101/stat"] = stat_line(7101, 90000100, 'S', 7199, "helper");
+  unknown("vanished parent");
+  // A manager whose credentials are not wholly the owner's (here a setuid-root shape, which the
+  // census itself skips) is not this owner's user manager.
+  host->files["/proc/1784/status"] = "Name:\tsystemd\nUid:\t1000\t0\t0\t0\n";
+  host->files["/proc/7101/stat"] = stat_line(7101, 90000100, 'S', 4954, "helper");
+  unknown("mixed-credential manager");
+  host->files["/proc/1784/status"] = "Name:\tsystemd\nUid:\t1000\t1000\t1000\t1000\n";
+  host->drop(7100);
+  host->drop(7101);
+  ASSERT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+
+  // In the manager's own scope, only the manager and its direct child qualify.
+  host->add_task(7110, "helper", 90000110, 1827, host->manager + "/init.scope", 1000, true);
+  unknown("grandchild in init.scope");
+  host->files["/proc/7110/stat"] = stat_line(7110, 90000110, 'S', 4954, "helper");
+  unknown("init.scope task under a service");
+  host->drop(7110);
+
+  // A login session's task under an owner shell, or under root started from that shell.
+  host->add_task(7200, "zsh", 90000200, 1941372, host->user + "/session-6028.scope");
+  host->add_task(7201, "helper", 90000300, 7200, host->user + "/session-6028.scope", 1000, true);
+  unknown("owner shell in a login session");
+  host->add_task(7202, "sudo", 90000250, 7200, host->user + "/session-6028.scope", 0);
+  host->files["/proc/7201/stat"] = stat_line(7201, 90000300, 'S', 7202, "helper");
+  unknown("root helper started from an owner shell");
+  // A root parent in another scope, or with mixed credentials, is not the login's own stack.
+  host->files["/proc/7201/stat"] = stat_line(7201, 90000300, 'S', 3652675, "helper");
+  unknown("root parent outside the session scope");
+  host->files["/proc/7201/stat"] = stat_line(7201, 90000300, 'S', 1941259, "helper");
+  ASSERT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+  host->files["/proc/1941259/status"] = "Name:\tsshd-session\nUid:\t1000\t0\t0\t0\n";
+  unknown("mixed-credential login parent");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateAdmissionNameScreenOnlyRefusesAndEveryRoleIsBookended) {
+  host->pids.clear();
+  host->desktop_session_host();
+  const auto service = host->manager + "/session.slice/helper.service";
+  // An Epic-, AppImage-, Wine-, Proton- or game-like name refuses even as a real session service.
+  for (const char *name : {"EpicGamesLaunch", "epic games laun", "Tool.AppImage", "wineserver", "wine64-preloade", "AlanWake2.exe", "proton"}) {
+    host->add_task(7300, name, 90000300, 1784, service, 1000, true);
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host)) << name;
+    EXPECT_EQ(error, "launcher_inventory_incomplete") << name;
+    host->drop(7300);
+  }
+  // The stat and status names must agree.
+  host->add_task(7300, "helper", 90000300, 1784, service, 1000, true);
+  ASSERT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+  host->files["/proc/7300/status"] = "Name:\tother\nUid:\t1000\t1000\t1000\t1000\n";
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "launcher_inventory_incomplete");
+  host->drop(7300);
+
+  // An edge that changes during its own role proof leaves the role unproven.
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/5157/cgroup") host->files["/proc/5157/stat"] = stat_line(5157, 2905, 'S', 1, "ssh-agent");
+  };
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "launcher_inventory_incomplete");
+  host->after_read = {};
+  host->files["/proc/5157/stat"] = stat_line(5157, 2905, 'S', 1784, "ssh-agent");
+  ASSERT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+
+  // A set-aside task that runs a readable executable before the census ends was never checked.
+  host->add_task(7400, "plasmashell", 90000400, 1784, host->manager + "/session.slice/plasma-plasmashell.service");
+  int reads = 0;
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/7400/stat" && ++reads == 2) {
+      host->denied_links.erase("/proc/5157/exe");
+      host->links["/proc/5157/exe"] = "/usr/bin/ssh-agent";
+    }
+  };
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "launcher_inventory_changed");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, AdmissionNamesAPrefixlessTitleAsFirstPlayInMirrorDesktop) {
+  std::string reason;
+  host->pids.clear();
+  // A title that has never run has no prefix yet; that stays unknown, but says why (N3).
+  host->identities.erase(prefix_path);
+  EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host));
+  EXPECT_EQ(reason, "title_prefix_unavailable");
+  host->identities[prefix_path] = directory(0xe2a1113);
+  host->resolved[prefix_path] = data / "compat/compatdata/other/pfx";
+  EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host));
+  EXPECT_EQ(reason, "redirected_title_prefix");
+  host->resolved.erase(prefix_path);
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true);
   EXPECT_TRUE(host->opened.empty());
   EXPECT_TRUE(host->signals.empty());
 }
