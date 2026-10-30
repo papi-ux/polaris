@@ -7,6 +7,7 @@
 #ifdef __linux__
 
 #include <src/platform/linux/epic_process.h>
+#include <src/steamos_session.h>
 #include <src/vrr_compositor_identity.h>
 
 #include <algorithm>
@@ -285,6 +286,10 @@ namespace {
 
     std::optional<ep::testing::unit_t> user_unit(const std::string &name) override {
       unit_queries.push_back(name);
+      // The real backend's bus read binds the manager's name by this same check on its cgroup file.
+      if (manager_pid_bound_by_cgroup && !prelaunch::steamos::cgroup_is_user_manager(files["/proc/" + std::to_string(*manager_pid_bound_by_cgroup) + "/cgroup"], static_cast<std::uint32_t>(uid))) {
+        return std::nullopt;
+      }
       const auto found = units.find(name);
       return found == units.end() ? std::nullopt : std::make_optional(found->second);
     }
@@ -317,8 +322,18 @@ namespace {
       }
     }
 
+    /// Mullvad's split tunnelling mounts a v1 net_cls hierarchy, so every cgroup file on the host lists it.
+    void list_net_cls_in_every_cgroup_file() {
+      for (auto &[path, text] : files) {
+        if (path.filename() == "cgroup" && !text.starts_with("1:net_cls:")) {
+          text.insert(0, "1:net_cls:/\n");
+        }
+      }
+    }
+
     const std::string user = "/user.slice/user-1000.slice";
     const std::string manager = user + "/user@1000.service";
+    std::optional<std::uint64_t> manager_pid_bound_by_cgroup;
 
     void add_protected_process(std::uint64_t pid = 43, std::uint64_t start = 10003, std::uint64_t parent = 1) {
       add_process(pid, "/usr/lib/systemd/systemd", "/fixture/owner", start, parent);
@@ -974,6 +989,62 @@ TEST_F(EpicProcess, PrivateAdmissionSetsAsideTheRealHostsProtectedSessionAndSyst
   EXPECT_EQ(seen.uninspected_process_count, 8U);
   EXPECT_TRUE(host->opened.empty());
   EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, PrivateAdmissionSetsAsideTheProtectedTasksOnAHostWithACgroupV1Hierarchy) {
+  std::string reason;
+  host->pids.clear();
+  host->desktop_session_host();
+  host->list_net_cls_in_every_cgroup_file();
+  host->manager_pid_bound_by_cgroup = 1784;
+  // pc-papi with Mullvad, 2026-10-30: this shape refused every launch as launcher_inventory_incomplete.
+  ASSERT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+  EXPECT_TRUE(error.empty()) << error;
+  ASSERT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true) << reason;
+  EXPECT_EQ(reason, "title_runtime_absent");
+  EXPECT_FALSE(host->unit_queries.empty());
+
+  // Setting them aside still never hides a readable launcher, the game or its prefix server.
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 80000000, 1784);
+  host->list_net_cls_in_every_cgroup_file();
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 1U);
+  host->drop(43);
+  host->pids.push_back("42");
+  host->list_net_cls_in_every_cgroup_file();
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), false);
+  EXPECT_EQ(reason, "title_runtime_busy");
+  host->drop(42);
+
+  const auto refuses = [&](const char *what) {
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host)) << what;
+    EXPECT_EQ(error, "launcher_inventory_incomplete") << what;
+    EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host)) << what;
+    EXPECT_EQ(reason, "title_runtime_inventory_incomplete") << what;
+  };
+  // An unrelated protected task in a custom unit still refuses, the line beside it changing nothing.
+  const auto group = host->manager + "/session.slice/mylauncher.service";
+  host->add_task(7500, "helper", 90000700, 1784, group, 1000, true);
+  host->list_net_cls_in_every_cgroup_file();
+  refuses("no such unit loaded");
+  host->vendor_unit(group);
+  host->units["mylauncher.service"].fragment_path = "/fixture/owner/.config/systemd/user/mylauncher.service";
+  refuses("a ~/.config user unit");
+  host->units["mylauncher.service"].fragment_path = "/run/user/1000/systemd/transient/mylauncher.service";
+  host->units["mylauncher.service"].transient = true;
+  refuses("a transient unit");
+  host->drop(7500);
+  ASSERT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+
+  // So does a manager its cgroup file does not prove, or does not prove once.
+  const auto manager_cgroup = host->files["/proc/1784/cgroup"];
+  for (const auto &text : {
+         "1:net_cls:/\n0::" + host->manager + "/app.slice/impostor.service\n",
+         manager_cgroup + "0::" + host->manager + "/init.scope\n",
+         "1:net_cls\n0::" + host->manager + "/init.scope\n",
+       }) {
+    host->files["/proc/1784/cgroup"] = text;
+    refuses(text.c_str());
+  }
 }
 
 TEST_F(EpicProcess, PrivateAdmissionRefusesAProtectedTaskOutsideTheSessionAndSystemRoles) {

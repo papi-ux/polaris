@@ -1342,6 +1342,58 @@ TEST(SteamosBusTests, AUserUnitIsReadFromTheBoundUserManagerWithoutLoadingIt) {
   }
 }
 
+TEST(SteamosBusTests, AUserUnitIsStillReadWhenTheManagersCgroupListsAV1Hierarchy) {
+  // pc-papi, as read on 2026-10-30: Mullvad's split tunnelling puts this line in every cgroup file.
+  const std::string v1 = "1:net_cls:/\n";
+  const std::string manager = "/user.slice/user-1000.slice/user@1000.service";
+  const std::string group = manager + "/app.slice/ssh-agent.service";
+  const auto vendor = [&](host_script_t &s) {
+    auto &agent = s.units["ssh-agent.service"];
+    agent.control_group = group;
+    agent.transient = false;
+    agent.fragment_path = "/usr/lib/systemd/user/ssh-agent.service";
+    agent.drop_in_paths = {};
+  };
+  world_t world;
+  world.fake->edit(vendor);
+  world.scratch.write("proc/22/cgroup", v1 + "0::" + manager + "/init.scope\n");
+  bus::user_unit_t unit;
+  const auto read = bus::read_user_unit(world.sources, world.budget(), "ssh-agent.service", unit);
+  ASSERT_TRUE(read.ok()) << read.code << ": " << read.reason;
+  EXPECT_TRUE(unit.loaded);
+  EXPECT_EQ(unit.id, "ssh-agent.service");
+  EXPECT_EQ(unit.control_group, group);
+
+  // The line is ignored, not trusted: the same refusals still hold beside it.
+  for (const auto &cgroup : {
+         v1 + "0::" + manager + "/app.slice/impostor.service\n",
+         v1 + "0::" + manager + "/init.scope\n0::" + manager + "/init.scope\n",
+         "1:net_cls\n0::" + manager + "/init.scope\n",
+         "1:name=systemd:/x\n0::" + manager + "/init.scope\n",
+         v1,
+       }) {
+    world_t refused;
+    refused.fake->edit(vendor);
+    refused.scratch.write("proc/22/cgroup", cgroup);
+    const auto verdict = bus::read_user_unit(refused.sources, refused.budget(), "ssh-agent.service", unit);
+    EXPECT_EQ(verdict.code, "prelaunch_session_identity_unavailable") << cgroup << ": " << verdict.reason;
+    EXPECT_FALSE(unit.loaded) << cgroup;
+  }
+
+  // The SteamOS readers bind logind, the manager and this process through the same parser.
+  world_t session;
+  session.scratch.write("proc/11/cgroup", v1 + "0::/system.slice/systemd-logind.service\n");
+  session.scratch.write("proc/22/cgroup", v1 + "0::" + manager + "/init.scope\n");
+  session.scratch.write("proc/4242/cgroup", v1 + "0::" + manager + "/app.slice/steamos-manager.service\n");
+  session.scratch.write("self_cgroup", v1 + "0::" + std::string {k_polaris_cgroup} + "\n");
+  steamos::snapshot_t snapshot;
+  const auto snapshot_read = bus::read_snapshot(session.sources, session.budget(), snapshot);
+  ASSERT_TRUE(snapshot_read.ok()) << snapshot_read.code << ": " << snapshot_read.reason;
+  EXPECT_EQ(steamos::cgroup_v2_path(snapshot.self_cgroup), std::string {k_polaris_cgroup});
+  const auto probed = bus::probe_support(session.sources, session.budget());
+  EXPECT_TRUE(probed.ok()) << probed.code << ": " << probed.reason;
+}
+
 TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
   const std::set<std::string> expected {
     "ATypedSnapshotBindsTheGameModeSessionWithoutStartingAnyService",
@@ -1371,6 +1423,7 @@ TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
     "AKeptReadinessAnswerFollowsAnInPlaceEditOfThePackageRecord",
     "AStalledBusCostsOneReadinessBudgetPerAppListAndIsNeverHealth",
     "AUserUnitIsReadFromTheBoundUserManagerWithoutLoadingIt",
+    "AUserUnitIsStillReadWhenTheManagersCgroupListsAV1Hierarchy",
     "RegisteredCasesAreFrozen",
   };
   std::set<std::string> registered;
