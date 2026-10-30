@@ -1104,6 +1104,7 @@ function save() {
   // The response confirms this submission, not edits typed while it was in flight.
   const submittedSerialized = JSON.stringify(configCopy)
   const clearSteamGridDbApiKey = configCopy.clear_steamgriddb_api_key === true
+  const previous = JSON.parse(initialSerialized.value || '{}')
 
   tabs.value.forEach(tab => {
     Object.keys(tab.options).forEach(optionKey => {
@@ -1112,7 +1113,15 @@ function save() {
         delete_value = true
       }
       if (delete_value && !(optionKey === 'steamgriddb_api_key' && clearSteamGridDbApiKey)) {
-        delete configCopy[optionKey]
+        // Omission preserves settings. Returning an edited option to its
+        // default must explicitly reset it; blank secret placeholders still
+        // mean unchanged, with clearing owned by the existing clear flags.
+        const secret = ['api_key', 'ai_api_key', 'steamgriddb_api_key'].includes(optionKey)
+        if (!secret && JSON.stringify(previous[optionKey]) !== JSON.stringify(configCopy[optionKey])) {
+          configCopy[optionKey] = null
+        } else {
+          delete configCopy[optionKey]
+        }
       }
     })
   })

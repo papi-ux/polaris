@@ -3,12 +3,59 @@
 #include "src/adaptive_bitrate.h"
 #include "src/crypto.h"
 #include "src/private_state_file.h"
+#include "src/file_handler.h"
 #include <Simple-Web-Server/server_https.hpp>
 #include <Simple-Web-Server/client_https.hpp>
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <thread>
 #include <sys/stat.h>
+
+namespace {
+  class ConfigSaveHttp: public testing::TestWithParam<std::string> {
+  protected:
+    config::sunshine_t old_config = config::sunshine;
+    const config::vaapi::settings_t old_vaapi = config::vaapi::snapshot();
+    const decltype(config::video.adaptive_bitrate) old_adaptive = config::video.adaptive_bitrate;
+    const decltype(config::video.ai_optimizer) old_ai = config::video.ai_optimizer;
+    std::filesystem::path directory;
+
+    void SetUp() override {
+      directory = std::filesystem::temp_directory_path() /
+        ("polaris-save-config-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+      ASSERT_TRUE(std::filesystem::create_directory(directory));
+      std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+      config::sunshine.username = "test-admin";
+      config::sunshine.api_key = "isolated-test-api-key";
+      config::sunshine.config_file = (directory / "polaris.conf").string();
+      const auto credentials = crypto::gen_creds("localhost", 2048);
+      ASSERT_TRUE(private_state_file::write_atomic(directory / "cert.pem", credentials.x509));
+      ASSERT_TRUE(private_state_file::write_atomic(directory / "key.pem", credentials.pkey));
+    }
+
+    void TearDown() override {
+      config::sunshine = old_config;
+      config::vaapi::publish(old_vaapi);
+      config::video.adaptive_bitrate = old_adaptive;
+      config::video.ai_optimizer = old_ai;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+      std::filesystem::remove_all(directory);
+    }
+
+    void run(const std::function<void(SimpleWeb::Client<SimpleWeb::HTTPS> &)> &check);
+
+    void save(SimpleWeb::Client<SimpleWeb::HTTPS> &client, const nlohmann::json &payload) {
+      const auto response = client.request(GetParam(), "/api/config", payload.dump(),
+        {{"Authorization", "Bearer isolated-test-api-key"}, {"Content-Type", "application/json"}});
+      ASSERT_EQ(std::stoi(response->status_code), 200) << response->content.string();
+    }
+
+    auto variables() const {
+      return config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    }
+  };
+}
 
 namespace confighttp {
   void live_tuning_http_for_tests(std::shared_ptr<SimpleWeb::Server<SimpleWeb::HTTPS>::Response>,
@@ -22,6 +69,109 @@ namespace confighttp {
   void with_web_session_for_tests(const std::filesystem::path &, const std::string &,
                                  const std::function<void(const std::string &)> &);
 }
+
+void ConfigSaveHttp::run(const std::function<void(SimpleWeb::Client<SimpleWeb::HTTPS> &)> &check) {
+  confighttp::with_web_session_for_tests(directory / "sessions.json", "test-csrf", [&](const std::string &) {
+    SimpleWeb::Server<SimpleWeb::HTTPS> server((directory / "cert.pem").string(), (directory / "key.pem").string());
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    server.config.timeout_request = 5;
+    server.config.timeout_content = 5;
+    server.resource["^/api/config$"]["POST"] = confighttp::saveConfig;
+    server.resource["^/api/config$"]["PATCH"] = confighttp::patchConfig;
+    std::atomic<unsigned short> port {0};
+    std::jthread worker([&] { server.start([&](unsigned short assigned) { port = assigned; }); });
+    auto stop = util::fail_guard([&] { server.stop(); worker.join(); });
+    for (int attempt = 0; attempt < 100 && port == 0; ++attempt) std::this_thread::sleep_for(10ms);
+    ASSERT_NE(port, 0);
+    SimpleWeb::Client<SimpleWeb::HTTPS> client("127.0.0.1:" + std::to_string(port.load()), false);
+    client.config.timeout = 5;
+    check(client);
+  });
+}
+
+TEST_P(ConfigSaveHttp, OmittedCaptureAndCompositorChoicesSurviveAnInputsSave) {
+  ASSERT_TRUE(private_state_file::write_atomic(config::sunshine.config_file,
+    "linux_use_cage_compositor = disabled\nlinux_prefer_gpu_native_capture = disabled\n"
+    "unknown_future_setting = keep-me\n"));
+  run([&](auto &client) {
+    save(client, {{"client_gamepad_seat_isolation", "disabled"}});
+    const auto after = variables();
+    EXPECT_EQ(after.at("client_gamepad_seat_isolation"), "disabled");
+    EXPECT_EQ(after.count("linux_use_cage_compositor"), 1u);
+    EXPECT_EQ(after.count("linux_prefer_gpu_native_capture"), 1u);
+    EXPECT_EQ(after.count("unknown_future_setting"), 1u);
+    if (after.contains("linux_use_cage_compositor")) {
+      EXPECT_EQ(after.at("linux_use_cage_compositor"), "disabled");
+    }
+    if (after.contains("linux_prefer_gpu_native_capture")) {
+      EXPECT_EQ(after.at("linux_prefer_gpu_native_capture"), "disabled");
+    }
+    if (after.contains("unknown_future_setting")) {
+      EXPECT_EQ(after.at("unknown_future_setting"), "keep-me");
+    }
+  });
+}
+
+TEST_P(ConfigSaveHttp, RedactedWriteOnlySecretsSurviveAndExplicitClearStillWorks) {
+  ASSERT_TRUE(private_state_file::write_atomic(config::sunshine.config_file,
+    "steamgriddb_api_key = test-grid-secret\nai_api_key = test-ai-secret\napi_key = test-api-secret\n"));
+  run([&](auto &client) {
+    save(client, {{"steamgriddb_api_key", ""}, {"ai_api_key", ""}, {"api_key", ""}});
+    auto after = variables();
+    EXPECT_EQ(after.at("steamgriddb_api_key"), "test-grid-secret");
+    EXPECT_EQ(after.at("ai_api_key"), "test-ai-secret");
+    EXPECT_EQ(after.at("api_key"), "test-api-secret");
+    save(client, {{"clear_steamgriddb_api_key", true}, {"clear_ai_api_key", true}});
+    after = variables();
+    // The existing clear path writes a blank assignment; the legacy parser
+    // can retain its trailing space. Neither credential may survive it.
+    EXPECT_TRUE(!after.contains("steamgriddb_api_key") || after.at("steamgriddb_api_key").find_first_not_of(" \t\r\n") == std::string::npos);
+    EXPECT_TRUE(!after.contains("ai_api_key") || after.at("ai_api_key").find_first_not_of(" \t\r\n") == std::string::npos);
+    EXPECT_EQ(after.at("api_key"), "test-api-secret");
+  });
+}
+
+TEST_P(ConfigSaveHttp, ExplicitNullResetsOnlyTheNamedKey) {
+  ASSERT_TRUE(private_state_file::write_atomic(config::sunshine.config_file,
+    "linux_use_cage_compositor = disabled\nlinux_prefer_gpu_native_capture = disabled\n"
+    "unknown_future_setting = keep-me\n"));
+  run([&](auto &client) {
+    save(client, {{"linux_use_cage_compositor", nullptr}});
+    const auto after = variables();
+    EXPECT_FALSE(after.contains("linux_use_cage_compositor"));
+    EXPECT_EQ(after.count("linux_prefer_gpu_native_capture"), 1u);
+    EXPECT_EQ(after.count("unknown_future_setting"), 1u);
+  });
+}
+
+TEST_P(ConfigSaveHttp, OmittedAdaptiveChoiceIsNotOverwrittenByRuntimeState) {
+  const std::string stored = adaptive_bitrate::get_state().configured_enabled ? "disabled" : "enabled";
+  ASSERT_TRUE(private_state_file::write_atomic(config::sunshine.config_file,
+    "adaptive_bitrate_enabled = " + stored + "\n"));
+  run([&](auto &client) {
+    save(client, {{"sunshine_name", "saved-host"}});
+    EXPECT_EQ(variables().at("adaptive_bitrate_enabled"), stored);
+  });
+}
+
+TEST_P(ConfigSaveHttp, SecretBearingPrivateFileStaysPrivateAndIsReplacedAtomically) {
+  ASSERT_TRUE(private_state_file::write_atomic(config::sunshine.config_file,
+    "steamgriddb_api_key = test-grid-secret\n"));
+  struct stat before {};
+  ASSERT_EQ(::stat(config::sunshine.config_file.c_str(), &before), 0);
+  ASSERT_EQ(before.st_mode & 07777, 0600u);
+  run([&](auto &client) {
+    save(client, {{"sunshine_name", "saved-host"}});
+    struct stat after {};
+    ASSERT_EQ(::stat(config::sunshine.config_file.c_str(), &after), 0);
+    EXPECT_EQ(after.st_mode & 07777, 0600u);
+    EXPECT_NE(after.st_ino, before.st_ino);
+    EXPECT_EQ(variables().at("steamgriddb_api_key"), "test-grid-secret");
+  });
+}
+
+INSTANTIATE_TEST_SUITE_P(PostAndPatch, ConfigSaveHttp, testing::Values("POST", "PATCH"));
 
 TEST(LiveTuningHttp, RealTlsHandlerRequiresAuthenticationCsrfAndCurrentRevision) {
   const auto old_config = config::sunshine;

@@ -332,8 +332,8 @@ TEST(AppValidationTests, RejectsUnexpectedCommandShapes) {
 }
 
 TEST(ConfigValidationTests, PatchMergeKeepsUnmentionedKeysAndDropsEmptiedOnes) {
-  // POST /api/config rewrites the file from its body; a one-key PATCH must
-  // not do that. Found the hard way when a single-key POST truncated a live
+  // Both POST and PATCH preserve unmentioned keys. Found the hard way when
+  // the old single-key POST behavior truncated a live
   // config to two lines.
   const std::unordered_map<std::string, std::string> existing {
     {"port", "47989"},

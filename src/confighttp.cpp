@@ -6366,9 +6366,14 @@ namespace confighttp {
       observed_revision.value_or(configuration_store::revision(config::sunshine.config_file, true)));
     std::stringstream config_stream;
     const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
-    auto persisted = tree;
+    // Both POST and PATCH are partial writes. Only a named null/empty reset
+    // removes a setting; omitted fields belong to another page or client.
+    auto persisted = validation::merge_config_patch(existing_vars, tree);
     validation::preserve_local_config(existing_vars, persisted);
     std::vector<std::string> written_keys;
+    for (const auto &[key, value] : tree.items()) {
+      if (!validation::is_local_config_key(key)) written_keys.push_back(key);
+    }
     for (const auto &[k, v] : persisted.items()) {
       if (v.is_null()) {
         continue;
@@ -6379,25 +6384,6 @@ namespace confighttp {
       // v.dump() will dump valid json, which we do not want for strings in the config right now
       // we should migrate the config file to straight json and get rid of all this nonsense
       config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
-      if (!validation::is_local_config_key(k)) written_keys.push_back(k);
-    }
-    if (!tree.contains("adaptive_bitrate_enabled")) {
-      config_stream << "adaptive_bitrate_enabled = "
-                    << bool_config_value(adaptive_bitrate::get_state().configured_enabled) << std::endl;
-    }
-    std::size_t dropped = 0;
-    for (const auto &[key, value] : existing_vars) {
-      if (persisted.contains(key) || value.empty()) {
-        continue;
-      }
-      if (is_write_only_secret_config_key(key)) {
-        config_stream << key << " = " << value << std::endl;
-        continue;
-      }
-      ++dropped;
-    }
-    if (dropped > 0) {
-      BOOST_LOG(info) << "SaveConfig: "sv << writer << " left "sv << dropped << " existing key(s) out of the payload; they revert to defaults"sv;
     }
     if (config::write_config_with_vaapi_settings(config::sunshine.config_file, config_stream.str(), before) != 0) {
       const std::string message = "Failed to write config file: " + config::sunshine.config_file;
@@ -6443,8 +6429,8 @@ namespace confighttp {
       config::apply_trusted_network(written_vars);
       BOOST_LOG(info) << "SaveConfig: trusted network applied at runtime"sv;
     }
-    // Only a changed AI key reapplies: a PATCH merges into the whole file, so the
-    // tree carries every AI key on every save.
+    // Only a changed AI key reapplies: the persisted file carries all AI keys,
+    // including keys this request left untouched.
     if (std::any_of(changed.begin(), changed.end(), [](const std::string &key) {
           return validation::is_ai_config_key(key);
         })) {
@@ -6514,8 +6500,7 @@ namespace confighttp {
   /**
    * @brief Update part of the configuration.
    *
-   * Unlike POST, which rewrites the file from its body alone, keys absent from
-   * a PATCH body keep their current values. A key set to null or an empty
+   * POST and PATCH both preserve keys absent from the body. A key set to null or an empty
    * string is removed and reverts to its default. Write-only secrets follow
    * the POST rules: an empty value leaves the stored secret alone unless the
    * matching clear flag is set.
@@ -6539,10 +6524,8 @@ namespace confighttp {
         json_config_enabled(input_tree["adaptive_bitrate_enabled"]) != adaptive_bitrate::get_state().configured_enabled;
       if (!configuration_current(response, request, changes_tuning)) return;
       const auto observed_revision = configuration_store::revision(config::sunshine.config_file, true);
-      const auto existing_vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
-      const auto merged = validation::merge_config_patch(existing_vars, input_tree);
       bool restart_required = true;
-      if (!write_config_tree(response, request, merged, "api_patch", authority, observed_revision, &restart_required)) {
+      if (!write_config_tree(response, request, input_tree, "api_patch", authority, observed_revision, &restart_required)) {
         return;
       }
       nlohmann::json output_tree;

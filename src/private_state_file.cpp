@@ -701,10 +701,11 @@ namespace private_state_file {
       // It grew under us.
       return inspected(refused(read_status_e::rejected, refusal_e::size_changed));
     }
-    return {.status = read_status_e::ok, .payload = std::move(payload)};
+    return {.status = read_status_e::ok, .payload = std::move(payload),
+      .mode = static_cast<unsigned>(metadata.st_mode & 07777)};
   }
 
-  static write_result_t write_locked(directory_handle_t &directory, std::string_view payload) {
+  static write_result_t write_locked(directory_handle_t &directory, std::string_view payload, unsigned mode = 0600) {
 #ifdef POLARIS_TESTS
     const auto injected_fault = write_fault.load(std::memory_order_relaxed);
     if (injected_fault == write_fault_e::open) {
@@ -734,7 +735,7 @@ namespace private_state_file {
         temporary_exists = false;
       }
     };
-    if (::fchmod(descriptor, S_IRUSR | S_IWUSR) != 0) {
+    if (::fchmod(descriptor, static_cast<mode_t>(mode & 0600)) != 0) {
       cleanup();
       return {write_status_e::not_committed};
     }
@@ -865,8 +866,9 @@ namespace private_state_file {
     if (!current && current.status != read_status_e::missing) return {write_status_e::not_committed, current.refusal};
     const auto next = update(current);
     if (!next || next->size() > max_bytes) return {write_status_e::not_committed};
-    if (current && *next == current.payload) return {write_status_e::committed};
-    return write_locked(directory, *next);
+    const auto mode = current ? current.mode & 0600U : 0600U;
+    if (current && *next == current.payload && current.mode == mode) return {write_status_e::committed};
+    return write_locked(directory, *next, mode);
   }
 
   std::string_view refusal_name(refusal_e kind) {

@@ -1431,23 +1431,23 @@ namespace config {
     if (::fstat(descriptor, &metadata) != 0) {
       failed = true;
     } else if (S_ISREG(metadata.st_mode) && metadata.st_uid == ::geteuid() &&
-               (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-      // Only write access is taken away: the settings store reads a configuration file that
-      // others can read, and refuses one that others can write.
-      failed = ::fchmod(descriptor, metadata.st_mode & 07777 & ~(S_IWGRP | S_IWOTH)) != 0;
+               (metadata.st_mode & 07777 & ~0600) != 0) {
+      // The file can hold write-only API secrets. Keep stricter owner access,
+      // and remove public read access as well as public write access.
+      failed = ::fchmod(descriptor, metadata.st_mode & 0600) != 0;
       restricted = !failed;
     }
     const auto error = errno;
     ::close(descriptor);
     if (failed) {
-      BOOST_LOG(warning) << "Could not remove group and other write access from ["sv << path.string()
-                         << "]: "sv << std::strerror(error) << ". Saving settings will fail until it is restricted."sv;
+      BOOST_LOG(warning) << "Could not restrict access to ["sv << path.string()
+                         << "]: "sv << std::strerror(error) << ". The file may contain secrets and still has excess access."sv;
       return false;
     }
     if (restricted) {
-      BOOST_LOG(info) << "Removed group and other write access from ["sv << path.string() << "] (it was mode 0"sv
+      BOOST_LOG(info) << "Restricted access to ["sv << path.string() << "] (it was mode 0"sv
                       << std::oct << (metadata.st_mode & 07777) << std::dec
-                      << "), which the settings store refuses to save into"sv;
+                      << "), keeping stored secrets private"sv;
     }
     return true;
 #endif
@@ -1971,10 +1971,19 @@ namespace config {
       if (!config_file_from_cli && !fs::exists(sunshine.config_file)) {
         const auto old_config = appdata_dir / "sunshine.conf";
         if (fs::exists(old_config)) {
-          std::error_code ec;
-          fs::copy_file(old_config, sunshine.config_file, fs::copy_options::none, ec);
-          if (ec) {
-            BOOST_LOG(warning) << "Could not migrate legacy config " << old_config << " to " << sunshine.config_file << ": " << ec.message();
+          std::error_code size_error;
+          const auto size = fs::file_size(old_config, size_error);
+          if (size_error || size > 4 * 1024 * 1024) {
+            BOOST_LOG(error) << "Could not read legacy config " << old_config << " for migration";
+            return -1;
+          }
+          std::ifstream legacy_file {old_config, std::ios::binary};
+          std::string contents(size, '\0');
+          legacy_file.read(contents.data(), static_cast<std::streamsize>(contents.size()));
+          if (!legacy_file || legacy_file.peek() != std::char_traits<char>::eof() ||
+              configuration_store::initialize(sunshine.config_file, contents) != configuration_store::result::committed) {
+            BOOST_LOG(error) << "Could not migrate legacy config " << old_config << " to " << sunshine.config_file;
+            return -1;
           } else {
             BOOST_LOG(info) << "Migrated legacy config from " << old_config << " to " << sunshine.config_file;
           }
@@ -1984,7 +1993,7 @@ namespace config {
       // Create the config file if it does not exist, which only happens on a new
       // install: an existing host has a file, even an empty one.
       if (!fs::exists(sunshine.config_file)) {
-        auto cfg_file = std::ofstream {sunshine.config_file};
+        auto cfg_file = std::ostringstream {};
       #ifdef _WIN32
         cfg_file << "server_cmd = [{\"name\":\"Bubbles\",\"cmd\":\"bubbles.scr\",\"elevated\":false}]\n";
       #endif
@@ -2000,13 +2009,14 @@ namespace config {
                               "New install: streams start in Private Stream"sv :
                               "New install: labwc or wlr-randr is not on the PATH, so streams start in Mirror Desktop"sv);
       #endif
+        if (configuration_store::initialize(sunshine.config_file, cfg_file.str()) != configuration_store::result::committed) {
+          BOOST_LOG(error) << "Could not create configuration file " << sunshine.config_file;
+          return -1;
+        }
       }
 
-      // Every settings save goes through the settings store, which refuses a file that
-      // group or other can write. The file above is created through the umask, so on a
-      // host with umask 002 it came out 0664 and every save failed (#769); a host that
-      // was set up that way still has such a file. Take the write bits away on the way
-      // in, like the directory above.
+      // Older versions created files through the umask. Restrict those files
+      // before reading secrets or admitting settings saves.
       restrict_config_file_mode(sunshine.config_file);
 
       // Read config file
