@@ -1838,6 +1838,13 @@ namespace proc {
       std::string reason;
     };
 
+    /// A process carrying the token outside the fence's session cgroup, and where it is.
+    struct outside_session_process_t {
+      pid_t pid = -1;
+      std::optional<std::uint64_t> start_time;  ///< with the pid, which process it is
+      std::string cgroup;
+    };
+
     struct isolated_session_process_snapshot_t {
       std::vector<pidfd_handle_t> owned;
       std::vector<pidfd_handle_t> ambiguous;
@@ -1849,7 +1856,7 @@ namespace proc {
       /// What kept the capture from completing, so the log can name it.
       std::vector<unattributed_process_t> unattributed;
       /// Processes carrying the token outside the fence's session cgroup, which are not the session's.
-      std::vector<unattributed_process_t> outside_session_cgroup;
+      std::vector<outside_session_process_t> outside_session_cgroup;
       bool capture_complete = true;
       bool retryable_capture_failure = false;
       bool hard_capture_failure = false;
@@ -1904,6 +1911,9 @@ namespace proc {
     /// Pids a test's snapshot treats as the bwraps of a live Flatpak instance, which it cannot
     /// make: a live instance needs a systemd scope of its own.
     thread_local const std::set<pid_t> *forced_flatpak_sandbox_pids_for_tests = nullptr;
+    /// A pid whose cgroup a fenced snapshot reads as a foreign service's, so a test can stand one
+    /// process outside the session beside one inside it.
+    thread_local pid_t forced_foreign_session_cgroup_pid = -1;
 #endif
 
     std::filesystem::path private_session_runtime_dir();
@@ -2102,7 +2112,12 @@ namespace proc {
         if (!environment_before_matches) {
           continue;
         }
-        const auto cgroup_before = session_cgroup ? read_proc_status_file_result(pid, "cgroup") : proc_file_read_result_t {};
+        auto cgroup_before = session_cgroup ? read_proc_status_file_result(pid, "cgroup") : proc_file_read_result_t {};
+#ifdef POLARIS_TESTS
+        if (session_cgroup && pid == forced_foreign_session_cgroup_pid && cgroup_before.ok()) {
+          cgroup_before.bytes = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/desktop-app.service\n";
+        }
+#endif
         if (session_cgroup && !cgroup_before.ok()) {
           if (process_vanished_during_proc_read(cgroup_before.error)) {
             snapshot.mark_retryable_failure();
@@ -2113,7 +2128,7 @@ namespace proc {
         }
         if (!isolated_session_cgroup_member(cgroup_before, session_cgroup)) {
           // Handed the token, but outside the session: never captured, never signalled.
-          snapshot.outside_session_cgroup.push_back({pid, flatpak_session_instances::cgroup_from_proc(cgroup_before.bytes)});
+          snapshot.outside_session_cgroup.push_back({pid, proc_start_time_ticks(pid), flatpak_session_instances::cgroup_from_proc(cgroup_before.bytes)});
           continue;
         }
 #ifdef POLARIS_TESTS
@@ -2297,7 +2312,29 @@ namespace proc {
       bool terminated_any = false;  ///< it found live processes of the generation and signalled them
       bool sandboxes_remained = false;  ///< Flatpak sandbox processes of the generation were live
       int unattributed = 0;  ///< processes that kept its capture from completing
+      int outside_session_cgroup = 0;  ///< token bearers its fence left running outside the session's cgroup
     };
+
+    /// Pid and start time: one process, however many of a sweep's snapshots see it.
+    using outside_session_reported_t = std::set<std::pair<pid_t, std::optional<std::uint64_t>>>;
+
+    /**
+     * Name each token bearer a snapshot's fence left outside the session, once per sweep. It is
+     * left running, so this line is its only record, and it is written whichever way the sweep ends.
+     */
+    void log_outside_session_processes(
+      const isolated_session_process_snapshot_t &snapshot,
+      outside_session_reported_t &reported,
+      std::string_view reason
+    ) {
+      for (const auto &outside : snapshot.outside_session_cgroup) {
+        if (!reported.insert({outside.pid, outside.start_time}).second) {
+          continue;
+        }
+        BOOST_LOG(warning) << "process: left pid="sv << outside.pid << " running: it carries the session token outside the session's cgroup ("sv
+                           << outside.cgroup << ") "sv << reason;
+      }
+    }
 
     /// Name each process that kept the capture from completing, once, with its comm and parent.
     int log_unattributed_processes(const isolated_session_process_snapshot_t &snapshot, std::string_view reason) {
@@ -2339,8 +2376,17 @@ namespace proc {
           false
         );
       }
+      // Unfenced, no snapshot records an outsider, so this reports nothing.
+      outside_session_reported_t outside_reported;
+      const auto report_outside = [&outside_reported, reason, sweep](const isolated_session_process_snapshot_t &snapshot) {
+        log_outside_session_processes(snapshot, outside_reported, reason);
+        if (sweep) {
+          sweep->outside_session_cgroup = static_cast<int>(outside_reported.size());
+        }
+      };
       for (int pass = 0; pass < 2; ++pass) {
         auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason, session_cgroup);
+        report_outside(snapshot);
         if (!snapshot.capture_complete) {
           BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
           const auto unattributed = log_unattributed_processes(snapshot, reason);
@@ -2407,12 +2453,9 @@ namespace proc {
       }
 
       const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason, session_cgroup);
+      report_outside(final_snapshot);
       if (sweep && !final_snapshot.capture_complete) {
         sweep->capture_complete = false;
-      }
-      for (const auto &outside : final_snapshot.outside_session_cgroup) {
-        BOOST_LOG(warning) << "process: left pid="sv << outside.pid << " running: it carries the session token outside the session's cgroup ("sv
-                           << outside.reason << ") "sv << reason;
       }
       if (tracked_detached_children != nullptr) {
         direct_child_reap_complete = reap_tracked_detached_children(
@@ -7273,6 +7316,36 @@ namespace proc {
     const std::optional<std::string> &session_cgroup
   ) {
     return terminate_isolated_session_processes(session_instance_id, "during fenced exact-generation test"sv, nullptr, std::chrono::milliseconds(2s), nullptr, session_cgroup);
+  }
+
+  exact_generation_sweep_test_result_t exact_generation_sweep_for_tests(
+    std::string_view session_instance_id,
+    const std::optional<std::string> &session_cgroup,
+    pid_t foreign_cgroup_pid,
+    const std::set<pid_t> &recorded_flatpak_sandboxes
+  ) {
+    const auto previous_foreign = forced_foreign_session_cgroup_pid;
+    const auto previous_sandboxes = forced_flatpak_sandbox_pids_for_tests;
+    auto restore = util::fail_guard([previous_foreign, previous_sandboxes]() {
+      forced_foreign_session_cgroup_pid = previous_foreign;
+      forced_flatpak_sandbox_pids_for_tests = previous_sandboxes;
+    });
+    forced_foreign_session_cgroup_pid = foreign_cgroup_pid;
+    forced_flatpak_sandbox_pids_for_tests = &recorded_flatpak_sandboxes;
+    isolated_sweep_report_t sweep;
+    exact_generation_sweep_test_result_t result;
+    result.complete = terminate_isolated_session_processes(
+      session_instance_id,
+      "during exact-generation sweep test"sv,
+      nullptr,
+      std::chrono::milliseconds(2s),
+      &sweep,
+      session_cgroup
+    );
+    result.capture_complete = sweep.capture_complete;
+    result.sandboxes_remained = sweep.sandboxes_remained;
+    result.outside_session_cgroup = sweep.outside_session_cgroup;
+    return result;
   }
 
   std::string epic_private_session_cgroup_for_tests() {
