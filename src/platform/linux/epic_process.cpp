@@ -1670,6 +1670,12 @@ namespace platf::epic {
              std::all_of(pid.begin(), pid.end(), [](char c) { return c >= '0' && c <= '9'; });
     }
 
+    // ENOENT from the open, or ESRCH from a read of a task that exited since the open. Neither proves
+    // absence alone: procfs can hide a live process, so the directory and a pidfd must agree.
+    bool absence_may_follow(int error) {
+      return error == ENOENT || error == ESRCH;
+    }
+
     std::optional<std::string> read_file(const fs::path &path, std::size_t limit, bool prefix, int *read_error = nullptr) {
       if (limit == 0 || limit > maps_limit) {
         return std::nullopt;
@@ -1727,9 +1733,8 @@ namespace platf::epic {
         if (text) {
           return {std::move(text)};
         }
-        // A task that exits between the open and the read gives ESRCH from the read.
         struct stat info {};
-        if ((read_error != ENOENT && read_error != ESRCH) || ::lstat(process.c_str(), &info) == 0 || errno != ENOENT) {
+        if (!absence_may_follow(read_error) || ::lstat(process.c_str(), &info) == 0 || errno != ENOENT) {
           return {};
         }
 #ifdef SYS_pidfd_open
@@ -2475,6 +2480,14 @@ namespace platf::epic {
 
     std::optional<std::string> read_bounded(const fs::path &path, std::size_t limit) {
       return read_file(path, limit, false);
+    }
+
+    status_result_t real_initial_status(const fs::path &process, std::size_t limit) {
+      return production_backend()->initial_status(process, limit);
+    }
+
+    bool status_failure_may_be_absence(int error) {
+      return absence_may_follow(error);
     }
   }  // namespace testing
 }  // namespace platf::epic

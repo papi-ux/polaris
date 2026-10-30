@@ -677,6 +677,11 @@ TEST(EpicPrivateSessionContractTests, OnlyAnAppImageUnderStrictIsolationGetsTheM
   ASSERT_NE(startup, std::string::npos);
   EXPECT_LT(refusal, window);
   EXPECT_LT(window, startup);
+  // The refusal says what to do and that nothing was requested.
+  const auto refused = source.substr(refusal, source.find(");", refusal) - refusal);
+  EXPECT_NE(refused.find("headless_gamepad_isolation"), std::string::npos) << refused;
+  EXPECT_NE(refused.find("Mirror Desktop"), std::string::npos) << refused;
+  EXPECT_NE(refused.find("No private request was sent."), std::string::npos) << refused;
 }
 #endif
 

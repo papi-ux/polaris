@@ -19,8 +19,12 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <csignal>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <utility>
 
 namespace {
@@ -524,6 +528,20 @@ namespace {
     host->add_process(60, "/usr/bin/tool", "/fixture/owner", 10060);
     host->add_foreign(61, 10061);
     return host;
+  }
+
+  // A session with its game and server up, one unrelated owner task and two protected ones outside.
+  std::shared_ptr<fixture_t> session_host(std::shared_ptr<fixture_lease_t> &lease) {
+    auto h = std::make_shared<fixture_t>();
+    lease = h->private_tree();
+    h->private_game();
+    h->private_server();
+    h->fd_pid = 81;
+    h->add_process(60, "/usr/bin/tool", "/fixture/owner", 10060);
+    h->add_protected_process(43, 50);
+    h->add_protected_process(45, 500, 43);
+    h->add_protected_process(46, 510, 45);
+    return h;
   }
 
   bool under(const fs::path &path, std::uint64_t pid) {
@@ -2173,10 +2191,42 @@ TEST_F(EpicProcess, AnOwnerTaskGoingAtAnyReadLeavesBothCensusesDefinite) {
       EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
       EXPECT_NE(answer.reason, "launcher_census_unresolved") << nth;
     });
-    // An exited task its parent has not reaped reads the same way, with its stat and status left.
+  }
+}
+
+// A task exits before it is reaped: its status still reads, so only its stat's state can prove it.
+TEST_F(EpicProcess, AnExitedTaskItsParentHasNotReapedCountsAsGone) {
+  const auto desktop = [] {
+    auto h = std::make_shared<fixture_t>();
+    h->pids.clear();
+    h->desktop_session_host();
+    return h;
+  };
+  for (const auto &census : censuses) {
+    // Its status still reads and its stat says so, while its links and maps read as missing.
     at_every_read(60, quiet_host, [](fixture_t &h) { h.zombie(60); }, [&](const auto &h, int nth, int) {
       const auto answer = census(h);
-      EXPECT_TRUE(answer.admits) << census.name << " zombie at read " << nth << ": " << answer.reason;
+      EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
+    });
+    at_every_read(5157, desktop, [](fixture_t &h) { h.zombie(5157); }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " protected, at read " << nth << ": " << answer.reason;
+    });
+    // The stat's own state decides it. A live task with the same missing link is still a refusal.
+    host = quiet_host();
+    host->links.erase("/proc/60/exe");
+    const auto answer = census(host);
+    EXPECT_FALSE(answer.admits) << census.name;
+    EXPECT_EQ(answer.reason, "unreadable_process_link") << census.name;
+  }
+  // So does a session's observation, where a refusal would retire the claim.
+  std::shared_ptr<fixture_lease_t> lease;
+  for (const std::uint64_t task : {60, 46}) {
+    at_every_read(task, [&] { return session_host(lease); }, [task](fixture_t &h) { h.zombie(task); }, [&](const auto &h, int nth, int) {
+      const auto session = ep::testing::pin_private_session(lease, "private-generation", error, h);
+      ASSERT_TRUE(session) << error;
+      const auto seen = ep::observe_in_session(h->title(), *session, 300);
+      EXPECT_TRUE(seen.available) << task << " at read " << nth << ": " << seen.reason;
     });
   }
 }
@@ -2341,7 +2391,7 @@ TEST_F(EpicProcess, ACandidateThatChangesOrVanishesStillRefuses) {
   }
 
   // A row that changes, or that the bookend cannot read any more.
-  for (const auto change : std::vector<std::function<void(fixture_t &)>> {
+  for (const auto &change : std::vector<std::function<void(fixture_t &)>> {
          [](fixture_t &h) { h.files["/proc/70/stat"] = stat_line(70, 20070); },
          [](fixture_t &h) { h.links["/proc/70/cwd"] = "/tmp/.wine-1000/server-moved"; },
          [](fixture_t &h) { h.hide(70); },
@@ -2433,10 +2483,6 @@ TEST_F(EpicProcess, AProtectedTaskGoingLeavesTheCensusDefiniteAndItsUnitIsNotAsk
       const auto answer = census(h);
       EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
     });
-    at_every_read(5157, desktop, [](fixture_t &h) { h.zombie(5157); }, [&](const auto &h, int nth, int) {
-      const auto answer = census(h);
-      EXPECT_TRUE(answer.admits) << census.name << " zombie at read " << nth << ": " << answer.reason;
-    });
 
     // Between its placement and the census end, its unit is asked about once, not twice.
     host = desktop();
@@ -2510,7 +2556,7 @@ TEST_F(EpicProcess, ChurnThatNeverLeavesAQuietListingRefusesAtTheCapWithBoundedR
 
 TEST_F(EpicProcess, BootOwnerAndCgroupNamespaceChangesStillRefuse) {
   for (const auto &census : censuses) {
-    for (const auto change : std::vector<std::function<void(fixture_t &)>> {
+    for (const auto &change : std::vector<std::function<void(fixture_t &)>> {
            [](fixture_t &h) { h.files["/proc/sys/kernel/random/boot_id"] = "add26721-4424-4907-ab80-4f023729a22f\n"; },
            [](fixture_t &h) { h.uid = 1001; },
            [](fixture_t &h) { h.links["/proc/self/ns/cgroup"] = "cgroup:[999]"; },
@@ -2527,22 +2573,6 @@ TEST_F(EpicProcess, BootOwnerAndCgroupNamespaceChangesStillRefuse) {
   }
 }
 
-namespace {
-  // A session with its game and server up, one unrelated owner task and two protected ones outside.
-  std::shared_ptr<fixture_t> session_host(std::shared_ptr<fixture_lease_t> &lease) {
-    auto h = std::make_shared<fixture_t>();
-    lease = h->private_tree();
-    h->private_game();
-    h->private_server();
-    h->fd_pid = 81;
-    h->add_process(60, "/usr/bin/tool", "/fixture/owner", 10060);
-    h->add_protected_process(43, 50);
-    h->add_protected_process(45, 500, 43);
-    h->add_protected_process(46, 510, 45);
-    return h;
-  }
-}  // namespace
-
 TEST_F(EpicProcess, ATaskVanishingDuringAPrivateObservationKeepsTheClaimAndTheGrant) {
   constexpr std::uint64_t request = 300, upper = 3300;
   for (const std::uint64_t task : {60, 46}) {
@@ -2558,12 +2588,6 @@ TEST_F(EpicProcess, ATaskVanishingDuringAPrivateObservationKeepsTheClaimAndTheGr
       EXPECT_TRUE(h->signals.empty());
     });
     // A retained grant is not revoked, and End can still close the exact game.
-    at_every_read(task, [&] { return session_host(lease); }, [task](fixture_t &h) { h.zombie(task); }, [&](const auto &h, int nth, int) {
-      const auto session = ep::testing::pin_private_session(lease, "private-generation", error, h);
-      ASSERT_TRUE(session) << error;
-      const auto seen = ep::observe_in_session(h->title(), *session, request);
-      ASSERT_TRUE(seen.available) << task << " zombie at read " << nth << ": " << seen.reason;
-    });
     const auto grant_host = session_host(lease);
     const auto session = ep::testing::pin_private_session(lease, "private-generation", error, grant_host);
     ASSERT_TRUE(session) << error;
@@ -2659,6 +2683,43 @@ TEST_F(EpicProcess, AGameBeingReadWhenItVanishesInASessionIsStillNotASkippedRow)
   });
   EXPECT_TRUE(reasons.count("game_not_observed"));
   EXPECT_GT(reasons.size(), 1U);
+}
+
+// An exiting task's status can open and then fail to read, which is no different from failing to open.
+TEST(EpicProcessReader, ATaskExitingBetweenTheOpenAndTheReadBeginsTheSameAbsenceProof) {
+  EXPECT_TRUE(ep::testing::status_failure_may_be_absence(ENOENT));
+  EXPECT_TRUE(ep::testing::status_failure_may_be_absence(ESRCH));
+  for (const int error : {0, EACCES, EPERM, EIO, EMFILE, EINVAL}) {
+    EXPECT_FALSE(ep::testing::status_failure_may_be_absence(error)) << error;
+  }
+  if (!fs::exists("/proc/self/stat")) {
+    GTEST_SKIP() << "needs a real /proc";
+  }
+  const auto child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    pause();
+    _exit(0);
+  }
+  const fs::path process = fs::path("/proc") / std::to_string(child);
+  // A live task's status reads.
+  const auto live = ep::testing::real_initial_status(process, 65536);
+  ASSERT_TRUE(live.text.has_value());
+  // The kernel's own behaviour this rests on: the file opened first, the task gone before the read.
+  const int opened = ::open((process / "status").c_str(), O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(opened, 0);
+  ASSERT_EQ(::kill(child, SIGKILL), 0);
+  int status = 0;
+  ASSERT_EQ(::waitpid(child, &status, 0), child);
+  char buffer[64];
+  errno = 0;
+  EXPECT_EQ(::read(opened, buffer, sizeof(buffer)), -1);
+  EXPECT_EQ(errno, ESRCH);
+  ::close(opened);
+  // And once reaped, the whole proof holds: nothing at the path, and no pidfd for the pid.
+  const auto reaped = ep::testing::real_initial_status(process, 65536);
+  EXPECT_FALSE(reaped.text.has_value());
+  EXPECT_EQ(reaped.absence, ep::testing::process_absence_t::vanished);
 }
 
 TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks) {

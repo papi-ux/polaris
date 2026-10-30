@@ -215,5 +215,9 @@ namespace platf::epic {
       std::shared_ptr<const vrr_clock::compositor_lease_t>, const std::string &generation, std::string &reason, std::shared_ptr<backend_t>);
     // The actual bounded reader, also usable with inert fixture files (including size-zero procfs).
     std::optional<std::string> read_bounded(const std::filesystem::path &, std::size_t limit);
+    // The production backend's initial status of a real /proc entry.
+    status_result_t real_initial_status(const std::filesystem::path &process, std::size_t limit);
+    // Whether a failed status read can begin the proof that a task has gone.
+    bool status_failure_may_be_absence(int error);
   }
 }  // namespace platf::epic
