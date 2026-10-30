@@ -18,7 +18,7 @@ Some games list more than one way to start in Steam: Hades offers DirectX, Vulka
 
 Polaris leaves that choice to Steam. No launch command has been confirmed to skip the dialog, and Polaris never changes your Steam settings. Steam's dialog has its own checkbox to remember your selection, and the game's **Properties** in Steam can change that selection later.
 
-Mission Control and the game's `steam_launch.mode_reason` say **Steam may ask** for a title with more than one launch option. Polaris reads this from Steam's `appcache/appinfo.vdf`, without writing to it. It cannot see a choice you told Steam to remember, or an option that needs a beta branch or DLC, so the note can appear for a game that starts straight away.
+Mission Control and the game's `steam_launch.mode_reason` say **Steam may ask** for a title with more than one launch option. Nova's Play Setup does not show this yet. Polaris reads the options from Steam's `appcache/appinfo.vdf`, without writing to it. It leaves out options that need a beta branch or DLC and builds for 32-bit systems. It cannot see a choice you told Steam to remember, so the note can appear for a game that starts straight away.
 
 ## Nova controls
 

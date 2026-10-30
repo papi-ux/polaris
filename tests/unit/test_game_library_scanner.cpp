@@ -1206,6 +1206,78 @@ TEST_P(SteamLaunchOptionsTest, CountsEveryOptionSteamCanOfferForTheTitlesAskedFo
   EXPECT_FALSE(counts.contains("999"));
 }
 
+// Every launch option of Hades (1145360) as a host's appinfo.vdf lists them, with only the fields
+// that decide what Steam offers. On a 64-bit desktop Steam's dialog offered three: SELECT LAUNCH
+// OPTION (3) with DirectX, Vulkan and 32-bit, which are the first, 14th and 15th rows here.
+TEST_P(SteamLaunchOptionsTest, CountsTheThreeOptionsSteamOffersForHades) {
+  struct row_t {
+    const char *description, *oslist, *osarch, *beta, *steam_deck;
+  };
+  const std::vector<row_t> rows {
+    {"Hades (DirectX - Default)", "windows", "64", "", ""},
+    {"32-bit", "windows", "32", "", ""},
+    {"Debug", "windows", "64", "nightly-qa", ""},
+    {"Debug x86", "windows", "", "nightly-qa", ""},
+    {"Debug", "windows", "64", "prev-nightly", ""},
+    {"Debug", "windows", "32", "prev-nightly", ""},
+    {"Release", "windows", "64", "nightly-qa", ""},
+    {"Ship", "windows", "64", "nightly-qa", ""},
+    {"Play Hades", "windows", "64", "techbeta", ""},
+    {"", "macos", "", "", ""},
+    {"Vulkan Debug", "windows", "64", "nightly-qa", ""},
+    {"Vulkan Release", "windows", "64", "nightly-qa", ""},
+    {"Vulkan Ship", "windows", "64", "nightly-qa", ""},
+    {"Hades (Vulkan)", "windows", "64", "", "0"},
+    {"Hades (32-bit)", "windows", "64", "", "0"},
+    {"Hades (Vulkan - Steam Deck)", "windows", "64", "", "1"},
+    {"Hades (Apple Silicon)", "macos", "", "nightly-qa", ""},
+    {"Hades (Intel Mac)", "macos", "", "nightly-qa", ""}
+  };
+  appinfo_writer_t writer {GetParam()};
+  std::vector<std::string> options;
+  for (const auto &row : rows) {
+    auto config = writer.text("oslist", row.oslist);
+    if (*row.osarch) config += writer.text("osarch", row.osarch);
+    if (*row.beta) config += writer.text("BetaKey", row.beta);
+    if (*row.steam_deck) config += writer.text("steamdeck", row.steam_deck);
+    options.push_back(writer.text("description", row.description) + writer.map("config", config));
+  }
+  EXPECT_EQ(rows.size(), 18u);
+  EXPECT_EQ(counts_of(writer.file(writer.entry(1145360, writer.app(options))), {"1145360"}).at("1145360"), 3);
+}
+
+// One build for each kind of system, not a choice for the player.
+TEST_P(SteamLaunchOptionsTest, LeavesOutA32BitBuildAndCountsSteamDecksOwnApart) {
+  appinfo_writer_t writer {GetParam()};
+  const auto bitness = writer.app({
+    writer.map("config", writer.text("oslist", "windows") + writer.text("osarch", "64")),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("osarch", "32")),
+  });
+  const auto per_device = writer.app({
+    writer.map("config", writer.text("oslist", "windows") + writer.text("steamdeck", "0")),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("steamdeck", "1")),
+  });
+  const auto integer_flag = writer.app({
+    writer.map("config", writer.text("oslist", "windows") + writer.number("steamdeck", 0)),
+    writer.map("config", writer.text("oslist", "windows") + writer.number("steamdeck", 1)),
+  });
+  const auto counts = counts_of(writer.file(writer.entry(1, bitness) + writer.entry(2, per_device) + writer.entry(3, integer_flag)), {"1", "2", "3"});
+  EXPECT_EQ(counts.at("1"), 1);
+  EXPECT_EQ(counts.at("2"), 1);
+  EXPECT_EQ(counts.at("3"), 1);
+}
+
+TEST_P(SteamLaunchOptionsTest, ReadsSteamsKeysInWhateverCaseATitleWritesThem) {
+  appinfo_writer_t writer {GetParam()};
+  const auto gated = writer.app({
+    writer.option("Game.exe", "windows"),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("BetaKey", "nightly")),
+    writer.map("config", writer.text("OSList", "macos")),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("OwnsDlc", "12345")),
+  });
+  EXPECT_EQ(counts_of(writer.file(writer.entry(1, gated)), {"1"}).at("1"), 1);
+}
+
 TEST_P(SteamLaunchOptionsTest, LeavesOutOptionsThatNeedABetaOrADlc) {
   appinfo_writer_t writer {GetParam()};
   const auto gated = writer.app({
@@ -1309,5 +1381,5 @@ TEST(SteamLaunchOptions, NotesOnlyATitleSteamHasSomethingToAskAbout) {
   EXPECT_EQ(game_library::steam_launch_choice_note(1), "");
   const auto note = game_library::steam_launch_choice_note(3);
   EXPECT_NE(note.find("may ask"), std::string::npos);
-  EXPECT_NE(note.find("3 launch options"), std::string::npos);
+  EXPECT_NE(note.find("several launch options"), std::string::npos);
 }

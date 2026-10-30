@@ -579,7 +579,7 @@ describe('Mission Control live session card', () => {
 })
 
 describe('Mission Control Steam launch note', () => {
-  const note = 'Steam may ask which version of this game to start, because it has 3 launch options. If it does, choose one in the stream.'
+  const note = 'Steam may ask which version of this game to start, because it has several launch options. If it does, choose one in the stream.'
   const hades = { uuid: 'hades', name: 'Hades', source: 'steam', 'last-launched': 2, 'steam-launch-note': note }
   const control = { uuid: 'control', name: 'Control', source: 'steam', 'last-launched': 1 }
 

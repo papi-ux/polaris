@@ -1151,7 +1151,24 @@ namespace game_library {
     /// The fields of one launch option that decide whether Steam can offer it.
     struct appinfo_launch_option_t {
       std::string oslist;
+      std::string osarch;
+      std::string steamdeck;
       bool conditional = false;
+
+      /// Steam's key case varies between titles: Hades writes BetaKey.
+      void note(std::string_view key, std::string value) {
+        std::string name {key};
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name == "oslist") {
+          oslist = std::move(value);
+        } else if (name == "osarch") {
+          osarch = std::move(value);
+        } else if (name == "steamdeck") {
+          steamdeck = std::move(value);
+        } else if ((name == "betakey" || name == "ownsdlc") && !value.empty()) {
+          conditional = true;
+        }
+      }
     };
 
     /// Walks one entry's binary key/values in memory, keeping only config/launch.
@@ -1261,23 +1278,29 @@ namespace game_library {
                 return false;
               }
               if (where == where_t::option_config && !options.empty()) {
-                if (name == "oslist") {
-                  options.back().oslist = std::move(value);
-                } else if ((name == "betakey" || name == "ownsdlc") && !value.empty()) {
-                  options.back().conditional = true;
-                }
+                options.back().note(name, std::move(value));
               }
               break;
             }
-            case 0x02:  // int32
+            case 0x02: {  // int32
+              if (bytes_.size() - at_ < 4) {
+                return false;
+              }
+              std::uint32_t value = 0;
+              for (int i = 0; i < 4; ++i) {
+                value |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes_[at_ + i])) << (8 * i);
+              }
+              at_ += 4;
+              if (where == where_t::option_config && !options.empty()) {
+                options.back().note(name, std::to_string(static_cast<std::int32_t>(value)));
+              }
+              break;
+            }
             case 0x03:  // float
             case 0x04:  // pointer
             case 0x06:  // color
               if (!skip(4)) {
                 return false;
-              }
-              if (type == 0x02 && where == where_t::option_config && (name == "betakey" || name == "ownsdlc") && !options.empty()) {
-                options.back().conditional = true;
               }
               break;
             case 0x07:  // uint64
@@ -1306,17 +1329,23 @@ namespace game_library {
       return lower.find(os) != std::string::npos;
     }
 
+    // Hades lists 18 launch options and Steam offered three of them on a 64-bit desktop: those that
+    // need no beta branch, are not for macOS or 32-bit systems, and are not Steam Deck's own.
     int offered_launch_options(const std::vector<appinfo_launch_option_t> &options) {
-      int windows = 0;
-      int linux_native = 0;
-      for (const auto &option : options) {
-        if (option.conditional) {
-          continue;
+      int offered = 0;
+      for (const std::string_view os : {"windows", "linux"}) {
+        for (const std::string_view steam_deck : {"0", "1"}) {
+          int count = 0;
+          for (const auto &option : options) {
+            if (!option.conditional && option.osarch != "32" && oslist_names(option.oslist, os) &&
+                (option.steamdeck.empty() || option.steamdeck == steam_deck)) {
+              ++count;
+            }
+          }
+          offered = std::max(offered, count);
         }
-        windows += oslist_names(option.oslist, "windows") ? 1 : 0;
-        linux_native += oslist_names(option.oslist, "linux") ? 1 : 0;
       }
-      return std::max(windows, linux_native);
+      return offered;
     }
 
     std::optional<std::vector<std::string>> read_appinfo_strings(std::istream &in, std::int64_t offset) {
@@ -1399,8 +1428,8 @@ namespace game_library {
     if (options < 2) {
       return {};
     }
-    return "Steam may ask which version of this game to start, because it has " + std::to_string(options) +
-           " launch options. If it does, choose one in the stream.";
+    return "Steam may ask which version of this game to start, because it has several launch options. "
+           "If it does, choose one in the stream.";
   }
 
   std::map<std::string, int> steam_launch_option_counts(const std::set<std::string> &appids) {
