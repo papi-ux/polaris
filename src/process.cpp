@@ -8826,7 +8826,8 @@ namespace proc {
       std::uint64_t lower, upper;
     };
 
-    std::optional<epic_request_window_t> epic_request_birth_window() {
+    // The boot clock in /proc start-time ticks, the unit an Epic request window is kept in.
+    std::optional<std::uint64_t> epic_boottime_ticks() {
       timespec now {};
       const auto hz = sysconf(_SC_CLK_TCK);
       if (hz <= 0 || hz > 1'000'000'000L || clock_gettime(CLOCK_BOOTTIME, &now) != 0 ||
@@ -8834,11 +8835,17 @@ namespace proc {
       const auto seconds = static_cast<std::uint64_t>(now.tv_sec);
       const auto ticks = static_cast<std::uint64_t>(hz);
       if (seconds > (UINT64_MAX - ticks) / ticks) return std::nullopt;
+      return seconds * ticks + static_cast<std::uint64_t>(now.tv_nsec) * ticks / 1'000'000'000;
+    }
+
+    std::optional<epic_request_window_t> epic_request_birth_window() {
       // This is sampled BEFORE requesting startup, not an invented URI-dispatch timestamp.
-      const auto lower = seconds * ticks + static_cast<std::uint64_t>(now.tv_nsec) * ticks / 1'000'000'000;
-      const auto span = 30 * ticks;
-      if (lower == 0 || lower > UINT64_MAX - span) return std::nullopt;
-      return epic_request_window_t {lower, lower + span};
+      const auto lower = epic_boottime_ticks();
+      const auto hz = sysconf(_SC_CLK_TCK);
+      if (!lower || hz <= 0) return std::nullopt;
+      const auto span = 30 * static_cast<std::uint64_t>(hz);
+      if (*lower == 0 || *lower > UINT64_MAX - span) return std::nullopt;
+      return epic_request_window_t {*lower, *lower + span};
     }
 
     std::string epic_private_kiosk_command(const std::filesystem::path &directory, const std::string &command) {
@@ -11648,15 +11655,17 @@ namespace proc {
     }
     const auto target = epic_process_title(title);
     auto observed = platf::epic::observe_in_session(target, *_epic_private_session, _epic_private_request_ticks);
-    if (!observed.available) {
-      if (observed.reason != "game_not_observed") _epic_private_grant_retired = true;
-      return observed;
-    }
     // Lazy status or End may arrive much later. Bound the candidate's birth,
     // not when the owner opens Mission Control or ends a long-running game.
-    if (observed.start_ticks < _epic_private_request_ticks || observed.start_ticks > _epic_private_birth_upper_ticks) {
-      _epic_private_grant_retired = true;
-      return {false, "private_game_outside_birth_window", "", "unknown", 0, 0};
+    switch (platf::epic::private_claim(observed, _epic_private_request_ticks, _epic_private_birth_upper_ticks)) {
+      case platf::epic::private_claim_t::keep_looking:
+        return observed;
+      case platf::epic::private_claim_t::retire:
+        _epic_private_grant_retired = true;
+        if (observed.available) return {false, "private_game_outside_birth_window", "", "unknown", 0, 0};
+        return observed;
+      case platf::epic::private_claim_t::retain:
+        break;
     }
     std::string error;
     _epic_grant = platf::epic::adopt_in_session(target, *_epic_private_session, _epic_private_request_ticks, observed, error);
@@ -11702,15 +11711,22 @@ namespace proc {
       if (!action.empty())
         return refused(409, "session_managed", "Private Stream owns this session. Manual game adoption or release is unavailable.");
       const auto observed = retain_epic_private_game();
-      const bool verified = _epic_grant && observed.available;
-      const bool waiting = !_epic_private_grant_retired && observed.reason == "game_not_observed";
-      const char *message = verified ?
+      const auto game = platf::epic::private_game_state(bool(_epic_grant), _epic_private_grant_retired, observed,
+        epic_boottime_ticks(), _epic_private_birth_upper_ticks);
+      // Past its launch window, a game never seen in the session may have opened on the desktop. The
+      // claim stays open: an exact game born inside the window is still retained if it shows later.
+      const bool unseen_after_window = game == platf::epic::private_game_t::unverified &&
+        !_epic_private_grant_retired && observed.reason == "game_not_observed";
+      const char *message = game == platf::epic::private_game_t::managed ?
         "Private Stream retains this exact requested game. End asks it to close, allows a bounded Epic grace period, then ends the whole private session, including Epic and any additional in-session games. Disconnect and Resume preserve it. Cloud-sync completion is not known." :
-        (waiting ? "The requested game is not currently observed. Only an exact game born within the original 30-second request window can be retained, even at a later End. End closes the whole private session; no other title can acquire this game's individual close authority." :
-        "The requested game was born outside its one-shot launch window or its identity could not be retained. It will not be replaced automatically. End still ends the whole private session; exact-game graceful closure is not confirmed.");
+        game == platf::epic::private_game_t::waiting ?
+        "The requested game is not currently observed. Only an exact game born within the original 30-second request window can be retained, even at a later End. End closes the whole private session; no other title can acquire this game's individual close authority." :
+        unseen_after_window ?
+        "The requested game has not appeared in this private session within its 30-second launch window, so Polaris can't verify it. If it opened on the host desktop instead, that copy isn't part of this session and End won't close it. A game born inside the window can still be retained if it appears later. End closes the whole private session." :
+        "The requested game was born outside its one-shot launch window or its identity could not be retained. It will not be replaced automatically. End still ends the whole private session; exact-game graceful closure is not confirmed.";
       return {200, {{"status", true}, {"version", 1}, {"available", true}, {"state", "session_managed"},
-        {"game_state", verified ? "managed" : (waiting ? "waiting" : "unavailable")},
-        {"code", observed.reason}, {"app_uuid", _app.uuid}, {"app_name", _app.name},
+        {"game_state", game == platf::epic::private_game_t::managed ? "managed" : (game == platf::epic::private_game_t::waiting ? "waiting" : "unavailable")},
+        {"code", unseen_after_window ? std::string {"game_not_observed_after_launch_window"} : observed.reason}, {"app_uuid", _app.uuid}, {"app_name", _app.name},
         {"session_id", _session_instance_id}, {"revision", _epic_grant_revision},
         {"runtime", observed.runtime}, {"can_adopt", false}, {"can_release", false},
         {"uninspected_process_count", observed.uninspected_process_count}, {"message", message}}};

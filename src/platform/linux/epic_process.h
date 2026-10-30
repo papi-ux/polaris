@@ -126,6 +126,19 @@ namespace platf::epic {
   std::unique_ptr<adopted_game_t> adopt_in_session(
     const title_t &, const private_session_t &, std::uint64_t not_before_ticks, const observation_t &, std::string &error);
 
+  // One step of a private session's lazy claim on its requested game, from a fresh in-session
+  // observation. The request window bounds the game's birth, never when status or End looks: an
+  // exact game born inside it is retained however late it is first seen, and one born after it
+  // never is. A game not seen yet keeps the claim open; any other unavailable answer retires it.
+  enum class private_claim_t { retain, keep_looking, retire };
+  private_claim_t private_claim(const observation_t &in_session, std::uint64_t request_ticks, std::uint64_t birth_upper_ticks);
+
+  // What private status says about the requested game. Until the window ends, a game not seen yet
+  // is awaited. After it, or with no clock to tell, the game is unverified: it may have opened on
+  // the desktop. The claim itself stays open, so a later look may still retain an early-born game.
+  enum class private_game_t { managed, waiting, unverified };
+  private_game_t private_game_state(bool retained, bool claim_retired, const observation_t &latest,
+                                    std::optional<std::uint64_t> now_ticks, std::uint64_t birth_upper_ticks);
 
   /**
    * Explicit, per-call fixture dependencies. Production never installs a global override.

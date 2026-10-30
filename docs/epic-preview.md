@@ -68,8 +68,8 @@ permission; Polaris will not guess a replacement or close an uninspected process
 
 This path requires an explicit `headless_stream` selection and the actual **labwc** private
 runtime. It never falls back to sending the request to the desktop. Existing entries and host
-defaults are not migrated. The corresponding Launch as caption and Private session controls
-still need their frontend integration and qualification.
+defaults are not migrated. Mission Control shows the private session's state without consent
+actions; that view still needs its integrated runtime qualification.
 
 While Epic is running on the host desktop, scan the signed-in Polaris Library or select the
 official Epic provider. Polaris retains proof of that exact original launcher executable in
@@ -113,7 +113,9 @@ only if that process was **born within the first 30 seconds** after the request 
 A slower launch remains unowned. The observation time is not a deadline, so leaving Mission
 Control closed does not by itself prevent game-first End. A failed or retired grant never
 switches to a replacement. Another title never becomes this requested game's individual close
-target. Private status is session-managed and offers no manual adopt/release action.
+target. Private status is session-managed and offers no manual adopt/release action. Until the
+30 seconds pass, a game not seen yet reads as waiting; after them it reads as unverified, since
+it may have opened on the desktop, while a game born inside the window can still be retained.
 
 Disconnect and Resume preserve the private session. **End closes the whole owned private
 session**, including its newly started Epic launcher and any additional games opened inside it;

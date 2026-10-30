@@ -2080,6 +2080,21 @@ namespace platf::epic {
     return detail::engine_t::adopt_in_session(title, session, not_before_ticks, observation, error);
   }
 
+  private_claim_t private_claim(const observation_t &in_session, std::uint64_t request_ticks, std::uint64_t birth_upper_ticks) {
+    if (!in_session.available) {
+      return in_session.reason == "game_not_observed" ? private_claim_t::keep_looking : private_claim_t::retire;
+    }
+    return in_session.start_ticks < request_ticks || in_session.start_ticks > birth_upper_ticks ? private_claim_t::retire : private_claim_t::retain;
+  }
+
+  private_game_t private_game_state(bool retained, bool claim_retired, const observation_t &latest,
+                                    std::optional<std::uint64_t> now_ticks, std::uint64_t birth_upper_ticks) {
+    if (retained && latest.available) {
+      return private_game_t::managed;
+    }
+    const bool awaited = !claim_retired && !latest.available && latest.reason == "game_not_observed";
+    return awaited && now_ticks && *now_ticks <= birth_upper_ticks ? private_game_t::waiting : private_game_t::unverified;
+  }
 
   namespace testing {
     observation_t observe(const title_t &title, std::shared_ptr<backend_t> backend) {

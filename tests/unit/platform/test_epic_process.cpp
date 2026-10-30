@@ -1820,6 +1820,54 @@ TEST_F(EpicProcess, PrivateAdmissionRequiresEveryRoleFactAgainAtTheCensusEnd) {
   }
 }
 
+TEST_F(EpicProcess, PrivateStatusIsUnverifiedAfterTheLaunchWindowYetAnEarlyBornGameIsStillRetained) {
+  constexpr std::uint64_t request = 300, upper = 3300, after = 9000;
+  const auto lease = host->private_tree();
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+  ASSERT_TRUE(session) << error;
+  // The URI reached a desktop launcher: only the desktop copy (41 and its server 42) exists.
+  auto seen = ep::observe_in_session(host->title(), *session, request);
+  ASSERT_EQ(seen.reason, "game_not_observed");
+  EXPECT_EQ(ep::private_claim(seen, request, upper), ep::private_claim_t::keep_looking);
+  EXPECT_EQ(ep::private_game_state(false, false, seen, 1000, upper), ep::private_game_t::waiting);
+  EXPECT_EQ(ep::private_game_state(false, false, seen, upper, upper), ep::private_game_t::waiting);
+  // After the window the desktop-only copy, however long it persists, reads as unverified, and
+  // with no clock to tell the window either.
+  EXPECT_EQ(ep::private_game_state(false, false, seen, upper + 1, upper), ep::private_game_t::unverified);
+  EXPECT_EQ(ep::private_game_state(false, false, seen, after, upper), ep::private_game_t::unverified);
+  EXPECT_EQ(ep::private_game_state(false, false, seen, std::nullopt, upper), ep::private_game_t::unverified);
+  seen = ep::observe_in_session(host->title(), *session, request);
+  EXPECT_EQ(ep::private_claim(seen, request, upper), ep::private_claim_t::keep_looking) << "the claim is not expired";
+  EXPECT_TRUE(host->opened.empty());
+
+  // An exact game born inside the window, first seen at a later poll or End, is still retained.
+  host->private_game(81, 400);
+  host->private_server(390);
+  seen = ep::observe_in_session(host->title(), *session, request);
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(seen.start_ticks, 400U);
+  ASSERT_EQ(ep::private_claim(seen, request, upper), ep::private_claim_t::retain);
+  host->fd_pid = 81;
+  const auto grant = ep::adopt_in_session(host->title(), *session, request, seen, error);
+  ASSERT_TRUE(grant) << error;
+  EXPECT_EQ(ep::private_game_state(true, false, ep::inspect(*grant), after, upper), ep::private_game_t::managed);
+  EXPECT_TRUE(host->signals.empty());
+
+  // One born after the window, or one that is ambiguous, retires the claim for good.
+  host->files["/proc/81/stat"] = stat_line(81, upper + 1, 'S', 101);
+  seen = ep::observe_in_session(host->title(), *session, request);
+  ASSERT_TRUE(seen.available) << seen.reason;
+  EXPECT_EQ(ep::private_claim(seen, request, upper), ep::private_claim_t::retire);
+  EXPECT_EQ(ep::private_game_state(false, true, seen, 1000, upper), ep::private_game_t::unverified);
+  host->files["/proc/81/stat"] = stat_line(81, 400, 'S', 101);
+  host->private_game(83, 401);
+  seen = ep::observe_in_session(host->title(), *session, request);
+  EXPECT_EQ(seen.reason, "ambiguous_game_process");
+  EXPECT_EQ(ep::private_claim(seen, request, upper), ep::private_claim_t::retire);
+  EXPECT_EQ(ep::private_game_state(false, false, seen, 1000, upper), ep::private_game_t::unverified);
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks) {
   auto pattern = (fs::temp_directory_path() / "polaris-epic-reader-XXXXXX").string();
   const auto made = mkdtemp(pattern.data());
