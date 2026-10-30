@@ -565,7 +565,10 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 5000);
+  // The whole function: a private Epic End's game-first close precedes the Steam/cage stop.
+  const auto end = source.find("\n  bool proc_t::reload_configuration_from_file(", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto steam = body.find("terminate_session_owned_steam_before_cage_stop(");
   const auto gen = body.find("terminate_isolated_session_generation(");
