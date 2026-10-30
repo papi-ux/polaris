@@ -57,6 +57,7 @@
         <template v-if="stageMode === 'live' || stageMode === 'idle'" #reason>
           <!-- Only a blocked preview needs a reason; the stage note already says it starts on request. -->
           <p v-if="stageMode === 'live' && !showPreview && spacesPreviewBlocked" id="dashboard-preview-blocked-reason" class="mc-stage-reason" data-preview-hidden-reason>{{ $t('dashboard_spaces.no_preview') }}</p>
+          <p v-if="stageSteamNote" class="mc-stage-reason" data-steam-launch-note>{{ stageSteamNote }}</p>
           <p v-if="stageMode === 'idle' && featuredApp && !currentAppAvailable" id="mission-stage-launch-reason" class="mc-stage-reason">Waiting for current app status.</p>
           <p v-if="stageMode === 'idle' && featuredApp && novaLaunchWaiting" id="mission-stage-nova-reason" class="mc-stage-reason" data-nova-launch-reason>{{ t('mission_control.nova_launch_waiting') }}</p>
         </template>
@@ -2019,6 +2020,9 @@ const stageView = computed(() => {
     logoSrc: appArtworkSrc(featured?.app, 'logo'),
   }
 })
+
+// Steam may stop at its own launch dialog for a title with several launch options.
+const stageSteamNote = computed(() => (stageMode.value === 'live' ? currentApp.value : featuredApp.value?.app)?.['steam-launch-note'] || '')
 
 // ── Diagnostics disclosure ──
 const diagnosticsOpen = ref(false)

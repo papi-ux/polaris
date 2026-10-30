@@ -6751,6 +6751,50 @@ TEST(ProcessMigrationTests, ParseDefaultsSteamLibraryLaunchModeToDirect) {
   std::filesystem::remove(file_path);
 }
 
+// Hades has three launch options, and Steam asks which one to start. No command is known to skip that
+// without a setting of the player's changing, so the launch stays Steam's own and only says so.
+TEST(ProcessMigrationTests, SteamTitleWithSeveralLaunchOptionsKeepsItsLaunchCommand) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
+  const auto file_path = test_paths::root() / "steam_title_several_launch_options.json";
+  const nlohmann::json apps = {
+    {"version", 8},
+    {"apps", {
+      {
+        {"name", "Hades"},
+        {"uuid", "steam-title-several-launch-options"},
+        {"cmd", ""},
+        {"detached", {"setsid steam steam://rungameid/1145360"}},
+        {"source", "steam"},
+        {"steam-appid", "1145360"}
+      }
+    }}
+  };
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps.dump(2)), 0);
+
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+  const auto &parsed_apps = parsed_proc->get_apps();
+  const auto hades = std::find_if(parsed_apps.begin(), parsed_apps.end(), [](const auto &app) {
+    return app.name == "Hades";
+  });
+  ASSERT_NE(hades, parsed_apps.end());
+  EXPECT_EQ(hades->steam_launch_mode, "direct");
+  ASSERT_EQ(hades->detached.size(), 1);
+  EXPECT_EQ(hades->detached.front(), "setsid steam steam://rungameid/1145360");
+  // Launching touches no Steam setting: not localconfig.vdf, not a launch option, not the dialog's choice.
+  for (const auto &command : hades->detached) {
+    EXPECT_EQ(command.find("localconfig"), std::string::npos);
+    EXPECT_EQ(command.find("/dialog"), std::string::npos);
+    EXPECT_EQ(command.find("/option"), std::string::npos);
+  }
+
+  std::filesystem::remove(file_path);
+}
+
 TEST(ProcessMigrationTests, ParseHonorsExplicitSteamLibraryBigPictureLaunchMode) {
 #ifdef __linux__
   linux_cage_compositor_guard_t guard;

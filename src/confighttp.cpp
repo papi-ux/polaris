@@ -2373,8 +2373,23 @@ namespace confighttp {
       nlohmann::json file_tree = nlohmann::json::parse(content);
       hydrate_lutris_app_images(file_tree);
       if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
+        // Read once for the whole library, because the file holds every app Steam knows.
+        std::set<std::string> steam_appids;
+        for (const auto &app : file_tree["apps"]) {
+          if (!app.is_object()) continue;
+          if (const auto appid = app.find("steam-appid"); appid != app.end() && appid->is_string()) steam_appids.insert(appid->get<std::string>());
+        }
+        const auto steam_launch_options = game_library::steam_launch_option_counts(steam_appids);
         for (auto &app : file_tree["apps"]) {
           if (!app.is_object()) continue;
+          // Response only, as the editor's next save drops it: Steam may stop at its launch dialog.
+          if (const auto appid = app.find("steam-appid"); appid != app.end() && appid->is_string()) {
+            if (const auto options = steam_launch_options.find(appid->get<std::string>()); options != steam_launch_options.end()) {
+              if (auto note = game_library::steam_launch_choice_note(options->second); !note.empty()) {
+                app["steam-launch-note"] = std::move(note);
+              }
+            }
+          }
           // Response-only hydration describes what parse/launch will read,
           // and gives older editors the basis for their next checkbox edit.
           const auto launch_as = proc::normalize_launch_as(app);
@@ -2496,8 +2511,11 @@ namespace confighttp {
     try {
       // Read the input JSON from the request body.
       nlohmann::json inputTree = nlohmann::json::parse(ss.str());
-      // Response-only #204 readiness the editor may send back; it is never stored.
-      if (inputTree.is_object()) inputTree.erase("leave-game-mode-before-launch-readiness");
+      // Response-only #204 readiness and Steam's launch note the editor may send back; neither is stored.
+      if (inputTree.is_object()) {
+        inputTree.erase("leave-game-mode-before-launch-readiness");
+        inputTree.erase("steam-launch-note");
+      }
       std::string validation_error;
       if (!validation::validate_app_payload(inputTree, validation_error)) {
         bad_request(response, request, validation_error);

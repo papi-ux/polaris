@@ -578,6 +578,33 @@ describe('Mission Control live session card', () => {
   })
 })
 
+describe('Mission Control Steam launch note', () => {
+  const note = 'Steam may ask which version of this game to start, because it has 3 launch options. If it does, choose one in the stream.'
+  const hades = { uuid: 'hades', name: 'Hades', source: 'steam', 'last-launched': 2, 'steam-launch-note': note }
+  const control = { uuid: 'control', name: 'Control', source: 'steam', 'last-launched': 1 }
+
+  it('says so on the idle stage for the featured title, and only for that title', async () => {
+    appPayload = { apps: [hades, control], current_app: '' }
+    await render(false)
+    expect(wrapper.get('[data-steam-launch-note]').text()).toBe(note)
+    await wrapper.get('[data-dashboard-feature-app="control"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-steam-launch-note]').exists()).toBe(false)
+  })
+
+  it('says so on the live stage, where a stream stopped at the dialog is being watched', async () => {
+    appPayload = { apps: [hades, control], current_app: 'hades' }
+    await render(true)
+    expect(wrapper.get('[data-steam-launch-note]').text()).toBe(note)
+  })
+
+  it('says nothing for a title with one launch option', async () => {
+    appPayload = { apps: [control], current_app: 'control' }
+    await render(true)
+    expect(wrapper.find('[data-steam-launch-note]').exists()).toBe(false)
+  })
+})
+
 describe('Mission Control Disconnect', () => {
   const posts = () => fetch.mock.calls.filter(([, options]) => options?.method === 'POST')
   afterEach(() => { document.body.innerHTML = '' })

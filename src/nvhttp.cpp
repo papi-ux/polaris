@@ -3596,7 +3596,7 @@ namespace nvhttp {
       return contract;
     }
 
-    nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {
+    nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app, const std::map<std::string, int> &launch_options) {
       nlohmann::json contract;
       const bool is_steam = !app.steam_appid.empty() || boost::iequals(app.source, "steam");
       contract[v1::steam_launch::available] = is_steam;
@@ -3616,9 +3616,16 @@ namespace nvhttp {
         std::string {proc::STEAM_LAUNCH_MODE_DIRECT},
         std::string {proc::STEAM_LAUNCH_MODE_BIG_PICTURE}
       });
-      contract[v1::steam_launch::mode_reason] = mode == proc::STEAM_LAUNCH_MODE_BIG_PICTURE ?
+      std::string mode_reason = mode == proc::STEAM_LAUNCH_MODE_BIG_PICTURE ?
         "Steam Big Picture compatibility mode may also receive controller input." :
         "Direct launch avoids opening Steam Big Picture.";
+      // Said here because no launch command is known to skip Steam's dialog without a setting of the player's changing.
+      if (const auto options = launch_options.find(app.steam_appid); options != launch_options.end()) {
+        if (const auto note = game_library::steam_launch_choice_note(options->second); !note.empty()) {
+          mode_reason += " " + note;
+        }
+      }
+      contract[v1::steam_launch::mode_reason] = std::move(mode_reason);
       return contract;
     }
 
@@ -10214,6 +10221,13 @@ namespace nvhttp {
       const bool desktop_offers_its_own_screen =
         library_desktop_offers_own_screen(apps, settings_metadata::host_virtual_display_available());
 
+      // Read once for the whole library, because the file holds every app Steam knows.
+      std::set<std::string> steam_appids;
+      for (const auto &app : apps) {
+        if (!app.steam_appid.empty()) steam_appids.insert(app.steam_appid);
+      }
+      const auto steam_launch_options = game_library::steam_launch_option_counts(steam_appids);
+
       int idx = 0;
       for (auto &app : apps) {
         if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;
@@ -10269,7 +10283,7 @@ namespace nvhttp {
           }
         }
         game[v1::game::launch_mode] = launch_mode_contract_for_app(app);
-        game[v1::game::steam_launch] = steam_launch_contract_for_app(app);
+        game[v1::game::steam_launch] = steam_launch_contract_for_app(app, steam_launch_options);
         bool steam_lifetime_game_mode = false;
 #ifdef __linux__
         steam_lifetime_game_mode = platf::game_mode_host::session_live();
