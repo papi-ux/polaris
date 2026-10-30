@@ -1720,6 +1720,38 @@ TEST_F(EpicProcess, KnownOwnerAppImageProcessDoesNotProveTheMountedLauncherSourc
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, TheRetainedProofSaysWhetherItIsAnAppImageThatMountsItself) {
+  const auto appimage = host->fuse_launcher();
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  EXPECT_TRUE(proof->appimage());
+  // Its runtime is read up to the file's size, and only a runtime naming the flag qualifies.
+  host->identities[appimage].size = 11;
+  EXPECT_FALSE(ep::appimage_mounts_itself(*proof));
+  auto with_flag = std::string("\177ELF\0\0\0\0AI\002", 11) + "usage: --appimage-mount\n";
+  host->headers[appimage] = with_flag;
+  EXPECT_FALSE(ep::appimage_mounts_itself(*proof)) << "the retained size still bounds the read";
+  const auto retained = [&] {
+    host = std::make_shared<fixture_t>();
+    const auto path = host->fuse_launcher();
+    host->identities[path].size = with_flag.size();
+    host->headers[path] = with_flag;
+    host->identities["/proc/44/exe"] = host->identities[path];
+    host->identities["/proc/44/fd/3"] = host->identities[path];
+    return ep::testing::prove_launcher(error, host);
+  }();
+  ASSERT_TRUE(retained) << error;
+  EXPECT_TRUE(ep::appimage_mounts_itself(*retained));
+  // A plain ELF launcher is not an AppImage, whatever its bytes say.
+  host = std::make_shared<fixture_t>();
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto native = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(native) << error;
+  EXPECT_FALSE(native->appimage());
+  host->headers["/usr/bin/EpicGamesLauncher"] += "--appimage-mount";
+  EXPECT_FALSE(ep::appimage_mounts_itself(*native));
+}
+
 TEST_F(EpicProcess, FuseConnectionAndOpenImageIdentifyTheOriginalAppImage) {
   const auto appimage = host->fuse_launcher();
   const auto found = ep::testing::desktop_launcher_executable(error, host);

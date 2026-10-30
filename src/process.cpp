@@ -9001,7 +9001,24 @@ namespace proc {
       // without changing Polaris's process-wide directory or creating an on-disk wrapper.
       return "/bin/sh -c " + quote("cd -- " + quote(directory.string()) + " && exec " + command);
     }
+
+    /**
+     * A private Epic session's startup client. An AppImage's runtime cannot mount inside strict
+     * gamepad isolation, so that one case gets the stage. Every other is the plain kiosk command.
+     */
+    std::string epic_private_startup_command(const std::filesystem::path &launcher, const epic_library::installation_t &title,
+      const std::string &game_cmd, bool appimage_under_isolation, const std::function<std::string(const std::string &)> &isolate) {
+      return appimage_under_isolation ? epic_library::appimage_stage_command(launcher, title.install_dir, title.identity, isolate) :
+                                        isolate(epic_private_kiosk_command(title.install_dir, game_cmd));
+    }
   }  // namespace
+
+  #ifdef POLARIS_TESTS
+  std::string epic_private_startup_command_for_tests(const std::filesystem::path &launcher, const epic_library::installation_t &title,
+    const std::string &game_cmd, bool appimage_under_isolation, const std::function<std::string(const std::string &)> &isolate) {
+    return epic_private_startup_command(launcher, title, game_cmd, appimage_under_isolation, isolate);
+  }
+  #endif
 #endif
 
   int proc_t::execute_impl(
@@ -11329,6 +11346,11 @@ namespace proc {
               current->data_root != _epic_title->data_root || current->platform != _epic_title->platform)
             return launch_failure::refuse(503, "epic_installation_changed", "This Epic installation changed before its private request.", "Finish the update in Epic and scan the library again; no private request was sent.");
           if (const auto refusal = admit_private_epic(*_epic_title, _epic_launcher_proof ? &*_epic_launcher_proof : nullptr)) return refusal;
+          prepare_headless_gamepad_isolation();
+          const bool appimage_under_isolation = gamepad_isolation_plan.strict_applied() && _epic_launcher_proof->appimage();
+          if (appimage_under_isolation && !platf::epic::appimage_mounts_itself(*_epic_launcher_proof))
+            return launch_failure::refuse(503, "epic_appimage_mount_unavailable", "This Epic AppImage can't be mounted ahead of Private Stream's controller isolation.",
+              "Update Epic on the host desktop and scan the library again, set headless_gamepad_isolation to disabled, or use Mirror Desktop. No private request was sent.");
           const auto window = epic_request_birth_window();
           if (!window)
             return launch_failure::refuse(503, "epic_request_clock_unavailable", "A safe process-clock lower bound could not be recorded.", "Try again after checking the host's process clock; no Epic request was sent.");
@@ -11340,7 +11362,7 @@ namespace proc {
           // Never repeat a URI after a partial runtime/encoder failure. Empty probe
           // runtimes above carry no Epic request; the real startup is attempted once.
           started = start_cage_session(
-            command_with_gamepad_isolation(epic_private_kiosk_command(_epic_title->install_dir, game_cmd)),
+            epic_private_startup_command(_epic_launcher_proof->path(), *_epic_title, game_cmd, appimage_under_isolation, command_with_gamepad_isolation),
             force_windowed_cage_for_gpu_native, strict_session_encoder);
           if (started) {
             std::string reason;

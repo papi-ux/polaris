@@ -73,6 +73,8 @@ namespace platf::epic {
   class launcher_proof_t {
   public:
     std::filesystem::path path() const;
+    // The original is a type-2 AppImage, whose runtime FUSE-mounts its own payload.
+    bool appimage() const;
 
   private:
     struct state_t;
@@ -93,6 +95,9 @@ namespace platf::epic {
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
   // Revalidates the retained original file without requiring a launcher or AppImage mount.
   bool verify_launcher(const launcher_proof_t &, std::string &reason);
+  // Whether a retained AppImage's runtime knows --appimage-mount. One that does not would treat the
+  // flag as the launcher's own argument and start it outside any sandbox, without the request.
+  bool appimage_mounts_itself(const launcher_proof_t &);
 
   // A sampled admission check, never dispatch authority: true means the requested game
   // and its exact prefix server are absent, false means busy, nullopt means unknown.

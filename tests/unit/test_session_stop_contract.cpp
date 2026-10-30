@@ -609,6 +609,42 @@ TEST(EpicPrivateSessionContractTests, EveryTeardownSweepOfAPrivateEpicSessionCar
   EXPECT_EQ(std::string::npos, source.find("classify(read_process_facts(reader), request.supervisor, token, instances, getuid());"));
 }
 
+#ifdef __linux__
+TEST(EpicPrivateSessionContractTests, OnlyAnAppImageUnderStrictIsolationGetsTheMountStage) {
+  const epic_library::installation_t title {{"sandbox", "catalog", "artifact"}, "install1", "Alan Wake 2", "bin/Game.exe", "1", "/games/Alan Wake's 2", "/fixture/epic", "Windows"};
+  const std::string game_cmd = "'/fixture/Epic.AppImage' 'com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true'";
+  const auto isolate = [](const std::string &inner) { return "ISOLATE(" + inner + ")"; };
+  // Every other case keeps today's bytes: an ELF launcher under isolation, or either with no strict plan.
+  const auto quote = [](const std::string &text) {
+    std::string quoted = "'";
+    for (const char c : text) {
+      quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    }
+    return quoted + "'";
+  };
+  const std::string today = "ISOLATE(/bin/sh -c " + quote("cd -- " + quote(title.install_dir.string()) + " && exec " + game_cmd) + ")";
+  EXPECT_EQ(proc::epic_private_startup_command_for_tests("/fixture/Epic.AppImage", title, game_cmd, false, isolate), today);
+  const auto stage = proc::epic_private_startup_command_for_tests("/fixture/Epic.AppImage", title, game_cmd, true, isolate);
+  EXPECT_NE(stage.find("exec '/fixture/Epic.AppImage' --appimage-mount)"), std::string::npos);
+  EXPECT_NE(stage.find("ISOLATE(cd -- '/games/Alan Wake'\\''s 2' && exec \"$APPDIR/AppRun\" '"), std::string::npos);
+
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto site = source.find("const bool appimage_under_isolation = gamepad_isolation_plan.strict_applied() && _epic_launcher_proof->appimage();");
+  ASSERT_NE(site, std::string::npos);
+  // Decided after admission and before the request's window opens, so a refusal starts nothing.
+  EXPECT_LT(source.rfind("admit_private_epic(*_epic_title", site), site);
+  const auto refusal = source.find("\"epic_appimage_mount_unavailable\"", site);
+  const auto window = source.find("epic_request_birth_window();", site);
+  const auto startup = source.find("epic_private_startup_command(_epic_launcher_proof->path(), *_epic_title, game_cmd, appimage_under_isolation, command_with_gamepad_isolation)", site);
+  ASSERT_NE(refusal, std::string::npos);
+  ASSERT_NE(window, std::string::npos);
+  ASSERT_NE(startup, std::string::npos);
+  EXPECT_LT(refusal, window);
+  EXPECT_LT(window, startup);
+}
+#endif
+
 TEST(EpicPrivateSessionContractTests, AMissingOrUnreadablePrefixIsStatedWithoutClaimingTheGameWasNeverPlayed) {
   // #582 finding 6: title_prefix_unavailable covers a missing prefix and an unreadable one alike.
   const auto source = read_source_for_contract("src/process.cpp");

@@ -120,7 +120,13 @@ until it has run, it has no prefix, and a missing or unreadable prefix is unknow
 its server is absent. Finish the game's normal setup in Epic on the desktop first.
 
 The one requested URI is the new private compositor's startup client, in the game's installation
-directory with this generation's credentials. A request lower bound is recorded before startup;
+directory with this generation's credentials. An AppImage cannot mount itself inside
+`headless_gamepad_isolation`'s sandbox, which has no `/dev/fuse`, so when host controllers are being
+hidden, Polaris mounts the retained AppImage with its own runtime first, outside the sandbox, and
+starts only its `AppRun` inside. The URI reaches only that launcher, never the mount step. If the
+mount fails, nothing is launched and the stream stays black until End, with the reason in the
+startup diagnostics. A retained runtime that doesn't offer the mount refuses before the session
+starts. A request lower bound is recorded before startup;
 it is not an exact URI-dispatch timestamp. The launcher and game must actually stay inside that
 private generation and display. An escaped, unreadable, stale or ambiguous game cannot receive
 individual close authority. Sampled absence, ancestry and timing cannot prove URI causation or
@@ -156,6 +162,10 @@ No source-only result establishes those outcomes.
 - Open Epic on the host desktop and finish any install or update before trying again.
 - Use Mirror Desktop if the explicit labwc private candidate or its ownership checks are unavailable.
   A running desktop launcher cannot be moved into the private compositor.
+- Under `headless_gamepad_isolation`, Epic can't relaunch itself from inside the sandbox, since its
+  AppImage needs FUSE to start again. If Epic updates itself during a Private Stream, the launcher
+  is likely to end and the stream to go black until End; let Epic update on the host desktop first.
+  The update changes the file, so the next launch needs Epic opened once on the desktop again.
 - An AppImage's mounted internal executable is not a supported standalone launch command.
   Polaris must establish the original launcher backing file; otherwise launch is refused.
   For filename-only FUSE mounts, this also needs the kernel’s `fuse_connection` descriptor

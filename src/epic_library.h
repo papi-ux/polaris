@@ -2,6 +2,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -39,4 +40,14 @@ namespace epic_library {
     const std::vector<std::filesystem::path> &homes, std::string *name = nullptr);
   std::string launch_uri(const identity_t &);
   std::string launch_command(const std::filesystem::path &launcher, const identity_t &);
+  /**
+   * The startup client, for bash, that starts a retained AppImage under headless gamepad isolation.
+   * Its runtime cannot mount inside the sandbox, which has no /dev/fuse and ignores setuid
+   * fusermount, so it mounts outside first, in Polaris's own mount namespace, where the launcher's
+   * executable stays statable by its host path. Only AppRun enters the sandbox, wrapped by isolate,
+   * and only it ever gets the request. The mount stays up until End: a launcher can return while
+   * its children still run from it.
+   */
+  std::string appimage_stage_command(const std::filesystem::path &image, const std::filesystem::path &install_dir,
+    const identity_t &, const std::function<std::string(const std::string &)> &isolate);
 }

@@ -2262,6 +2262,16 @@ namespace platf::epic {
         return false;
       }
 
+      static bool appimage_mounts_itself(const launcher_proof_t &proof) {
+        if (!proof.state_ || !proof.state_->image.appimage) {
+          return false;
+        }
+        // The runtime is a small static ELF ahead of the payload, well inside the bound.
+        const auto &state = *proof.state_;
+        const auto head = state.backend->prefix(state.image.path, std::min<std::uint64_t>(state.image.file.size, maps_limit));
+        return head && head->find("appimage-mount") != std::string::npos;
+      }
+
       static std::unique_ptr<adopted_game_t> adopt(const title_t &title, const observation_t &observation, std::string &error, std::shared_ptr<backend_t> backend,
                                                 std::optional<private_context_t> session = std::nullopt, std::uint64_t not_before_ticks = 0) {
         error.clear();
@@ -2303,6 +2313,10 @@ namespace platf::epic {
 
   std::filesystem::path launcher_proof_t::path() const {
     return state_ ? state_->image.path : std::filesystem::path {};
+  }
+
+  bool launcher_proof_t::appimage() const {
+    return state_ && state_->image.appimage;
   }
 
   observation_t observe(const title_t &title) {
@@ -2368,6 +2382,10 @@ namespace platf::epic {
 
   bool verify_launcher(const launcher_proof_t &proof, std::string &reason) {
     return detail::engine_t::verify_launcher(proof, reason);
+  }
+
+  bool appimage_mounts_itself(const launcher_proof_t &proof) {
+    return detail::engine_t::appimage_mounts_itself(proof);
   }
 
   std::optional<bool> title_runtime_absent(const title_t &title, std::string &reason) {
