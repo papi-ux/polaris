@@ -60,7 +60,12 @@ commit rather than a fixed historical commit.
 | every push (Public Hygiene) | hunk headers and patch declarations, offline |
 | changes under `nix/` or `flake.*` | the patch stacks against their pinned sources; `nix flake check`; every package evaluates |
 | the same, then | `nix build` of `gamescope-polaris` and the portal — the only place the `+polhdr` install check can run |
+| the same, against the current stable nixpkgs | the flake check, every package evaluates, and the `gamescope-polaris` and portal builds |
 | manual and weekly | `nix build` of `polaris-stream`, which is what catches a stale `npmDepsHash` |
+
+The stable job exists because the example below has Polaris follow the host's
+nixpkgs, so a NixOS stable host builds against its release rather than
+`flake.lock`.
 
 The x86_64 flake check also evaluates the NixOS host module with the host enabled
 and disabled. It catches collisions with the ordinary nixpkgs module set; it
@@ -71,6 +76,8 @@ profile priority. These assertions do not compile Polaris or run a GPU.
 The session-wrapper check builds the configured wrapper with stock Gamescope,
 so its real ShellCheck runs without compiling Polaris or the patched compositor.
 It never starts the wrapper or a stream.
+The gamescope-patch-phase check applies `gamescope-polaris`'s patches and path
+fixups to its pinned source and confirms each fixup took, without compiling it.
 
 Not covered: the home-manager module, and evaluation for `aarch64-linux`.
 

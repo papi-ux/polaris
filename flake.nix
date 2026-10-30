@@ -94,6 +94,10 @@
         inherit self nixpkgs;
       };
 
+      checks.x86_64-linux.gamescope-patch-phase = import ./nix/tests/gamescope-patch-phase.nix {
+        inherit self nixpkgs;
+      };
+
       hjemModules.polaris = import ./nix/modules/hjem.nix;
       hjemModules.default = self.hjemModules.polaris;
 
