@@ -120,6 +120,24 @@ namespace prelaunch::steamos::bus {
    */
   verdict_t read_snapshot(const sources_t &sources, const budget_t &budget, snapshot_t &out, bool with_closure = false);
 
+  /// What this account's user manager reports for one of its loaded service units.
+  struct user_unit_t {
+    bool loaded = false;  ///< false when GetUnit answered NoSuchUnit
+    std::string id, load_state, fragment_path, control_group;
+    std::vector<std::string> drop_in_paths;
+    bool transient = true;
+  };
+
+  /**
+   * @brief One bounded read of a service unit from this account's own user manager.
+   *
+   * The user bus must belong to the account, and its systemd1 name's owner is bound to the user
+   * manager's process and placement before the read and checked again after it, as read_snapshot
+   * binds it. GetUnit never loads a unit; one not loaded reads as not loaded. Any timeout,
+   * cancellation, changed owner or malformed reply is a refusal.
+   */
+  verdict_t read_user_unit(const sources_t &sources, const budget_t &budget, const std::string &name, user_unit_t &out);
+
   /// Parsed as D-Bus introspection XML: exactly one SessionManagement1 interface declaring
   /// SwitchToDesktopMode and SwitchToGameMode once each, without arguments. Malformed is refused.
   verdict_t introspection_supports_switch(std::string_view xml);

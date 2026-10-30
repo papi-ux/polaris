@@ -85,7 +85,7 @@ namespace platf::epic {
   // unknown. An unassociated AppImage runtime cannot establish absence, even if renamed. A task
   // running the retained launcher's file counts whatever path it runs it by. A protected
   // (unreadable) task counts as not Epic only when its world-readable stat, status and cgroup
-  // facts, and its ancestors', place it as the user manager, a user service or a login
+  // facts, and its ancestors', place it as the user manager, a vendor user service or a login
   // session (D-A (B), see session_role); any other protected task leaves this unknown.
   std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr);
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
@@ -126,6 +126,7 @@ namespace platf::epic {
   std::unique_ptr<adopted_game_t> adopt_in_session(
     const title_t &, const private_session_t &, std::uint64_t not_before_ticks, const observation_t &, std::string &error);
 
+
   /**
    * Explicit, per-call fixture dependencies. Production never installs a global override.
    * A fixture cannot manufacture a production grant: its backend stays attached to the grant.
@@ -151,6 +152,14 @@ namespace platf::epic {
       process_absence_t absence {process_absence_t::unproven};
     };
 
+    /** What this account's systemd user manager reports for one of its loaded units. */
+    struct unit_t {
+      std::string id, load_state, fragment_path, control_group;
+      std::vector<std::string> drop_in_paths;
+      bool transient {true};
+      bool operator==(const unit_t &) const = default;
+    };
+
     struct backend_t {
       virtual ~backend_t() = default;
       virtual std::uint64_t owner_uid() const = 0;
@@ -163,6 +172,9 @@ namespace platf::epic {
       // Missing/raced links are not permission denials. Fixture backends opt in explicitly.
       virtual link_result_t inspect_link(const std::filesystem::path &path) { return {link(path), false}; }
       virtual std::optional<std::filesystem::path> canonical(const std::filesystem::path &) = 0;
+      // A bounded read of the user manager, which assigns the unit; nullopt when it cannot be
+      // asked, does not answer in time or has no such unit loaded. Fixture backends opt in.
+      virtual std::optional<unit_t> user_unit(const std::string &) { return std::nullopt; }
       virtual std::optional<file_t> stat(const std::filesystem::path &) = 0;
       virtual std::optional<std::vector<std::string>> list(const std::filesystem::path &, std::size_t limit) = 0;
       virtual int open_pidfd(std::uint64_t pid) = 0;

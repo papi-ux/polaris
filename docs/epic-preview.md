@@ -85,10 +85,15 @@ requested game or exact title-prefix server is present. Incomplete or unreadable
 Some session and system processes hide their details even from your own account, such as
 `systemd --user`, KWin, the polkit agent, `ssh-agent` and SSH logins. Polaris sets such a process
 aside only when the details any process can read (its name, start time, parent chain and systemd
-unit) show that it belongs to your user manager, a session service that manager started, or a
-login session. Any other hidden process refuses. If that judgement is ever wrong, a hidden desktop
-Epic receives the request and the game opens on the desktop: Private Stream shows the game as
-unverified, End closes only the private session, and nothing outside it is signalled.
+unit) show that it belongs to your user manager, a service that manager started, or a login
+session. For a service, your user manager must also report a unit your system installed: not
+transient, and defined only by root-owned files in `/usr/lib/systemd/user` or `/etc/systemd/user`.
+A unit started with `systemd-run`, or one in your own `~/.config/systemd/user`, refuses whatever
+it is called, as does any manager query that fails or changes during the check. Every one of
+these facts is checked again at the end of the census. Any other hidden process refuses. If that
+judgement is ever wrong, a hidden desktop Epic receives the request and the game opens on the
+desktop: Private Stream shows the game as unverified, End closes only the private session, and
+nothing outside it is signalled.
 
 An unassociated AppImage, even if renamed, can conservatively prevent a complete launcher census;
 quit other AppImages or use Mirror Desktop. A running copy of the retained launcher counts

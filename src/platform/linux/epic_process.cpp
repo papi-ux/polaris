@@ -8,12 +8,17 @@
 
 #include "src/vrr_compositor_identity.h"
 
+#ifdef POLARIS_BUILD_GIO
+  #include "steamos_bus.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
 #include <climits>
 #include <fcntl.h>
+#include <map>
 #include <mutex>
 #include <openssl/sha.h>
 #include <poll.h>
@@ -39,6 +44,8 @@ namespace platf::epic {
     constexpr std::size_t mount_limit = 2 * 1024 * 1024;
     constexpr std::size_t process_limit = 8192;
     constexpr std::size_t snapshot_limit = 64 * 1024 * 1024;
+    // One user-manager read; a stalled manager makes the census unknown after this, never longer.
+    constexpr std::chrono::milliseconds unit_query_timeout {1000};
 
     struct refusal_t: std::runtime_error {
       using std::runtime_error::runtime_error;
@@ -284,6 +291,7 @@ namespace platf::epic {
       }
       // A service unit of the user manager. Application launches (app-*), transient runs (run-*)
       // and D-Bus activations (dbus-*) are not session services, and nothing nests below a unit.
+      // A unit's name can be chosen by whoever starts it, so session_role() also asks the manager.
       const auto &slice = parts[3];
       const auto &unit = parts[4];
       if (parts.size() != 5 || (slice != "session.slice" && slice != "background.slice" && slice != "app.slice") || !ends(unit, ".service")) {
@@ -485,16 +493,51 @@ namespace platf::epic {
       struct role_t {
         std::string name;
         std::vector<lineage_t> chain;
+        std::optional<testing::unit_t> unit;
       };
 
       static bool same_role(const role_t &a, const role_t &b) {
-        return a.name == b.name && a.chain.size() == b.chain.size() &&
+        return a.name == b.name && a.unit == b.unit && a.chain.size() == b.chain.size() &&
                std::equal(a.chain.begin(), a.chain.end(), b.chain.begin(), same_lineage);
       }
 
+      // What the user manager reported for each unit this census asked about, asked once.
+      std::map<std::string, std::optional<testing::unit_t>> units;
       std::vector<role_t> roles;
       std::string placed_group;
 
+      std::optional<testing::unit_t> unit(const std::string &name) {
+        if (!units.count(name)) {
+          units[name] = backend.user_unit(name);
+        }
+        return units.at(name);
+      }
+
+      // A root-owned regular file the system installed in a vendor or administrator unit
+      // directory, never a user's own unit, a transient unit or a file reached through a link.
+      bool vendor_unit_file(const std::string &text) {
+        const fs::path path = text;
+        if (!safe_absolute_path(path) || !(inside(path, "/usr/lib/systemd/user") || inside(path, "/etc/systemd/user"))) {
+          return false;
+        }
+        const auto file = backend.stat(path);
+        const auto directory = backend.stat(path.parent_path());
+        return file && directory && backend.canonical(path) == path && S_ISREG(file->mode) && file->uid == 0 &&
+               S_ISDIR(directory->mode) && directory->uid == 0 && ((file->mode | directory->mode) & (S_IWGRP | S_IWOTH)) == 0;
+      }
+
+      /**
+       * The manager's own account of the unit a cgroup names: loaded, not transient, assigned this
+       * exact cgroup and defined only by vendor files. A unit made by systemd-run, one in the user's
+       * own unit directory and one a user drop-in changes are not, whatever they are called.
+       */
+      bool vendor_service(const std::string &group) {
+        const auto name = fs::path(group).filename().string();
+        const auto facts = unit(name);
+        return facts && facts->id == name && facts->load_state == "loaded" && !facts->transient && facts->control_group == group &&
+               vendor_unit_file(facts->fragment_path) &&
+               std::all_of(facts->drop_in_paths.begin(), facts->drop_in_paths.end(), [this](const auto &file) { return vendor_unit_file(file); });
+      }
 
       /**
        * D-A (B), papi's 2026-10-29 decision on #420. At private admission a protected owner task,
@@ -507,10 +550,13 @@ namespace platf::epic {
        *
        *  1. The user manager itself, M/init.scope: a child of PID 1, or a child of that scope's
        *     owner-credentialed child of PID 1 ("systemd --user" and its "(sd-pam)").
-       *  2. A user service, M/{session,background,app}.slice/<unit>.service, other than an
+       *  2. A vendor user service, M/{session,background,app}.slice/<unit>.service, other than an
        *     application launch (app-*), a transient run (run-*) or a D-Bus activation (dbus-*).
-       *     Every ancestor up to the user manager is owner-credentialed in that same unit, so the
-       *     manager started it rather than an application ("kwin_wayland", "ssh-agent").
+       *     The user manager must report the unit loaded, not transient, in that exact cgroup and
+       *     defined by root-owned files in /usr/lib/systemd/user or /etc/systemd/user alone, so a
+       *     unit from systemd-run or the user's own unit directory refuses whatever its name. Every
+       *     ancestor up to the user manager is owner-credentialed in that same unit, so the manager
+       *     started it rather than an application ("kwin_wayland", "ssh-agent").
        *  3. A login session, U/session-<id>.scope, whose parent is root in that same scope and whose
        *     ancestors are all root up to PID 1 (an SSH login's unprivileged "sshd-session").
        *
@@ -518,8 +564,9 @@ namespace platf::epic {
        * younger than its child, and every edge is read again before the role counts; a vanished,
        * reused, mixed-credential or changed link leaves it unproven. The task's stat and status
        * names must agree and must not look like Epic, an AppImage, Wine, Proton or a Windows game;
-       * that screen can only refuse. Anything else, including any application placement, refuses.
-       * recheck_placed() requires the whole proof again at the census end.
+       * that screen can only refuse. Anything else, including any application placement, an
+       * unanswered or ambiguous manager query, refuses. recheck_placed() requires the whole proof
+       * again at the census end.
        *
        * This is the owner-visible residual papi accepted, not a proof of absence. If it is ever
        * wrong, a hidden desktop launcher receives the request and the game opens on the desktop:
@@ -556,6 +603,7 @@ namespace platf::epic {
             return chain[i].credentials == credentials_t::owner && chain[i].group == unit;
           };
           bool placed = false;
+          std::optional<testing::unit_t> service;
           switch (service_cgroup(group, own_group) ? placement_t::none : placement(group, owner)) {
             case placement_t::user_manager:
               placed = chain.size() == 1 || (chain.size() == 2 && owned_in(1, group));
@@ -565,6 +613,8 @@ namespace platf::epic {
               for (std::size_t i = 1; placed && i + 1 < chain.size(); ++i) {
                 placed = owned_in(i, group);
               }
+              placed = placed && vendor_service(group);
+              service = placed ? unit(fs::path(group).filename().string()) : std::nullopt;
               break;
             case placement_t::login_session:
               placed = chain.size() >= 2 && chain[1].group == group;
@@ -583,7 +633,7 @@ namespace platf::epic {
               return std::nullopt;
             }
           }
-          return role_t {name, std::move(chain)};
+          return role_t {name, std::move(chain), std::move(service)};
         }
         catch (const refusal_t &) {
           return std::nullopt;
@@ -604,14 +654,17 @@ namespace platf::epic {
       }
 
       // A set-aside task must still be the same protected task when the census ends, and every fact
-      // that set it aside must still hold: its names and their veto, and each lineage edge's parent,
-      // cgroup and credentials. One that exits, is reused, becomes readable or changes its role
-      // meanwhile was never checked.
+      // that set it aside must still hold: its names and their veto, each lineage edge's parent,
+      // cgroup and credentials, and what the user manager reports for its unit, asked again. One that
+      // exits, is reused, becomes readable or changes its role meanwhile was never checked.
       void recheck_placed(const char *reason) {
         if (uninspected.empty()) {
           return;
         }
         require(roles.size() == uninspected.size() && cgroup(read("/proc/self/cgroup")) == placed_group, reason);
+        for (const auto &[name, facts] : units) {
+          require(backend.user_unit(name) == facts, reason);
+        }
         for (std::size_t i = 0; i < uninspected.size(); ++i) {
           require(still_uninspected(uninspected[i]), reason);
           const auto again = session_role(uninspected[i], placed_group);
@@ -1439,6 +1492,24 @@ namespace platf::epic {
         return error ? std::nullopt : std::make_optional(result);
       }
 
+      std::optional<testing::unit_t> user_unit(const std::string &name) override {
+#ifdef POLARIS_BUILD_GIO
+        // This account's own user bus, its systemd1 name bound to the user manager's process and
+        // checked again after the read, as the SteamOS session reader does. Never loads a unit.
+        namespace bus = prelaunch::steamos::bus;
+        bus::sources_t sources;
+        sources.uid = static_cast<std::uint32_t>(owner_uid());
+        const bus::budget_t budget {bus::clock_t::now() + unit_query_timeout, {}};
+        bus::user_unit_t unit;
+        if (!bus::read_user_unit(sources, budget, name, unit).ok() || !unit.loaded) {
+          return std::nullopt;
+        }
+        return testing::unit_t {unit.id, unit.load_state, unit.fragment_path, unit.control_group, unit.drop_in_paths, unit.transient};
+#else
+        (void) name;
+        return std::nullopt;
+#endif
+      }
 
       std::optional<file_t> stat(const fs::path &path) override {
         struct stat value {};

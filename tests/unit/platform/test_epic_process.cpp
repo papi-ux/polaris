@@ -61,8 +61,8 @@ namespace {
     return {makedev(0, 52), inode, uid, S_IFREG | 0755, 12345, 123, 456};
   }
 
-  file_t directory(std::uint64_t inode) {
-    return {makedev(0, 52), inode, 1000, S_IFDIR | 0755, 4096, 111, 222};
+  file_t directory(std::uint64_t inode, std::uint64_t uid = 1000) {
+    return {makedev(0, 52), inode, uid, S_IFDIR | 0755, 4096, 111, 222};
   }
 
   struct fixture_lease_t final: vrr_clock::compositor_lease_t {
@@ -76,6 +76,8 @@ namespace {
     std::map<fs::path, fs::path> links, resolved;
     std::map<fs::path, file_t> identities;
     std::map<fs::path, std::vector<std::string>> listings;
+    std::map<std::string, ep::testing::unit_t> units;
+    std::vector<std::string> unit_queries;
     std::set<fs::path> denied_links;
     std::map<fs::path, int> status_errors, directory_errors, absence_probe_errors;
     std::set<fs::path> live_absence_probes;
@@ -264,6 +266,29 @@ namespace {
       }
     }
 
+    /**
+     * A user service the system installed, as the user manager reports it on pc-papi: loaded, not
+     * transient, in this exact cgroup, from a root-owned vendor file with the vendor drop-in.
+     */
+    void vendor_unit(const std::string &group) {
+      const auto name = fs::path(group).filename().string();
+      const fs::path file = fs::path("/usr/lib/systemd/user") / name;
+      const fs::path drop_in = "/usr/lib/systemd/user/service.d/10-timeout-abort.conf";
+      units[name] = {name, "loaded", file.string(), group, {drop_in.string()}, false};
+      identities["/usr/lib/systemd/user"] = directory(20, 0);
+      identities["/usr/lib/systemd/user/service.d"] = directory(21, 0);
+      identities[file] = regular(30000 + units.size(), 0);
+      identities[file].mode = S_IFREG | 0644;
+      identities[drop_in] = regular(29999, 0);
+      identities[drop_in].mode = S_IFREG | 0644;
+    }
+
+    std::optional<ep::testing::unit_t> user_unit(const std::string &name) override {
+      unit_queries.push_back(name);
+      const auto found = units.find(name);
+      return found == units.end() ? std::nullopt : std::make_optional(found->second);
+    }
+
     void drop(std::uint64_t pid) {
       pids.erase(std::remove(pids.begin(), pids.end(), std::to_string(pid)), pids.end());
     }
@@ -287,6 +312,9 @@ namespace {
       add_task(3652675, "sshd", 70119596, 1, "/system.slice/sshd.service", 0);
       add_task(1941259, "sshd-session", 72641468, 3652675, user + "/session-6028.scope", 0);
       add_task(1941372, "sshd-session", 72641483, 1941259, user + "/session-6028.scope", 1000, true);
+      for (const char *unit : {"/session.slice/plasma-kwin_wayland.service", "/background.slice/plasma-polkit-agent.service", "/app.slice/ssh-agent.service"}) {
+        vendor_unit(manager + unit);
+      }
     }
 
     const std::string user = "/user.slice/user-1000.slice";
@@ -976,7 +1004,8 @@ TEST_F(EpicProcess, PrivateAdmissionRefusesAProtectedTaskOutsideTheSessionAndSys
     host->files["/proc/7001/cgroup"] = "0::" + group + "\n";
     refuses(group.c_str());
   }
-  // The same task in a session service's placement is set aside.
+  // The same task in a vendor session service's placement is set aside.
+  host->vendor_unit(host->manager + "/session.slice/helper.service");
   host->files["/proc/7001/cgroup"] = "0::" + host->manager + "/session.slice/helper.service\n";
   EXPECT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
   EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true) << reason;
@@ -1043,6 +1072,7 @@ TEST_F(EpicProcess, PrivateAdmissionNameScreenOnlyRefusesAndEveryRoleIsBookended
   host->pids.clear();
   host->desktop_session_host();
   const auto service = host->manager + "/session.slice/helper.service";
+  host->vendor_unit(service);
   // An Epic-, AppImage-, Wine-, Proton- or game-like name refuses even as a real session service.
   for (const char *name : {"EpicGamesLaunch", "epic games laun", "Tool.AppImage", "wineserver", "wine64-preloade", "AlanWake2.exe", "proton"}) {
     host->add_task(7300, name, 90000300, 1784, service, 1000, true);
@@ -1637,6 +1667,85 @@ TEST_F(EpicProcess, LauncherInventoryKnowsTheRetainedFileByIdentityAndBookendsTh
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, Peer582CustomNamedProtectedApplicationServiceMustRemainUnknown) {
+  host->pids.clear();
+  host->desktop_session_host();
+  // The same structural shape as systemd-run --user --unit=mylauncher --slice=session.slice.
+  // An Epic-related protected task may choose an ordinary comm, or a Windows name may truncate.
+  host->add_task(7500, "HogwartsLegacy.", 90000700, 1784,
+    host->manager + "/session.slice/mylauncher.service", 1000, true);
+  const auto launchers = ep::testing::launcher_instances(error, host);
+  EXPECT_FALSE(launchers.has_value()) << "unexpected launcher census=" << (launchers ? std::to_string(*launchers) : error);
+  const auto absent = ep::testing::title_runtime_absent(host->title(), error, host);
+  EXPECT_FALSE(absent.has_value()) << "unexpected runtime absence=" << (absent ? (*absent ? "true" : "false") : error);
+}
+
+TEST_F(EpicProcess, PrivateAdmissionSetsAsideOnlyAUserServiceTheManagerReportsAsVendorInstalled) {
+  std::string reason;
+  host->pids.clear();
+  host->desktop_session_host();
+  // pc-papi's shape admits: its three user services are vendor units, each asked about once by a
+  // census and once more at its end.
+  ASSERT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+  auto queries = host->unit_queries;
+  std::sort(queries.begin(), queries.end());
+  EXPECT_EQ(queries, (std::vector<std::string> {
+    "plasma-kwin_wayland.service", "plasma-kwin_wayland.service", "plasma-polkit-agent.service",
+    "plasma-polkit-agent.service", "ssh-agent.service", "ssh-agent.service"}));
+  ASSERT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true) << reason;
+
+  const auto group = host->manager + "/session.slice/mylauncher.service";
+  host->add_task(7500, "helper", 90000700, 1784, group, 1000, true);
+  const auto refuses = [&](const char *unit) {
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host)) << unit;
+    EXPECT_EQ(error, "launcher_inventory_incomplete") << unit;
+    EXPECT_FALSE(ep::testing::title_runtime_absent(host->title(), reason, host)) << unit;
+    EXPECT_EQ(reason, "title_runtime_inventory_incomplete") << unit;
+  };
+  // A manager that does not answer, or has no such unit loaded.
+  refuses("unanswered query");
+  const auto set = [&](const std::function<void(ep::testing::unit_t &)> &change) {
+    host->vendor_unit(group);
+    change(host->units["mylauncher.service"]);
+  };
+  // systemd-run --user --unit=mylauncher: a transient unit, whatever it is called.
+  set([](auto &unit) { unit.transient = true; unit.fragment_path = "/run/user/1000/systemd/transient/mylauncher.service"; unit.drop_in_paths.clear(); });
+  refuses("systemd-run transient");
+  set([](auto &unit) { unit.fragment_path = "/run/user/1000/systemd/transient/mylauncher.service"; });
+  refuses("a unit file outside the vendor directories");
+  // A unit in the user's own unit directory, or a vendor unit a user drop-in changes.
+  set([](auto &unit) { unit.fragment_path = "/fixture/owner/.config/systemd/user/mylauncher.service"; });
+  refuses("a ~/.config user unit");
+  set([](auto &unit) { unit.drop_in_paths.push_back("/fixture/owner/.config/systemd/user/mylauncher.service.d/override.conf"); });
+  refuses("a user drop-in");
+  set([](auto &unit) { unit.fragment_path.clear(); });
+  refuses("a drop-in-only unit");
+  // An answer about another unit or cgroup, or a unit that is not loaded.
+  set([](auto &unit) { unit.control_group += "x"; });
+  refuses("another cgroup");
+  set([](auto &unit) { unit.id = "other.service"; });
+  refuses("an alias");
+  set([](auto &unit) { unit.load_state = "not-found"; });
+  refuses("not loaded");
+  // A vendor path is only one when its file and directory are root's and nobody else can write them.
+  host->vendor_unit(group);
+  host->identities["/usr/lib/systemd/user/mylauncher.service"].uid = 1000;
+  refuses("an owner-written vendor path");
+  host->vendor_unit(group);
+  host->identities["/usr/lib/systemd/user/mylauncher.service"].mode |= S_IWOTH;
+  refuses("a world-writable vendor file");
+  host->vendor_unit(group);
+  host->resolved["/usr/lib/systemd/user/mylauncher.service"] = "/fixture/owner/mylauncher.service";
+  refuses("a vendor path that links elsewhere");
+  host->resolved.clear();
+  // The rule is the manager's account, not a name: the same task in a vendor unit is set aside.
+  host->vendor_unit(group);
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 0U) << error;
+  EXPECT_EQ(ep::testing::title_runtime_absent(host->title(), reason, host), true) << reason;
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, Peer582RoleFactsChangedAtFinalBookendMustRemainUnknown) {
   for (const bool runtime_census : {false, true}) {
     host = std::make_shared<fixture_t>();
@@ -1676,10 +1785,15 @@ TEST_F(EpicProcess, PrivateAdmissionRequiresEveryRoleFactAgainAtTheCensusEnd) {
        h.files["/proc/5157/status"] = "Name:\twineserver\nUid:\t1000\t1000\t1000\t1000\n";
      }},
     {"its status name alone", [](fixture_t &h) { h.files["/proc/5157/status"] = "Name:\tssh-agent2\nUid:\t1000\t1000\t1000\t1000\n"; }},
-    {"its cgroup, to another service", [](fixture_t &h) { h.files["/proc/5157/cgroup"] = "0::" + h.manager + "/app.slice/other.service\n"; }},
+    {"its cgroup, to another vendor unit", [&](fixture_t &h) {
+       h.vendor_unit(h.manager + "/app.slice/other.service");
+       h.files["/proc/5157/cgroup"] = "0::" + h.manager + "/app.slice/other.service\n";
+     }},
     {"its parent, reparented to PID 1", [](fixture_t &h) { h.files["/proc/5157/stat"] = stat_line(5157, 2905, 'S', 1, "ssh-agent"); }},
     {"an ancestor's credentials", [](fixture_t &h) { h.files["/proc/1784/status"] = "Name:\tsystemd\nUid:\t1000\t0\t0\t0\n"; }},
     {"a login session's root parent, replaced", [](fixture_t &h) { h.files["/proc/561444/stat"] = stat_line(561444, 26805729, 'S', 1, "sshd-session"); }},
+    {"what the manager reports for its unit", [](fixture_t &h) { h.units["ssh-agent.service"].drop_in_paths.push_back("/fixture/owner/.config/systemd/user/ssh-agent.service.d/x.conf"); }},
+    {"the manager no longer answering", [](fixture_t &h) { h.units.erase("ssh-agent.service"); }},
   };
   for (const auto &change : changes) {
     for (const bool runtime_census : {false, true}) {

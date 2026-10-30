@@ -559,6 +559,37 @@ namespace prelaunch::steamos::bus {
     return verdict_t::pass();
   }
 
+  verdict_t read_user_unit(const sources_t &sources, const budget_t &budget, const std::string &name, user_unit_t &out) {
+    out = {};
+    if (sources.user.address.empty()) {
+      if (auto bus = user_bus_trusted(sources.runtime_root / std::to_string(sources.uid), sources.uid); !bus.ok()) return bus;
+    }
+    std::string error;
+    auto user = client_t::connect(user_endpoint(sources), budget, error);
+    if (!user) return connect_failure(budget, "user bus", error, "prelaunch_session_identity_unavailable");
+    owner_t manager;
+    const auto uid = sources.uid;
+    if (auto bound = bind_owner(*user, k_systemd, uid, sources.proc_root, [uid](std::string_view cgroup) { return cgroup_is_user_manager(cgroup, uid); },
+          budget, "this account's systemd user manager", "prelaunch_session_identity_unavailable", manager);
+        !bound.ok()) {
+      return bound;
+    }
+    std::string path;
+    if (auto found = unit_path(*user, manager.unique, name, budget, path); !found.ok() || path.empty()) return found;
+    props_t unit;
+    if (auto read = get_all(*user, manager.unique, path, k_systemd_unit, budget, "the user unit " + name, unit); !read.ok()) return read;
+    if (!unit.get("Id", out.id) || !unit.get("LoadState", out.load_state) || !unit.get("Transient", out.transient) ||
+        !unit.get("FragmentPath", out.fragment_path) || !unit.get("DropInPaths", out.drop_in_paths)) {
+      return malformed("Unit properties of " + name);
+    }
+    props_t service;
+    if (auto read = get_all(*user, manager.unique, path, k_systemd_service, budget, "the service " + name, service); !read.ok()) return read;
+    if (!service.get("ControlGroup", out.control_group)) return malformed("ControlGroup of " + name);
+    if (auto same = owner_unchanged(*user, k_systemd, manager, sources.proc_root, budget, "user manager"); !same.ok()) return same;
+    out.loaded = true;
+    return verdict_t::pass();
+  }
+
   verdict_t probe_manager(const sources_t &sources, const budget_t &budget) {
     if (sources.user.address.empty()) {
       if (auto bus = user_bus_trusted(sources.runtime_root / std::to_string(sources.uid), sources.uid); !bus.ok()) return bus;
