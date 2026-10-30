@@ -88,12 +88,19 @@ aside only when the details any process can read (its name, start time, parent c
 unit) show that it belongs to your user manager, a service that manager started, or a login
 session. For a service, your user manager must also report a unit your system installed: not
 transient, and defined only by root-owned files in `/usr/lib/systemd/user` or `/etc/systemd/user`.
-A unit started with `systemd-run`, or one in your own `~/.config/systemd/user`, refuses whatever
-it is called, as does any manager query that fails or changes during the check. Every one of
-these facts is checked again at the end of the census. Any other hidden process refuses. If that
-judgement is ever wrong, a hidden desktop Epic receives the request and the game opens on the
-desktop: Private Stream shows the game as unverified, End closes only the private session, and
-nothing outside it is signalled.
+That is a property of the paths the manager reports for the unit's fragment and every drop-in:
+each must be a root-owned regular file there, at a path not reached through a link. A unit started
+with `systemd-run`, one whose reported fragment is in your own `~/.config/systemd/user`, and one
+a drop-in of yours changes refuse whatever they are called, as does any manager query that fails
+or changes during the check. systemd resolves an alias to its unit before reporting these paths,
+so a link of your own to a genuine vendor unit is judged as that vendor unit; the rule does not
+show that only root chose how that program was started. Each query has its own one-second
+deadline. A unit is asked about once when the census places a process in it and again at the
+census's end, so the bound is per unit, not one second for the whole admission, and a stalled
+query refuses. Every one of these facts is checked again at the end of the census. Any other
+hidden process refuses. If that judgement is ever wrong, a hidden desktop Epic receives the
+request and the game opens on the desktop: Private Stream shows the game as unverified, End
+closes only the private session, and nothing outside it is signalled.
 
 An unassociated AppImage, even if renamed, can conservatively prevent a complete launcher census;
 quit other AppImages or use Mirror Desktop. A running copy of the retained launcher counts
@@ -118,16 +125,16 @@ target. Private status is session-managed and offers no manual adopt/release act
 it may have opened on the desktop, while a game born inside the window can still be retained.
 
 Disconnect and Resume preserve the private session. **End closes the whole owned private
-session**, including its newly started Epic launcher and any additional games opened inside it;
-an existing desktop launcher or outside game is not part of that authority. A process carrying
-the session's token counts only inside its supervisor tree or Polaris's own cgroup; one elsewhere
-is left running and logged. When the exact requested game is retained, Polaris asks it to close
-through its pidfd first. Within the existing five-second Epic close budget, a confirmed exit can
-leave up to two seconds of launcher grace before ordinary private-session teardown. This is an
-allowed grace period, not evidence that Epic cloud synchronization completed. If the game cannot
-be retained or graceful exit is not confirmed, the status says so; ending the session does not
-prove exact-game graceful closure. There is no individual game group/prefix/wineserver or
-forced-kill fallback.
+session**, including its newly started Epic launcher and any additional games opened inside it; an
+existing desktop launcher or outside game is not part of that authority. A process carrying the
+session's token counts only inside its supervisor tree or Polaris's own cgroup; one elsewhere is
+left running and logged as `left pid=<pid> running`, once per sweep however the sweep ends. When
+the exact requested game is retained, Polaris asks it to close through its pidfd first. Within the
+existing five-second Epic close budget, a confirmed exit can leave up to two seconds of launcher
+grace before ordinary private-session teardown. This is an allowed grace period, not evidence that
+Epic cloud synchronization completed. If the game cannot be retained or graceful exit is not
+confirmed, the status says so; ending the session does not prove exact-game graceful closure.
+There is no individual game group/prefix/wineserver or forced-kill fallback.
 
 The owner-controlled Alan Wake 2 launch/display/process-tree, sign-in availability,
 Disconnect/Resume, End order, launcher settle and save-integrity checks remain later gates.

@@ -514,7 +514,8 @@ namespace platf::epic {
       }
 
       // A root-owned regular file the system installed in a vendor or administrator unit
-      // directory, never a user's own unit, a transient unit or a file reached through a link.
+      // directory, never a user's own unit or a transient unit, at a reported path not reached
+      // through a link. The manager resolves an alias to its unit before it reports these paths.
       bool vendor_unit_file(const std::string &text) {
         const fs::path path = text;
         if (!safe_absolute_path(path) || !(inside(path, "/usr/lib/systemd/user") || inside(path, "/etc/systemd/user"))) {
