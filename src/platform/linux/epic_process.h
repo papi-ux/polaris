@@ -86,7 +86,9 @@ namespace platf::epic {
   // running the retained launcher's file counts whatever path it runs it by. A protected
   // (unreadable) task counts as not Epic only when its world-readable stat, status and cgroup
   // facts, and its ancestors', place it as the user manager, a vendor user service or a login
-  // session (D-A (B), see session_role); any other protected task leaves this unknown.
+  // session (D-A (B), see session_role); any other protected task leaves this unknown. It answers
+  // only from a listing in which every owner task has been judged, so another user's process or an
+  // unrelated owner task coming and going does not make it unknown. A candidate changing does.
   std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr);
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
   // Revalidates the retained original file without requiring a launcher or AppImage mount.
@@ -95,8 +97,9 @@ namespace platf::epic {
   // A sampled admission check, never dispatch authority: true means the requested game
   // and its exact prefix server are absent, false means busy, nullopt means unknown.
   // Recheck immediately before dispatch; concurrent launches remain possible afterwards.
-  // Protected tasks are set aside by the same role rule as launcher_instances. A missing or
-  // unreadable prefix reports "title_prefix_unavailable"; a first play in Mirror Desktop creates one.
+  // Protected tasks are set aside by the same role rule as launcher_instances, and it answers from
+  // the same kind of listing. A missing or unreadable prefix reports "title_prefix_unavailable"; a
+  // first play in Mirror Desktop creates one.
   std::optional<bool> title_runtime_absent(const title_t &, std::string &reason);
 
   /**

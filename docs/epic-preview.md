@@ -82,6 +82,16 @@ disappears.
 Before the single private launch request, Polaris checks that no owner Epic launcher process,
 requested game or exact title-prefix server is present. Incomplete or unreadable checks refuse.
 
+Other programs starting and exiting while it checks do not refuse. It answers only once it has
+judged every process of yours that a fresh look at `/proc` still shows, by the same rules, so a
+program started during the check is checked too, and one that starts running something else is
+checked again. A process the kernel proves has exited is skipped, and another user's needs no
+judgement. It still refuses when a process that could be Epic or the game changes or exits during
+the check, when a process's absence isn't proven, and when so much keeps starting that sixteen
+looks at `/proc` never find nothing new. A check is only ever a sample: a launch after it is not
+excluded. The same rule applies while a session runs, so a program exiting during a status check
+or End never loses the session's claim on its game.
+
 Some session and system processes hide their details even from your own account, such as
 `systemd --user`, KWin, the polkit agent, `ssh-agent` and SSH logins. Polaris sets such a process
 aside only when the details any process can read (its name, start time, parent chain and systemd
@@ -97,8 +107,9 @@ so a link of your own to a genuine vendor unit is judged as that vendor unit; th
 show that only root chose how that program was started. Each query has its own one-second
 deadline. A unit is asked about once when the census places a process in it and again at the
 census's end, so the bound is per unit, not one second for the whole admission, and a stalled
-query refuses. Every one of these facts is checked again at the end of the census. Any other
-hidden process refuses. If that judgement is ever wrong, a hidden desktop Epic receives the
+query refuses. Every one of these facts is checked again at the end of the census; a process that
+has exited by then needs no role. Any other hidden process refuses. If that judgement is ever
+wrong, a hidden desktop Epic receives the
 request and the game opens on the desktop: Private Stream shows the game as unverified, End
 closes only the private session, and nothing outside it is signalled.
 

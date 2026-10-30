@@ -85,6 +85,10 @@ namespace {
     std::vector<fs::path> closed_absence_probes;
     std::function<void(const fs::path &)> after_read;
     std::function<void(const fs::path &)> after_missing_status;
+    // After any read, link or stat that found what it asked for, and before each /proc listing.
+    std::function<void(const fs::path &)> after_access;
+    std::function<void()> before_listing;
+    int proc_listings {0};
     std::vector<std::string> pids;
     std::vector<fs::path> reads;
     std::vector<std::uint64_t> opened;
@@ -200,7 +204,14 @@ namespace {
       if (after_read) {
         after_read(path);
       }
+      accessed(path);
       return value;
+    }
+
+    void accessed(const fs::path &path) {
+      if (after_access) {
+        after_access(path);
+      }
     }
 
     ep::testing::status_result_t initial_status(const fs::path &process, std::size_t limit) override {
@@ -236,17 +247,27 @@ namespace {
       if (found == headers.end() || found->second.size() < length) {
         return std::nullopt;
       }
-      return found->second.substr(0, length);
+      auto value = found->second.substr(0, length);
+      accessed(path);
+      return value;
     }
 
     std::optional<fs::path> link(const fs::path &path) override {
       const auto found = links.find(path);
-      return found == links.end() ? std::nullopt : std::make_optional(found->second);
+      if (found == links.end()) {
+        return std::nullopt;
+      }
+      auto value = found->second;
+      accessed(path);
+      return value;
     }
 
     ep::testing::link_result_t inspect_link(const fs::path &path) override {
-      return denied_links.count(path) ? ep::testing::link_result_t {std::nullopt, true} :
-        ep::testing::link_result_t {link(path), false};
+      if (denied_links.count(path)) {
+        accessed(path);
+        return {std::nullopt, true};
+      }
+      return {link(path), false};
     }
 
     /**
@@ -296,6 +317,54 @@ namespace {
 
     void drop(std::uint64_t pid) {
       pids.erase(std::remove(pids.begin(), pids.end(), std::to_string(pid)), pids.end());
+    }
+
+    template<class Map>
+    static void erase_under(Map &map, const fs::path &process) {
+      for (auto entry = map.begin(); entry != map.end();) {
+        const auto text = entry->first.string();
+        const auto root = process.string();
+        entry = text == root || text.compare(0, root.size() + 1, root + "/") == 0 ? map.erase(entry) : std::next(entry);
+      }
+    }
+
+    // The task's /proc entry goes: its files and links no longer read, while a listing already taken still names it.
+    void hide(std::uint64_t pid) {
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      erase_under(files, path);
+      erase_under(links, path);
+      erase_under(identities, path);
+      for (auto denied = denied_links.begin(); denied != denied_links.end();) {
+        denied = denied->parent_path() == path ? denied_links.erase(denied) : std::next(denied);
+      }
+    }
+
+    // The task has exited and been reaped.
+    void vanish(std::uint64_t pid) {
+      hide(pid);
+      drop(pid);
+    }
+
+    // The task has exited and its parent has not reaped it: it still has a stat and a status, and nothing else.
+    void zombie(std::uint64_t pid) {
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      const auto text = files[path / "stat"];
+      const auto right = text.rfind(") S ");
+      files[path / "stat"] = text.substr(0, right) + ") Z " + text.substr(right + 4);
+      links.erase(path / "exe");
+      links.erase(path / "cwd");
+      identities.erase(path / "exe");
+      denied_links.erase(path / "exe");
+      files[path / "maps"] = "";
+    }
+
+    // Another user's task, as the census reads it: a stat, a status, and nothing it may open.
+    void add_foreign(std::uint64_t pid, std::uint64_t start, const std::string &name = "nvidia-smi", std::uint64_t foreign_uid = 0) {
+      add_task(pid, name, start, 1, "/system.slice/foreign.service", foreign_uid);
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      identities[path].uid = foreign_uid;
+      links.erase(path / "exe");
+      links.erase(path / "cwd");
     }
 
     /**
@@ -351,7 +420,9 @@ namespace {
 
     std::optional<file_t> stat(const fs::path &path) override {
       if (identities.count(path)) {
-        return identities.at(path);
+        const auto value = identities.at(path);
+        accessed(path);
+        return value;
       }
       const auto text = path.string();
       const auto root = text.find("/root/");
@@ -363,6 +434,10 @@ namespace {
 
     std::optional<std::vector<std::string>> list(const fs::path &path, std::size_t limit) override {
       if (path == "/proc") {
+        ++proc_listings;
+        if (before_listing) {
+          before_listing();
+        }
         return pids.size() <= limit ? std::make_optional(pids) : std::nullopt;
       }
       const auto found = listings.find(path);
@@ -408,6 +483,78 @@ namespace {
       return ep::testing::adopt(host->title(), seen, error, host);
     }
   };
+
+  // Either admission census: whether it admits, what it counted, and why it does not admit.
+  struct census_answer_t {
+    bool admits {false};
+    std::optional<std::size_t> launchers;
+    std::optional<bool> absent;
+    std::string reason;
+  };
+
+  struct census_t {
+    const char *name, *changed, *incomplete;
+    bool runtime;
+
+    census_answer_t operator()(const std::shared_ptr<fixture_t> &host) const {
+      census_answer_t answer;
+      if (runtime) {
+        answer.absent = ep::testing::title_runtime_absent(host->title(), answer.reason, host);
+        answer.admits = answer.absent == true;
+      }
+      else {
+        answer.launchers = ep::testing::launcher_instances(answer.reason, host);
+        answer.admits = answer.launchers == std::optional<std::size_t> {0};
+      }
+      return answer;
+    }
+  };
+
+  const std::vector<census_t> censuses {
+    {"launcher census", "launcher_inventory_changed", "launcher_inventory_incomplete", false},
+    {"runtime census", "title_runtime_inventory_changed", "title_runtime_inventory_incomplete", true},
+  };
+
+  // A host with the game closed: one unrelated owner task, 60, and another user's, 61.
+  std::shared_ptr<fixture_t> quiet_host() {
+    auto host = std::make_shared<fixture_t>();
+    host->pids.clear();
+    host->add_process(60, "/usr/bin/tool", "/fixture/owner", 10060);
+    host->add_foreign(61, 10061);
+    return host;
+  }
+
+  bool under(const fs::path &path, std::uint64_t pid) {
+    const auto text = path.string();
+    const auto root = "/proc/" + std::to_string(pid);
+    return text == root || text.compare(0, root.size() + 1, root + "/") == 0;
+  }
+
+  /**
+   * Runs @p run once per read of a task's /proc entry, doing @p change just after the nth read, for
+   * as many n as the run has reads. Between them that is every seam, whatever the code reads next.
+   */
+  void at_every_read(std::uint64_t pid, const std::function<std::shared_ptr<fixture_t>()> &make,
+                     const std::function<void(fixture_t &)> &change,
+                     const std::function<void(const std::shared_ptr<fixture_t> &, int nth, int total)> &run) {
+    int total = 0;
+    {
+      const auto host = make();
+      host->after_access = [&](const fs::path &path) { total += under(path, pid); };
+      run(host, 0, 0);
+    }
+    ASSERT_GT(total, 5) << "the task was never read";
+    for (int nth = 1; nth <= total; ++nth) {
+      const auto host = make();
+      int seen = 0;
+      host->after_access = [&, raw = host.get()](const fs::path &path) {
+        if (under(path, pid) && ++seen == nth) {
+          change(*raw);
+        }
+      };
+      run(host, nth, total);
+    }
+  }
 }  // namespace
 
 TEST_F(EpicProcess, BtrfsMapsUseMountDeviceWhilePrefixUsesStatDevice) {
@@ -1937,6 +2084,548 @@ TEST_F(EpicProcess, PrivateStatusIsUnverifiedAfterTheLaunchWindowYetAnEarlyBornG
   EXPECT_EQ(ep::private_claim(seen, request, upper), ep::private_claim_t::retire);
   EXPECT_EQ(ep::private_game_state(false, false, seen, 1000, upper), ep::private_game_t::unverified);
   EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, ChurnOfOtherUsersTasksLeavesBothCensusesDefinite) {
+  for (const auto &census : censuses) {
+    SCOPED_TRACE(census.name);
+    // Born while the first listing's tasks are read, and gone before the census ends.
+    host = quiet_host();
+    int reads = 0;
+    host->after_read = [&](const fs::path &path) {
+      if (path == "/proc/60/status" && ++reads == 1) {
+        host->add_foreign(7000, 90000000);
+        host->vanish(61);
+      }
+    };
+    const auto answer = census(host);
+    EXPECT_TRUE(answer.admits) << census.name << ": " << answer.reason;
+    EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, AKernelThreadStartedAtBootIsAnOrdinaryForeignTask) {
+  for (const auto &census : censuses) {
+    host = quiet_host();
+    // kthreadd reports a start time of 0, which is no owner task's identity.
+    host->add_foreign(2, 10002, "kthreadd");
+    host->files["/proc/2/stat"] = stat_line(2, 0, 'S', 0, "kthreadd");
+    const auto answer = census(host);
+    EXPECT_TRUE(answer.admits) << census.name << ": " << answer.reason;
+  }
+}
+
+TEST_F(EpicProcess, AnUnrelatedOwnerTaskBornMidCensusIsJudgedAndAdmits) {
+  for (const auto &census : censuses) {
+    host = quiet_host();
+    int reads = 0;
+    bool judged = false;
+    host->after_read = [&](const fs::path &path) {
+      if (path == "/proc/60/status" && ++reads == 1) {
+        host->add_process(7000, "/usr/bin/docker", "/fixture/owner", 90000000);
+      }
+    };
+    host->after_access = [&](const fs::path &path) { judged = judged || path == "/proc/7000/exe"; };
+    const auto answer = census(host);
+    EXPECT_TRUE(answer.admits) << census.name << ": " << answer.reason;
+    EXPECT_TRUE(judged) << census.name << ": a newborn must be judged, not just tolerated";
+  }
+}
+
+TEST_F(EpicProcess, AnOwnerTaskGoingAtAnyReadLeavesBothCensusesDefinite) {
+  for (const auto &census : censuses) {
+    at_every_read(60, quiet_host, [](fixture_t &h) { h.vanish(60); }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
+      EXPECT_NE(answer.reason, "launcher_census_unresolved") << nth;
+    });
+    // An exited task its parent has not reaped reads the same way, with its stat and status left.
+    at_every_read(60, quiet_host, [](fixture_t &h) { h.zombie(60); }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " zombie at read " << nth << ": " << answer.reason;
+    });
+  }
+}
+
+TEST_F(EpicProcess, AnOwnerTaskWhoseAbsenceTheKernelDoesNotProveStillRefuses) {
+  for (const auto &census : censuses) {
+    const std::vector<std::pair<const char *, std::function<void(fixture_t &)>>> unproven {
+      {"status EIO", [](fixture_t &h) { h.hide(60); h.status_errors["/proc/60"] = EIO; }},
+      {"directory EACCES", [](fixture_t &h) { h.hide(60); h.directory_errors["/proc/60"] = EACCES; }},
+      {"a live or reused PID", [](fixture_t &h) { h.hide(60); h.live_absence_probes.insert("/proc/60"); }},
+      {"a pidfd that cannot tell", [](fixture_t &h) { h.hide(60); h.absence_probe_errors["/proc/60"] = EMFILE; }},
+    };
+    for (const auto &[what, change] : unproven) {
+      at_every_read(60, quiet_host, change, [&, what = what](const auto &h, int nth, int total) {
+        const auto answer = census(h);
+        // After the very last read of the last listing, nothing looks at the task again.
+        if (nth == 0 || nth == total) {
+          EXPECT_TRUE(answer.admits) << census.name << ' ' << what << ": " << answer.reason;
+        }
+        else {
+          EXPECT_FALSE(answer.admits) << census.name << ' ' << what << " at read " << nth;
+        }
+      });
+    }
+  }
+}
+
+TEST_F(EpicProcess, ATaskThatExecsDuringItsOwnJudgementIsJudgedAgain) {
+  for (const auto &census : censuses) {
+    at_every_read(60, quiet_host, [](fixture_t &h) {
+      h.links["/proc/60/exe"] = "/usr/bin/other";
+      h.identities["/usr/bin/other"] = regular(777);
+      h.identities["/proc/60/exe"] = regular(777);
+      h.headers["/usr/bin/other"] = std::string("\177ELF\0\0\0\0\0\0\0", 11);
+    }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
+    });
+  }
+}
+
+TEST_F(EpicProcess, ALauncherBornMidCensusIsCounted) {
+  const auto with_birth = [](const std::function<void(fixture_t &)> &born) {
+    auto h = quiet_host();
+    h->after_read = [raw = h.get(), born, reads = 0](const fs::path &path) mutable {
+      if (path == "/proc/60/status" && ++reads == 1) {
+        born(*raw);
+      }
+    };
+    return h;
+  };
+  // Named as the launcher.
+  host = with_birth([](fixture_t &h) { h.add_process(7000, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 90000000); });
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 1U) << error;
+  // Any other AppImage cannot be told apart from it.
+  host = with_birth([](fixture_t &h) {
+    h.add_process(7000, "/fixture/owner/renamed-runtime", "/fixture/owner", 90000000);
+    h.headers["/fixture/owner/renamed-runtime"] = std::string("\177ELF\0\0\0\0AI\002", 11);
+  });
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  // The retained launcher's file, by a hard link.
+  const fs::path original = "/usr/bin/EpicGamesLauncher";
+  const fs::path alias = "/fixture/owner/launcher-alias";
+  host = quiet_host();
+  host->add_process(7501, original, "/fixture/owner", 90001000);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->drop(7501);
+  int reads = 0;
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/60/status" && ++reads == 1) {
+      host->identities[alias] = host->identities[original];
+      host->headers[alias] = host->headers[original];
+      host->add_process(7000, alias, "/fixture/owner", 90000000);
+    }
+  };
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, &*proof), 1U) << error;
+}
+
+TEST_F(EpicProcess, TheGameOrItsServerBornMidCensusIsBusy) {
+  const auto census = censuses[1];
+  // A task that maps the title image.
+  host = quiet_host();
+  int reads = 0;
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/60/status" && ++reads == 1) {
+      host->add_process(7000, runtime / "files/bin/wine64-preloader", install, 90000000);
+      host->files["/proc/7000/maps"] = host->maps();
+    }
+  };
+  auto answer = census(host);
+  EXPECT_EQ(answer.absent, false) << answer.reason;
+  EXPECT_EQ(answer.reason, "title_runtime_busy");
+  // A Wine server in the title's exact server directory.
+  host = quiet_host();
+  reads = 0;
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/60/status" && ++reads == 1) {
+      host->add_process(7000, runtime / "files/bin/wineserver", "/tmp/.wine-1000/server-34-e2a1113", 90000000);
+    }
+  };
+  answer = census(host);
+  EXPECT_EQ(answer.absent, false) << answer.reason;
+  EXPECT_EQ(answer.reason, "title_runtime_busy");
+}
+
+TEST_F(EpicProcess, ACandidateThatChangesOrVanishesStillRefuses) {
+  // A Wine server of another title is a row that does not make this one busy, so what it does is all
+  // that decides the answer. So is a launcher only for the census that counts it.
+  const auto with_row = [](const census_t &census) {
+    auto h = quiet_host();
+    if (census.runtime) {
+      h->add_process(70, runtime / "files/bin/wineserver", "/tmp/.wine-1000/server-other", 10070);
+    }
+    else {
+      h->add_process(70, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10070);
+    }
+    return h;
+  };
+  for (const auto &census : censuses) {
+    // Each seam leaves it either unknown to be a candidate yet, so skipped as any gone task, or
+    // refused as a change. It is never skipped once known, and never reads as another AppImage.
+    bool refused = false;
+    at_every_read(70, [&] { return with_row(census); }, [](fixture_t &h) { h.vanish(70); }, [&](const auto &h, int nth, int total) {
+      const auto answer = census(h);
+      // After the very last read of the last listing, nothing looks at the task again.
+      if (nth == 0 || nth == total) {
+        return;
+      }
+      if (!answer.admits && answer.reason == census.changed) {
+        refused = true;
+      }
+      else {
+        EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
+        EXPECT_FALSE(refused) << census.name << " at read " << nth << ": skipped after it was known to be a candidate";
+      }
+      EXPECT_NE(answer.reason, "launcher_census_unresolved") << nth;
+    });
+    EXPECT_TRUE(refused) << census.name;
+
+    // Born, judged and gone before the census ends.
+    host = quiet_host();
+    int reads = 0;
+    host->after_read = [&](const fs::path &path) {
+      if (path == "/proc/60/status" && ++reads == 1) {
+        if (census.runtime) {
+          host->add_process(70, runtime / "files/bin/wineserver", "/tmp/.wine-1000/server-other", 90000000);
+        }
+        else {
+          host->add_process(70, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 90000000);
+        }
+      }
+    };
+    host->before_listing = [&, listings = 0]() mutable {
+      if (++listings == 3) {
+        host->vanish(70);
+      }
+    };
+    const auto answer = census(host);
+    EXPECT_FALSE(answer.admits) << census.name;
+    EXPECT_EQ(answer.reason, census.changed) << census.name;
+  }
+
+  // A row that changes, or that the bookend cannot read any more.
+  for (const auto change : std::vector<std::function<void(fixture_t &)>> {
+         [](fixture_t &h) { h.files["/proc/70/stat"] = stat_line(70, 20070); },
+         [](fixture_t &h) { h.links["/proc/70/cwd"] = "/tmp/.wine-1000/server-moved"; },
+         [](fixture_t &h) { h.hide(70); },
+       }) {
+    host = with_row(censuses[1]);
+    host->before_listing = [&, listings = 0]() mutable {
+      if (++listings == 2) {
+        change(*host);
+      }
+    };
+    const auto answer = censuses[1](host);
+    EXPECT_FALSE(answer.absent.has_value());
+    EXPECT_EQ(answer.reason, "title_runtime_inventory_changed");
+  }
+}
+
+TEST_F(EpicProcess, ATaskThatExecsAfterItsJudgementIsJudgedAgain) {
+  // Task 62 is read after 60 in the listing, so 60 has been judged by the time this happens.
+  const auto host_with_exec = [](const fs::path &exe, const std::function<void(fixture_t &)> &extra) {
+    auto h = quiet_host();
+    h->add_process(62, "/usr/bin/later", "/fixture/owner", 10062);
+    h->after_read = [raw = h.get(), exe, extra, done = false](const fs::path &path) mutable {
+      if (path == "/proc/62/status" && !done) {
+        done = true;
+        raw->links["/proc/60/exe"] = exe;
+        raw->identities["/proc/60/exe"] = regular(778);
+        extra(*raw);
+      }
+    };
+    return h;
+  };
+  // Same pid, same start time: the old name list could not see this.
+  host = host_with_exec("/usr/bin/EpicGamesLauncher", [](fixture_t &h) {
+    h.identities["/usr/bin/EpicGamesLauncher"] = regular(778);
+    h.headers["/usr/bin/EpicGamesLauncher"] = std::string("\177ELF\0\0\0\0\0\0\0", 11);
+  });
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 1U) << error;
+  host = host_with_exec(runtime / "files/bin/wine64-preloader", [](fixture_t &h) {
+    h.files["/proc/60/maps"] = h.maps();
+    h.identities[runtime / "files/bin/wine64-preloader"] = regular(778);
+    h.links["/proc/60/cwd"] = install;
+    h.links["/proc/60/map_files/1000-2000"] = image;
+  });
+  const auto answer = censuses[1](host);
+  EXPECT_EQ(answer.absent, false) << answer.reason;
+  EXPECT_EQ(answer.reason, "title_runtime_busy");
+}
+
+TEST_F(EpicProcess, AForeignNewbornThatBecomesTheOwnersIsJudgedAgain) {
+  host = quiet_host();
+  int reads = 0;
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/60/status" && ++reads == 1) {
+      host->add_foreign(7000, 90000000);
+    }
+    // Once judged as root's, it drops to the owner and execs the launcher, as a setuid helper can.
+    if (path == "/proc/7000/status" && host->identities["/proc/7000"].uid == 0) {
+      host->add_process(7000, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 90000000);
+      host->drop(7000);
+      host->pids.push_back("7000");
+    }
+  };
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 1U) << error;
+}
+
+TEST_F(EpicProcess, AnOwnerTaskReusingAForeignTasksPidIsNewAtTheNextListing) {
+  host = quiet_host();
+  int reads = 0;
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/62/status" && ++reads == 1) {
+      host->vanish(61);
+      host->add_process(61, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 90000000);
+    }
+  };
+  host->add_process(62, "/usr/bin/later", "/fixture/owner", 10062);
+  EXPECT_EQ(ep::testing::launcher_instances(error, host), 1U) << error;
+}
+
+TEST_F(EpicProcess, AProtectedTaskGoingLeavesTheCensusDefiniteAndItsUnitIsNotAskedAgain) {
+  const auto desktop = [] {
+    auto h = std::make_shared<fixture_t>();
+    h->pids.clear();
+    h->desktop_session_host();
+    return h;
+  };
+  for (const auto &census : censuses) {
+    // At any read of it, before or after it was placed.
+    at_every_read(5157, desktop, [](fixture_t &h) { h.vanish(5157); }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
+    });
+    at_every_read(5157, desktop, [](fixture_t &h) { h.zombie(5157); }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " zombie at read " << nth << ": " << answer.reason;
+    });
+
+    // Between its placement and the census end, its unit is asked about once, not twice.
+    host = desktop();
+    int self_reads = 0;
+    host->after_read = [&](const fs::path &path) {
+      if (path == "/proc/self/cgroup" && ++self_reads == 2) {
+        host->vanish(5157);
+      }
+    };
+    const auto answer = census(host);
+    EXPECT_TRUE(answer.admits) << census.name << ": " << answer.reason;
+    EXPECT_EQ(std::count(host->unit_queries.begin(), host->unit_queries.end(), "ssh-agent.service"), 1) << census.name;
+    EXPECT_EQ(std::count(host->unit_queries.begin(), host->unit_queries.end(), "plasma-polkit-agent.service"), 2) << census.name;
+
+    // A task whose absence the kernel does not prove is still a refusal, as is one that lives on and changes.
+    host = desktop();
+    self_reads = 0;
+    host->after_read = [&](const fs::path &path) {
+      if (path == "/proc/self/cgroup" && ++self_reads == 2) {
+        host->hide(5157);
+        host->live_absence_probes.insert("/proc/5157");
+      }
+    };
+    EXPECT_FALSE(census(host).admits) << census.name;
+  }
+}
+
+TEST_F(EpicProcess, AProtectedNewbornIsPlacedOrRefuses) {
+  const auto desktop_with_birth = [](const std::function<void(fixture_t &)> &born) {
+    auto h = std::make_shared<fixture_t>();
+    h->pids.clear();
+    h->desktop_session_host();
+    // Born at the final bookend, so only the listing after it can see it.
+    h->after_read = [raw = h.get(), born, self_reads = 0](const fs::path &path) mutable {
+      if (path == "/proc/self/cgroup" && ++self_reads == 2) {
+        born(*raw);
+      }
+    };
+    return h;
+  };
+  for (const auto &census : censuses) {
+    // A new SSH login's unprivileged task places as the login session's.
+    host = desktop_with_birth([](fixture_t &h) {
+      h.add_task(7600, "sshd-session", 90000000, 1941259, h.user + "/session-6028.scope", 1000, true);
+    });
+    auto answer = census(host);
+    EXPECT_TRUE(answer.admits) << census.name << ": " << answer.reason;
+    // Anything else refuses, as it does at the start of a census.
+    host = desktop_with_birth([](fixture_t &h) {
+      h.add_task(7600, "helper", 90000000, 1784, h.manager + "/session.slice/mylauncher.service", 1000, true);
+    });
+    answer = census(host);
+    EXPECT_FALSE(answer.admits) << census.name;
+    EXPECT_EQ(answer.reason, census.incomplete) << census.name;
+  }
+}
+
+TEST_F(EpicProcess, ChurnThatNeverLeavesAQuietListingRefusesAtTheCapWithBoundedReads) {
+  for (const auto &census : censuses) {
+    host = quiet_host();
+    std::uint64_t next = 7000;
+    host->before_listing = [&] { host->add_process(next, "/usr/bin/docker", "/fixture/owner", 90000000 + next); ++next; };
+    const auto answer = census(host);
+    EXPECT_FALSE(answer.admits) << census.name;
+    EXPECT_EQ(answer.reason, census.changed) << census.name;
+    EXPECT_EQ(host->proc_listings, 16) << census.name;
+    EXPECT_LE(host->reads.size(), 2000U) << census.name;
+    EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, BootOwnerAndCgroupNamespaceChangesStillRefuse) {
+  for (const auto &census : censuses) {
+    for (const auto change : std::vector<std::function<void(fixture_t &)>> {
+           [](fixture_t &h) { h.files["/proc/sys/kernel/random/boot_id"] = "add26721-4424-4907-ab80-4f023729a22f\n"; },
+           [](fixture_t &h) { h.uid = 1001; },
+           [](fixture_t &h) { h.links["/proc/self/ns/cgroup"] = "cgroup:[999]"; },
+         }) {
+      host = quiet_host();
+      host->before_listing = [&, listings = 0]() mutable {
+        if (++listings == 2) {
+          change(*host);
+        }
+      };
+      const auto answer = census(host);
+      EXPECT_FALSE(answer.admits) << census.name;
+    }
+  }
+}
+
+namespace {
+  // A session with its game and server up, one unrelated owner task and two protected ones outside.
+  std::shared_ptr<fixture_t> session_host(std::shared_ptr<fixture_lease_t> &lease) {
+    auto h = std::make_shared<fixture_t>();
+    lease = h->private_tree();
+    h->private_game();
+    h->private_server();
+    h->fd_pid = 81;
+    h->add_process(60, "/usr/bin/tool", "/fixture/owner", 10060);
+    h->add_protected_process(43, 50);
+    h->add_protected_process(45, 500, 43);
+    h->add_protected_process(46, 510, 45);
+    return h;
+  }
+}  // namespace
+
+TEST_F(EpicProcess, ATaskVanishingDuringAPrivateObservationKeepsTheClaimAndTheGrant) {
+  constexpr std::uint64_t request = 300, upper = 3300;
+  for (const std::uint64_t task : {60, 46}) {
+    // The claim is not retired, and a later look still retains the game.
+    std::shared_ptr<fixture_lease_t> lease;
+    at_every_read(task, [&] { return session_host(lease); }, [task](fixture_t &h) { h.vanish(task); }, [&](const auto &h, int nth, int) {
+      const auto session = ep::testing::pin_private_session(lease, "private-generation", error, h);
+      ASSERT_TRUE(session) << error;
+      const auto seen = ep::observe_in_session(h->title(), *session, request);
+      ASSERT_TRUE(seen.available) << task << " at read " << nth << ": " << seen.reason;
+      EXPECT_EQ(seen.pid, 81);
+      EXPECT_EQ(ep::private_claim(seen, request, upper), ep::private_claim_t::retain) << nth;
+      EXPECT_TRUE(h->signals.empty());
+    });
+    // A retained grant is not revoked, and End can still close the exact game.
+    at_every_read(task, [&] { return session_host(lease); }, [task](fixture_t &h) { h.zombie(task); }, [&](const auto &h, int nth, int) {
+      const auto session = ep::testing::pin_private_session(lease, "private-generation", error, h);
+      ASSERT_TRUE(session) << error;
+      const auto seen = ep::observe_in_session(h->title(), *session, request);
+      ASSERT_TRUE(seen.available) << task << " zombie at read " << nth << ": " << seen.reason;
+    });
+    const auto grant_host = session_host(lease);
+    const auto session = ep::testing::pin_private_session(lease, "private-generation", error, grant_host);
+    ASSERT_TRUE(session) << error;
+    const auto seen = ep::observe_in_session(grant_host->title(), *session, request);
+    ASSERT_TRUE(seen.available) << seen.reason;
+    auto grant = ep::adopt_in_session(grant_host->title(), *session, request, seen, error);
+    ASSERT_TRUE(grant) << error;
+    int reads = 0;
+    grant_host->after_access = [&](const fs::path &path) {
+      if (under(path, task) && ++reads == 2) {
+        grant_host->vanish(task);
+      }
+    };
+    const auto inspected = ep::inspect(*grant);
+    EXPECT_TRUE(inspected.available) << task << ": " << inspected.reason;
+    EXPECT_EQ(inspected.revision, seen.revision);
+    EXPECT_TRUE(ep::ask_to_close(*grant, 1s).closed);
+    EXPECT_EQ(grant_host->signals, std::vector<int> {77});
+  }
+}
+
+TEST_F(EpicProcess, AnAncestorExitingDuringAPrivateWalkReparentsTheTaskAndIsReadAfresh) {
+  // Task 45 exits, so the kernel makes its child's parent the desktop's subreaper. Wherever that
+  // lands in the walk, 46 is still proved outside rather than retiring the claim.
+  std::shared_ptr<fixture_lease_t> lease;
+  at_every_read(45, [&] { return session_host(lease); }, [](fixture_t &h) {
+    h.vanish(45);
+    h.files["/proc/46/stat"] = stat_line(46, 510, 'S', 43);
+  }, [&](const auto &h, int nth, int) {
+    const auto session = ep::testing::pin_private_session(lease, "private-generation", error, h);
+    ASSERT_TRUE(session) << error;
+    const auto seen = ep::observe_in_session(h->title(), *session, 300);
+    EXPECT_TRUE(seen.available) << "at read " << nth << ": " << seen.reason;
+  });
+  // A member reparents to the supervisor, a subreaper, and is a member still. So one that stays
+  // unproven refuses rather than being read as outside.
+  const auto member = session_host(lease);
+  const auto session = ep::testing::pin_private_session(lease, "private-generation", error, member);
+  ASSERT_TRUE(session) << error;
+  member->add_protected_process(47, 520, 101);
+  member->add_protected_process(48, 530, 47);
+  int reads = 0;
+  member->after_read = [&](const fs::path &path) {
+    if (path == "/proc/48/status" && ++reads == 2) {
+      member->vanish(47);
+      member->files["/proc/48/stat"] = stat_line(48, 530, 'S', 100);
+    }
+  };
+  EXPECT_EQ(ep::observe_in_session(member->title(), *session, 300).reason, "private_process_inventory_incomplete");
+}
+
+TEST_F(EpicProcess, ThePrivateGamesOwnIdentityChangingStillRevokesTheGrant) {
+  std::shared_ptr<fixture_lease_t> lease;
+  const auto changes = std::vector<std::pair<const char *, std::function<void(fixture_t &)>>> {
+    {"its start time, a reused pid", [](fixture_t &h) { h.files["/proc/81/stat"] = stat_line(81, 401, 'S', 101); }},
+    {"its executable", [](fixture_t &h) { h.links["/proc/81/exe"] = runtime / "files/bin/other"; }},
+    {"its mapping of the image", [](fixture_t &h) { h.files["/proc/81/maps"] = h.maps("00:22", 999); }},
+    {"its prefix server", [](fixture_t &h) { h.files["/proc/82/stat"] = stat_line(82, 391, 'S', 101); }},
+    {"the task's parent", [](fixture_t &h) { h.files["/proc/81/stat"] = stat_line(81, 400, 'S', 100); }},
+    {"gone from under the grant", [](fixture_t &h) { h.vanish(81); }},
+  };
+  for (const auto &[what, change] : changes) {
+    host = session_host(lease);
+    const auto session = ep::testing::pin_private_session(lease, "private-generation", error, host);
+    ASSERT_TRUE(session) << error;
+    const auto seen = ep::observe_in_session(host->title(), *session, 300);
+    ASSERT_TRUE(seen.available) << seen.reason;
+    auto grant = ep::adopt_in_session(host->title(), *session, 300, seen, error);
+    ASSERT_TRUE(grant) << error;
+    change(*host);
+    EXPECT_FALSE(ep::inspect(*grant).available) << what;
+    EXPECT_FALSE(ep::inspect(*grant).available) << what;
+    EXPECT_EQ(ep::inspect(*grant).reason, "adoption_revoked") << what;
+    EXPECT_FALSE(ep::ask_to_close(*grant, 1s).signalled) << what;
+    EXPECT_TRUE(host->signals.empty()) << what;
+  }
+}
+
+TEST_F(EpicProcess, AGameBeingReadWhenItVanishesInASessionIsStillNotASkippedRow) {
+  // Only a task not yet known to map the game can vanish unnoticed. Once it is a row, a look that
+  // loses it is not a game that was never there: game_not_observed would keep the claim open.
+  std::shared_ptr<fixture_lease_t> lease;
+  std::set<std::string> reasons;
+  at_every_read(81, [&] { return session_host(lease); }, [](fixture_t &h) { h.vanish(81); }, [&](const auto &h, int nth, int total) {
+    const auto session = ep::testing::pin_private_session(lease, "private-generation", error, h);
+    ASSERT_TRUE(session) << error;
+    const auto seen = ep::observe_in_session(h->title(), *session, 300);
+    // After its very last read nothing looks at the game again until the next observation.
+    if (nth != 0 && nth != total) {
+      EXPECT_FALSE(seen.available) << "at read " << nth;
+      reasons.insert(seen.reason);
+    }
+  });
+  EXPECT_TRUE(reasons.count("game_not_observed"));
+  EXPECT_GT(reasons.size(), 1U);
 }
 
 TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks) {
