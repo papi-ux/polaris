@@ -581,6 +581,19 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   EXPECT_EQ(body.find("portal::release_global_capture("), std::string::npos);
 }
 
+TEST(EpicPrivateSessionContractTests, AMissingOrUnreadablePrefixIsStatedWithoutClaimingTheGameWasNeverPlayed) {
+  // #582 finding 6: title_prefix_unavailable covers a missing prefix and an unreadable one alike.
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto refusal = source.find("\"epic_first_play_in_mirror\"");
+  ASSERT_NE(refusal, std::string::npos);
+  const auto text = source.substr(refusal, source.find(");", refusal) - refusal);
+  EXPECT_NE(text.find("Wine prefix is missing or can't be read"), std::string::npos) << text;
+  EXPECT_NE(text.find("play it once in Mirror Desktop"), std::string::npos) << text;
+  EXPECT_EQ(text.find("hasn't been played"), std::string::npos) << text;
+  EXPECT_EQ(source.find("This game hasn't been played on this host yet"), std::string::npos);
+}
+
 TEST(SessionStopContractTests, UnclassifiedNestedLaunchHasNoNumericGroupKillFallback) {
   const auto source = read_source_for_contract("nix/modules/polaris-gamescope-session.sh");
   ASSERT_FALSE(source.empty());

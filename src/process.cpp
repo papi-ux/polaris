@@ -8803,10 +8803,10 @@ namespace proc {
       const auto absent = platf::epic::title_runtime_absent(epic_process_title(title), reason);
       if (!absent) {
         BOOST_LOG(info) << "Epic Private Stream: game runtime census unknown: "sv << reason;
-        // N3, accepted for now: a game that has never run here has no prefix to check.
+        // N3, accepted for now: a missing or unreadable prefix cannot be checked. A first play makes one.
         if (reason == "title_prefix_unavailable")
-          return launch_failure::refuse(503, "epic_first_play_in_mirror", "This game hasn't been played on this host yet, so Polaris can't check it for Private Stream.",
-            "Play this game once in Mirror Desktop first, then quit it and Epic, and try Private Stream again.");
+          return launch_failure::refuse(503, "epic_first_play_in_mirror", "This game's Wine prefix is missing or can't be read on this host, so Polaris can't check it for Private Stream.",
+            "If you haven't played it on this host yet, play it once in Mirror Desktop to create its prefix, then quit it and Epic, and try Private Stream again.");
         if (reason == "title_runtime_inventory_incomplete")
           return launch_failure::refuse(503, "epic_protected_process_unplaced", "A protected program on the host isn't a recognised session or system process, so Polaris can't confirm this game is closed.",
             "Close this game and any app that hides its process details on the host, then try again, or use Mirror Desktop.");

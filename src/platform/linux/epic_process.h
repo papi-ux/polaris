@@ -95,8 +95,8 @@ namespace platf::epic {
   // A sampled admission check, never dispatch authority: true means the requested game
   // and its exact prefix server are absent, false means busy, nullopt means unknown.
   // Recheck immediately before dispatch; concurrent launches remain possible afterwards.
-  // Protected tasks are set aside by the same role rule as launcher_instances. A title with
-  // no prefix yet reports "title_prefix_unavailable": play it once in Mirror Desktop first.
+  // Protected tasks are set aside by the same role rule as launcher_instances. A missing or
+  // unreadable prefix reports "title_prefix_unavailable"; a first play in Mirror Desktop creates one.
   std::optional<bool> title_runtime_absent(const title_t &, std::string &reason);
 
   /**
