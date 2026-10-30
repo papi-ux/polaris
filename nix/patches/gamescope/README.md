@@ -6,12 +6,22 @@ Polaris HDR capture patch surface for gamescope PipeWire streaming.
 
 | # | File | Purpose | Drop when |
 |---|------|---------|-----------|
+| — | `shaders-path.patch` | nixpkgs packaging: data under `$out`, not `/usr` (`postPatch` fills `@out@`) | Never; re-check its target file on each bump |
+| — | `gamescopereaper.patch` | nixpkgs packaging: absolute `gamescopereaper` path (`postPatch` fills it) | Never; re-check on each bump |
 | **10** | `10-pipewire-offer-10-bit-BT2020-PQ.patch` | Offer SPA 10-bit BT.2020/PQ formats; paint switches on negotiated format | Upstream HDR PW formats land |
 | **11** | `11-pipewire-composite-cursor.patch` | Optional `--pipewire-composite-cursor` | Upstream cursor composite lands |
 | **12** | `12-polaris-stamp-version-polhdrN.patch` | Banner `+polhdr2` capability stamp | Functional patches upstream; version floors suffice |
 | 02 | `02-headless-hdr-colorimetry.patch` | Headless real SDR vs HDR EDID/expose | Proven redundant with 10 on headless |
 | 03 | `03-pipewire-prefer-dmabuf.patch` | Advertise DmaBuf\|MemFd\|MemPtr | Portal path no longer needs multi-type |
 | **06** | `06-prefer-discrete-gpu-2217.patch` | Headless prefers discrete GPU if unpinned | **[#2217](https://github.com/ValveSoftware/gamescope/pull/2217)** merges |
+
+The two nixpkgs packaging patches are vendored from nixpkgs'
+`pkgs/by-name/ga/gamescope` at
+[241313f4](https://github.com/NixOS/nixpkgs/tree/241313f4e8e508cb9b13278c2b0fa25b9ca27163/pkgs/by-name/ga/gamescope),
+the revision `flake.lock` pins, whose recipe already matches master's paths.
+The package does not inherit the host's copies or its `postPatch`: a host that
+follows its own nixpkgs supplies its own gamescope recipe, and NixOS 26.05's
+targets a file master has moved.
 
 ## Superseded (kept in `archive/`)
 
