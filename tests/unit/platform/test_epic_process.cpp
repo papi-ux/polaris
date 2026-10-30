@@ -1262,7 +1262,8 @@ TEST_F(EpicProcess, PrivateSelectionRequiresAMonotonicKnownAncestryAndFreshPrefi
   ASSERT_TRUE(session) << error;
   EXPECT_FALSE(ep::observe_in_session(host->title(), *session, 300).available);
   host->add_process(83, "/bin/sh", "/fixture/owner", 401, 101);
-  EXPECT_EQ(ep::observe_in_session(host->title(), *session, 300).reason, "private_parent_younger_than_child");
+  // A parent younger than its child (a reused PID) already fails the stat-only membership walk.
+  EXPECT_EQ(ep::observe_in_session(host->title(), *session, 300).reason, "private_ancestry_unproven");
   host->files["/proc/83/stat"] = stat_line(83, 350, 'S', 101);
   host->files["/proc/82/stat"] = stat_line(82, 299, 'S', 101);
   const auto seen = ep::observe_in_session(host->title(), *session, 300);
@@ -1522,7 +1523,7 @@ TEST_F(EpicProcess, FuseProofRequiresTheOriginalOpenImageAndRealFuseDevice) {
     [&] { host->links["/proc/44/fd/3"] = "/fixture/owner/other.appimage"; },
     [&] { host->identities["/proc/44/fd/5"].inode++; },
     [&] { host->identities["/dev/fuse"].mode = S_IFREG | 0600; },
-    [&] { host->headers[host->links["/proc/44/exe"]] = std::string("\177ELF", 11); },
+    [&] { host->headers[host->links["/proc/44/exe"]] = std::string("\177ELF\0\0\0\0\0\0\0", 11); },
     [&] { host->identities[host->links["/proc/44/exe"]].mode |= S_IWGRP; },
   };
   for (const auto &change : changes) {
