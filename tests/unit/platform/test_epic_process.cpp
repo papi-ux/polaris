@@ -88,6 +88,7 @@ namespace {
     // After any read, link or stat that found what it asked for, and before each /proc listing.
     std::function<void(const fs::path &)> after_access;
     std::function<void()> before_listing;
+    std::map<fs::path, int> access_counts;
     int proc_listings {0};
     std::vector<std::string> pids;
     std::vector<fs::path> reads;
@@ -209,6 +210,7 @@ namespace {
     }
 
     void accessed(const fs::path &path) {
+      ++access_counts[path];
       if (after_access) {
         after_access(path);
       }
@@ -2296,25 +2298,24 @@ TEST_F(EpicProcess, ACandidateThatChangesOrVanishesStillRefuses) {
     return h;
   };
   for (const auto &census : censuses) {
-    // Each seam leaves it either unknown to be a candidate yet, so skipped as any gone task, or
-    // refused as a change. It is never skipped once known, and never reads as another AppImage.
-    bool refused = false;
+    // Each seam leaves it either not known to be a candidate yet, so skipped as any gone task, or
+    // refused as a change: never skipped once known, and never read as another AppImage. A row is
+    // known from its executable's link, and a launcher from the header read through that link's handle.
+    const int known_after = census.runtime ? 1 : 3;
     at_every_read(70, [&] { return with_row(census); }, [](fixture_t &h) { h.vanish(70); }, [&](const auto &h, int nth, int total) {
       const auto answer = census(h);
       // After the very last read of the last listing, nothing looks at the task again.
       if (nth == 0 || nth == total) {
         return;
       }
-      if (!answer.admits && answer.reason == census.changed) {
-        refused = true;
+      if (h->access_counts["/proc/70/exe"] >= known_after) {
+        EXPECT_FALSE(answer.admits) << census.name << " at read " << nth << ": skipped once known to be a candidate";
+        EXPECT_EQ(answer.reason, census.changed) << census.name << " at read " << nth;
       }
       else {
         EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
-        EXPECT_FALSE(refused) << census.name << " at read " << nth << ": skipped after it was known to be a candidate";
       }
-      EXPECT_NE(answer.reason, "launcher_census_unresolved") << nth;
     });
-    EXPECT_TRUE(refused) << census.name;
 
     // Born, judged and gone before the census ends.
     host = quiet_host();

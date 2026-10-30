@@ -56,8 +56,11 @@ namespace {
     return true;
   }
 
+  // Not a zombie either: what the stage leaves is reaped by whatever PID 1 this host or container has.
   bool process_alive(pid_t pid) {
-    return ::kill(pid, 0) == 0;
+    const auto stat = read_all(fs::path("/proc") / std::to_string(pid) / "stat");
+    const auto name_end = stat.rfind(") ");
+    return name_end != std::string::npos && name_end + 2 < stat.size() && stat[name_end + 2] != 'Z' && stat[name_end + 2] != 'X';
   }
 
   // Single-quotes a path for the fixture's own scripts.

@@ -1576,7 +1576,8 @@ TEST(SteamShutdownStateMachineTests, PrivateAppStopFindsNoMountWithoutANamedImag
   ASSERT_GE(outsider.pid, 0);
   if (outsider.pid == 0) {
     const auto image = appimage.image.string();
-    execl(image.c_str(), image.c_str(), "-c", "sleep 30", static_cast<char *>(nullptr));
+    // More than one command, or bash becomes the sleep and its argv[0] goes with it.
+    execl(image.c_str(), image.c_str(), "-c", "sleep 30; true", static_cast<char *>(nullptr));
     _exit(127);
   }
   // Naming no image, they are the session's own and go with the game in one pass, as any session's do.
