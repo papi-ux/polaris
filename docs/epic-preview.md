@@ -85,8 +85,8 @@ requested game or exact title-prefix server is present. Incomplete or unreadable
 Other programs starting and exiting while it checks do not refuse. It answers only once it has
 judged every process of yours that a fresh look at `/proc` still shows, by the same rules, so a
 program started during the check is checked too, and one that starts running something else is
-checked again. A process the kernel proves has exited is skipped, and another user's needs no
-judgement. It still refuses when a process that could be Epic or the game changes or exits during
+checked again. A process the kernel proves has exited or is exiting is skipped, and another user's
+needs no judgement. It still refuses when a process that could be Epic or the game changes or exits during
 the check, when a process's absence isn't proven, and when so much keeps starting that sixteen
 looks at `/proc` never find nothing new. A check is only ever a sample: a launch after it is not
 excluded. The same rule applies while a session runs, so a program exiting during a status check

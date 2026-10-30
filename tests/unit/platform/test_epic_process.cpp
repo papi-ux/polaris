@@ -43,12 +43,12 @@ namespace {
   const std::string boot = "9dd26721-4424-4907-ab80-4f023729a22f\n";
 
   std::string stat_line(std::uint64_t pid, std::uint64_t start, char state = 'S', std::uint64_t parent = 1,
-                        const std::string &name = "game ) with (parens)") {
+                        const std::string &name = "game ) with (parens)", std::uint64_t flags = 0x400000) {
     std::ostringstream text;
     // The kernel comm can contain right parentheses, spaces, and left parentheses.
     text << pid << " (" << name << ") " << state << ' ' << parent;
     for (int field = 2; field < 19; ++field) {
-      text << " 0";
+      text << ' ' << (field == 6 ? flags : 0);
     }
     text << ' ' << start << " 0 0\n";
     return text.str();
@@ -357,6 +357,29 @@ namespace {
       const auto text = files[path / "stat"];
       const auto right = text.rfind(") S ");
       files[path / "stat"] = text.substr(0, right) + ") Z " + text.substr(right + 4);
+      links.erase(path / "exe");
+      links.erase(path / "cwd");
+      identities.erase(path / "exe");
+      denied_links.erase(path / "exe");
+      files[path / "maps"] = "";
+    }
+
+    // The task has begun to exit and dropped its memory, as read on pc-papi: still R in its stat, with
+    // PF_EXITING in its flags, and its links gone. A large process can stay like this for seconds.
+    void exiting(std::uint64_t pid) {
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      const auto text = files[path / "stat"];
+      std::istringstream fields(text.substr(text.rfind(')') + 2));
+      std::vector<std::string> parts;
+      for (std::string field; fields >> field;) {
+        parts.push_back(field);
+      }
+      std::ostringstream rebuilt;
+      rebuilt << text.substr(0, text.rfind(')') + 1) << " R " << parts[1];
+      for (std::size_t field = 2; field < parts.size(); ++field) {
+        rebuilt << ' ' << (field == 6 ? std::string {"4194316"} : parts[field]);
+      }
+      files[path / "stat"] = rebuilt.str() + "\n";
       links.erase(path / "exe");
       links.erase(path / "cwd");
       identities.erase(path / "exe");
@@ -2228,6 +2251,86 @@ TEST_F(EpicProcess, AnExitedTaskItsParentHasNotReapedCountsAsGone) {
       const auto seen = ep::observe_in_session(h->title(), *session, 300);
       EXPECT_TRUE(seen.available) << task << " at read " << nth << ": " << seen.reason;
     });
+  }
+}
+
+// As read on pc-papi at a refusal: state R, flags 0x40000c, no memory, no exe link. Mostly docker's tasks.
+TEST_F(EpicProcess, ATaskTheKernelHasMarkedExitingCountsAsGone) {
+  const auto desktop = [] {
+    auto h = std::make_shared<fixture_t>();
+    h->pids.clear();
+    h->desktop_session_host();
+    return h;
+  };
+  for (const auto &census : censuses) {
+    // At any read, and however long it stays listed: a slow exit leaves no listing unquiet.
+    at_every_read(60, quiet_host, [](fixture_t &h) { h.exiting(60); }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " at read " << nth << ": " << answer.reason;
+    });
+    at_every_read(5157, desktop, [](fixture_t &h) { h.exiting(5157); }, [&](const auto &h, int nth, int) {
+      const auto answer = census(h);
+      EXPECT_TRUE(answer.admits) << census.name << " protected, at read " << nth << ": " << answer.reason;
+    });
+    // Only that flag says so. A live task with every other flag set is still a refusal.
+    host = quiet_host();
+    host->files["/proc/60/stat"] = stat_line(60, 10060, 'R', 1, "tool", ~std::uint64_t {0x4});
+    host->links.erase("/proc/60/exe");
+    const auto answer = census(host);
+    EXPECT_FALSE(answer.admits) << census.name;
+    EXPECT_EQ(answer.reason, "unreadable_process_link") << census.name;
+    // A candidate on its way out still changed: it is never skipped once known.
+    host = quiet_host();
+    host->add_process(70, census.runtime ? fs::path(runtime / "files/bin/wineserver") : fs::path("/usr/bin/EpicGamesLauncher"),
+                      census.runtime ? fs::path("/tmp/.wine-1000/server-other") : fs::path("/fixture/owner"), 10070);
+    host->before_listing = [&, listings = 0]() mutable {
+      if (++listings == 2) {
+        host->exiting(70);
+      }
+    };
+    const auto changed = census(host);
+    EXPECT_FALSE(changed.admits) << census.name;
+    EXPECT_EQ(changed.reason, census.changed) << census.name;
+  }
+  // So does a session's observation, where a refusal would retire the claim.
+  std::shared_ptr<fixture_lease_t> lease;
+  for (const std::uint64_t task : {60, 46}) {
+    at_every_read(task, [&] { return session_host(lease); }, [task](fixture_t &h) { h.exiting(task); }, [&](const auto &h, int nth, int) {
+      const auto session = ep::testing::pin_private_session(lease, "private-generation", error, h);
+      ASSERT_TRUE(session) << error;
+      const auto seen = ep::observe_in_session(h->title(), *session, 300);
+      EXPECT_TRUE(seen.available) << task << " at read " << nth << ": " << seen.reason;
+    });
+  }
+}
+
+// A thread's exec makes its leader a zombie until the thread takes over its PID and start time.
+TEST_F(EpicProcess, ATaskReadAsExitedThatRunsAgainIsJudgedAgain) {
+  for (const auto &census : censuses) {
+    host = quiet_host();
+    host->add_process(62, "/usr/bin/later", "/fixture/owner", 10062);
+    host->zombie(60);
+    host->after_read = [&, done = false](const fs::path &path) mutable {
+      if (path == "/proc/62/status" && !done) {
+        done = true;
+        host->files["/proc/60/stat"] = stat_line(60, 10060);
+        const fs::path exe = census.runtime ? fs::path(runtime / "files/bin/wine64-preloader") : fs::path("/usr/bin/EpicGamesLauncher");
+        host->links["/proc/60/exe"] = exe;
+        host->links["/proc/60/cwd"] = install;
+        host->identities[exe] = regular(779);
+        host->identities["/proc/60/exe"] = regular(779);
+        host->headers[exe] = std::string("\177ELF\0\0\0\0\0\0\0", 11);
+        host->files["/proc/60/maps"] = host->maps();
+      }
+    };
+    const auto answer = census(host);
+    EXPECT_FALSE(answer.admits) << census.name << ": " << answer.reason;
+    if (census.runtime) {
+      EXPECT_EQ(answer.absent, false) << answer.reason;
+    }
+    else {
+      EXPECT_EQ(answer.launchers, std::optional<std::size_t> {1}) << answer.reason;
+    }
   }
 }
 

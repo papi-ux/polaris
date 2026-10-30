@@ -134,6 +134,7 @@ namespace platf::epic {
     struct stat_t {
       std::uint64_t pid, parent, start;
       char state;
+      std::uint64_t flags;
     };
 
     // Any task's stat as the kernel wrote it. kthreadd's start time is 0, which only parse_stat refuses.
@@ -143,7 +144,7 @@ namespace platf::epic {
       require(left != std::string::npos && right != std::string::npos && left > 1 && right > left && text[left - 1] == ' ', "malformed_process_stat");
       const auto fields = words(text.substr(right + 1));
       require(fields.size() >= 20 && fields[0].size() == 1, "incomplete_process_stat");
-      return {number(std::string_view(text).substr(0, left - 1)), number(fields[1]), number(fields[19]), fields[0][0]};
+      return {number(std::string_view(text).substr(0, left - 1)), number(fields[1]), number(fields[19]), fields[0][0], number(fields[6])};
     }
 
     stat_t parse_stat(const std::string &text) {
@@ -154,6 +155,13 @@ namespace platf::epic {
 
     bool dead_state(char state) {
       return state == 'Z' || state == 'X' || state == 'x';
+    }
+
+    // The kernel sets PF_EXITING first, drops the task's memory, and only then makes it a zombie, which
+    // can take seconds for a large process. Throughout, its links and maps read as missing.
+    bool exiting(const stat_t &task) {
+      constexpr std::uint64_t pf_exiting = 0x4;
+      return dead_state(task.state) || (task.flags & pf_exiting) != 0;
     }
 
     std::string cgroup(const std::string &text) {
@@ -442,11 +450,12 @@ namespace platf::epic {
       }
 
       /**
-       * The kernel's proof that a task has exited. Procfs can hide a live process, so a missing file
-       * proves nothing alone. A task its parent has not reaped yet still has a status, and its stat
-       * state says it exited; its links and maps already read as missing.
+       * The kernel's proof that a task has exited or is exiting, so it cannot receive the request.
+       * Procfs can hide a live process, so a missing file proves nothing alone. A task on its way out
+       * still has a status, and its stat says where it is; its start time goes to @p start, since it
+       * stays listed until it is reaped.
        */
-      bool gone(std::uint64_t pid) {
+      bool gone(std::uint64_t pid, std::uint64_t *start = nullptr) {
         const auto path = fs::path("/proc") / std::to_string(pid);
         // Twice, since an exiting task can be reaped between the two reads, or between an open and a read.
         for (int look = 0; look < 2; ++look) {
@@ -459,7 +468,11 @@ namespace platf::epic {
           }
           if (const auto text = backend.read(path / "stat", small_limit)) {
             try {
-              return dead_state(stat_fields(*text).state);
+              const auto task = stat_fields(*text);
+              if (start) {
+                *start = task.start;
+              }
+              return exiting(task);
             }
             catch (const refusal_t &) {
               return false;
@@ -474,7 +487,8 @@ namespace platf::epic {
        * the request, and any child it left is judged as its own task. Anything else still refuses.
        */
       void rethrow_unless_gone(std::uint64_t pid, bool candidate) {
-        if (!gone(pid)) {
+        std::uint64_t start = 0;
+        if (!gone(pid, &start)) {
           throw;
         }
         if (candidate) {
@@ -484,6 +498,9 @@ namespace platf::epic {
           throw;
         }
         judged.erase(pid);
+        if (start) {
+          note(pid, start, verdict_t::dead);
+        }
       }
 
       fs::path link(const fs::path &path) {
@@ -1025,15 +1042,17 @@ namespace platf::epic {
 
       /**
        * Whether what the census decided about a task still holds. A candidate that changes refuses.
-       * A negative that execs, and a foreign task born during the census that is now the owner's (a
-       * root process can setuid and then exec), are judged again; the rest only need their start time.
+       * A negative that execs, a foreign task born during the census that is now the owner's (a root
+       * process can setuid and then exec), and an exiting task that runs again (a thread's exec makes
+       * its leader a zombie until it takes over the PID and start time) are judged again; the rest only
+       * need their start time.
        */
       standing_t standing(std::uint64_t pid, const judged_t &task) {
         const auto path = fs::path("/proc") / std::to_string(pid);
         const bool candidate = task.verdict == verdict_t::candidate;
         try {
           const auto now = stat_fields(read(path / "stat"));
-          require(!candidate || (now.start == task.start && !dead_state(now.state)), census_changed);
+          require(!candidate || (now.start == task.start && !exiting(now)), census_changed);
           if (now.start != task.start) {
             return standing_t::changed;
           }
@@ -1041,6 +1060,9 @@ namespace platf::epic {
             return standing_t::changed;
           }
           if (task.verdict == verdict_t::negative && !stable_negative(now, task.exe, task.image ? &*task.image : nullptr)) {
+            return standing_t::changed;
+          }
+          if (task.verdict == verdict_t::dead && !exiting(now)) {
             return standing_t::changed;
           }
           return standing_t::stands;
