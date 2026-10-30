@@ -481,6 +481,7 @@
 
 <script setup>
 import { ref, shallowRef, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
+import { sourceLabel } from '../library-source-names'
 import { useLiveTuning } from '../composables/useLiveTuning'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
@@ -1999,7 +2000,7 @@ const stageView = computed(() => {
       timecode: '',
       kicker: t('mission_control.now_streaming'),
       title: currentAppName.value || liveSessionTitle.value,
-      meta: [app?.source && app.source !== 'manual' ? app.source : '', runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '', viewerCountLabel.value],
+      meta: [app?.source && app.source !== 'manual' ? sourceLabel(app.source) : '', runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '', viewerCountLabel.value],
       note: showPreview.value ? '' : (artSrc ? t('mission_control.art_note') : t('mission_control.capture_note')),
       noteTone: '', artSrc, heroSrc: appArtworkSrc(app, 'hero'), logoSrc: appArtworkSrc(app, 'logo'),
     }
@@ -2011,7 +2012,7 @@ const stageView = computed(() => {
     timecode: '',
     kicker: featured ? (featured.chosen || featured.launchedAt ? t('mission_control.next_up') : t('mission_control.from_library')) : t('dashboard.stream_readiness'),
     title: featured ? featured.app.name : t('dashboard.no_games'),
-    meta: featured ? [featured.app.source && featured.app.source !== 'manual' ? featured.app.source : '',
+    meta: featured ? [featured.app.source && featured.app.source !== 'manual' ? sourceLabel(featured.app.source) : '',
       featured.launchedAt ? t('mission_control.last_launched', { when: relativeDay(featured.launchedAt, nowMs.value) }) : ''] : [],
     note: idleNote.value,
     noteTone: display.attention > 0 ? 'text-warning-bright' : '',

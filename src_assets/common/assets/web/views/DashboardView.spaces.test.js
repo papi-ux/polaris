@@ -73,6 +73,9 @@ describe('Mission Control with Space sessions', () => {
     await vi.waitFor(() => {
       expect(fetch.mock.calls.some(([url]) => url === './api/epic/session')).toBe(true)
     }, { timeout: 2000, interval: 20 })
+    // The stage names the source as the Library does, while live and while featured.
+    expect(wrapper.text()).toContain('Epic')
+    expect(wrapper.text()).not.toContain('epic_launcher')
   })
 
   it('puts idle launches before collapsible vitals, preserving zero and unknown readings', async () => {

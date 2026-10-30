@@ -386,9 +386,8 @@
                   <span v-if="game.slug" class="control-chip">{{ game.slug }}</span>
                   <span v-if="game.emulator_label" class="control-chip">{{ game.emulator_label }}</span>
                   <span v-if="game.source === 'emulator' && game.platform" class="control-chip">{{ game.platform }}</span>
-                  <span v-if="game.source === 'epic_launcher' && game.provider" class="control-chip">{{ game.provider === 'official' ? 'Epic Launcher' : 'Heroic' }}</span>
-                  <span v-if="game.source === 'epic_launcher' && game.installed_platform" class="control-chip">{{ game.installed_platform }}</span>
-                  <span v-if="game.source === 'epic_launcher' && game.runtime" class="control-chip">{{ game.runtime }}</span>
+                  <span v-if="game.source === 'epic_launcher' && epicProviderLabel(game.provider)" class="control-chip">{{ epicProviderLabel(game.provider) }}</span>
+                  <span v-if="game.source === 'epic_launcher' && epicPlatformChip(game)" class="control-chip">{{ epicPlatformChip(game) }}</span>
                   <span v-if="game.game_category && game.game_category !== 'unknown'" class="control-chip">{{ formatCategory(game.game_category) }}</span>
                 </div>
                 <!-- Explicit, two-step provider switch for a deduped title both launchers can provide. -->
@@ -445,7 +444,7 @@
               <div class="mt-3 flex flex-wrap gap-1.5 text-[11px] text-storm">
                 <span v-if="quickLaunchDetails(app).favorite" class="meta-pill border-warning/25 bg-warning/10 text-warning-bright">Favorite</span>
                 <span v-if="quickLaunchDetails(app).recent" class="meta-pill border-ice/20 bg-ice/10 text-ice">Recent</span>
-                <span v-if="app.source && app.source !== 'manual'" class="meta-pill">{{ app.source }}</span>
+                <span v-if="app.source && app.source !== 'manual'" class="meta-pill">{{ sourceLabel(app.source) }}</span>
               </div>
               <div class="mt-auto pt-4">
                 <button
@@ -585,7 +584,7 @@
                   <div class="flex flex-wrap items-center gap-2">
                     <h3 class="min-w-0 max-w-full truncate text-base font-semibold text-silver">{{ app.name || 'Untitled app' }}</h3>
                     <span v-if="app.source && app.source !== 'manual'" class="rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow" :class="sourceBadgeClass(app.source)">
-                      {{ app.source }}
+                      {{ sourceLabel(app.source) }}
                     </span>
                     <span v-if="launchAsPinned(app)" class="meta-pill" :class="{ 'text-warning-bright border-warning/25 bg-warning/10': !launchAsChoice(app)?.available }">{{ launchAsPill(app) }}</span>
                     <span v-if="app['game-category'] && app['game-category'] !== 'unknown'" class="control-chip">
@@ -1390,7 +1389,8 @@ import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
 import { hasLaunchCommand, isLaunchReadyApp, launchPriorityDetails, quickLaunchApps as buildQuickLaunchApps } from '../library-launch-priority'
-import { filterImportGames, summarizeImportGames } from '../library-imports'
+import { epicPlatformChip, epicProviderLabel, filterImportGames, summarizeImportGames } from '../library-imports'
+import { sourceLabel } from '../library-source-names'
 import { romInstallsPending, useRomSources } from '../composables/useRomSources'
 import { useCoverSweep } from '../composables/useCoverSweep'
 import { readConfigOrNull } from '../config-cache.js'
@@ -1705,6 +1705,7 @@ function sourceBadgeClass(source) {
     lutris: 'bg-warning/10 text-warning',
     heroic: 'bg-accent/10 text-accent-bright',
     emulator: 'bg-success/10 text-success',
+    epic_launcher: 'bg-ice/10 text-ice',
   }[source] || 'bg-void/60 text-silver'
 }
 
@@ -1740,17 +1741,8 @@ function quickLaunchStateCopy(app) {
   return 'Launch-ready and available to paired clients.'
 }
 
-function sourceLabel(source = '') {
-  return {
-    steam: 'Steam',
-    lutris: 'Lutris',
-    heroic: 'Heroic',
-    emulator: 'Emulator',
-  }[source] || source || 'Unknown'
-}
-
 function importSourceChip(game) {
-  return game.emulator_label || sourceLabel(game.source)
+  return game.emulator_label || epicProviderLabel(game.provider) || sourceLabel(game.source)
 }
 
 function importGameKey(game) {
