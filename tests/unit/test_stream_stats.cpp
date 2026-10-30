@@ -3985,7 +3985,7 @@ TEST(StreamStatsDoctorTests, GivesAStepThatIsNotTheHeadlineForAnIssueWithNoneOfI
   EXPECT_NE(bare.at("recommendation").at("body"), bare.at("summary"));
 }
 
-TEST(StreamStatsTests, ReportsHowLongTheStreamHasRunByTheHostClock) {
+TEST(StreamStatsDoctorTests, ReportsHowLongTheStreamHasRunByTheHostClock) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
   stats.session_generation = 7;
@@ -4006,7 +4006,7 @@ TEST(StreamStatsTests, ReportsHowLongTheStreamHasRunByTheHostClock) {
   EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("session_elapsed_s"), 0);
 }
 
-TEST(StreamStatsTests, LeavesElapsedTimeOutWhenTheHostHoldsNoStartForThisStream) {
+TEST(StreamStatsDoctorTests, LeavesElapsedTimeOutWhenTheHostHoldsNoStartForThisStream) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
   stats.session_generation = 7;
