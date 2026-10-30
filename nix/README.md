@@ -98,8 +98,14 @@ polaris.inputs.nixpkgs.follows = "nixpkgs";
 
 # system: overlay + optional nixosModules.polaris (udev / firewall / packages)
 nixpkgs.overlays = [ inputs.polaris.overlays.default ];
+# Required: the per-user module installs Steam, which nixpkgs marks unfree, so
+# evaluation stops without this. Allowing Steam's two packages is enough for a
+# non-CUDA build.
+nixpkgs.config.allowUnfreePredicate =
+  pkg: builtins.elem (lib.getName pkg) [ "steam" "steam-unwrapped" ];
 # NVIDIA/NVENC is opt-in: the overlay follows nixpkgs.config.cudaSupport (default off).
-# nixpkgs.config.cudaSupport = true; # needs allowUnfree; omit for a non-CUDA build
+# CUDA adds many unfree packages: replace the predicate with allowUnfree = true.
+# nixpkgs.config.cudaSupport = true;
 
 # per-user (hjem or home-manager)
 imports = [ inputs.polaris.hjemModules.polaris ];
@@ -111,6 +117,10 @@ services.polaris = {
   # preferVkDevice = "10de:2684"; # optional gamescope --prefer-vk-device
 };
 ```
+
+Under Home Manager, the system's unfree setting reaches the per-user packages
+only with `home-manager.useGlobalPkgs = true`; otherwise set the same predicate
+in Home Manager's own `nixpkgs.config`.
 
 After rebuild / switch:
 
