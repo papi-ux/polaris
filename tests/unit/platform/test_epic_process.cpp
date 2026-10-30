@@ -1100,6 +1100,21 @@ TEST_F(EpicProcess, AdmissionNamesAPrefixlessTitleAsFirstPlayInMirrorDesktop) {
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, PrivateSessionPinRefusesASupervisorThatStaysNonDumpable) {
+  // N6: Polaris reads its own /proc entry even when its file capabilities make it non-dumpable
+  // (the kernel exempts a task's own thread group), and its /proc directory stays the owner's.
+  // The supervisor re-executes that binary and restores dumpability before starting labwc. If it
+  // did not, its links stay denied and pinning refuses rather than treating it as outside.
+  const auto lease = host->private_tree();
+  ASSERT_TRUE(ep::testing::pin_private_session(lease, "private-generation", error, host)) << error;
+  host->links.erase("/proc/100/exe");
+  host->denied_links.insert("/proc/100/exe");
+  EXPECT_FALSE(ep::testing::pin_private_session(lease, "private-generation", error, host));
+  EXPECT_EQ(error, "unreadable_process_link");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, EpicObserveInSessionNeverTakesTheDesktopCopy) {
   const auto lease = host->private_tree();
   host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 250);
