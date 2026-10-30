@@ -153,6 +153,12 @@ Epic cloud synchronization completed. If the game cannot be retained or graceful
 confirmed, the status says so; ending the session does not prove exact-game graceful closure.
 There is no individual game group/prefix/wineserver or forced-kill fallback.
 
+An AppImage launcher's mount outlasts the launcher: Polaris ends the mount's two processes only
+after the launcher has gone, one first and then, if they haven't both exited within a quarter of a
+second, both. Ending them together makes the mount's daemon die before it unmounts, leaving a dead
+`/tmp/.mount_*` directory until reboot. If the private app stop is skipped because the compositor
+has already gone, or Polaris itself stops, that can still happen; it is harmless to a later launch.
+
 The owner-controlled Alan Wake 2 launch/display/process-tree, sign-in availability,
 Disconnect/Resume, End order, launcher settle and save-integrity checks remain later gates.
 No source-only result establishes those outcomes.

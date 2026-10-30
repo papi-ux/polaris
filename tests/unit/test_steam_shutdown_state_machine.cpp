@@ -1453,6 +1453,164 @@ TEST(SteamShutdownStateMachineTests, PrivateAppStopNeverSignalsAProcessOutsideTh
   expect_compositor_untouched(*session, result);
 }
 
+namespace {
+  /**
+   * What the AppImage's runtime and FUSE daemon look like to the app stop: a copy of bash under the
+   * image's own name, so its task name is the image's and its argv[0] the image's path.
+   */
+  struct fake_appimage_t {
+    std::filesystem::path root, image;
+
+    fake_appimage_t() {
+      static int serial = 0;
+      root = std::filesystem::temp_directory_path() / ("polaris-fake-appimage-" + std::to_string(getpid()) + "-" + std::to_string(++serial));
+      std::filesystem::remove_all(root);
+      std::filesystem::create_directories(root);
+      image = root / "EpicGamesLauncher-x86_64.appimage";
+      std::filesystem::copy_file("/bin/bash", image);
+    }
+
+    ~fake_appimage_t() {
+      std::error_code ignored;
+      std::filesystem::remove_all(root, ignored);
+    }
+
+    std::string quoted() const {
+      return "'" + image.string() + "'";
+    }
+
+    pid_t pid(const char *name) const {
+      std::ifstream file(root / name);
+      pid_t value = -1;
+      file >> value;
+      return value;
+    }
+
+    bool exists(const char *name) const {
+      return std::filesystem::exists(root / name);
+    }
+  };
+
+  bool wait_for(const std::function<bool()> &done) {
+    for (int attempt = 0; attempt < 500; ++attempt) {
+      if (done()) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+  }
+}  // namespace
+
+TEST(SteamShutdownStateMachineTests, PrivateAppStopEndsAHeldMountAfterTheLauncherInTwoPasses) {
+  fake_appimage_t appimage;
+  const auto root = appimage.root.string();
+  // Both record when SIGTERM reached them. The launcher, on TERM, says whether the mount was still up.
+  const auto stand_in = [&](const std::string &name) {
+    return appimage.quoted() + " -c 'trap \"date +%s%N > " + root + "/" + name + ".term; exit 0\" TERM; while :; do sleep 0.01; done' & echo $! > " + root + "/" + name + "\n";
+  };
+  const auto script = stand_in("holder") + stand_in("daemon") +
+                      "trap 'kill -0 $(cat " + root + "/holder) && kill -0 $(cat " + root + "/daemon) && touch " + root + "/mount-up; kill $!; exit 0' TERM\n"
+                      "sleep 30 & wait\n";
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, script.c_str());
+  ASSERT_TRUE(session);
+  ASSERT_TRUE(wait_for([&] { return appimage.pid("holder") > 0 && appimage.pid("daemon") > 0; }));
+  const auto holder = appimage.pid("holder");
+  const auto daemon = appimage.pid("daemon");
+  const auto result = proc::stop_private_session_apps_for_tests(token, session->supervisor.pid, session->runtime_dir, false, 1, {}, appimage.image);
+
+  // The launcher quit with its files still there, and nothing of the mount had a signal by then.
+  EXPECT_EQ(result.path, "sigterm");
+  EXPECT_TRUE(appimage.exists("mount-up"));
+  EXPECT_TRUE(contains(result.sigterm, session->shell));
+  EXPECT_FALSE(contains(result.sigterm, holder));
+  EXPECT_FALSE(contains(result.sigterm, daemon));
+  EXPECT_TRUE(result.sigkill.empty());
+
+  // One first, the other only after the wait.
+  ASSERT_TRUE(result.mount_first.has_value());
+  EXPECT_TRUE(*result.mount_first == holder || *result.mount_first == daemon);
+  const auto other = *result.mount_first == holder ? daemon : holder;
+  EXPECT_EQ(result.mount_rest, std::vector<pid_t> {other});
+  EXPECT_TRUE(wait_for([&] { return !running(holder) && !running(daemon); }));
+  const auto when = [&](pid_t pid) {
+    std::ifstream file(root + "/" + (pid == holder ? "holder.term" : "daemon.term"));
+    long long nanoseconds = 0;
+    file >> nanoseconds;
+    return nanoseconds;
+  };
+  ASSERT_GT(when(*result.mount_first), 0);
+  ASSERT_GT(when(other), 0);
+  EXPECT_GE(when(other) - when(*result.mount_first), 100'000'000LL) << "the second pass came before the wait";
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, PrivateAppStopNeedsOnlyOneSignalWhenItEndsTheWholeMount) {
+  fake_appimage_t appimage;
+  const auto root = appimage.root.string();
+  // As the real runtime's daemon does, this one goes by itself once what holds the mount has gone.
+  const auto script = appimage.quoted() + " -c 'while :; do sleep 0.01; done' & holder=$!; echo $holder > " + root + "/holder\n" +
+                      appimage.quoted() + " -c \"while kill -0 $holder 2>/dev/null; do sleep 0.01; done\" & echo $! > " + root + "/daemon\n"
+                      "trap 'kill $!; exit 0' TERM\n"
+                      "sleep 30 & wait\n";
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, script.c_str());
+  ASSERT_TRUE(session);
+  ASSERT_TRUE(wait_for([&] { return appimage.pid("holder") > 0 && appimage.pid("daemon") > 0; }));
+  const auto holder = appimage.pid("holder");
+  const auto daemon = appimage.pid("daemon");
+  const auto result = proc::stop_private_session_apps_for_tests(token, session->supervisor.pid, session->runtime_dir, false, 1, {}, appimage.image);
+  EXPECT_FALSE(contains(result.sigterm, holder));
+  EXPECT_FALSE(contains(result.sigterm, daemon));
+  EXPECT_TRUE(result.mount_first.has_value());
+  EXPECT_TRUE(wait_for([&] { return !running(holder) && !running(daemon); }));
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, PrivateAppStopFindsNoMountWithoutANamedImageOrOutsideTheSession) {
+  fake_appimage_t appimage;
+  const auto root = appimage.root.string();
+  child_guard_t outsider;
+  outsider.pid = fork();
+  ASSERT_GE(outsider.pid, 0);
+  if (outsider.pid == 0) {
+    const auto image = appimage.image.string();
+    execl(image.c_str(), image.c_str(), "-c", "sleep 30", static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  // Naming no image, they are the session's own and go with the game in one pass, as any session's do.
+  const auto script = appimage.quoted() + " -c 'while :; do sleep 0.01; done' & echo $! > " + root + "/holder\n"
+                      "sleep 30 & wait\n";
+  auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, script.c_str());
+  ASSERT_TRUE(session);
+  ASSERT_TRUE(wait_for([&] { return appimage.pid("holder") > 0; }));
+  auto holder = appimage.pid("holder");
+  auto result = proc::stop_private_session_apps_for_tests(token, session->supervisor.pid, session->runtime_dir, false, 10, {});
+  EXPECT_TRUE(contains(result.sigterm, holder));
+  EXPECT_FALSE(result.mount_first.has_value());
+  EXPECT_TRUE(result.mount_rest.empty());
+  EXPECT_TRUE(wait_for([&] { return !running(holder); }));
+
+  // Naming it, only what descends from this session's supervisor is held: the outsider has the same
+  // argv[0] and no signal at all.
+  session.reset();
+  std::filesystem::remove(appimage.root / "holder");
+  token = private_app_stop_token();
+  session = spawn_fake_private_session(token, script.c_str());
+  ASSERT_TRUE(session);
+  ASSERT_TRUE(wait_for([&] { return appimage.pid("holder") > 0; }));
+  holder = appimage.pid("holder");
+  result = proc::stop_private_session_apps_for_tests(token, session->supervisor.pid, session->runtime_dir, false, 10, {}, appimage.image);
+  EXPECT_EQ(result.mount_first, std::make_optional(holder));
+  EXPECT_FALSE(contains(result.sigterm, outsider.pid));
+  EXPECT_FALSE(contains(result.mount_rest, outsider.pid));
+  EXPECT_NE(result.mount_first, std::make_optional(outsider.pid));
+  EXPECT_TRUE(running(outsider.pid));
+  expect_compositor_untouched(*session, result);
+}
+
 TEST(SteamShutdownStateMachineTests, SteamContextRunsTheSteamLaneFirstThenTheAppsThenTheCompositor) {
   const auto source = read_source_file("src/process.cpp");
   ASSERT_FALSE(source.empty());

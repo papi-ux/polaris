@@ -54,7 +54,13 @@ namespace private_app_stop {
     std::chrono::milliseconds launcher_settle = 3s;  ///< for the launcher to see its game return
     std::chrono::milliseconds launcher_quit = 5s;  ///< for a launcher to quit after SIGTERM
     std::chrono::milliseconds backstop_wait = 3s;  ///< for the scopes to empty after the backstop
+    /// An AppImage mount's end, after the phase: for it to go on one SIGTERM, then after one to all.
+    std::chrono::milliseconds mount_first_wait = 250ms;
+    std::chrono::milliseconds mount_last_wait = 1s;
   };
+
+  /// A session holding an AppImage mount spends its end out of the phase's budget, not on top of it.
+  timings_t with_mount_phase(timings_t timings);
 
   /// How long a game asked to close is given: its app's exit timeout, at least the floor and at
   /// most the ceiling, so raising an app's exit timeout gives a slow saver longer.
@@ -152,6 +158,10 @@ namespace private_app_stop {
     /// the session started. Signalling one of them would bring the sandbox down unordered, so they
     /// are left to exit when their child does.
     std::vector<flatpak_session_instances::process_t> launch_chain;
+    /// A named AppImage's runtime and FUSE daemon, which share its path as argv[0]. Signalled with
+    /// the game, the launcher would lose its files as it quits, and a daemon that gets a second
+    /// SIGTERM, from its keepalive thread, dies before it unmounts. They end after the phase.
+    std::vector<flatpak_session_instances::process_t> held_appimage;
   };
 
   /// Whether a cgroup is the session's own or below it. An empty session cgroup contains nothing.
@@ -167,7 +177,9 @@ namespace private_app_stop {
    * those, the compositor and what it runs for its own sake, the launch chains of the session's
    * Flatpak sandboxes, anything in a Flatpak scope or in a pid namespace below the host's, any
    * bwrap a Flatpak record names, any zero-byte-environ bwrap, and any process of another user are
-   * never in T.
+   * never in T. With a held image, a process descending from the supervisor whose argv[0] is that
+   * path is not in T either, only in held_appimage. That is its own claim, so a process making it
+   * falsely only delays its own SIGTERM.
    */
   session_processes_t classify(
     const std::vector<process_facts_t> &facts,
@@ -175,7 +187,8 @@ namespace private_app_stop {
     std::string_view token,
     const flatpak_session_instances::instances_t &instances,
     uid_t uid,
-    std::optional<std::string_view> session_cgroup = std::nullopt
+    std::optional<std::string_view> session_cgroup = std::nullopt,
+    std::optional<std::string_view> held_image = std::nullopt
   );
 
   /// The launcher's processes it ran for the game, which the settle waits for: its app processes

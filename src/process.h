@@ -535,6 +535,8 @@ namespace proc {
     std::chrono::milliseconds elapsed {};
     std::vector<pid_t> sigterm;  ///< every pid it sent SIGTERM
     std::vector<pid_t> sigkill;  ///< every pid it sent SIGKILL
+    std::optional<pid_t> mount_first;  ///< the one pid of the mount it sent SIGTERM first
+    std::vector<pid_t> mount_rest;  ///< the pids of the mount it sent SIGTERM after that wait
   };
 
   /**
@@ -544,6 +546,7 @@ namespace proc {
    * @param timing_divisor Every wait of the phase is divided by it.
    * @param request_close Stands in for the X close request: it is given the test for a host pid
    *        whose window would be asked, and returns how many it asked.
+   * @param held_image The retained AppImage whose mount is held out, as for an Epic private session.
    */
   private_app_stop_test_result_t stop_private_session_apps_for_tests(
     std::string_view session_instance_id,
@@ -551,7 +554,8 @@ namespace proc {
     const std::filesystem::path &runtime_dir,
     bool immediate,
     int timing_divisor,
-    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close
+    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close,
+    const std::optional<std::filesystem::path> &held_image = std::nullopt
   );
   bool steam_launch_cmdline_matches_appid_for_tests(
     std::string_view cmdline,
@@ -1458,6 +1462,7 @@ namespace proc {
     std::uint64_t _epic_private_birth_upper_ticks = 0;
     bool _epic_private_requested = false;
     bool _epic_private_grant_retired = false;
+    std::optional<std::filesystem::path> _epic_private_held_image;
     platf::epic::observation_t retain_epic_private_game(); // Caller holds the lifecycle mutex.
     std::vector<pidfd_handle_t> _detached_child_pidfds;
     bool _detached_child_authority_complete = true;

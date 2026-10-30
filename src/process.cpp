@@ -3068,8 +3068,13 @@ namespace proc {
     }
 
     /// Everything the host reads of each process for private_app_stop::classify, in one pass.
-    std::vector<private_app_stop::process_facts_t> read_process_facts(const flatpak_session_instances::proc_reader_t &reader) {
+    std::vector<private_app_stop::process_facts_t> read_process_facts(
+      const flatpak_session_instances::proc_reader_t &reader,
+      const std::optional<std::filesystem::path> &held_image = std::nullopt
+    ) {
       namespace fsi = flatpak_session_instances;
+      // The kernel keeps a task's name to its first 15 bytes, so the launcher's own name can match too.
+      const auto held_name = held_image ? held_image->filename().string().substr(0, 15) : std::string {};
       std::vector<private_app_stop::process_facts_t> facts;
       for (const auto pid : reader.all_pids()) {
         if (pid <= 1 || pid == getpid()) {
@@ -3088,8 +3093,9 @@ namespace proc {
           boost::trim(*comm);
           fact.comm = std::move(*comm);
         }
-        if (fact.comm == "sleep") {
-          // labwc's `sleep infinity` startup client is told apart by its arguments.
+        if (fact.comm == "sleep" || (!held_name.empty() && fact.comm == held_name)) {
+          // labwc's `sleep infinity` startup client is told apart by its arguments, and so are a
+          // held AppImage's runtime and FUSE daemon.
           if (auto cmdline = reader.read(pid, "cmdline")) {
             fact.cmdline = std::move(*cmdline);
           }
@@ -3117,6 +3123,8 @@ namespace proc {
       bool steam_context = false;
       /// An Epic private session's own cgroup: the token alone admits nothing outside it.
       std::optional<std::string> session_cgroup;
+      /// The retained AppImage whose mount the launcher runs from, ended after the phase.
+      std::optional<std::filesystem::path> held_image;
       std::vector<std::string> launched_app_ids;
       std::filesystem::path runtime_dir;
       private_app_stop::timings_t timings;
@@ -3135,6 +3143,8 @@ namespace proc {
       stream_stats::app_stop_t stop;
       std::vector<pid_t> signalled_sigterm;  ///< every pid sent SIGTERM, for the tests
       std::vector<pid_t> signalled_sigkill;  ///< every pid sent SIGKILL, for the tests
+      std::optional<pid_t> mount_first;  ///< the one pid of the mount sent SIGTERM first, for the tests
+      std::vector<pid_t> mount_rest;  ///< the pids of the mount sent SIGTERM after that wait, for the tests
     };
 
     /**
@@ -3181,8 +3191,10 @@ namespace proc {
                         << attribution.unresolved.front().app_id << '/' << attribution.unresolved.front().id;
       }
 
-      const auto facts = read_process_facts(reader);
-      const auto session = private_app_stop::classify(facts, request.supervisor, token, instances, getuid(), request.session_cgroup);
+      const auto held_path = request.held_image ? std::make_optional(request.held_image->string()) : std::nullopt;
+      const auto held_view = held_path ? std::make_optional(std::string_view {*held_path}) : std::nullopt;
+      const auto facts = read_process_facts(reader, request.held_image);
+      const auto session = private_app_stop::classify(facts, request.supervisor, token, instances, getuid(), request.session_cgroup, held_view);
       if (!session.launch_chain.empty()) {
         BOOST_LOG(info) << "process: private app stop: leaving "sv << session.launch_chain.size()
                         << " process(es) that ran the launcher to exit with it"sv;
@@ -3302,7 +3314,7 @@ namespace proc {
       const auto track_new_app_processes = [&]() {
         std::vector<fsi::process_t> added;
         std::vector<fsi::process_t> added_backstop;
-        const auto fresh = private_app_stop::classify(read_process_facts(reader), request.supervisor, token, instances, getuid(), request.session_cgroup);
+        const auto fresh = private_app_stop::classify(read_process_facts(reader, request.held_image), request.supervisor, token, instances, getuid(), request.session_cgroup, held_view);
         for (const auto &process : fresh.session) {
           if (tracked.insert({process.pid, process.start_time}).second) {
             added.push_back(process);
@@ -3433,8 +3445,34 @@ namespace proc {
         return remaining.empty() || wait_for_pidfds_exit(remaining, timeout);
       };
 
-      report.outcome = private_app_stop::run(plan, actions, request.timings);
+      const auto timings = request.held_image ? private_app_stop::with_mount_phase(request.timings) : request.timings;
+      report.outcome = private_app_stop::run(plan, actions, timings);
       const auto &outcome = report.outcome;
+
+      // The launcher has gone, so the mount it ran from can too. One first, then wait on both: SIGTERM
+      // to the runtime that holds the mount also ends its FUSE daemon, and a daemon signalled again
+      // meanwhile dies before it unmounts, which leaves a dead mount in /tmp until reboot.
+      if (request.held_image) {
+        const auto mount = open_exact_pidfds(
+          private_app_stop::classify(read_process_facts(reader, request.held_image), request.supervisor, token, instances, getuid(), request.session_cgroup, held_view).held_appimage
+        );
+        if (!mount.empty()) {
+          BOOST_LOG(info) << "process: private app stop: ending the AppImage mount's "sv << mount.size() << " process(es) now the launcher has gone"sv;
+          report.mount_first = mount.front().pid;
+          (void) send_pidfd_signal(mount.front(), SIGTERM);
+          if (!wait_for_pidfds_exit(mount, timings.mount_first_wait)) {
+            for (const auto &handle : mount) {
+              if (!pidfd_has_exited(handle)) {
+                report.mount_rest.push_back(handle.pid);
+              }
+            }
+            (void) signal_all(mount, SIGTERM);
+            if (!wait_for_pidfds_exit(mount, timings.mount_last_wait)) {
+              BOOST_LOG(warning) << "process: private app stop: the AppImage mount's processes remain; the sweep after the compositor stop ends them"sv;
+            }
+          }
+        }
+      }
 
       auto &stop = report.stop;
       stop.path = outcome.path.empty() ? "exited_before_stop" : outcome.path;
@@ -6953,7 +6991,8 @@ namespace proc {
     const std::filesystem::path &runtime_dir,
     bool immediate,
     int timing_divisor,
-    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close
+    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close,
+    const std::optional<std::filesystem::path> &held_image
   ) {
     private_app_stop_test_result_t result;
     const auto supervisor_start = proc_start_time_ticks(supervisor_pid);
@@ -6965,9 +7004,10 @@ namespace proc {
     request.supervisor = {supervisor_pid, *supervisor_start};
     request.immediate = immediate;
     request.runtime_dir = runtime_dir;
+    request.held_image = held_image;
     auto &timings = request.timings;
     const auto divisor = std::max(1, timing_divisor);
-    for (auto *timing : {&timings.budget, &timings.close_request, &timings.close_wait_floor, &timings.exit_timeout_ceiling, &timings.sigterm, &timings.sigterm_after_close, &timings.immediate_sigterm, &timings.sigkill_wait, &timings.left_settle, &timings.launcher_settle, &timings.launcher_quit, &timings.backstop_wait}) {
+    for (auto *timing : {&timings.budget, &timings.close_request, &timings.close_wait_floor, &timings.exit_timeout_ceiling, &timings.sigterm, &timings.sigterm_after_close, &timings.immediate_sigterm, &timings.sigkill_wait, &timings.left_settle, &timings.launcher_settle, &timings.launcher_quit, &timings.backstop_wait, &timings.mount_first_wait, &timings.mount_last_wait}) {
       *timing /= divisor;
     }
     if (request_close) {
@@ -6991,6 +7031,8 @@ namespace proc {
     result.elapsed = report.outcome.elapsed;
     result.sigterm = report.signalled_sigterm;
     result.sigkill = report.signalled_sigkill;
+    result.mount_first = report.mount_first;
+    result.mount_rest = report.mount_rest;
     return result;
   }
 
@@ -9357,6 +9399,7 @@ namespace proc {
     _epic_private_birth_upper_ticks = 0;
     _epic_private_requested = epic_private;
     _epic_private_grant_retired = false;
+    _epic_private_held_image.reset();
     if (epic_command) {
       _app.cmd.clear();
       _app.detached = {*epic_command};
@@ -11348,6 +11391,8 @@ namespace proc {
           if (const auto refusal = admit_private_epic(*_epic_title, _epic_launcher_proof ? &*_epic_launcher_proof : nullptr)) return refusal;
           prepare_headless_gamepad_isolation();
           const bool appimage_under_isolation = gamepad_isolation_plan.strict_applied() && _epic_launcher_proof->appimage();
+          // Isolated or not, the launcher runs from this file's mount, so End ends the mount after it.
+          if (_epic_launcher_proof->appimage()) _epic_private_held_image = _epic_launcher_proof->path();
           if (appimage_under_isolation && !platf::epic::appimage_mounts_itself(*_epic_launcher_proof))
             return launch_failure::refuse(503, "epic_appimage_mount_unavailable", "This Epic AppImage can't be mounted ahead of Private Stream's controller isolation.",
               "Update Epic on the host desktop and scan the library again, set headless_gamepad_isolation to disabled, or use Mirror Desktop. No private request was sent.");
@@ -12802,6 +12847,7 @@ namespace proc {
     if (_epic_private_requested) {
       // #582: an outside process handed this token is not the private Epic session's.
       request.session_cgroup = epic_private_session_cgroup();
+      request.held_image = _epic_private_held_image;
     }
     if (auto app_id = private_session_attach::flatpak_run_app_id(_app.cmd)) {
       request.launched_app_ids.push_back(std::move(*app_id));
@@ -13130,6 +13176,7 @@ namespace proc {
     _epic_private_session.reset();
     _epic_private_request_ticks = 0;
     _epic_private_birth_upper_ticks = 0;
+    _epic_private_held_image.reset();
     // An incomplete private cleanup still owns its generation. Do not let a later
     // teardown mistake that retained generation for the unmanaged Mirror exception.
     _epic_private_requested = _epic_private_requested && !_session_instance_id.empty();

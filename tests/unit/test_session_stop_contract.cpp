@@ -609,6 +609,41 @@ TEST(EpicPrivateSessionContractTests, EveryTeardownSweepOfAPrivateEpicSessionCar
   EXPECT_EQ(std::string::npos, source.find("classify(read_process_facts(reader), request.supervisor, token, instances, getuid());"));
 }
 
+TEST(EpicPrivateSessionContractTests, AnAppImageMountIsHeldForEveryPrivateEpicSessionAndEndedInTheAppStopPhase) {
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto body_of = [&](const char *signature, const char *next) {
+    const auto start = source.find(signature);
+    const auto end = start == std::string::npos ? std::string::npos : source.find(next, start + 1);
+    return start == std::string::npos || end == std::string::npos ? std::string {} : source.substr(start, end - start);
+  };
+  // Recorded for an AppImage whether or not it is isolated: the runtime's own daemon has the same race.
+  const auto recorded = source.find("if (_epic_launcher_proof->appimage()) _epic_private_held_image = _epic_launcher_proof->path();");
+  ASSERT_NE(recorded, std::string::npos);
+  EXPECT_LT(source.rfind("if (_epic_private_requested) {", recorded), recorded);
+  const auto stop_apps = body_of("void proc_t::stop_private_session_apps_before_compositor(", "\n  void proc_t::finalize_isolated_session_runtime(");
+  const auto guard = stop_apps.find("if (_epic_private_requested) {");
+  ASSERT_NE(guard, std::string::npos);
+  EXPECT_NE(stop_apps.find("request.held_image = _epic_private_held_image;", guard), std::string::npos);
+  // The phase holds it through both classifications, ends it after the launcher, and never with a kill.
+  const auto phase = body_of("private_app_stop_report_t stop_private_session_apps(", "bool terminate_session_owned_steam_app_lineage(");
+  ASSERT_FALSE(phase.empty());
+  EXPECT_NE(phase.find("classify(facts, request.supervisor, token, instances, getuid(), request.session_cgroup, held_view)"), std::string::npos);
+  EXPECT_NE(phase.find("classify(read_process_facts(reader, request.held_image), request.supervisor, token, instances, getuid(), request.session_cgroup, held_view);"), std::string::npos);
+  const auto ran = phase.find("private_app_stop::run(plan, actions, timings)");
+  const auto first = phase.find("send_pidfd_signal(mount.front(), SIGTERM)");
+  ASSERT_NE(ran, std::string::npos);
+  ASSERT_NE(first, std::string::npos);
+  EXPECT_LT(ran, first);
+  const auto mount_phase = phase.substr(first);
+  EXPECT_EQ(mount_phase.find("SIGKILL"), std::string::npos);
+  // An earlier generation's image never carries into the next launch, or past the teardown.
+  EXPECT_NE(source.find("_epic_private_grant_retired = false;\n    _epic_private_held_image.reset();"), std::string::npos);
+  const auto generation = source.find("terminate_isolated_session_generation();\n    _epic_private_session.reset();");
+  ASSERT_NE(generation, std::string::npos);
+  EXPECT_NE(source.substr(generation, 300).find("_epic_private_held_image.reset();"), std::string::npos);
+}
+
 #ifdef __linux__
 TEST(EpicPrivateSessionContractTests, OnlyAnAppImageUnderStrictIsolationGetsTheMountStage) {
   const epic_library::installation_t title {{"sandbox", "catalog", "artifact"}, "install1", "Alan Wake 2", "bin/Game.exe", "1", "/games/Alan Wake's 2", "/fixture/epic", "Windows"};
