@@ -266,6 +266,12 @@
       </div>
 
       <p v-for="warning in epicWarnings" :key="warning" class="mt-3 text-xs text-warning-bright" role="status">{{ warning }}</p>
+      <!-- Accepted setup steps for Epic Private Stream (#420 D-C): the launcher proof is in memory only. -->
+      <p v-if="epicGames.length" class="mt-3 text-xs text-support" data-epic-private-setup>
+        For Epic Private Stream, open Epic once on the host desktop while you scan here, then quit it.
+        Do this again after Polaris restarts or Epic updates. Play each game once in Mirror Desktop
+        before its first Private Stream.
+      </p>
 
       <div v-if="!hasImportSources && !gameScanning" class="mt-5 rounded-lg border border-storm/20 bg-deep/35 px-5 py-10 text-center">
         <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-storm/20 bg-void/60 text-storm">

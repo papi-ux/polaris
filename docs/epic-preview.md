@@ -73,17 +73,27 @@ still need their frontend integration and qualification.
 
 While Epic is running on the host desktop, scan the signed-in Polaris Library or select the
 official Epic provider. Polaris retains proof of that exact original launcher executable in
-memory; a successful Mirror admission can retain it too. Then quit Epic completely. After a
-Polaris restart or launcher update, repeat this setup if the proof is unavailable or stale.
+memory; a successful Mirror admission can retain it too. Then quit Epic completely. Repeat this
+after every Polaris restart or Epic update.
 Polaris never guesses an installed path, persists an untrusted executable proof, or reads your
 Epic account data. An AppImage's original backing-file proof remains necessary after its mount
 disappears.
 
 Before the single private launch request, Polaris checks that no owner Epic launcher process,
 requested game or exact title-prefix server is present. Incomplete or unreadable checks refuse.
+
+Some session and system processes hide their details even from your own account, such as
+`systemd --user`, KWin, the polkit agent, `ssh-agent` and SSH logins. Polaris sets such a process
+aside only when the details any process can read (its name, start time, parent chain and systemd
+unit) show that it belongs to your user manager, a session service that manager started, or a
+login session. Any other hidden process refuses. If that judgement is ever wrong, a hidden desktop
+Epic receives the request and the game opens on the desktop: Private Stream shows the game as
+unverified, End closes only the private session, and nothing outside it is signalled.
+
 An unassociated AppImage, even if renamed, can conservatively prevent a complete launcher census;
-quit other AppImages or use Mirror Desktop. A missing or unreadable prefix is unknown, not proof
-that its server is absent. Finish the game's normal setup in Epic on the desktop yourself first.
+quit other AppImages or use Mirror Desktop. Play a game once in Mirror Desktop before its first
+Private Stream: until it has run, it has no prefix, and a missing or unreadable prefix is unknown,
+not proof that its server is absent. Finish the game's normal setup in Epic on the desktop first.
 
 The one requested URI is the new private compositor's startup client, in the game's installation
 directory with this generation's credentials. A request lower bound is recorded before startup;

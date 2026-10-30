@@ -106,6 +106,31 @@ describe('AppsView staged import review', () => {
     document.body.innerHTML = ''
   })
 
+  it('explains the Epic Private Stream setup steps only when Epic titles are listed', async () => {
+    resetScannerState()
+    scannerState.epicGames.value = []
+    let wrapper = mountAppsView()
+    await flushAppsViewLoad()
+    await wrapper.find('button').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-epic-private-setup]').exists()).toBe(false)
+    wrapper.unmount()
+
+    scannerState.epicGames.value = [
+      { name: 'Alan Wake 2', source: 'epic_launcher', provider: 'official', namespace: 'n', item_id: 'i', artifact_id: 'a', selected: false, already_imported: true },
+    ]
+    wrapper = mountAppsView()
+    await flushAppsViewLoad()
+    await wrapper.find('button').trigger('click')
+    await nextTick()
+    const setup = wrapper.find('[data-epic-private-setup]')
+    expect(setup.exists()).toBe(true)
+    expect(setup.text()).toContain('open Epic once on the host desktop while you scan here, then quit it')
+    expect(setup.text()).toContain('after Polaris restarts or Epic updates')
+    expect(setup.text()).toContain('Play each game once in Mirror Desktop before its first Private Stream')
+    scannerState.epicGames.value = []
+  })
+
   it('keeps a sticky staged summary with source counts and primary import action', async () => {
     resetScannerState()
     const wrapper = mountAppsView()

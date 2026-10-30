@@ -8779,20 +8779,40 @@ namespace proc {
 
     int admit_private_epic(const epic_library::installation_t &title, const platf::epic::launcher_proof_t *proof) {
       std::string reason;
+      // Setup step (N2, accepted for now): the launcher proof lives in memory only, so it is
+      // needed again after every Polaris restart and every Epic update.
       if (!proof || !platf::epic::verify_launcher(*proof, reason))
-        return launch_failure::refuse(503, "epic_launcher_proof_required", "The original Epic launcher executable has not been retained or has changed.",
-          "Open official Epic on the host desktop, scan Epic in the signed-in Polaris Library, then quit Epic completely and try Private Stream again.");
+        return launch_failure::refuse(503, "epic_launcher_proof_required", "Polaris needs to see Epic open on the host desktop once before a Private Stream.",
+          "Open Epic once on the host desktop and scan Epic in the Polaris Library, then quit Epic completely and try Private Stream again. Repeat this after Polaris restarts or Epic updates.");
       const auto launchers = platf::epic::launcher_instances(reason, proof);
-      if (!launchers)
+      if (!launchers) {
+        BOOST_LOG(info) << "Epic Private Stream: launcher census unknown: "sv << reason;
+        // N4: an AppImage that is not the retained launcher cannot be told apart from Epic.
+        if (reason == "launcher_census_unresolved")
+          return launch_failure::refuse(503, "epic_other_appimage_running", "Another AppImage app is running on the host, and Polaris can't tell it apart from Epic.",
+            "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.");
+        if (reason == "launcher_inventory_incomplete")
+          return launch_failure::refuse(503, "epic_protected_process_unplaced", "A protected program on the host isn't a recognised session or system process, so Polaris can't confirm Epic is closed.",
+            "Quit Epic and any app that hides its process details on the host, then try again, or use Mirror Desktop.");
         return launch_failure::refuse(503, "epic_launcher_inventory_unknown", "Polaris cannot verify that Epic is completely closed for this user.",
           "Quit Epic and other AppImages on the host, check process visibility, then try again or use Mirror Desktop.");
+      }
       if (*launchers != 0)
         return launch_failure::refuse(409, "epic_open_on_desktop", "Epic is already running for this user. A private request could reach that existing launcher.",
           "Quit Epic completely on the host to play privately, or use Mirror Desktop.");
       const auto absent = platf::epic::title_runtime_absent(epic_process_title(title), reason);
-      if (!absent)
+      if (!absent) {
+        BOOST_LOG(info) << "Epic Private Stream: game runtime census unknown: "sv << reason;
+        // N3, accepted for now: a game that has never run here has no prefix to check.
+        if (reason == "title_prefix_unavailable")
+          return launch_failure::refuse(503, "epic_first_play_in_mirror", "This game hasn't been played on this host yet, so Polaris can't check it for Private Stream.",
+            "Play this game once in Mirror Desktop first, then quit it and Epic, and try Private Stream again.");
+        if (reason == "title_runtime_inventory_incomplete")
+          return launch_failure::refuse(503, "epic_protected_process_unplaced", "A protected program on the host isn't a recognised session or system process, so Polaris can't confirm this game is closed.",
+            "Close this game and any app that hides its process details on the host, then try again, or use Mirror Desktop.");
         return launch_failure::refuse(503, "epic_runtime_inventory_unknown", "The requested game's runtime or prefix could not be checked completely.",
           "Open Epic on the host, finish this game's setup or update, then close the game and Epic completely before trying again.");
+      }
       if (!*absent)
         return launch_failure::refuse(409, "epic_game_already_running", "The requested game or its exact prefix server is still running.",
           "Close that game and let its runtime exit on the host, or use Mirror Desktop.");
