@@ -7322,12 +7322,12 @@ TEST(StreamStatsDoctorTests, PyroWaveEncoderLoadAsksForASmallerPictureNotALowerB
   ASSERT_EQ(doctor.at("primary_issue"), "encoder_load");
   const auto body = doctor.at("recommendation").at("body").get<std::string>();
   EXPECT_NE(body.find("resolution or FPS"), std::string::npos) << body;
-  EXPECT_EQ(body.find("Trim bitrate"), std::string::npos) << body;
+  EXPECT_EQ(body.find("frame rate or bitrate"), std::string::npos) << body;
 
   stats.codec = "hevc";
   const auto hevc = stream_stats::build_doctor_json(stats, nlohmann::json::object());
   ASSERT_EQ(hevc.at("primary_issue"), "encoder_load");
-  EXPECT_NE(hevc.at("recommendation").at("body").get<std::string>().find("Trim bitrate"), std::string::npos);
+  EXPECT_NE(hevc.at("recommendation").at("body").get<std::string>().find("frame rate or bitrate"), std::string::npos);
 }
 
 TEST(StreamStatsDoctorTests, CleanReductionWithoutAPairedProfileRestoresTheLaunchBitrate) {

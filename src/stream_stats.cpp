@@ -2882,7 +2882,7 @@ namespace stream_stats {
           next_step = "Reconnect one stream";
           expected = "No other encoder can be changed by this stream's Auto Fix.";
         } else {
-          body = "Video is being lost or delayed on the network, and this encoder cannot change bitrate during a stream. Lower the bitrate in your client before the next one.";
+          body = "Video is being lost or delayed on the network, and this encoder cannot change bitrate during a live stream. Lower the bitrate in your client before the next one.";
           next_step = "Lower next-stream bitrate";
           expected = "The next stream should start at a bitrate the network can sustain.";
         }
@@ -2920,7 +2920,7 @@ namespace stream_stats {
           next_step = "Reconnect one stream";
           expected = "No other encoder can be changed by this stream's Auto Fix.";
         } else {
-          body = "The network looks clean, but this encoder cannot raise the bitrate during a stream. Doctor will not change your next launch.";
+          body = "The network looks clean, but this encoder cannot raise the bitrate during a live stream. Doctor will not change your next launch.";
           next_step = "Keep current settings";
           expected = "Any later launch remains governed only by the user's selected preset and capability validation.";
         }
