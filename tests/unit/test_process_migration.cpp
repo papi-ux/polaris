@@ -3834,8 +3834,10 @@ TEST(ProcessRuntimeConfigTests, IncompleteCaptureListsUnattributedPids) {
 }
 
 namespace {
-  /// A fence no test process is inside: a desktop service handed the token is outside it.
-  const std::string foreign_service_cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/desktop-app.service";
+  /// A private session's fence that no real process is in, so every test process is outside it,
+  /// whatever cgroup the tests run in; the sweep's seam can place one inside. A fence of the test's
+  /// own cgroup would not do: in a container that reads "/", which contains every path.
+  const std::string private_session_cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/polaris-epic-private-582.service";
 
   pid_t spawn_token_bearer(const std::string &token) {
     const auto child = fork();
@@ -3858,17 +3860,6 @@ namespace {
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
     return false;
-  }
-
-  std::string unified_cgroup(pid_t pid) {
-    std::ifstream cgroup_file("/proc/" + std::to_string(pid) + "/cgroup");
-    std::string line, cgroup;
-    while (std::getline(cgroup_file, line)) {
-      if (line.rfind("0::", 0) == 0) {
-        cgroup = line.substr(3);
-      }
-    }
-    return cgroup;
   }
 
   /// How many lines of @p log say the sweep left @p pid running outside the session.
@@ -3894,7 +3885,7 @@ TEST(ProcessRuntimeConfigTests, EpicPrivateSweepReportsAnOutsiderWhenNothingOfTh
   int status = 0;
   {
     test_log_capture_t log;
-    const auto sweep = proc::exact_generation_sweep_for_tests(token, foreign_service_cgroup);
+    const auto sweep = proc::exact_generation_sweep_for_tests(token, private_session_cgroup);
     EXPECT_TRUE(sweep.complete);
     EXPECT_TRUE(sweep.capture_complete);
     EXPECT_EQ(sweep.outside_session_cgroup, 1);
@@ -3925,20 +3916,18 @@ TEST(ProcessRuntimeConfigTests, EpicPrivateSweepReportsAnOutsiderOnceAfterItsFir
   ASSERT_GT(outsider.pid, 0);
   ASSERT_TRUE(bears_token(inside.pid, token)) << "the session's child did not finish exec";
   ASSERT_TRUE(bears_token(outsider.pid, token)) << "the outsider did not finish exec";
-  const auto cgroup = unified_cgroup(inside.pid);
-  ASSERT_FALSE(cgroup.empty());
 
   test_log_capture_t log;
-  const auto sweep = proc::exact_generation_sweep_for_tests(token, cgroup, outsider.pid);
-  EXPECT_TRUE(sweep.complete);
-  EXPECT_TRUE(sweep.capture_complete);
+  const auto sweep = proc::exact_generation_sweep_for_tests(token, private_session_cgroup, inside.pid);
+  int status = 0;
+  EXPECT_EQ(outsider.wait(&status, WNOHANG), 0) << "an outsider handed the token was signalled";
   EXPECT_EQ(sweep.outside_session_cgroup, 1);
   EXPECT_EQ(outside_warnings(log.text(), outsider.pid), 1u) << log.text();
-
-  int status = 0;
+  EXPECT_TRUE(sweep.capture_complete);
+  // Only a complete sweep signalled the session's process; otherwise its guard ends it.
+  ASSERT_TRUE(sweep.complete) << log.text();
   EXPECT_EQ(inside.wait(&status, 0), inside.pid);
   EXPECT_TRUE(WIFSIGNALED(status));
-  EXPECT_EQ(outsider.wait(&status, WNOHANG), 0) << "an outsider handed the token was signalled";
 }
 
 TEST(ProcessRuntimeConfigTests, EpicPrivateSweepReportsAnOutsiderWhenItsCaptureIsIncompleteOrOnlySandboxesRemain) {
@@ -3954,7 +3943,7 @@ TEST(ProcessRuntimeConfigTests, EpicPrivateSweepReportsAnOutsiderWhenItsCaptureI
   {
     // A zero-byte environ no Flatpak record names keeps the capture from completing.
     test_log_capture_t log;
-    const auto sweep = proc::exact_generation_sweep_for_tests(token, foreign_service_cgroup);
+    const auto sweep = proc::exact_generation_sweep_for_tests(token, private_session_cgroup);
     EXPECT_FALSE(sweep.complete);
     EXPECT_FALSE(sweep.capture_complete);
     EXPECT_EQ(sweep.outside_session_cgroup, 1);
@@ -3964,7 +3953,7 @@ TEST(ProcessRuntimeConfigTests, EpicPrivateSweepReportsAnOutsiderWhenItsCaptureI
   {
     // Recorded as a live Flatpak instance's bwrap, it is a sandbox nothing the token names is left to end.
     test_log_capture_t log;
-    const auto sweep = proc::exact_generation_sweep_for_tests(token, foreign_service_cgroup, -1, {unnamed.pid});
+    const auto sweep = proc::exact_generation_sweep_for_tests(token, private_session_cgroup, -1, {unnamed.pid});
     EXPECT_FALSE(sweep.complete);
     EXPECT_TRUE(sweep.capture_complete);
     EXPECT_TRUE(sweep.sandboxes_remained);

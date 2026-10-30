@@ -619,13 +619,13 @@ namespace proc {
     int outside_session_cgroup = 0;  ///< token bearers it left running outside the fence, each once
   };
 
-  /// The exact sweep, fenced on @p session_cgroup if it has one (#582), with @p foreign_cgroup_pid's
-  /// cgroup read as a foreign service's and @p recorded_flatpak_sandboxes taken as the bwraps of a
-  /// live Flatpak instance.
+  /// The exact sweep, fenced on @p session_cgroup if it has one (#582), with @p session_member_pid
+  /// counted inside that fence and @p recorded_flatpak_sandboxes taken as the bwraps of a live
+  /// Flatpak instance.
   exact_generation_sweep_test_result_t exact_generation_sweep_for_tests(
     std::string_view session_instance_id,
     const std::optional<std::string> &session_cgroup,
-    pid_t foreign_cgroup_pid = -1,
+    pid_t session_member_pid = -1,
     const std::set<pid_t> &recorded_flatpak_sandboxes = {}
   );
   bool exact_generation_transient_capture_failure_retries_for_tests(

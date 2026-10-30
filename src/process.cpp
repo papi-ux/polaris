@@ -1911,9 +1911,9 @@ namespace proc {
     /// Pids a test's snapshot treats as the bwraps of a live Flatpak instance, which it cannot
     /// make: a live instance needs a systemd scope of its own.
     thread_local const std::set<pid_t> *forced_flatpak_sandbox_pids_for_tests = nullptr;
-    /// A pid whose cgroup a fenced snapshot reads as a foreign service's, so a test can stand one
-    /// process outside the session beside one inside it.
-    thread_local pid_t forced_foreign_session_cgroup_pid = -1;
+    /// A pid a fenced snapshot counts as inside the fence, so a test can stand one process inside a
+    /// session cgroup no real process is in, beside one outside it, whatever cgroup the test runs in.
+    thread_local pid_t forced_session_cgroup_member_pid = -1;
 #endif
 
     std::filesystem::path private_session_runtime_dir();
@@ -2114,8 +2114,10 @@ namespace proc {
         }
         auto cgroup_before = session_cgroup ? read_proc_status_file_result(pid, "cgroup") : proc_file_read_result_t {};
 #ifdef POLARIS_TESTS
-        if (session_cgroup && pid == forced_foreign_session_cgroup_pid && cgroup_before.ok()) {
-          cgroup_before.bytes = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/desktop-app.service\n";
+        const bool forced_session_cgroup_member = session_cgroup && pid == forced_session_cgroup_member_pid && cgroup_before.ok();
+        const auto real_cgroup_before = cgroup_before;
+        if (forced_session_cgroup_member) {
+          cgroup_before.bytes = "0::" + *session_cgroup + '\n';
         }
 #endif
         if (session_cgroup && !cgroup_before.ok()) {
@@ -2132,6 +2134,10 @@ namespace proc {
           continue;
         }
 #ifdef POLARIS_TESTS
+        if (forced_session_cgroup_member) {
+          // Placed in the fence for membership only: the capture's bookend compares its real reads.
+          cgroup_before = real_cgroup_before;
+        }
         if (pid == forced_isolated_session_capture_failure_pid) {
           snapshot.mark_hard_failure();
           continue;
@@ -7321,16 +7327,16 @@ namespace proc {
   exact_generation_sweep_test_result_t exact_generation_sweep_for_tests(
     std::string_view session_instance_id,
     const std::optional<std::string> &session_cgroup,
-    pid_t foreign_cgroup_pid,
+    pid_t session_member_pid,
     const std::set<pid_t> &recorded_flatpak_sandboxes
   ) {
-    const auto previous_foreign = forced_foreign_session_cgroup_pid;
+    const auto previous_member = forced_session_cgroup_member_pid;
     const auto previous_sandboxes = forced_flatpak_sandbox_pids_for_tests;
-    auto restore = util::fail_guard([previous_foreign, previous_sandboxes]() {
-      forced_foreign_session_cgroup_pid = previous_foreign;
+    auto restore = util::fail_guard([previous_member, previous_sandboxes]() {
+      forced_session_cgroup_member_pid = previous_member;
       forced_flatpak_sandbox_pids_for_tests = previous_sandboxes;
     });
-    forced_foreign_session_cgroup_pid = foreign_cgroup_pid;
+    forced_session_cgroup_member_pid = session_member_pid;
     forced_flatpak_sandbox_pids_for_tests = &recorded_flatpak_sandboxes;
     isolated_sweep_report_t sweep;
     exact_generation_sweep_test_result_t result;
