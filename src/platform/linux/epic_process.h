@@ -82,10 +82,11 @@ namespace platf::epic {
   };
 
   // Counts process identities, not logical UI instances. Unlike Mirror presence, nullopt is
-  // unknown. An unassociated AppImage runtime cannot establish absence, even if renamed. A
-  // protected (unreadable) task counts as not Epic only when its world-readable stat, status
-  // and cgroup facts, and its ancestors', place it as the user manager, a user service or a
-  // login session (D-A (B), see session_role); any other protected task leaves this unknown.
+  // unknown. An unassociated AppImage runtime cannot establish absence, even if renamed. A task
+  // running the retained launcher's file counts whatever path it runs it by. A protected
+  // (unreadable) task counts as not Epic only when its world-readable stat, status and cgroup
+  // facts, and its ancestors', place it as the user manager, a user service or a login
+  // session (D-A (B), see session_role); any other protected task leaves this unknown.
   std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr);
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
   // Revalidates the retained original file without requiring a launcher or AppImage mount.

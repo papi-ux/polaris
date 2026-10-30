@@ -1739,11 +1739,10 @@ namespace platf::epic {
             // Read through the task's own executable handle, which also opens a Flatpak's or a
             // replaced (deleted) executable that the host cannot open by its path.
             const auto header = needed(backend->prefix(path / "exe", 11), "launcher_census_unresolved");
-            bool known_image = false;
-            if (known_launcher) {
-              const auto &image = known_launcher->state_->image;
-              known_image = task.exe == image.path && same_image(task.image, image.file);
-            }
+            // The retained file is known by its identity, not its path: a hard link or another
+            // dentry of the same executable runs the same launcher. It is then a full candidate.
+            const bool known_image = known_launcher && task.image.device == known_launcher->state_->image.file.device &&
+                                     task.image.inode == known_launcher->state_->image.file.inode;
             // AppImages may be renamed and their runtime may precede the inner launcher.
             // Never turn such a readable but unassociated runtime into a proven zero.
             const bool appimage_marker = header.substr(0, 4) == std::string("\177ELF", 4) && header.substr(8, 2) == "AI";

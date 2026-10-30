@@ -91,9 +91,10 @@ Epic receives the request and the game opens on the desktop: Private Stream show
 unverified, End closes only the private session, and nothing outside it is signalled.
 
 An unassociated AppImage, even if renamed, can conservatively prevent a complete launcher census;
-quit other AppImages or use Mirror Desktop. Play a game once in Mirror Desktop before its first
-Private Stream: until it has run, it has no prefix, and a missing or unreadable prefix is unknown,
-not proof that its server is absent. Finish the game's normal setup in Epic on the desktop first.
+quit other AppImages or use Mirror Desktop. A running copy of the retained launcher counts
+whatever path it runs by. Play a game once in Mirror Desktop before its first Private Stream:
+until it has run, it has no prefix, and a missing or unreadable prefix is unknown, not proof that
+its server is absent. Finish the game's normal setup in Epic on the desktop first.
 
 The one requested URI is the new private compositor's startup client, in the game's installation
 directory with this generation's credentials. A request lower bound is recorded before startup;

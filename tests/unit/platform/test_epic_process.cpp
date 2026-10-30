@@ -1587,6 +1587,56 @@ TEST_F(EpicProcess, FuseProofBookendsProcessImageNamespaceMountAndSelectedDescri
   }
 }
 
+TEST_F(EpicProcess, Peer582ReadableHardlinkOfProvenNativeLauncherCannotCountAsZero) {
+  host->pids.clear();
+  const fs::path original = "/usr/bin/EpicGamesLauncher";
+  host->add_process(7501, original, "/fixture/owner", 90001000);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  // Executed through another hard-link dentry: identical inode/file identity, different exe path.
+  const fs::path alias = "/fixture/owner/launcher-alias";
+  host->identities[alias] = host->identities[original];
+  host->headers[alias] = host->headers[original];
+  host->links["/proc/7501/exe"] = alias;
+  ASSERT_TRUE(ep::verify_launcher(*proof, error)) << error;
+  const auto result = ep::testing::launcher_instances(error, host, &*proof);
+  ASSERT_TRUE(result.has_value()) << error;
+  EXPECT_GT(*result, 0U) << "same retained native launcher inode was counted as absent";
+}
+
+TEST_F(EpicProcess, LauncherInventoryKnowsTheRetainedFileByIdentityAndBookendsTheCandidate) {
+  host->pids.clear();
+  const fs::path original = "/usr/bin/EpicGamesLauncher";
+  const fs::path alias = "/fixture/owner/launcher-alias";
+  host->add_process(7501, original, "/fixture/owner", 90001000);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->identities[alias] = host->identities[original];
+  host->headers[alias] = host->headers[original];
+  host->links["/proc/7501/exe"] = alias;
+  // Once the identity matches, the alias is a full candidate: a path that no longer opens the same
+  // file, or a link that changes while it is read, is unknown rather than a zero.
+  host->identities.erase(alias);
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, &*proof));
+  EXPECT_EQ(error, "unreadable_file_identity");
+  host->identities[alias] = host->identities[original];
+  int reads = 0;
+  host->after_read = [&](const fs::path &path) {
+    if (path == "/proc/7501/cgroup" && ++reads == 1) host->links["/proc/7501/exe"] = "/fixture/owner/other-alias";
+  };
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, &*proof));
+  host->after_read = {};
+  host->links["/proc/7501/exe"] = alias;
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, &*proof), 1U) << error;
+  // A different file at a launcher-like path is still only a stable negative.
+  host->add_process(7502, "/fixture/owner/launcher-copy", "/fixture/owner", 90001010);
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, &*proof), 1U) << error;
+  host->drop(7501);
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, &*proof), 0U) << error;
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks) {
   auto pattern = (fs::temp_directory_path() / "polaris-epic-reader-XXXXXX").string();
   const auto made = mkdtemp(pattern.data());
