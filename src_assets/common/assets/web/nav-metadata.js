@@ -19,7 +19,7 @@ export const NAV_SECTION_DEFINITIONS = [
       { commandId: 'dashboard', to: '/', icon: ICONS.dashboard, labelKey: 'navbar.dashboard', fallbackLabel: 'Mission Control', aliases: ['dashboard', 'home', 'overview', 'session', 'stream status'], description: 'Open the live control surface and active session overview.' },
       { commandId: 'apps', to: '/apps', icon: ICONS.apps, labelKey: 'navbar.library', fallbackLabel: 'Library', aliases: ['apps', 'applications', 'games', 'game library', 'streamable apps'], description: 'Browse, edit, and import games or streamable applications.' },
       { commandId: 'pairing', to: '/pin', icon: ICONS.pairing, labelKey: 'navbar.pairing', fallbackLabel: 'Devices', aliases: ['pairing', 'pin', 'devices', 'clients', 'moonlight pairing'], description: 'Pair clients and review devices trusted to use this host.' },
-      { commandId: 'spaces', to: '/spaces', icon: ICONS.spaces, labelKey: 'navbar.spaces', fallbackLabel: 'Spaces', badge: 'Preview', platforms: ['linux'], aliases: ['space', 'gaming spaces', 'multiseat', 'multi session', 'multiple players', 'headless', 'docker'], description: 'Set up separate gaming Spaces, Steam sign-ins, and device access.' },
+      { commandId: 'spaces', to: '/spaces', icon: ICONS.spaces, labelKey: 'navbar.spaces', fallbackLabel: 'Spaces', platforms: ['linux'], aliases: ['space', 'gaming spaces', 'multiseat', 'multi session', 'multiple players', 'headless', 'docker'], description: 'Set up separate gaming Spaces, Steam sign-ins, and device access.' },
     ],
   },
   {

@@ -4,10 +4,10 @@ A Heroic Space keeps its own Epic, GOG and Amazon sign-ins, installed games
 and saves. Open Heroic from Nova to manage that library, then start installed
 games from their own tiles in Nova.
 
-This uses the [Spaces preview](spaces.md#preview-limits). Complete
+This uses [Spaces](spaces.md). Complete
 [Host Setup](spaces.md#host-setup) first. The host does not need a separate
-Heroic installation. The preview currently allows one active Space per host;
-see the preview limits for graphics and audio acceptance. Keep a mouse or
+Heroic installation. A host runs one active Space at a time; see the
+[current limits](spaces.md#current-limits) for graphics and audio. Keep a mouse or
 touch controls available: Heroic's menus do not receive controller input in
 a Space yet, even though games do.
 
@@ -40,7 +40,7 @@ selected for it. Use Heroic's own game settings for Wine or Proton choices;
 Nova's **Play Setup** controls the stream's resolution and frame rate. Start
 at 60 FPS and check picture, sound and controls before increasing it.
 
-Save in the game before leaving. In this preview, disconnecting ends the
+Save in the game before leaving. Disconnecting ends the
 Space's running game. The Space retains installed games, saves and sign-ins;
 **Resume** does not promise that a disconnected game stayed running.
 
@@ -50,9 +50,9 @@ Space's running game. The Space retains installed games, saves and sign-ins;
 | --- | --- |
 | Only the Heroic tile | Open it and check that the game is installed in this Space, not just owned by the signed-in store account or installed on the host desktop. After installation, wait 15 seconds and refresh Nova's library. |
 | A game opens the wrong account | Check the account inside Heroic. The Space name is only a label; it does not select a store account. |
-| A controller works in the game but not Heroic | Use touch or a mouse in Heroic's menus. This is a current preview limit. |
+| A controller works in the game but not Heroic | Use touch or a mouse in Heroic's menus. This is a current limit. |
 | Heroic opens but a game does not start | Open the game's settings in Heroic and check its installation and selected Wine or Proton runtime. A library tile does not establish game compatibility. |
-| The Space cannot open | Read its status in Polaris and recheck Host Setup. The preview's capacity and graphics limits also apply to Heroic. |
+| The Space cannot open | Read its status in Polaris and recheck Host Setup. The capacity and graphics limits also apply to Heroic. |
 
 Heroic's update check starts disabled. Update the Space's gaming runtime
 through its card in Polaris when a newer runtime is offered; do not try to

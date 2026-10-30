@@ -7,19 +7,19 @@ Regular streaming plays the games installed on your PC, signed in as you, and
 Polaris picks where the session runs: your desktop, a private compositor, or a
 display it creates for the stream. A Space is a separate sign-in to Steam,
 Heroic or Lutris, with its own game library and saves, on the same PC, kept in
-its own container, chosen per device. Spaces are a preview; the limits in the table are the ones that shape
+its own container, chosen per device. The limits in the table are the ones that shape
 the choice today.
 
-| Area | Regular streaming | Spaces (preview) |
+| Area | Regular streaming | Spaces |
 | --- | --- | --- |
 | Who it is for | One player, or one shared Steam account | Each player, or each device, with their own sign-in and saves |
 | Sign-ins and saves | Your PC's Steam and its saves | One Steam per Space; installed games, saves and the sign-in stay in the Space |
 | What runs it | The games installed on the host | The Polaris gaming runtime image, with Steam inside; the host needs no Steam |
 | Host requirements | Polaris and a GPU driver | Polaris, Docker Engine, the runtime image, a GPU seat, Linux only |
 | Session modes | Mirror Desktop, Private Stream, Host Virtual Display, Desktop Takeover, Gamescope Stream | Gamescope Stream inside the Space |
-| HDR | Where the capture path carries it | Not in the preview |
-| Audio | Host audio | Under investigation on handhelds in the preview |
-| How many at once | One session on the host | One Space at a time in the preview |
+| HDR | Where the capture path carries it | Not available |
+| Audio | Host audio | Under investigation on handhelds |
+| How many at once | One session on the host | One Space at a time |
 | In Nova | The Library | The Library for the chosen Space, with Change Space, statuses and reasons |
 | Setup | Install and pair | Host Setup on the Spaces page, seven checks, then the first Space |
 | When it breaks | Doctor and the launch's own reason | The same reasons, and the Spaces page says why a Space cannot be offered |

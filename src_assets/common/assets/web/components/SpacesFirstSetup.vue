@@ -136,8 +136,8 @@ const unavailableCopy = computed(() => {
 })
 // Without a published runtime the create steps cannot run, so they are not described.
 const runtimeNotPublished = computed(() => snapshot.value?.available === false && snapshot.value?.unavailable_reason === 'runtime_not_published')
-const unavailableAnchor = computed(() => ({ runtime_not_published: '#preview-limits', journal_fault: '#recover-an-interrupted-setup' })[snapshot.value?.unavailable_reason] || '')
-const unavailableLinkLabel = computed(() => t(snapshot.value?.unavailable_reason === 'runtime_not_published' ? 'spaces.preview_limits_link' : 'spaces.guide_section'))
+const unavailableAnchor = computed(() => ({ runtime_not_published: '#current-limits', journal_fault: '#recover-an-interrupted-setup' })[snapshot.value?.unavailable_reason] || '')
+const unavailableLinkLabel = computed(() => t(snapshot.value?.unavailable_reason === 'runtime_not_published' ? 'spaces.current_limits_link' : 'spaces.guide_section'))
 const blockedReasons = ['journal_fault', 'runtime_withdrawn', 'no_eligible_gpu', 'closing']
 const blockedBy = computed(() => (snapshot.value?.job?.blocked_by || []).filter(reason => blockedReasons.includes(reason)))
 const blockedCopy = reason => t('spaces.blocked_' + reason)
