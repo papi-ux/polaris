@@ -740,6 +740,12 @@ if (UNIX)
                 bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_install_gamescope_stack_shell.sh
     )
     add_test(
+        NAME polaris_private_config_seeder
+        COMMAND ${CMAKE_COMMAND} -E env
+                POLARIS_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+                python3 -B ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_seed_config.py
+    )
+    add_test(
         NAME polaris_gamescope_session_geometry_shell
         COMMAND ${CMAKE_COMMAND} -E env
                 POLARIS_SOURCE_DIR=${CMAKE_SOURCE_DIR}

@@ -122,14 +122,20 @@ let
     '';
   };
 
+  seedConfig = pkgs.writeShellApplication {
+    name = "polaris-seed-config";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      ${builtins.readFile ../../scripts/install/lib/polaris-seed-config.sh}
+      polaris_seed_config "$@"
+    '';
+  };
+
   polarisStart = pkgs.writeShellScript "polaris-start" ''
     set -euo pipefail
     confdir="''${XDG_CONFIG_HOME:-$HOME/.config}/polaris"
     mkdir -p "$confdir"
-    if [ ! -f "$confdir/polaris.conf" ]; then
-      cp ${polarisConfSeed} "$confdir/polaris.conf"
-      chmod 600 "$confdir/polaris.conf"
-    fi
+    ${lib.getExe seedConfig} "$confdir/polaris.conf" ${polarisConfSeed}
 
     # The managed service is coupled to its private portal generation. Recheck
     # both names immediately before exec so readiness cannot silently fall back
@@ -429,6 +435,7 @@ in
     polarisStart
     waitPortal
     polarisConfSeed
+    seedConfig
     gamescope
     portal
     polarisPkg

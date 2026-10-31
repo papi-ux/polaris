@@ -148,10 +148,7 @@ in
     home.activation.polarisConfSeed = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       confdir="$HOME/.config/polaris"
       mkdir -p "$confdir"
-      if [ ! -f "$confdir/polaris.conf" ]; then
-        cp ${session.polarisConfSeed} "$confdir/polaris.conf"
-        chmod 600 "$confdir/polaris.conf"
-      fi
+      ${lib.getExe session.seedConfig} "$confdir/polaris.conf" ${session.polarisConfSeed} || exit $?
     '';
   };
 }
