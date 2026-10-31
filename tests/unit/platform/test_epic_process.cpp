@@ -1683,6 +1683,164 @@ TEST_F(EpicProcess, LauncherInventoryDoesNotCallARenamedUnassociatedAppImageAbse
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, BlockerLabelNamesOnlyThePinnedAppImageBasenameWithoutChangingRefusal) {
+  const fs::path app = "/fixture/owner/private-directory/Orca";
+  host->add_process(45, app, "/fixture/owner", 10005);
+  host->headers[app] = std::string("\177ELF\0\0\0\0AI\002", 11);
+  std::string label = "stale";
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  EXPECT_EQ(label, "Orca");
+  EXPECT_EQ(host->proc_listings, 3); // one refusing census, two presentation bookends; no retry
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, BlockerLabelDoesNotGuessAProgramFromAnUnknownOrUnsafeName) {
+  for (const auto &name : {std::string("<img onerror=alert(1)>"), std::string("Orca\nInjected"),
+         std::string("Orca\033[31m"), std::string("Orca\177"), std::string("Orca\302\240"),
+         std::string(65, 'a'), std::string(" Orca"), std::string("Orca "), std::string("owner@example.com")}) {
+    host = std::make_shared<fixture_t>();
+    const auto app = fs::path("/fixture/owner") / name;
+    host->add_process(45, app, "/fixture/owner", 10005);
+    host->headers[app] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    std::string label = "stale";
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+    EXPECT_EQ(error, "launcher_census_unresolved");
+    EXPECT_TRUE(label.empty()) << name;
+  }
+}
+
+TEST_F(EpicProcess, BlockerLabelAllowsBoundedPlainBasenamesAndRejectsUntrustedFiles) {
+  const auto app = fs::path("/fixture/owner") / std::string(64, 'a');
+  host->add_process(45, app, "/fixture/owner", 10005);
+  host->headers[app] = std::string("\177ELF\0\0\0\0AI\002", 11);
+  std::string label;
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+  EXPECT_EQ(label, std::string(64, 'a'));
+  for (const auto mode : {S_IFREG | 0777, S_IFREG | 04755}) {
+    host->identities[app].mode = mode;
+    host->identities["/proc/45/exe"] = host->identities[app];
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+    EXPECT_EQ(error, "launcher_census_unresolved");
+    EXPECT_TRUE(label.empty());
+  }
+}
+
+TEST_F(EpicProcess, BlockerLabelIsGenericForMultipleAppImageIdentitiesEvenWithTheSameName) {
+  for (const auto &name : {"Other", "Orca"}) {
+    host = std::make_shared<fixture_t>();
+    for (const auto &[pid, app] : std::vector<std::pair<int, fs::path>> {{45, "/fixture/owner/Orca"}, {46, fs::path("/opt/other") / name}}) {
+      host->add_process(pid, app, "/fixture/owner", 10000 + pid);
+      host->headers[app] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    }
+    std::string label = "stale";
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+    EXPECT_EQ(error, "launcher_census_unresolved");
+    EXPECT_TRUE(label.empty());
+  }
+}
+
+TEST_F(EpicProcess, BlockerLabelIsGenericWhenThePinnedIdentityChangesDuringProof) {
+  for (const auto &change : {"start", "exe", "file", "owner", "boot", "header", "listing"}) {
+    host = std::make_shared<fixture_t>();
+    const fs::path app = "/fixture/owner/Orca";
+    host->add_process(45, app, "/fixture/owner", 10005);
+    host->headers[app] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    host->after_access = [&, change](const fs::path &path) {
+      // The first header read is the admission's blocker observation. Mutate afterwards.
+      if (path != "/proc/45/exe" || host->access_counts[path] != 3) return;
+      if (std::string(change) == "start") host->files["/proc/45/stat"] = stat_line(45, 99999);
+      if (std::string(change) == "exe") host->links["/proc/45/exe"] = "/fixture/owner/Other";
+      if (std::string(change) == "file") ++host->identities["/proc/45/exe"].inode;
+      if (std::string(change) == "owner") host->files["/proc/45/status"] = "Uid:\t1001\t1001\t1001\t1001\n";
+      if (std::string(change) == "boot") host->files["/proc/sys/kernel/random/boot_id"] = "add26721-4424-4907-ab80-4f023729a22f\n";
+      if (std::string(change) == "header") host->headers[app] = std::string(11, 'x');
+      if (std::string(change) == "listing") host->drop(45);
+    };
+    std::string label = "stale";
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label)) << change;
+    EXPECT_EQ(error, "launcher_census_unresolved") << change;
+    EXPECT_TRUE(label.empty()) << change;
+    EXPECT_TRUE(host->opened.empty());
+    EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, BlockerLabelNeverSurvivesUnknownOrSuccessfulOrForeignCensuses) {
+  std::string label = "stale";
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, nullptr, &label), 0U);
+  EXPECT_TRUE(label.empty());
+  host->add_process(45, "/fixture/owner/Orca", "/fixture/owner", 10005);
+  host->headers["/fixture/owner/Orca"] = std::string("\177ELF\0\0\0\0AI\002", 11);
+  host->identities["/proc/45"].uid = 1001;
+  host->files["/proc/45/status"] = "Uid:\t1001\t1001\t1001\t1001\n";
+  EXPECT_EQ(ep::testing::launcher_instances(error, host, nullptr, &label), 0U);
+  EXPECT_TRUE(label.empty());
+  host->links.erase("/proc/41/exe");
+  label = "stale";
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+  EXPECT_EQ(error, "unreadable_process_link");
+  EXPECT_TRUE(label.empty());
+}
+
+TEST_F(EpicProcess, BlockerLabelIsGenericForIncompleteOrLateChangingBlockerSets) {
+  for (const auto &change : {"protected", "unreadable", "late_appimage", "late_foreign_owner", "late_birth"}) {
+    host = std::make_shared<fixture_t>();
+    const fs::path app = "/fixture/owner/Orca";
+    host->add_process(45, app, "/fixture/owner", 10005);
+    host->headers[app] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    if (std::string(change) == "protected") host->add_protected_process(46);
+    if (std::string(change) == "unreadable") host->headers.erase(runtime / "files/bin/wine64-preloader");
+    if (std::string(change) == "late_foreign_owner") {
+      host->add_process(46, "/fixture/other/Other", "/", 10006);
+      host->headers["/fixture/other/Other"] = std::string("\177ELF\0\0\0\0AI\002", 11);
+      host->identities["/proc/46"].uid = 1001;
+      host->files["/proc/46/status"] = "Uid:\t1001\t1001\t1001\t1001\n";
+    }
+    host->before_listing = [&, change] {
+      if (host->proc_listings != 3) return;
+      if (std::string(change) == "late_appimage") {
+        host->links["/proc/41/exe"] = "/fixture/owner/Other";
+        host->headers["/fixture/owner/Other"] = std::string("\177ELF\0\0\0\0AI\002", 11);
+      }
+      if (std::string(change) == "late_foreign_owner") {
+        host->identities["/proc/46"].uid = 1000;
+        host->files["/proc/46/status"] = "Uid:\t1000\t1000\t1000\t1000\n";
+      }
+      if (std::string(change) == "late_birth") host->add_process(46, "/fixture/owner/Other", "/", 10006);
+    };
+    // Put the known blocker first so the original reason is independent of later unreadability.
+    host->pids.erase(std::find(host->pids.begin(), host->pids.end(), "45"));
+    host->pids.insert(host->pids.begin(), "45");
+    std::string label = "stale";
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+    EXPECT_EQ(error, "launcher_census_unresolved") << change;
+    EXPECT_TRUE(label.empty()) << change;
+    EXPECT_LE(host->proc_listings, 3);
+  }
+}
+
+TEST_F(EpicProcess, BlockerLabelUsesOnlyTheRefusingCensusRemainingListingBudget) {
+  host->pids.clear();
+  host->before_listing = [&] {
+    if (host->proc_listings < 15) {
+      host->add_process(100 + host->proc_listings, "/usr/bin/worker", "/", 20000 + host->proc_listings);
+    } else if (host->proc_listings == 15) {
+      host->add_process(45, "/fixture/owner/Orca", "/", 10005);
+      host->headers["/fixture/owner/Orca"] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    }
+  };
+  std::string label = "stale";
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  EXPECT_TRUE(label.empty());
+  EXPECT_EQ(host->proc_listings, 16);
+  EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, RetainedLauncherProofUsesTheOriginalAppImageAfterItsMountDisappears) {
   const auto appimage = host->fuse_launcher();
   const auto proof = ep::testing::prove_launcher(error, host);

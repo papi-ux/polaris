@@ -9096,7 +9096,9 @@ namespace confighttp {
               "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
               "Failed to start the specified application";
             if (const auto refusal = launch_failure::take()) {
-              error_tree["error"] = launch_failure::status_message(*refusal);
+              // launchApp has passed authenticate(): only the signed-in host console may see
+              // attempt-local blocker labels. Paired clients and logs keep the generic message.
+              error_tree["error"] = launch_failure::authenticated_owner_status_message(*refusal);
               error_tree["error_code"] = refusal->code;
             }
 #ifdef __linux__

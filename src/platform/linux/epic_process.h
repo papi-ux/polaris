@@ -91,7 +91,10 @@ namespace platf::epic {
   // session (D-A (B), see session_role); any other protected task leaves this unknown. It answers
   // only from a listing in which every owner task has been judged, so another user's process or an
   // unrelated owner task coming and going does not make it unknown. A candidate changing does.
-  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr);
+  // Optional presentation only: a bounded basename of one confirmed blocker, never admission or
+  // process-control authority. Empty for incomplete, unsafe, changed or ambiguous observations.
+  // The caller must restrict it to the authenticated host console; reason stays non-identifying.
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr);
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
   // Revalidates the retained original file without requiring a launcher or AppImage mount.
   bool verify_launcher(const launcher_proof_t &, std::string &reason);
@@ -208,7 +211,7 @@ namespace platf::epic {
     observation_t observe(const title_t &, std::shared_ptr<backend_t>);
     std::unique_ptr<adopted_game_t> adopt(const title_t &, const observation_t &, std::string &error, std::shared_ptr<backend_t>);
     std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason, std::shared_ptr<backend_t>);
-    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr);
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr);
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t>);
     std::optional<bool> title_runtime_absent(const title_t &, std::string &reason, std::shared_ptr<backend_t>);
     std::optional<private_session_t> pin_private_session(

@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
@@ -23,6 +24,9 @@ namespace launch_failure {
     std::string code;  ///< a stable snake_case identifier, greppable in docs and support threads
     std::string message;  ///< what happened, in one or two plain sentences
     std::string action;  ///< the one change that fixes it, when there is one
+    // Attempt-local presentation for the authenticated host console only. Generic response and
+    // log consumers must continue using message/status_message; pairing permissions are not ownership.
+    std::optional<std::string> owner_message {std::nullopt};
   };
 
   /// The refusal recorded for the launch attempt this thread is handling.
@@ -32,8 +36,8 @@ namespace launch_failure {
    * @brief Record why the launch on this thread is being refused; returns the status to propagate.
    * @details Overwrites an earlier record: the code that knows most is the one closest to the fault.
    */
-  inline int refuse(int status, std::string code, std::string message, std::string action = {}) {
-    pending = record_t {status, std::move(code), std::move(message), std::move(action)};
+  inline int refuse(int status, std::string code, std::string message, std::string action = {}, std::optional<std::string> owner_message = std::nullopt) {
+    pending = record_t {status, std::move(code), std::move(message), std::move(action), std::move(owner_message)};
     return status;
   }
 
@@ -64,5 +68,14 @@ namespace launch_failure {
   /// The one string a Moonlight client shows: the message, then the action.
   inline std::string status_message(const record_t &record) {
     return record.action.empty() ? record.message : record.message + " " + record.action;
+  }
+
+  /// Call only after the existing signed-in host-console authentication guard.
+  inline std::string authenticated_owner_status_message(const record_t &record) {
+    if (!record.owner_message || record.owner_message->empty() || record.owner_message->size() > 160 ||
+        std::any_of(record.owner_message->begin(), record.owner_message->end(), [](unsigned char c) {
+          return c < 32 || c > 126 || c == '<' || c == '>' || c == '&' || c == '"' || c == '\'' || c == '\\';
+        })) return status_message(record);
+    return record.action.empty() ? *record.owner_message : *record.owner_message + " " + record.action;
   }
 }  // namespace launch_failure
