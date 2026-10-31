@@ -1456,6 +1456,10 @@ namespace config {
     // TODO: Android can possibly support this
     if (!fs::exists(stream.file_apps.c_str())) {
       fs::copy_file(POLARIS_ASSETS_DIR "/apps.json", stream.file_apps);
+      // The bundled default may be read-only (e.g. installed from the Nix
+      // store); the user's copy must stay writable or saving/importing apps fails.
+      std::error_code perm_ec;
+      fs::permissions(stream.file_apps, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::add, perm_ec);
     }
 #endif
 
