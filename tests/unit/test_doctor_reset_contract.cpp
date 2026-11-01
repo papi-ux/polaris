@@ -136,20 +136,58 @@ TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
   EXPECT_EQ(live_route.find("adaptive_bitrate::set_base_bitrate"), std::string::npos);
 
   const auto video = source("src/video.cpp");
+  EXPECT_NE(video.find("#include \"video_bitrate.h\""), std::string::npos);
+  const auto encode_loop = between(video, "  void encode_run(", "  void encode_published_displays(");
   const auto runtime_update = between(
-    video,
-    "// Check adaptive bitrate and update encoder if target has changed",
-    "stream_stats::update_frame_delivery("
+    encode_loop,
+    "const auto bitrate_update = bitrate::apply_after_encode(",
+    "// Update stream stats periodically"
   );
-  EXPECT_NE(runtime_update.find("adaptive_bitrate::get_live_bitrate_request()"), std::string::npos);
   EXPECT_NE(
-    runtime_update.find("begin_live_bitrate_session_recreation"),
+    runtime_update.find("bitrate::apply_after_encode(\n"
+                        "          adaptive_bitrate::get_live_bitrate_request(), *session, applied_adaptive_bitrate, frame_nr,"),
     std::string::npos
   );
-  EXPECT_NE(runtime_update.find("acknowledge_live_bitrate_applied"), std::string::npos);
-  EXPECT_NE(runtime_update.find("bitrate_update_e::recreate_session"), std::string::npos);
-  EXPECT_NE(runtime_update.find("config.bitrate = request->target_bitrate_kbps"), std::string::npos);
+  const auto encoded = encode_loop.find("if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp))");
+  const auto encode_end = encode_loop.find("auto encode_end = std::chrono::steady_clock::now()", encoded);
+  ASSERT_NE(encoded, std::string::npos);
+  ASSERT_NE(encode_end, std::string::npos);
+  EXPECT_LT(encode_end, encode_loop.find("const auto bitrate_update = bitrate::apply_after_encode("));
+
+  const auto recreate = between(runtime_update,
+    "if (bitrate_update.result == bitrate::result_e::recreate_session) {",
+    "if (bitrate_update.result == bitrate::result_e::rejected)");
+  const auto configured = recreate.find("config.bitrate = bitrate_update.target_bitrate_kbps;");
+  const auto pending = recreate.find("bitrate_session_recreation_pending = true;");
+  const auto returned = recreate.find("return;");
+  ASSERT_NE(configured, std::string::npos);
+  ASSERT_NE(pending, std::string::npos);
+  ASSERT_NE(returned, std::string::npos);
+  EXPECT_LT(configured, pending);
+  EXPECT_LT(pending, returned);
+
+  // Follow the included helper used by this caller, including the unchanged-rate ACK.
+  const auto transaction = between(source("src/video_bitrate.h"),
+    "  result_t apply_after_encode(", "}  // namespace video::bitrate");
+  EXPECT_NE(transaction.find("Session &session, int &applied_bitrate, std::int64_t next_frame_index,"), std::string::npos);
+  const auto unchanged = between(transaction,
+    "if (request->target_bitrate_kbps == applied_bitrate) {", "using update_e =");
+  EXPECT_NE(unchanged.find("adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, applied_bitrate, next_frame_index);"), std::string::npos);
+  const auto apply = between(transaction,
+    "adaptive_bitrate::apply_live_bitrate_request(*request, [&] {", "if (!current)");
+  EXPECT_NE(apply.find("update = session.update_bitrate(request->target_bitrate_kbps);"), std::string::npos);
+  EXPECT_NE(apply.find("return update == update_e::applied;"), std::string::npos);
+  EXPECT_NE(apply.find("}, trace ? &*before : nullptr, next_frame_index);"), std::string::npos);
+  const auto applied = between(transaction, "case update_e::applied:", "case update_e::recreate_session:");
+  EXPECT_NE(applied.find("applied_bitrate = request->target_bitrate_kbps;"), std::string::npos);
+  const auto helper_recreate = between(transaction, "case update_e::recreate_session:", "case update_e::rejected:");
+  const auto guarded_recreate = between(helper_recreate,
+    "if (!adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision, request->target_bitrate_kbps)) {",
+    "record_update(\"recreate\"");
+  EXPECT_NE(guarded_recreate.find("return {result_e::superseded, request->target_bitrate_kbps};"), std::string::npos);
+  EXPECT_NE(helper_recreate.find("return {result_e::recreate_session, request->target_bitrate_kbps};"), std::string::npos);
   EXPECT_EQ(runtime_update.find("pending_bitrate_confirmation"), std::string::npos);
+  EXPECT_EQ(transaction.find("pending_bitrate_confirmation"), std::string::npos);
   EXPECT_NE(video.find("codec_name == \"h264_nvenc\""), std::string::npos);
   EXPECT_NE(video.find("codec_name == \"hevc_nvenc\""), std::string::npos);
   EXPECT_NE(video.find("codec_name == \"av1_nvenc\""), std::string::npos);
