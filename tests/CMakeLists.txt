@@ -380,6 +380,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_acceptance.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_adaptive_bitrate.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_bitrate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_claude_cli.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_provider_http.cpp

@@ -37,6 +37,7 @@ extern "C" {
   #include "src/platform/linux/pyrowave_encode.h"
 #endif
 #include "adaptive_bitrate.h"
+#include "video_bitrate.h"
 #include "process.h"
 #include "cbs.h"
 #include "config.h"
@@ -5886,6 +5887,27 @@ namespace video {
           duplicate_frames++;
         }
 
+        // The encoded frame has already been submitted. Apply pending targets for frame_nr,
+        // the next frame, without waiting for the statistics cadence. A target produced by the
+        // health update below is picked up after the next successful encode.
+        const auto bitrate_update = bitrate::apply_after_encode(
+          adaptive_bitrate::get_live_bitrate_request(), *session, applied_adaptive_bitrate, frame_nr,
+          vrr_trace::enabled(), [&](const auto &before, const auto &request, int encoder_before,
+                                    const char *result, std::optional<int> backend) {
+            vrr_trace::record_bitrate_update(trace_encoder_event("bitrate_update", *session), before,
+              request.target_bitrate_kbps, request.revision, encoder_before, result, backend);
+          });
+        if (bitrate_update.result == bitrate::result_e::recreate_session) {
+          BOOST_LOG(info) << "Recreating the encoder session to apply bitrate "sv
+                          << bitrate_update.target_bitrate_kbps << " kbps"sv;
+          config.bitrate = bitrate_update.target_bitrate_kbps;
+          bitrate_session_recreation_pending = true;
+          return;
+        }
+        if (bitrate_update.result == bitrate::result_e::rejected) {
+          BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
+        }
+
         // Update stream stats periodically (every ~30 frames to avoid lock contention)
         // Track all frames for FPS calculation (outside the % 30 gate)
         {
@@ -5984,61 +6006,7 @@ namespace video {
             );
           }
 
-          // Check adaptive bitrate and update encoder if target has changed
-          int effective_bitrate = applied_adaptive_bitrate;
-          if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
-            if (request->target_bitrate_kbps != applied_adaptive_bitrate) {
-              auto update = encode_session_t::bitrate_update_e::rejected;
-              const bool trace = vrr_trace::enabled();
-              std::optional<vrr_trace::bitrate_observation_t> before;
-              if (trace) before.emplace();
-              auto record_update = [&](const char *result, std::optional<int> backend) {
-                if (trace) vrr_trace::record_bitrate_update(trace_encoder_event("bitrate_update", *session), *before,
-                  request->target_bitrate_kbps, request->revision, applied_adaptive_bitrate, result, backend);
-              };
-              const bool current = adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
-                update = session->update_bitrate(request->target_bitrate_kbps);
-                return update == encode_session_t::bitrate_update_e::applied;
-              }, trace ? &*before : nullptr, frame_nr);
-              if (!current) record_update("superseded", std::nullopt);
-              if (current) switch (update) {
-                case encode_session_t::bitrate_update_e::applied:
-                  record_update("applied", static_cast<int>(update));
-                  applied_adaptive_bitrate = request->target_bitrate_kbps;
-                  effective_bitrate = applied_adaptive_bitrate;
-                  break;
-                case encode_session_t::bitrate_update_e::recreate_session:
-                  if (!adaptive_bitrate::begin_live_bitrate_session_recreation(
-                        request->revision,
-                        request->target_bitrate_kbps
-                      )) {
-                    record_update("superseded", static_cast<int>(update));
-                    // A newer owner/controller decision won before the old
-                    // session was retired. Poll that target without
-                    // recreating for this stale request.
-                    break;
-                  }
-                  record_update("recreate", static_cast<int>(update));
-                  BOOST_LOG(info)
-                    << "Recreating the encoder session to apply bitrate "sv
-                    << request->target_bitrate_kbps << " kbps"sv;
-                  config.bitrate = request->target_bitrate_kbps;
-                  bitrate_session_recreation_pending = true;
-                  return;
-                case encode_session_t::bitrate_update_e::rejected:
-                  record_update("rejected", static_cast<int>(update));
-                  BOOST_LOG(warning) << "Encoder rejected a runtime bitrate update; disabling live adaptive bitrate for this session"sv;
-                  adaptive_bitrate::set_runtime_update_supported(false, "runtime_bitrate_update_failed");
-                  break;
-              }
-            } else {
-              adaptive_bitrate::acknowledge_live_bitrate_applied(
-                request->revision,
-                applied_adaptive_bitrate,
-                frame_nr
-              );
-            }
-          }
+          const int effective_bitrate = applied_adaptive_bitrate;
 
 #ifdef POLARIS_BUILD_PYROWAVE
           record_pyrowave_ceiling_frames(config, *session);
