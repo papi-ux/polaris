@@ -5508,6 +5508,19 @@ namespace video {
     return bitrate_application::origin_t {request->revision, request->target_bitrate_kbps};
   }
 
+  namespace bitrate {
+    // Preserve the production caller's single poll and session interface while
+    // retaining that request's origin in the real locked update callback.
+    template<class Record>
+    result_t apply_after_encode(const std::optional<adaptive_bitrate::live_bitrate_request_t> &request,
+                               encode_session_t &session, int &applied_bitrate, std::int64_t next_frame_index,
+                               bool trace, Record &&record) {
+      bitrate_application_view_t view {session, bitrate_application_origin(request)};
+      return video::bitrate::apply_after_encode<bitrate_application_view_t, Record>(
+        request, view, applied_bitrate, next_frame_index, trace, std::forward<Record>(record));
+    }
+  }  // namespace bitrate
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -6048,10 +6061,8 @@ namespace video {
         // The encoded frame has already been submitted. Apply pending targets for frame_nr,
         // the next frame, without waiting for the statistics cadence. A target produced by the
         // health update below is picked up after the next successful encode.
-        const auto application_request = adaptive_bitrate::get_live_bitrate_request();
-        bitrate_application_view_t application_view {*session, bitrate_application_origin(application_request)};
         const auto bitrate_update = bitrate::apply_after_encode(
-          application_request, application_view, applied_adaptive_bitrate, frame_nr,
+          adaptive_bitrate::get_live_bitrate_request(), *session, applied_adaptive_bitrate, frame_nr,
           vrr_trace::enabled(), [&](const auto &before, const auto &request, int encoder_before,
                                     const char *result, std::optional<int> backend) {
             vrr_trace::record_bitrate_update(trace_encoder_event("bitrate_update", *session), before,
