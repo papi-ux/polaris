@@ -193,6 +193,9 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_update_status.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
+    # PYROWORK01 BEGIN
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_pyrowave_work.cpp
+    # PYROWORK01 END
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_session_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_clock_proof.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_compositor_identity.cpp

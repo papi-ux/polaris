@@ -1947,6 +1947,10 @@ namespace video {
     }
 
     int convert(frame_t &frame) override {
+      // PYROWORK01 BEGIN
+      // Includes every early failure/unsupported path; do not touch codec flags.
+      work_observations.discard_buffer();
+      // PYROWORK01 END
       if (!session) {
         return -1;
       }
@@ -1983,7 +1987,16 @@ namespace video {
             }
             return convert_session_is_over;
           }
+          // PYROWORK01 BEGIN
+          // Shadow only for this work: the exact local value is both captured
+          // and passed by the unchanged backend expression below.
+          const auto max_frame_bytes = this->max_frame_bytes;
+          auto work = work_observations.begin_work(pyrowave_work::kind_e::imported, max_frame_bytes);
+          // PYROWORK01 END
           if (!session->encode_imported(buffer, max_frame_bytes)) {
+            // PYROWORK01 BEGIN
+            work_observations.discard_buffer();
+            // PYROWORK01 END
             if (!complained_about_import) {
               complained_about_import = true;
               BOOST_LOG(error) << "PyroWave: a captured frame on the GPU could not be encoded; the "sv
@@ -1992,6 +2005,9 @@ namespace video {
             return -1;
           }
           converted_since_last_packet = true;
+          // PYROWORK01 BEGIN
+          work_observations.complete_work(std::move(work), true, session->bitstream());
+          // PYROWORK01 END
           return session->bitstream().empty() ? -1 : 0;
         }
         if (!complained_about_import) {
@@ -2010,12 +2026,22 @@ namespace video {
         //
         // Getting this wrong is not subtle. Returning a failure tears the session down and the host
         // builds another, which it did forty thousand times in ten seconds before this existed.
+        // PYROWORK01 BEGIN
+        const auto max_frame_bytes = this->max_frame_bytes;
+        auto work = work_observations.begin_work(pyrowave_work::kind_e::blank_primer, max_frame_bytes);
+        // PYROWORK01 END
         if (!session->encode_blank(max_frame_bytes)) {
+          // PYROWORK01 BEGIN
+          work_observations.discard_buffer();
+          // PYROWORK01 END
           // A ten bit session that cannot make its own black frame cannot make any frame, and the
           // session built to replace it would fail here identically.
           return convert_session_is_over;
         }
         converted_since_last_packet = true;
+        // PYROWORK01 BEGIN
+        work_observations.complete_work(std::move(work), true, session->bitstream());
+        // PYROWORK01 END
         return session->bitstream().empty() ? -1 : 0;
       }
 
@@ -2036,10 +2062,20 @@ namespace video {
       // is black forever with nothing in any log, which is what this did for one hour today.
       if (frame.metadata.format == platf::frame_format_e::unknown &&
           range == pyrowave_encode::dynamic_range_e::hdr10) {
+        // PYROWORK01 BEGIN
+        const auto max_frame_bytes = this->max_frame_bytes;
+        auto work = work_observations.begin_work(pyrowave_work::kind_e::blank_hdr, max_frame_bytes);
+        // PYROWORK01 END
         if (!session->encode_blank(max_frame_bytes)) {
+          // PYROWORK01 BEGIN
+          work_observations.discard_buffer();
+          // PYROWORK01 END
           return -1;
         }
         converted_since_last_packet = true;
+        // PYROWORK01 BEGIN
+        work_observations.complete_work(std::move(work), true, session->bitstream());
+        // PYROWORK01 END
         return session->bitstream().empty() ? -1 : 0;
       }
 
@@ -2084,11 +2120,21 @@ namespace video {
         return convert_session_is_over;
       }
 
+      // PYROWORK01 BEGIN
+      const auto max_frame_bytes = this->max_frame_bytes;
+      auto work = work_observations.begin_work(pyrowave_work::kind_e::packed, max_frame_bytes);
+      // PYROWORK01 END
       if (!session->encode_packed(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
                                 max_frame_bytes)) {
+        // PYROWORK01 BEGIN
+        work_observations.discard_buffer();
+        // PYROWORK01 END
         return -1;
       }
       converted_since_last_packet = true;
+      // PYROWORK01 BEGIN
+      work_observations.complete_work(std::move(work), true, session->bitstream());
+      // PYROWORK01 END
       return session->bitstream().empty() ? -1 : 0;
     }
 
@@ -2108,11 +2154,33 @@ namespace video {
     bool prepare_packet() {
       if (converted_since_last_packet) {
         converted_since_last_packet = false;
+        // PYROWORK01 BEGIN
+        work_observations.prepare_cached_buffer(session->bitstream());
+        // PYROWORK01 END
         return true;
       }
+      // PYROWORK01 BEGIN
+      const auto max_frame_bytes = this->max_frame_bytes;
+      auto work = work_observations.begin_work(pyrowave_work::kind_e::retained, max_frame_bytes);
+      // The lambda retains the old return line verbatim for metadata erasure.
+      const auto run_original_work = [&] {
+      // PYROWORK01 END
       return session->encode_retained(max_frame_bytes);
+      // PYROWORK01 BEGIN
+      };
+      const bool encoded = run_original_work();
+      return work_observations.complete_retained(std::move(work), encoded, session->bitstream());
+      // PYROWORK01 END
     }
 
+    // PYROWORK01 BEGIN
+    pyrowave_work::receipt_value take_work_receipt(std::int64_t frame_index,
+        const std::vector<std::uint8_t> &encoded_buffer,
+        const std::vector<std::uint8_t> &packet_copy) noexcept {
+      return work_observations.take_for_packet(frame_index, encoded_buffer, packet_copy);
+    }
+
+    // PYROWORK01 END
     void request_idr_frame() override {
       // Every frame already is one.
     }
@@ -2162,6 +2230,10 @@ namespace video {
 
   private:
     std::unique_ptr<pyrowave_encode::session_t> session;
+    // PYROWORK01 BEGIN
+    // Neither trace identity nor global status/ACK creates this local lifetime.
+    pyrowave_work::adapter_t work_observations;
+    // PYROWORK01 END
     int framerate = 60;
     std::size_t max_frame_bytes = 0;
     bool converted_since_last_packet = false;
@@ -4522,6 +4594,10 @@ namespace video {
     trace_packet_output(session, *packet, frame_nr, false);
     packet->trace_enqueue_attempted = packet->trace_packet != 0;
     if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
+    // PYROWORK01 BEGIN
+    const auto work_receipt = session.take_work_receipt(frame_nr, encoded, packet->frame_data);
+    if (work_receipt) packet->pyrowave_work_receipt.emplace(*work_receipt);
+    // PYROWORK01 END
     packets->raise(std::move(packet));
 
     return 0;
