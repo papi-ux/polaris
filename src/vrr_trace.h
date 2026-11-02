@@ -16,8 +16,9 @@
 
 namespace vrr_trace {
   inline constexpr unsigned k_schema_major = 2;
-  // Minor 2 adds host_history_run. A reader that knows only minor 1 keeps refusing the trace.
-  inline constexpr unsigned k_schema_minor = 2;
+  // Minor 3 adds historical packet records at dequeue; minor 2 added host_history_run.
+  // Readers must explicitly support this minor; older reader predicates stay unchanged.
+  inline constexpr unsigned k_schema_minor = 3;
   inline constexpr std::size_t k_fields = 40;
   inline constexpr std::size_t k_queue_capacity = 512;
   inline constexpr std::uint64_t k_event_budget = 2'000'000;

@@ -195,6 +195,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_bitrate_provenance.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_bitrate_application.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_packet_trace_fields.cpp
     # PYROWORK01 BEGIN
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_pyrowave_work.cpp
     # PYROWORK01 END

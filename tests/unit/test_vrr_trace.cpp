@@ -469,7 +469,7 @@ TEST(VrrTraceTests, HostHistoryRunKeepsClientReportAndWriterOutcomesDistinct) {
 }
 
 TEST(VrrTraceTests, HostHistoryRunIsBoundedStaticVersionedAndOffWhenTraceIsOff) {
-  EXPECT_EQ(vrr_trace::k_schema_minor,2u);
+  EXPECT_EQ(vrr_trace::k_schema_minor,3u);
   const auto full = vrr_trace::host_history_run_event(ended_run(41,41,7));
   const auto empty = vrr_trace::host_history_run_event({});
   EXPECT_FALSE(full.overflow); EXPECT_FALSE(empty.overflow);
@@ -503,7 +503,7 @@ TEST(VrrTraceTests, HostHistoryRunIsBoundedStaticVersionedAndOffWhenTraceIsOff) 
     vrr_trace::record_host_history_run(ended_run(43,43,7));
   }
   c.stop(); const auto all = c.rows(); const auto rows = select(all,"host_history_run"); ASSERT_EQ(rows.size(),2u);
-  EXPECT_EQ(all.front()["minor"],2u);
+  EXPECT_EQ(all.front()["minor"],3u);
   EXPECT_EQ(rows[0]["codec"],"av1"); EXPECT_EQ(rows[0]["encoder_backend"],"vaapi"); EXPECT_EQ(rows[0]["start_outcome"],"no_ping");
   EXPECT_EQ(rows[0]["launch_policy_available"],1u); EXPECT_EQ(rows[0]["launch_requested_client_fps_milli"],119880);
   EXPECT_EQ(rows[0]["launch_session_target_fps_milli"],59940);

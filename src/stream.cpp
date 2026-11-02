@@ -53,6 +53,7 @@ extern "C" {
 #include "stream_stats.h"
 #include "vrr_rtp_timestamp.h"
 #include "vrr_trace.h"
+#include "video_packet_trace_fields.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -2001,10 +2002,14 @@ namespace stream {
           .u("lowseq_published", trace_sequence_published).i("initial_lowseq", trace_initial_lowseq).i("published_lowseq", trace_published_lowseq)
           .u("sequence_reuse_possible", trace_send_calls && !trace_sequence_published));
       });
-      if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("packet_dequeue").u("packet", packet->trace_packet)
+      if (vrr_trace::enabled()) {
+        auto event = vrr_trace::event_t("packet_dequeue").u("packet", packet->trace_packet)
         .u("encoder", packet->trace_encoder).u("submission", packet->trace_submission).i("frame_index", packet->frame_index())
         .o("frame_timestamp_ns", vrr_trace::ns(packet->frame_timestamp)).o("encode_done_ns", vrr_trace::ns(packet->encode_done_timestamp))
-        .u("source_clock_timestamp", packet->source_clock_timestamp).u("source_time_paced", packet->source_time_paced));
+        .u("source_clock_timestamp", packet->source_clock_timestamp).u("source_time_paced", packet->source_time_paced);
+        video::packet_trace_fields::append(event, packet->encoder_setting, packet->pyrowave_work_receipt);
+        vrr_trace::record(event);
+      }
       if (shutdown_event->peek()) {
         trace_disposition = "broadcast_shutdown";
         break;
