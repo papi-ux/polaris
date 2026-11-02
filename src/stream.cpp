@@ -45,6 +45,7 @@ extern "C" {
 #include "process.h"
 #include "pyrowave_advice.h"
 #include "stream.h"
+#include "stream_applied_pacing.h"
 #include "stream_fec.h"
 #include "stream_fec_status.h"
 #include "stream_pacing.h"
@@ -2233,8 +2234,9 @@ namespace stream {
 
       try {
         // Use around 80% of 1Gbps, unless wire pacing paces this session at its own negotiated rate.
-        const auto pacing = stream_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request.split_kbps,
+        auto pacing = stream_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request.split_kbps,
           config::stream.wire_pacing_headroom, blocksize);
+        bool applied_pacing = false;
         size_t ratecontrol_packets_in_1ms = pacing.packets_in_1ms;
 
         // Send less than 64K in a single batch.
@@ -2246,11 +2248,8 @@ namespace stream {
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
+        const auto legacy_send_batch_size = send_batch_size;
         send_batch_size = stream_pacing::send_batch_limit(pacing, send_batch_size);
-        if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
-          .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
-          .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage)
-          .s("pacing", stream_pacing::rate_name(pacing)).u("packets_per_second", pacing.packets_per_second));
 
         // Don't ignore the last ratecontrol group of the previous frame
         auto ratecontrol_frame_start = pacing.enabled ?
@@ -2293,6 +2292,29 @@ namespace stream {
           generated_data_bytes += shards.data_shards * (shards.blocksize + shards.prefixsize);
           generated_parity_bytes += (shards.size() - shards.data_shards) * (shards.blocksize + shards.prefixsize);
           frame_fec_latency_logger.second_point_now_and_log();
+
+          const auto select_applied_pacing = [&] {
+            return stream_applied_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request,
+              config::stream.wire_pacing_headroom, shards.blocksize, shards.prefixsize,
+              session->session_generation, packet->frame_index(), packet->encoder_setting ? &*packet->encoder_setting : nullptr,
+              config::stream.wire_pacing && packet->encoder_setting ?
+                adaptive_bitrate::get_live_pacing_cap(session->session_generation) : std::nullopt);
+          };
+          if (blockIndex == 0) {
+            const auto selected = select_applied_pacing();
+            pacing = selected.rate;
+            applied_pacing = selected.applied();
+          }
+          const auto refresh_pacing = [&] {
+            if (applied_pacing) stream_applied_pacing::tighten(pacing, select_applied_pacing());
+            ratecontrol_packets_in_1ms = pacing.packets_in_1ms;
+            send_batch_size = stream_pacing::send_batch_limit(pacing, legacy_send_batch_size);
+          };
+          refresh_pacing();
+          if (blockIndex == 0 && vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
+            .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
+            .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage)
+            .s("pacing", stream_pacing::rate_name(pacing)).u("packets_per_second", pacing.packets_per_second));
 
           auto peer_address = session->video.peer.address();
           auto batch_info = platf::batched_send_info_t {
@@ -2370,71 +2392,79 @@ namespace stream {
 
             if (x - next_shard_to_send + 1 >= send_batch_size ||
                 x + 1 == shards.size()) {
-              // Do pacing within the frame.
-              // Also trigger pacing before the first send_batch() of the frame
-              // to account for the last send_batch() of the previous frame.
-              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
-                  ratecontrol_frame_packets_sent == 0) {
-                auto due = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
+              // A lower cap can split the prepared range into smaller batches.
+              // Every actual shard (data, padded tail or parity) is charged once
+              // at its constructed block+prefix size, including across blocks.
+              while (next_shard_to_send <= x) {
+                refresh_pacing();
+                // Do pacing within the frame.
+                // Also trigger pacing before the first send_batch() of the frame
+                // to account for the last send_batch() of the previous frame.
+                if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
+                    ratecontrol_frame_packets_sent == 0) {
+                  auto due = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
 
-                auto now = std::chrono::steady_clock::now();
-                while (now < due) {
-                  if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
-                  // Wire pacing sleeps to an absolute deadline, and keeps the timer where it cannot.
-                  if (!pacing.enabled || !stream_pacing::sleep_until(stream_pacing::next_wake(due, now))) {
-                    timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
-                      std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
+                  auto now = std::chrono::steady_clock::now();
+                  while (now < due) {
+                    if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
+                    refresh_pacing();
+                    due = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
+                    // Wire pacing sleeps to an absolute deadline, and keeps the timer where it cannot.
+                    if (!pacing.enabled || !stream_pacing::sleep_until(stream_pacing::next_wake(due, now))) {
+                      timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
+                    }
+                    now = std::chrono::steady_clock::now();
                   }
-                  now = std::chrono::steady_clock::now();
+
+                  ratecontrol_group_packets_sent = 0;
                 }
 
-                ratecontrol_group_packets_sent = 0;
-              }
+                size_t current_batch_size = std::min<size_t>(x - next_shard_to_send + 1, send_batch_size);
+                batch_info.block_offset = next_shard_to_send;
+                batch_info.block_count = current_batch_size;
 
-              size_t current_batch_size = x - next_shard_to_send + 1;
-              batch_info.block_offset = next_shard_to_send;
-              batch_info.block_count = current_batch_size;
+                frame_send_batch_latency_logger.first_point_now();
+                // Use a batched send if it's supported on this platform
+                vrr_trace::send_attempt_t trace_batch {packet->trace_packet, blockIndex,
+                  static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send), current_batch_size, "send_batch"};
+                ++trace_send_calls;
+                const bool batch_result = platf::send_batch(batch_info);
+                trace_batch.finish(batch_result);
+                if (!batch_result) {
+                  if (delivery.cancelled()) { trace_disposition = "cancelled_after_batch"; return; }
+                  if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("whole_range_fallback").u("packet", packet->trace_packet)
+                    .u("retry_of", trace_batch.id()).i("first_lowseq", static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send))
+                    .u("count", current_batch_size).u("duplicate_possible", 1).n("batch_accepted_count"));
+                  // Batched send is not available, so send each packet individually
+                  BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
+                  for (auto y = 0; y < current_batch_size; y++) {
+                    if (delivery.cancelled()) { trace_disposition = "cancelled_during_fallback"; return; }
+                    auto send_info = platf::send_info_t {
+                      shards.prefix(next_shard_to_send + y),
+                      shards.prefixsize,
+                      shards.data(next_shard_to_send + y),
+                      shards.blocksize,
+                      (uintptr_t) sock.native_handle(),
+                      peer_address,
+                      session->video.peer.port(),
+                      session->localAddress,
+                      delivery.cancellation(),
+                    };
 
-              frame_send_batch_latency_logger.first_point_now();
-              // Use a batched send if it's supported on this platform
-              vrr_trace::send_attempt_t trace_batch {packet->trace_packet, blockIndex,
-                static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send), current_batch_size, "send_batch"};
-              ++trace_send_calls;
-              const bool batch_result = platf::send_batch(batch_info);
-              trace_batch.finish(batch_result);
-              if (!batch_result) {
-                if (delivery.cancelled()) { trace_disposition = "cancelled_after_batch"; return; }
-                if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("whole_range_fallback").u("packet", packet->trace_packet)
-                  .u("retry_of", trace_batch.id()).i("first_lowseq", static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send))
-                  .u("count", current_batch_size).u("duplicate_possible", 1).n("batch_accepted_count"));
-                // Batched send is not available, so send each packet individually
-                BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
-                for (auto y = 0; y < current_batch_size; y++) {
-                  if (delivery.cancelled()) { trace_disposition = "cancelled_during_fallback"; return; }
-                  auto send_info = platf::send_info_t {
-                    shards.prefix(next_shard_to_send + y),
-                    shards.prefixsize,
-                    shards.data(next_shard_to_send + y),
-                    shards.blocksize,
-                    (uintptr_t) sock.native_handle(),
-                    peer_address,
-                    session->video.peer.port(),
-                    session->localAddress,
-                    delivery.cancellation(),
-                  };
-
-                  vrr_trace::send_attempt_t trace_single {packet->trace_packet, blockIndex,
-                    static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send) + y, 1, "send", trace_batch.id()};
-                  ++trace_send_calls;
-                  const bool single_result = platf::send(send_info);
-                  trace_single.finish(single_result);
+                    vrr_trace::send_attempt_t trace_single {packet->trace_packet, blockIndex,
+                      static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send) + y, 1, "send", trace_batch.id()};
+                    ++trace_send_calls;
+                    const bool single_result = platf::send(send_info);
+                    trace_single.finish(single_result);
+                  }
                 }
-              }
-              frame_send_batch_latency_logger.second_point_now_and_log();
+                frame_send_batch_latency_logger.second_point_now_and_log();
 
-              ratecontrol_group_packets_sent += current_batch_size;
-              ratecontrol_frame_packets_sent += current_batch_size;
-              next_shard_to_send = x + 1;
+                ratecontrol_group_packets_sent += current_batch_size;
+                ratecontrol_frame_packets_sent += current_batch_size;
+                next_shard_to_send += current_batch_size;
+              }
             }
           }
 

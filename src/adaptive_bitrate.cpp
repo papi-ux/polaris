@@ -1123,6 +1123,22 @@ namespace adaptive_bitrate {
     return live_bitrate_request_t {target, operator_revision};
   }
 
+  std::optional<live_pacing_cap_t> get_live_pacing_cap(std::uint64_t generation) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    // Unlike get_live_bitrate_request(), this never advances policy, reaffirms
+    // an ACK or publishes parity. It can only restrict an immutable old frame.
+    const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
+    if (!generation || generation != scope_generation || !scope_exclusive ||
+        !enabled.load(std::memory_order_relaxed) ||
+        !runtime_update_supported.load(std::memory_order_relaxed) ||
+        doctor_override_active.load(std::memory_order_relaxed) ||
+        explicit_live_override_active.load(std::memory_order_relaxed) ||
+        pending_live_update_active.load(std::memory_order_relaxed) || target <= 0) {
+      return std::nullopt;
+    }
+    return live_pacing_cap_t {generation, operator_revision, target};
+  }
+
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
                                   const std::function<bool()> &apply,
                                   vrr_trace::bitrate_observation_t *trace_observation,

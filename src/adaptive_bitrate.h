@@ -358,6 +358,15 @@ namespace adaptive_bitrate {
   /** Return the current encoder request, including one-shot rollback work. */
   std::optional<live_bitrate_request_t> get_live_bitrate_request();
 
+  // A read-only ceiling for an already submission-bound frame, never an
+  // applied-setting receipt. Missing/contaminated scopes keep legacy pacing.
+  struct live_pacing_cap_t {
+    std::uint64_t generation = 0;
+    std::uint64_t revision = 0;
+    int target_encoder_kbps = 0;
+  };
+  std::optional<live_pacing_cap_t> get_live_pacing_cap(std::uint64_t generation);
+
   // The callback may only update the encoder; it must not call this controller.
   // Validate, apply and acknowledge under one boundary with operator changes.
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
