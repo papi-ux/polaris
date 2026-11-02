@@ -1443,6 +1443,10 @@ namespace stream_stats {
             {{"stream_instance_id", stream_instance_id(c.session_generation)}});
           cj["host_adaptive_sync"] = host_adaptive_sync_json(c.capture_timing->last_accepted);
         }
+        // This client's own handshake split, named by the row's opaque identity. A row still in its
+        // handshake reads unavailable; it never takes another stream's figures, and nothing serves a
+        // top-level copy.
+        cj["handshake_bitrate_units"] = handshake_bitrate_units_json(streaming, c);
       }
       if (!c.capture_backend.opened.empty()) {
         cj["capture"] = capture_backend_json(c.capture_backend, frames_of_published_display(c));
@@ -4815,6 +4819,59 @@ namespace stream_stats {
     return value;
   }
 
+  // Defined ahead of the selecting overload: docs/nova-contract.json names this function as the
+  // bitrate_units emitter, and its extractors read the first definition by that name.
+  nlohmann::json bitrate_units_json(const client_stats_t &client) {
+    if (!client.bitrate_request_recorded) {
+      return nullptr;
+    }
+    const auto &request = client.bitrate_request;
+    // The total the formula ran on, and null for a stream whose encoder rate is no split of its own
+    // request: a client that sent no bitrate at all, or a watcher, which encodes at its owner's rate.
+    // The formula says nothing about such a stream, and the null says so.
+    const auto split_kbps = request.split_kbps > 0 ? nlohmann::json(request.split_kbps) : nlohmann::json(nullptr);
+    // The cap that cut the request, and where it came from, or null for both when none did.
+    const bool capped = request.cap_kbps > 0;
+    const auto cap_kbps = capped ? nlohmann::json(request.cap_kbps) : nlohmann::json(nullptr);
+    const auto cap_source = capped ? nlohmann::json(request.cap_source) : nlohmann::json(nullptr);
+    // What the stream's own encode loop last reported it runs at, after a live bitrate, Live Tuning or
+    // Doctor changed it. The encoder opens at the negotiated rate, which stands in until that report.
+    const int live_encoder_kbps = client.bitrate_kbps > 0 ? client.bitrate_kbps : request.encoder_kbps;
+    return {
+      {v1::bitrate_units::version, 1},
+      {v1::bitrate_units::requested_kbps, request.client_kbps},
+      {v1::bitrate_units::warp_factor, request.warp_factor},
+      {v1::bitrate_units::cap_kbps, cap_kbps},
+      {v1::bitrate_units::cap_source, cap_source},
+      {v1::bitrate_units::split_kbps, split_kbps},
+      {v1::bitrate_units::encoder_kbps, request.encoder_kbps},
+      {v1::bitrate_units::live_encoder_kbps, live_encoder_kbps},
+      {v1::bitrate_units::audio_kbps, request.audio_kbps},
+      {v1::bitrate_units::fec_percentage, request.fec_percentage},
+      {v1::bitrate_units::formula, stream_bitrate::k_formula},
+    };
+  }
+
+  nlohmann::json handshake_bitrate_units_json(bool streaming, const client_stats_t &client) {
+    if (client.session_generation == 0) {
+      return nullptr;
+    }
+    // Only this row's own record, and nothing in its place: a row with none is unavailable, never
+    // answered with the first recorded stream's figures as a paired client with no stream is.
+    auto units = streaming ? bitrate_units_json(client) : nlohmann::json(nullptr);
+    const bool available = !units.is_null();
+    return {
+      {"version", 1},
+      {"stream_instance_id", stream_instance_id(client.session_generation)},
+      {"available", available},
+      {"reason", available ? "recorded" : streaming ? "handshake_not_recorded" : "not_streaming"},
+      {"basis", "rtsp_handshake_record"},
+      {"snapshot", "as_of_diagnostic"},
+      {"action_authority", false},
+      {"units", std::move(units)},
+    };
+  }
+
   nlohmann::json bitrate_units_json(const stats_t &stats, std::uint64_t requester_generation) {
     if (!stats.streaming) {
       return nullptr;
@@ -4844,31 +4901,7 @@ namespace stream_stats {
       }
       client = &*first;
     }
-    const auto &request = client->bitrate_request;
-    // The total the formula ran on, and null for a stream whose encoder rate is no split of its own
-    // request: a client that sent no bitrate at all, or a watcher, which encodes at its owner's rate.
-    // The formula says nothing about such a stream, and the null says so.
-    const auto split_kbps = request.split_kbps > 0 ? nlohmann::json(request.split_kbps) : nlohmann::json(nullptr);
-    // The cap that cut the request, and where it came from, or null for both when none did.
-    const bool capped = request.cap_kbps > 0;
-    const auto cap_kbps = capped ? nlohmann::json(request.cap_kbps) : nlohmann::json(nullptr);
-    const auto cap_source = capped ? nlohmann::json(request.cap_source) : nlohmann::json(nullptr);
-    // What the stream's own encode loop last reported it runs at, after a live bitrate, Live Tuning or
-    // Doctor changed it. The encoder opens at the negotiated rate, which stands in until that report.
-    const int live_encoder_kbps = client->bitrate_kbps > 0 ? client->bitrate_kbps : request.encoder_kbps;
-    return {
-      {v1::bitrate_units::version, 1},
-      {v1::bitrate_units::requested_kbps, request.client_kbps},
-      {v1::bitrate_units::warp_factor, request.warp_factor},
-      {v1::bitrate_units::cap_kbps, cap_kbps},
-      {v1::bitrate_units::cap_source, cap_source},
-      {v1::bitrate_units::split_kbps, split_kbps},
-      {v1::bitrate_units::encoder_kbps, request.encoder_kbps},
-      {v1::bitrate_units::live_encoder_kbps, live_encoder_kbps},
-      {v1::bitrate_units::audio_kbps, request.audio_kbps},
-      {v1::bitrate_units::fec_percentage, request.fec_percentage},
-      {v1::bitrate_units::formula, stream_bitrate::k_formula},
-    };
+    return bitrate_units_json(*client);
   }
 
   std::optional<stream_bitrate::request_t> recorded_stream_request(std::uint64_t session_generation) {

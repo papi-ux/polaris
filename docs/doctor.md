@@ -112,6 +112,12 @@ last two only when the client carries them. With no client, or with two, they ar
 one client's answer is no answer for another. `stream_instance_id` names one stream for a report
 about it. It is observational only and never accepted as input.
 
+Each client with a `stream_instance_id` also carries `handshake_bitrate_units`: how its own
+handshake split its bitrate request into video, FEC and audio, under `units`, with `available` and
+`reason` saying when that row has no record of its own yet. It is an as-of diagnostic with
+`action_authority` false, and Doctor takes no action from it. It has no top-level copy. See
+[Bitrate units](live-tuning.md#bitrate-units).
+
 Each client also carries `encoder_backend`, the encoder its own stream's encode loop last sampled,
 such as `nvenc`, `vaapi`, `vulkan`, `software` or `pyrowave`. It is absent until that stream's first
 sample, and `last_session` keeps it when the stream ends. With a single client streaming it repeats

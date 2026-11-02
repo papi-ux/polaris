@@ -1202,6 +1202,27 @@ namespace stream_stats {
    */
   nlohmann::json bitrate_units_json(const stats_t &stats, std::uint64_t requester_generation);
 
+  /// The bitrate_units object for this one client's own recorded handshake, or null when it has recorded
+  /// none. It never looks at another client: the overload above selects a client, then answers with this.
+  nlohmann::json bitrate_units_json(const client_stats_t &client);
+
+  /**
+   * @brief The admin stream stats row's handshake_bitrate_units: this client's own bitrate_units, as of
+   *   this diagnostic.
+   *
+   * It names the stream by the row's opaque stream_instance_id and carries the object under units with
+   * available and reason, so a row still in its handshake, or a snapshot taken while nothing streams,
+   * reads unavailable with null units rather than another stream's figures. basis names the handshake
+   * record the negotiated mapping comes from: requested_kbps, warp_factor, cap_kbps, cap_source,
+   * split_kbps, encoder_kbps, audio_kbps, fec_percentage and formula are fixed once it is recorded.
+   * live_encoder_kbps is not: it is the row's last encode-loop report as of this read, or encoder_kbps
+   * until the first report, and it moves with a live bitrate, Live Tuning or Doctor change. snapshot
+   * says the object is as of this read, and action_authority is always false: nothing may be applied
+   * from it, and neither part acknowledges a particular bitrate write or proves delivered media.
+   * @return Null for a client with no session generation, which has no stream identity to name.
+   */
+  nlohmann::json handshake_bitrate_units_json(bool streaming, const client_stats_t &client);
+
   /// What the stream with this generation recorded at its handshake, or nullopt when no stream holds
   /// that generation or it has recorded nothing yet.
   std::optional<stream_bitrate::request_t> recorded_stream_request(std::uint64_t session_generation);
