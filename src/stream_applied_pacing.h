@@ -66,12 +66,19 @@ namespace stream_applied_pacing {
     if (!frame_budget || !current_cap) return refuse(source_e::split_unavailable);
     // The sender retains its existing nonzero block/legacy-divisor precondition.
     // Check the constructed UDP payload size before adding the prefix.
-    if (blocksize > 65535 || prefixsize > 65535 - blocksize) {
+    if (blocksize > 65535 || prefixsize > 65535 - blocksize ||
+        headroom <= 0 || headroom > stream_pacing::k_max_headroom_percent) {
       return refuse(source_e::cost_unavailable);
     }
     // Keep both wire-domain bounds explicit, including the inverse's integer
     // rounding, rather than relying on an idealized proportional conversion.
-    return {stream_pacing::select_rate(true, std::min(*frame_budget, *current_cap), headroom, blocksize + prefixsize), source_e::applied};
+    const auto budget = std::min(*frame_budget, *current_cap);
+    if (static_cast<std::uint64_t>(budget) * 10 * headroom < (blocksize + prefixsize) * 8) {
+      // The existing pacer cannot represent less than one packet/second.
+      // Keep that path explicitly unsupported instead of claiming admission.
+      return refuse(source_e::cost_unavailable);
+    }
+    return {stream_pacing::select_rate(true, budget, headroom, blocksize + prefixsize), source_e::applied};
   }
 
   // The active frame may only slow down. This also preserves its accrued debt

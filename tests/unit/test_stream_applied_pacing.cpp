@@ -210,6 +210,11 @@ TEST(StreamAppliedPacing, OffUnknownOwnerAndWatcherKeepTheExactCompatibilityRate
   const auto invalid_cost = select(&*value, cap_t {generation, 11, 16000}, true, 65535);
   EXPECT_EQ(invalid_cost.source, applied::source_e::cost_unavailable);
   expect_same_rate(invalid_cost.rate, stream_pacing::select_rate(true, 20000, 100, blocksize));
+  const auto unrepresentable = frame(1);
+  ASSERT_TRUE(unrepresentable);
+  const auto too_slow = select(&*unrepresentable, cap_t {generation, 10, 1});
+  EXPECT_EQ(too_slow.source, applied::source_e::cost_unavailable);
+  expect_same_rate(too_slow.rate, stream_pacing::select_rate(true, 20000, 100, blocksize));
 }
 
 namespace {
