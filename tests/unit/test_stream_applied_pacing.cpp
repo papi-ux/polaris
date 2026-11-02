@@ -1,7 +1,9 @@
 /** @file Tests of the production packet-budget join; no encoder, socket or timer is opened. */
 #include <gtest/gtest.h>
+#include <future>
 
 #include "src/config.h"
+#include "src/live_tuning_fec.h"
 #include "src/stream_applied_pacing.h"
 #include "src/video_bitrate_application.h"
 
@@ -281,4 +283,126 @@ TEST_F(StreamAppliedPacingScope, DisabledManualAndDoctorWritersKeepCompatibility
   const auto state = adaptive_bitrate::get_doctor_state();
   ASSERT_TRUE(adaptive_bitrate::set_doctor_bitrate_if_revision(state.revision, 8000));
   EXPECT_FALSE(adaptive_bitrate::get_live_pacing_cap(generation));
+}
+
+TEST(StreamAppliedPacing, TrialAllocationUsesTheFramesPacketizerDomainAtLowHeadroom) {
+  stream_bitrate::request_t budget;
+  stream_bitrate::split_request(budget, 30000, 20, 512);
+  ASSERT_EQ(budget.encoder_kbps, 22988);
+  for (const int percentage : {40, 50}) {
+    live_tuning_fec::actuator_t actuator;
+    ASSERT_TRUE(actuator.configure(generation, budget));
+    const auto trial = actuator.request(budget.encoder_kbps, percentage, 1, true, 10);
+    ASSERT_TRUE(trial);
+    ASSERT_EQ(actuator.confirm(generation, 10, *trial, 7, true, true),
+      live_tuning_fec::actuator_t::confirmation_e::published);
+    const auto allocation = actuator.allocation_for_frame(generation, 7, 77);
+    ASSERT_EQ(allocation.first, 20);
+    ASSERT_EQ(allocation.second, percentage);
+    const auto value = frame(*trial);
+    ASSERT_TRUE(value);
+    const cap_t cap {generation, 10, *trial, budget.encoder_kbps};
+    const auto selected = applied::select_rate(true, budget, 100, blocksize, 32,
+      generation, 7, &*value, cap, allocation.second);
+    ASSERT_TRUE(selected.applied());
+    EXPECT_EQ(selected.rate.bits_per_second, 28'988'000u);
+    EXPECT_EQ(selected.rate.bits_per_packet, (blocksize + 32) * 8);
+    EXPECT_EQ(applied::packet_budget_kbps(budget, *trial), percentage == 40 ? 21488 : 17738);
+    // Nominal policy units cannot masquerade as this revision's actual encoder setting.
+    EXPECT_EQ(applied::select_rate(true, budget, 100, blocksize, 32, generation, 7, &*value,
+      cap_t {generation, 10, budget.encoder_kbps, budget.encoder_kbps}, allocation.second).source,
+      applied::source_e::frame_mismatch);
+    EXPECT_EQ(value->configured_encoder_kbps(), *trial);
+    EXPECT_EQ(value->authority_revision(), 10u);
+    EXPECT_EQ(value->input_pts(), 7);
+  }
+}
+
+TEST(StreamAppliedPacing, OldTrialRepairCannotInflateANewerLowerPolicyCeilingOrBorrowAnUp) {
+  stream_bitrate::request_t budget;
+  stream_bitrate::split_request(budget, 30000, 20, 512);
+  live_tuning_fec::actuator_t actuator;
+  ASSERT_TRUE(actuator.configure(generation, budget));
+  const auto trial = actuator.request(16000, 40, 1, true, 10);
+  ASSERT_TRUE(trial);
+  ASSERT_EQ(actuator.confirm(generation, 10, *trial, 7, true, true),
+    live_tuning_fec::actuator_t::confirmation_e::published);
+  const int percentage = actuator.allocation_for_frame(generation, 7, 77).second;
+  const auto old = frame(*trial);
+  ASSERT_TRUE(old);
+  const auto choose = [&](const cap_t &cap) {
+    return applied::select_rate(true, budget, 100, blocksize, 32, generation, 7, &*old, cap, percentage);
+  };
+  const auto before = choose({generation, 10, *trial, 16000});
+  const auto down = choose({generation, 11, 10000, 10000});
+  const auto policy_budget = applied::packet_budget_kbps(budget, 10000);
+  const auto wrong_domain = applied::packet_budget_kbps(budget, 10000, percentage);
+  ASSERT_TRUE(before.applied());
+  ASSERT_TRUE(down.applied());
+  ASSERT_TRUE(policy_budget);
+  ASSERT_TRUE(wrong_domain);
+  EXPECT_GT(*wrong_domain, *policy_budget);
+  EXPECT_EQ(down.rate.bits_per_second, *policy_budget * 1000);
+  EXPECT_LT(down.rate.bits_per_second, before.rate.bits_per_second);
+  const auto up = choose({generation, 12, budget.encoder_kbps, budget.encoder_kbps});
+  ASSERT_TRUE(up.applied());
+  expect_same_rate(up.rate, before.rate);
+  auto active = before.rate;
+  applied::tighten(active, down);
+  const auto debt = stream_pacing::send_offset(active, 20);
+  applied::tighten(active, up);
+  EXPECT_EQ(stream_pacing::send_offset(active, 20), debt);
+  EXPECT_GT(debt, stream_pacing::send_offset(before.rate, 20));
+  EXPECT_EQ(old->configured_encoder_kbps(), *trial);
+  EXPECT_EQ(old->authority_revision(), 10u);
+  EXPECT_EQ(old->input_pts(), 7);
+}
+
+TEST_F(StreamAppliedPacingScope, CapReadIsUnavailableDuringSdkApplyAndActiveFrameKeepsDebt) {
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  const auto cap = adaptive_bitrate::get_live_pacing_cap(generation);
+  ASSERT_TRUE(cap);
+  EXPECT_EQ(cap->policy_encoder_kbps, cap->target_encoder_kbps);
+  const auto value = frame(cap->target_encoder_kbps, cap->revision);
+  ASSERT_TRUE(value);
+  const auto before = select(&*value, cap);
+  ASSERT_TRUE(before.applied());
+  std::promise<void> entered, finish;
+  auto resume = finish.get_future();
+  auto update = std::async(std::launch::async, [&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+      entered.set_value();
+      resume.wait();
+      return true;
+    });
+  });
+  entered.get_future().wait();  // The SDK callback now owns state_mutex.
+  auto reader = std::async(std::launch::async, [] {
+    return adaptive_bitrate::get_live_pacing_cap(generation);
+  });
+  const auto status = reader.wait_for(100ms);
+  // Release before assertions/join, so a blocking-read regression can fail cleanly.
+  finish.set_value();
+  const auto unavailable = reader.get();
+  EXPECT_TRUE(update.get());
+  EXPECT_EQ(status, std::future_status::ready);
+  EXPECT_FALSE(unavailable);
+  auto active = before.rate;
+  const auto debt = stream_pacing::send_offset(active, 20);
+  const auto candidate = select(&*value, unavailable);
+  EXPECT_EQ(candidate.source, applied::source_e::owner_unavailable);
+  applied::tighten(active, candidate);
+  expect_same_rate(active, before.rate);
+  EXPECT_EQ(stream_pacing::send_offset(active, 20), debt);
+  stream_pacing::session_starts_t schedule;
+  const auto start = std::chrono::steady_clock::time_point {10s};
+  schedule.frame_end(generation, start + debt);
+  EXPECT_EQ(schedule.frame_start(generation, start), start + debt);
+  const auto after = adaptive_bitrate::get_live_pacing_cap(generation);
+  ASSERT_TRUE(after);
+  EXPECT_EQ(after->generation, cap->generation);
+  EXPECT_EQ(after->revision, cap->revision);
+  EXPECT_EQ(after->target_encoder_kbps, cap->target_encoder_kbps);
+  EXPECT_EQ(after->policy_encoder_kbps, cap->policy_encoder_kbps);
 }

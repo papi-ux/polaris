@@ -359,11 +359,15 @@ namespace adaptive_bitrate {
   std::optional<live_bitrate_request_t> get_live_bitrate_request();
 
   // A read-only ceiling for an already submission-bound frame, never an
-  // applied-setting receipt. Missing/contaminated scopes keep legacy pacing.
+  // applied-setting receipt. Missing/contaminated/busy scopes keep legacy for
+  // new frames; already admitted frames must freeze or tighten.
   struct live_pacing_cap_t {
     std::uint64_t generation = 0;
     std::uint64_t revision = 0;
     int target_encoder_kbps = 0;
+    // Nominal policy target in F0 units, before a trial's encoder allocation.
+    // Without a trial the nominal and actual targets are the same.
+    int policy_encoder_kbps = target_encoder_kbps;
   };
   std::optional<live_pacing_cap_t> get_live_pacing_cap(std::uint64_t generation);
 

@@ -2298,7 +2298,8 @@ namespace stream {
               config::stream.wire_pacing_headroom, shards.blocksize, shards.prefixsize,
               session->session_generation, packet->frame_index(), packet->encoder_setting ? &*packet->encoder_setting : nullptr,
               config::stream.wire_pacing && packet->encoder_setting ?
-                adaptive_bitrate::get_live_pacing_cap(session->session_generation) : std::nullopt);
+                adaptive_bitrate::get_live_pacing_cap(session->session_generation) : std::nullopt,
+              fecPercentage);
           };
           if (blockIndex == 0) {
             const auto selected = select_applied_pacing();

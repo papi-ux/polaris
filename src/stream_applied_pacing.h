@@ -17,23 +17,27 @@ namespace stream_applied_pacing {
     bool applied() const noexcept { return source == source_e::applied; }
   };
 
-  // F0 is only the handshake's nominal admission conversion, not an estimate
-  // of actual repair cost. Audio/control retain exactly the handshake's
-  // deductions. split_kbps already contains warp and any launch cap.
-  inline std::optional<std::int64_t> packet_budget_kbps(const stream_bitrate::request_t &request, int video_kbps) {
+  // Invert an encoder allocation in its own nominal FEC domain. The current
+  // policy uses F0; a historical frame uses its frozen packetizer percentage.
+  // Audio/control keep the handshake deductions in that domain, and the
+  // total remains bounded by split_kbps (already warped and launch-capped).
+  inline std::optional<std::int64_t> packet_budget_kbps(const stream_bitrate::request_t &request, int video_kbps,
+                                                      std::optional<int> frame_fec_percentage = std::nullopt) {
+    const int percentage = frame_fec_percentage.value_or(request.fec_percentage);
     if (request.split_kbps <= 0 || request.split_kbps > stream_pacing::k_max_negotiated_kbps ||
         request.encoder_kbps <= 0 || request.audio_kbps < 0 ||
         request.fec_percentage < 0 || request.fec_percentage > stream_bitrate::k_max_adjusted_fec_percentage ||
+        percentage < 0 || percentage > stream_bitrate::k_max_adjusted_fec_percentage ||
         request.warp_factor <= 0 || video_kbps <= 0 ||
         stream_bitrate::encoder_kbps_for_wire(request.split_kbps, request.fec_percentage, request.audio_kbps) != request.encoder_kbps) {
       return std::nullopt;
     }
     const auto total = std::min(request.split_kbps, stream_bitrate::wire_kbps_for_encoder(
-      std::min(video_kbps, request.encoder_kbps), request.fec_percentage, request.audio_kbps));
+      std::min(video_kbps, request.encoder_kbps), percentage, request.audio_kbps));
     std::int64_t after_fec = total;
-    after_fec /= 100.f / (100 - request.fec_percentage);
+    after_fec /= 100.f / (100 - percentage);
     const auto reserved_audio_control = after_fec - stream_bitrate::encoder_kbps_for_wire(
-      total, request.fec_percentage, request.audio_kbps);
+      total, percentage, request.audio_kbps);
     const auto packets = total - reserved_audio_control;
     return packets > 0 ? std::optional {packets} : std::nullopt;
   }
@@ -47,7 +51,8 @@ namespace stream_applied_pacing {
                                  std::size_t blocksize, std::size_t prefixsize,
                                  std::uint64_t generation, std::int64_t frame_index,
                                  const video::bitrate_provenance::record_t *frame,
-                                 const std::optional<adaptive_bitrate::live_pacing_cap_t> &cap) {
+                                 const std::optional<adaptive_bitrate::live_pacing_cap_t> &cap,
+                                 std::optional<int> frame_fec_percentage = std::nullopt) {
     const auto legacy = stream_pacing::select_rate(enabled, request.split_kbps, headroom, blocksize);
     const auto refuse = [&](source_e reason) { return selection_t {legacy, reason}; };
     if (!enabled) return refuse(source_e::off);
@@ -61,8 +66,10 @@ namespace stream_applied_pacing {
         (frame->authority_revision() == cap->revision && frame->configured_encoder_kbps() != cap->target_encoder_kbps)) {
       return refuse(source_e::frame_mismatch);
     }
-    const auto frame_budget = packet_budget_kbps(request, frame->configured_encoder_kbps());
-    const auto current_cap = packet_budget_kbps(request, cap->target_encoder_kbps);
+    const auto frame_budget = packet_budget_kbps(request, frame->configured_encoder_kbps(), frame_fec_percentage);
+    // The current lower policy ceiling is independent of an old frame's repair
+    // percentage. Keep the actual target above only for exact revision identity.
+    const auto current_cap = packet_budget_kbps(request, cap->policy_encoder_kbps);
     if (!frame_budget || !current_cap) return refuse(source_e::split_unavailable);
     // The sender retains its existing nonzero block/legacy-divisor precondition.
     // Check the constructed UDP payload size before adding the prefix.

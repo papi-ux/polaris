@@ -1124,7 +1124,10 @@ namespace adaptive_bitrate {
   }
 
   std::optional<live_pacing_cap_t> get_live_pacing_cap(std::uint64_t generation) {
-    std::lock_guard<std::mutex> lock(state_mutex);
+    // The shared sender must not wait behind an encoder/SDK reconfiguration.
+    // No field is read until this coherent, non-blocking snapshot is owned.
+    std::unique_lock<std::mutex> lock(state_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return std::nullopt;
     // Unlike get_live_bitrate_request(), this never advances policy, reaffirms
     // an ACK or publishes parity. It can only restrict an immutable old frame.
     const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
@@ -1136,7 +1139,8 @@ namespace adaptive_bitrate {
         pending_live_update_active.load(std::memory_order_relaxed) || target <= 0) {
       return std::nullopt;
     }
-    return live_pacing_cap_t {generation, operator_revision, target};
+    return live_pacing_cap_t {generation, operator_revision, target,
+      policy_target_kbps > 0 ? policy_target_kbps : target};
   }
 
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
