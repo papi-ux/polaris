@@ -15,10 +15,15 @@ namespace stream_applied_pacing {
     stream_pacing::rate_t rate;
     source_e source;
     bool applied() const noexcept { return source == source_e::applied; }
+    // A legacy start refused only because no owner cap was readable (busy
+    // try_lock or no current owner) may later tighten under a coherent cap.
+    // Every other refusal keeps the legacy rate for the whole frame.
+    bool refreshable() const noexcept { return applied() || source == source_e::owner_unavailable; }
   };
 
   // Invert an encoder allocation in its own nominal FEC domain. The current
-  // policy uses F0; a historical frame uses its frozen packetizer percentage.
+  // policy uses F0; a frame uses the percentage its allocation was published
+  // at, before the packetizer's envelope fit or oversized zero-parity fallback.
   // Audio/control keep the handshake deductions in that domain, and the
   // total remains bounded by split_kbps (already warped and launch-capped).
   inline std::optional<std::int64_t> packet_budget_kbps(const stream_bitrate::request_t &request, int video_kbps,

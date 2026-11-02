@@ -5,6 +5,7 @@
 #include "src/config.h"
 #include "src/live_tuning_fec.h"
 #include "src/stream_applied_pacing.h"
+#include "src/stream_fec.h"
 #include "src/video_bitrate_application.h"
 
 namespace {
@@ -405,4 +406,126 @@ TEST_F(StreamAppliedPacingScope, CapReadIsUnavailableDuringSdkApplyAndActiveFram
   EXPECT_EQ(after->revision, cap->revision);
   EXPECT_EQ(after->target_encoder_kbps, cap->target_encoder_kbps);
   EXPECT_EQ(after->policy_encoder_kbps, cap->policy_encoder_kbps);
+}
+
+TEST(StreamAppliedPacing, PacketizerFitAndOversizedFallbackKeepTheAllocationRepairDomain) {
+  stream_bitrate::request_t budget;
+  stream_bitrate::split_request(budget, 30000, 20, 512);
+  ASSERT_EQ(budget.encoder_kbps, 22988);
+  constexpr std::size_t prefix = 32;
+  // Packetized sizes where the production fit steps a 50% allocation down to
+  // 35% or 30%, and one past the configured envelope (zero-parity fallback).
+  constexpr std::size_t fits_35 = 4 * 188 * blocksize, fits_30 = 4 * 196 * blocksize,
+                        oversized = 4 * 212 * blocksize + 1;
+  struct case_t {
+    int trial;
+    std::size_t bytes;
+    int packetized;
+    std::int64_t packetized_budget;
+  };
+  for (const auto &c : {case_t {0, oversized, 0, 22988}, case_t {50, fits_35, 35, 22065},
+                        case_t {50, fits_30, 30, 20417}, case_t {50, oversized, 0, 13988}}) {
+    SCOPED_TRACE(testing::Message() << "trial " << c.trial << " bytes " << c.bytes);
+    live_tuning_fec::actuator_t actuator;
+    ASSERT_TRUE(actuator.configure(generation, budget));
+    int encoder = budget.encoder_kbps;
+    if (c.trial) {
+      const auto trial = actuator.request(budget.encoder_kbps, c.trial, 1, true, 10);
+      ASSERT_TRUE(trial);
+      ASSERT_EQ(actuator.confirm(generation, 10, *trial, 7, true, true),
+        live_tuning_fec::actuator_t::confirmation_e::published);
+      encoder = *trial;
+    }
+    const auto allocation = actuator.allocation_for_frame(generation, 7, 77);
+    ASSERT_EQ(allocation.first, 20);
+    ASSERT_EQ(allocation.second, c.trial ? c.trial : 20);
+    // The packetizer's own result: a fitted envelope, or zero parity for a
+    // frame the configured envelope cannot protect (the sender's fallback).
+    const auto fit = stream::fit_frame_fec(c.bytes, blocksize, allocation.first, allocation.second, 2);
+    ASSERT_TRUE(fit);
+    ASSERT_EQ(fit->fec_percentage, c.packetized);
+    const auto value = frame(encoder);
+    ASSERT_TRUE(value);
+    const auto choose = [&](const cap_t &cap, int percentage) {
+      return applied::select_rate(true, budget, 100, blocksize, prefix, generation, 7, &*value, cap, percentage);
+    };
+    const cap_t current {generation, 10, encoder, budget.encoder_kbps};
+    const auto selected = choose(current, allocation.second);
+    ASSERT_TRUE(selected.applied());
+    EXPECT_EQ(selected.rate.bits_per_second, 28'988'000u);
+    EXPECT_EQ(selected.rate.bits_per_packet, (blocksize + prefix) * 8);
+    // Inverting through the packetized percentage under-admits this frame.
+    EXPECT_EQ(applied::packet_budget_kbps(budget, encoder, c.packetized), c.packetized_budget);
+    EXPECT_LT(choose(current, c.packetized).rate.bits_per_second, selected.rate.bits_per_second);
+    // The current F0 policy ceiling still bounds the allocation's domain.
+    const auto lower = choose({generation, 11, 10000, 10000}, allocation.second);
+    ASSERT_TRUE(lower.applied());
+    EXPECT_EQ(lower.rate.bits_per_second, 12'753'000u);
+  }
+}
+
+TEST_F(StreamAppliedPacingScope, BusyBlockZeroStartCanOnlyTightenUnderALaterCoherentCap) {
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  const auto cap = adaptive_bitrate::get_live_pacing_cap(generation);
+  ASSERT_TRUE(cap);
+  const auto value = frame(cap->target_encoder_kbps, cap->revision);
+  ASSERT_TRUE(value);
+  const auto legacy = stream_pacing::select_rate(true, 20000, 100, blocksize);
+  std::promise<void> entered, finish;
+  auto owned = entered.get_future();
+  auto resume = finish.get_future();
+  auto update = std::async(std::launch::async, [&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+      entered.set_value();
+      resume.wait();
+      return true;
+    });
+  });
+  // Bounded, so a refusal before the SDK callback fails instead of hanging.
+  const auto sdk = owned.wait_for(10s);
+  auto block_zero = std::async(std::launch::async, [&] {
+    return select(&*value, adaptive_bitrate::get_live_pacing_cap(generation));
+  });
+  const auto status = block_zero.wait_for(100ms);
+  // Release before assertions/join, so a blocking-read regression can fail cleanly.
+  finish.set_value();
+  const auto start = block_zero.get();
+  EXPECT_TRUE(update.get());
+  ASSERT_EQ(sdk, std::future_status::ready);
+  EXPECT_EQ(status, std::future_status::ready);
+  EXPECT_EQ(start.source, applied::source_e::owner_unavailable);
+  expect_same_rate(start.rate, legacy);
+  ASSERT_TRUE(start.refreshable());
+  auto active = start.rate;
+  const auto legacy_due = stream_pacing::send_offset(active, 20);
+  // The released owner's coherent cap tightens the frame from its original start.
+  const auto later = select(&*value, adaptive_bitrate::get_live_pacing_cap(generation));
+  ASSERT_TRUE(later.applied());
+  applied::tighten(active, later);
+  expect_same_rate(active, later.rate);
+  const auto debt = stream_pacing::send_offset(active, 20);
+  EXPECT_GT(debt, legacy_due);
+  // Busy, missing or higher caps never speed it up again or forgive the debt.
+  applied::tighten(active, start);
+  applied::tighten(active, select(&*value, std::nullopt));
+  applied::tighten(active, select(&*value, cap_t {generation, cap->revision + 1, 50000}));
+  EXPECT_EQ(stream_pacing::send_offset(active, 20), debt);
+  // Unknown, off, mismatched and unrepresentable starts stay legacy for the frame.
+  EXPECT_FALSE(select(nullptr, cap).refreshable());
+  EXPECT_FALSE(select(&*value, cap, false).refreshable());
+  EXPECT_FALSE(select(&*value, cap_t {generation + 1, cap->revision, cap->target_encoder_kbps}).refreshable());
+  EXPECT_FALSE(select(&*value, cap, true, 65535).refreshable());
+  // Disabled and manual owners stay unreadable, so their frames keep the legacy rate.
+  adaptive_bitrate::set_runtime_enabled(false);
+  auto disabled = select(&*value, adaptive_bitrate::get_live_pacing_cap(generation));
+  EXPECT_EQ(disabled.source, applied::source_e::owner_unavailable);
+  applied::tighten(disabled.rate, select(&*value, adaptive_bitrate::get_live_pacing_cap(generation)));
+  expect_same_rate(disabled.rate, legacy);
+  adaptive_bitrate::set_runtime_enabled(true);
+  adaptive_bitrate::set_live_bitrate_for_stream(8000);
+  auto manual = select(&*value, adaptive_bitrate::get_live_pacing_cap(generation));
+  EXPECT_EQ(manual.source, applied::source_e::owner_unavailable);
+  applied::tighten(manual.rate, select(&*value, adaptive_bitrate::get_live_pacing_cap(generation)));
+  expect_same_rate(manual.rate, legacy);
 }

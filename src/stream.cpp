@@ -2123,6 +2123,9 @@ namespace stream {
       const auto [configured_fec, adaptive_fec] = adaptive_bitrate::frame_fec_allocation(
         session->session_generation, packet->frame_index(), fecPercentage);
       fecPercentage = configured_fec;
+      // Applied pacing inverts the frame's encoder allocation in this domain;
+      // the fit and oversized fallback below change only its packetization.
+      const int allocation_fec_percentage = adaptive_fec;
       if (adaptive_fec != fecPercentage) {
         // Keep the established configured-envelope warning and fallback for
         // an enormous frame. A trial may step down for this frame, never strip
@@ -2236,7 +2239,7 @@ namespace stream {
         // Use around 80% of 1Gbps, unless wire pacing paces this session at its own negotiated rate.
         auto pacing = stream_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request.split_kbps,
           config::stream.wire_pacing_headroom, blocksize);
-        bool applied_pacing = false;
+        bool refresh_applied_pacing = false;
         size_t ratecontrol_packets_in_1ms = pacing.packets_in_1ms;
 
         // Send less than 64K in a single batch.
@@ -2299,15 +2302,15 @@ namespace stream {
               session->session_generation, packet->frame_index(), packet->encoder_setting ? &*packet->encoder_setting : nullptr,
               config::stream.wire_pacing && packet->encoder_setting ?
                 adaptive_bitrate::get_live_pacing_cap(session->session_generation) : std::nullopt,
-              fecPercentage);
+              allocation_fec_percentage);
           };
           if (blockIndex == 0) {
             const auto selected = select_applied_pacing();
             pacing = selected.rate;
-            applied_pacing = selected.applied();
+            refresh_applied_pacing = selected.refreshable();
           }
           const auto refresh_pacing = [&] {
-            if (applied_pacing) stream_applied_pacing::tighten(pacing, select_applied_pacing());
+            if (refresh_applied_pacing) stream_applied_pacing::tighten(pacing, select_applied_pacing());
             ratecontrol_packets_in_1ms = pacing.packets_in_1ms;
             send_batch_size = stream_pacing::send_batch_limit(pacing, legacy_send_batch_size);
           };
