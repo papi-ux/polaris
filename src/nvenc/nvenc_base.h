@@ -13,6 +13,7 @@
 #include "nvenc_encoded_frame.h"
 #include "src/logging.h"
 #include "src/video.h"
+#include "src/video_bitrate_application.h"
 
 /**
  * @brief Standalone NVENC encoder
@@ -74,7 +75,11 @@ namespace nvenc {
      * @param new_bitrate_kbps New target bitrate in kilobits per second.
      * @return `true` on success, `false` on error.
      */
-    bool update_bitrate(int new_bitrate_kbps);
+    bool update_bitrate(int new_bitrate_kbps, std::optional<video::bitrate_application::origin_t> origin = std::nullopt);
+
+    // Passive local history only; no SDK/broker calls or ownership of packets.
+    std::optional<video::bitrate_provenance::record_t> take_bitrate_observation(uint64_t output_timestamp) noexcept;
+    void retire_bitrate_observations() noexcept;
 
   protected:
     /**
@@ -148,6 +153,9 @@ namespace nvenc {
                                          ///< Can be set in constructor or `init_library()`, must override `wait_for_async_event()`.
 
   private:
+    // Replaced only for a newly opened real SDK handle; weak observation sinks
+    // cannot mutate a later handle, even if this wrapper's address is reused.
+    std::unique_ptr<video::bitrate_application::adapter_t> bitrate_observations;
     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
     uint32_t minimum_api_version = 0;
 

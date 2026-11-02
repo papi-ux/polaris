@@ -9,6 +9,7 @@
 #include "encoder_probe_reuse.h"
 #include "launch_failure.h"
 #include "pyrowave_availability.h"
+#include "video_bitrate_provenance.h"
 // PYROWORK01 BEGIN
 #include "video_pyrowave_work.h"
 // PYROWORK01 END
@@ -628,6 +629,9 @@ namespace video {
     virtual bitrate_update_e update_bitrate(int new_bitrate_kbps) {
       return bitrate_update_e::rejected;
     }
+
+    // Metadata retirement happens on the owner thread, before detached teardown.
+    virtual void retire_bitrate_observations() noexcept {}
   };
 
   // encoders
@@ -709,6 +713,7 @@ namespace video {
     pyrowave_work::receipt_value pyrowave_work_receipt;
     // PYROWORK01 END
     // Local observation metadata only. These fields never enter a network packet.
+    std::optional<const bitrate_provenance::record_t> encoder_setting;
     std::uint64_t trace_encoder = 0;
     std::uint64_t trace_submission = 0;
     std::uint64_t trace_packet = 0;
