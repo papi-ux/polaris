@@ -32,6 +32,7 @@
 #include "crypto.h"
 #include "logging.h"
 #include "network.h"
+#include "stream_frame_feedback_json.h"
 #include "stream_start_outcome.h"
 #include "stream_stats.h"
 #include "utility.h"
@@ -657,6 +658,12 @@ namespace stream_stats {
       timing_ring_t capture_to_encode_ring;
       timing_ring_t encode_to_send_ring;
       timing_ring_t capture_to_send_ring;
+
+      // This exact scope's frame-submission launch nonce, baseline, latest receipt and sender ledger
+      // (#611). Shared only so an ingest can work on it outside frame_timing_mutex; retired when the
+      // scope ends. Null when it could not be made: its receipts then say so.
+      std::string frame_submission_launch_nonce;
+      std::shared_ptr<stream_frame_feedback::scope_feedback_t> frame_feedback;
     };
 
     std::mutex frame_timing_mutex;
@@ -5484,6 +5491,14 @@ namespace stream_stats {
       // Host arrival and client counter clocks do not locate encode or send time.
       {"media_rate_attribution", {{"state", "unknown"}, {"reason", "unmeasured_report_timing"}}},
     };
+    // The same stream scope's newest optional frame-submission receipt (#611), absent when its client
+    // never sent the section. Observational: it changes nothing above and is no loss figure.
+    if (stats.streaming && stats.frame_submission && stats.session_generation != 0 &&
+        stats.frame_submission->session_generation == stats.session_generation &&
+        !stats.app_session_id.empty() && stats.frame_submission->app_session_id == stats.app_session_id) {
+      out[stream_frame_feedback::k_receipt_key] = stream_frame_feedback::readback_json(
+        stats.frame_submission->receipt, std::chrono::steady_clock::now());
+    }
     if (!available) return out;
     out["epoch"] = receipt.epoch;
     out["sequence"] = receipt.sequence;
@@ -5697,6 +5712,34 @@ namespace stream_stats {
     if (primary_client) {
       record_primary_network_observation(true, latency_ms, packet_loss, bytes_sent);
     }
+  }
+
+  stream_frame_feedback::receipt_t ingest_frame_submission(
+      const std::string &owner_uuid,
+      const std::string &app_session_id,
+      std::uint64_t session_generation,
+      const stream_frame_feedback::section_t &section) {
+    stream_frame_feedback::receipt_t refused;
+    refused.reason = "scope_mismatch";
+    if (owner_uuid.empty() || app_session_id.empty() || session_generation == 0) return refused;
+    // Serialized with scope start/stop like the legacy ingest, so the scope checked here is still the
+    // current one when the section is folded. Nothing else is taken or published from here.
+    std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
+    std::shared_ptr<stream_frame_feedback::scope_feedback_t> feedback;
+    {
+      std::lock_guard<std::mutex> timing_lock(frame_timing_mutex);
+      const auto *active = find_session_timing_locked(owner_uuid);
+      if (!active || active->session_generation != session_generation ||
+          active->session_token != app_session_id) {
+        return refused;
+      }
+      feedback = active->frame_feedback;
+    }
+    if (!feedback) {
+      refused.reason = "frame_feedback_unavailable";
+      return refused;
+    }
+    return feedback->ingest(section, std::chrono::steady_clock::now());
   }
 
   std::string_view from_client_media_ingest_state(
@@ -6428,18 +6471,37 @@ namespace stream_stats {
 
   void start_session_timing(const std::string &device_uuid,
                             std::uint64_t session_generation,
-                            std::string session_token) {
+                            std::string session_token,
+                            std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_ledger,
+                            std::string frame_submission_launch_nonce) {
+    // A ledger of another generation is never this scope's evidence, and only an exact nonce is kept.
+    if (frame_ledger && frame_ledger->stream_generation() != session_generation) frame_ledger.reset();
+    if (!stream_frame_feedback::valid_nonce(frame_submission_launch_nonce)) frame_submission_launch_nonce.clear();
+    std::shared_ptr<stream_frame_feedback::scope_feedback_t> frame_feedback;
+    try {
+      frame_feedback = std::make_shared<stream_frame_feedback::scope_feedback_t>(
+        std::move(frame_ledger), CLIENT_MEDIA_COUNTER_MAX_GAP, frame_submission_launch_nonce);
+    } catch (const std::bad_alloc &) {
+      // Diagnostic state must never fail a stream; this scope's receipts then say it is unavailable.
+      frame_feedback.reset();
+    }
     std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
     std::unique_lock<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
-        [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; }),
+        [&device_uuid](const session_timing_state_t &s) {
+          if (s.device_uuid != device_uuid) return false;
+          if (s.frame_feedback) s.frame_feedback->retire();
+          return true;
+        }),
       session_timings.end());
 
     session_timing_state_t state;
     state.device_uuid = device_uuid;
     state.session_generation = session_generation;
     state.session_token = std::move(session_token);
+    state.frame_submission_launch_nonce = std::move(frame_submission_launch_nonce);
+    state.frame_feedback = std::move(frame_feedback);
     session_timings.push_back(std::move(state));
     // Taken alone, after frame_timing_mutex is released.
     lock.unlock();
@@ -6457,7 +6519,9 @@ namespace stream_stats {
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
         [&device_uuid, session_generation](const session_timing_state_t &s) {
-          return s.device_uuid == device_uuid && s.session_generation == session_generation;
+          if (s.device_uuid != device_uuid || s.session_generation != session_generation) return false;
+          if (s.frame_feedback) s.frame_feedback->retire();
+          return true;
         }),
       session_timings.end());
     // Taken alone, after frame_timing_mutex is released. Only the ending lifecycle's receipt goes;
@@ -6509,6 +6573,8 @@ namespace stream_stats {
     result.session_generation = state->session_generation;
     result.session_active = true;
     result.ring_complete = state->capture_to_encode_ring.filled < FRAME_TIMING_RING_CAPACITY;
+    result.session_token = state->session_token;
+    result.frame_submission_launch_nonce = state->frame_submission_launch_nonce;
     return result;
   }
 
@@ -7162,6 +7228,22 @@ namespace stream_stats {
     if (const auto identity = get_single_active_session_identity()) {
       result.session_generation = identity->session_generation;
       result.app_session_id = identity->session_token;
+      // That same exact scope's newest frame-submission receipt, if it is still the registered one.
+      std::shared_ptr<stream_frame_feedback::scope_feedback_t> feedback;
+      {
+        std::lock_guard<std::mutex> timing_lock(frame_timing_mutex);
+        const auto *state = find_session_timing_locked(identity->device_uuid);
+        if (state && state->session_generation == identity->session_generation &&
+            state->session_token == identity->session_token) {
+          feedback = state->frame_feedback;
+        }
+      }
+      if (feedback) {
+        if (auto receipt = feedback->latest()) {
+          result.frame_submission = frame_submission_readback_t {
+            identity->session_generation, identity->session_token, std::move(*receipt)};
+        }
+      }
     }
     if (adaptive_state.fec_budget_available && adaptive_state.session_exclusive &&
         result.clients.size() == 1 && result.session_generation != 0 &&

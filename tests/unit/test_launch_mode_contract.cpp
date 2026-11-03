@@ -22,6 +22,7 @@
 #include <string>
 #include <utility>
 #include <unordered_set>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -416,6 +417,47 @@ TEST_F(AppLaunchAsDoorTests, FreshLaunchParserReachesTheAppGuardAfterAPinLosesIt
   }
 }
 
+
+// #611: the optional frame-submission launch nonce is kept only when it is one exact valid value, and
+// whether or not it is kept, the launch the parser builds is the same one.
+TEST_F(AppLaunchAsDoorTests, FrameSubmissionLaunchNonceIsKeptOnlyWhenExactAndNeverChangesTheLaunch) {
+  const std::string nonce = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+  struct case_t {
+    std::vector<std::string> values;
+    bool watch;
+    std::string kept;
+  };
+  const std::vector<case_t> cases {
+    {{nonce}, false, nonce},
+    {{}, false, ""},
+    {{"5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A"}, false, ""},
+    {{"5a5a"}, false, ""},
+    {{std::string(32, '0')}, false, ""},
+    {{nonce, nonce}, false, ""},
+    {{nonce}, true, ""},
+  };
+  for (const auto &c : cases) {
+    SCOPED_TRACE(c.values.empty() ? std::string {"absent"} : c.values.front() + (c.watch ? " watch" : ""));
+    auto cert = launch_client_cert();
+    proc::ctx_t app;
+    proc::set_launch_as(app, "headless_stream");
+    auto plain_args = resolved_launch_args("headless_stream", "headless_stream");
+    if (c.watch) plain_args.emplace("watch", "1");
+    auto args = plain_args;
+    for (const auto &value : c.values) args.emplace("frameSubmissionLaunchNonce", value);
+    const auto plain = nvhttp::make_launch_session(false, false, plain_args, cert.get(), false, &app);
+    const auto parsed = nvhttp::make_launch_session(false, false, args, cert.get(), false, &app);
+    ASSERT_NE(plain, nullptr);
+    ASSERT_NE(parsed, nullptr) << "a missing or malformed nonce never refuses an otherwise valid launch";
+    EXPECT_EQ(parsed->frame_submission_launch_nonce, c.kept);
+    EXPECT_TRUE(plain->frame_submission_launch_nonce.empty());
+    EXPECT_EQ(parsed->stream_mode, plain->stream_mode);
+    EXPECT_EQ(parsed->width, plain->width);
+    EXPECT_EQ(parsed->height, plain->height);
+    EXPECT_EQ(parsed->fps, plain->fps);
+    EXPECT_EQ(parsed->watch_only, plain->watch_only);
+  }
+}
 
 TEST_F(AppLaunchAsDoorTests, StaleHvdLegacyAndExactRequestsReachTheRealNamedRefusalDoor) {
   struct ProviderGuard { ~ProviderGuard() { virtual_display::set_host_stream_probe_for_tests(std::nullopt); } } guard;

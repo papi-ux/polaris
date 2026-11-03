@@ -114,6 +114,7 @@
 #include "client_support_report.h"
 #include "confighttp.h"
 #include "settings_metadata.h"
+#include "stream_frame_feedback_json.h"
 #include "stream_stats.h"
 #include "video.h"
 #ifdef __linux__
@@ -5535,6 +5536,12 @@ namespace nvhttp {
     }
     launch_session->watch_only = watch_requested(args);
     launch_session->perm = launch_session->watch_only ? PERM::view : named_cert_p->perm;
+    // Optional frame-submission launch association (#611): exactly one valid value, or nothing. A
+    // missing or malformed one never changes an otherwise valid launch. Watch-only streams keep none.
+    if (!launch_session->watch_only && args.count("frameSubmissionLaunchNonce") == 1) {
+      auto nonce = get_arg(args, "frameSubmissionLaunchNonce", "");
+      if (stream_frame_feedback::valid_nonce(nonce)) launch_session->frame_submission_launch_nonce = std::move(nonce);
+    }
     launch_session->enable_sops = util::from_view(get_arg(args, "sops", "0"));
     launch_session->surround_info = util::from_view(get_arg(args, "surroundAudioInfo", "196610"));
     launch_session->surround_params = (get_arg(args, "surroundParams", ""));
@@ -8110,6 +8117,9 @@ namespace nvhttp {
       )
     );
     tree.put("root.sessionToken", launch_session->session_token);
+    if (!launch_session->frame_submission_launch_nonce.empty()) {
+      tree.put("root.frameSubmissionLaunchNonce", launch_session->frame_submission_launch_nonce);
+    }
     tree.put("root.gamesession", 1);
 
   }
@@ -8409,6 +8419,9 @@ namespace nvhttp {
       )
     );
     tree.put("root.sessionToken", launch_session->session_token);
+    if (!launch_session->frame_submission_launch_nonce.empty()) {
+      tree.put("root.frameSubmissionLaunchNonce", launch_session->frame_submission_launch_nonce);
+    }
     tree.put("root.resume", 1);
 
 #if defined POLARIS_TRAY && POLARIS_TRAY >= 1
@@ -8933,7 +8946,8 @@ namespace nvhttp {
             {"expected_topology_assertion_v1", true}, {"session_lifecycle", true},
             {"disconnect_resume_v1", false}, {"session_stop_v1", true},
             {"client_settings_v1", false}, {"live_tuning_v1", false},
-            {"live_media_telemetry_v1", false}, {"diagnostics_doctor_v1", false},
+            {"live_media_telemetry_v1", false}, {"live_media_frame_submission_v1", false},
+            {"diagnostics_doctor_v1", false},
             {"doctor_actions_v1", false}, {"doctor_trials_v1", false}}}};
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
@@ -9021,6 +9035,9 @@ namespace nvhttp {
       features["diagnostics_doctor_v1"] = true;
       features["doctor_actions_v1"] = true;
       features["live_media_telemetry_v1"] = true;
+      // The optional frame-submission section of that same telemetry route (#611). Parser and
+      // diagnostic support only; it promises no per-encoder evidence.
+      features[stream_frame_feedback::k_capability] = true;
       features["doctor_v2_shadow_v1"] = true;
       features["doctor_v2_shadow_enabled"] = doctor_v2::shadow_enabled();
       features["doctor_trials_v1"] = true;
@@ -9239,6 +9256,13 @@ namespace nvhttp {
       output["app_session_id"] = session_token;
       output["session_generation"] = session_timing.session_active ?
         session_timing.session_generation : 0;
+      // Optional (#611): the launch nonce of that same timing scope, served only to its owner and only
+      // when it is that scope's exact app session too. Never from any global latest launch.
+      if (session_timing.session_active && owned_by_client && !session_token.empty() &&
+          session_timing.session_token == session_token &&
+          stream_frame_feedback::valid_nonce(session_timing.frame_submission_launch_nonce)) {
+        output["frame_submission_launch_nonce"] = session_timing.frame_submission_launch_nonce;
+      }
       output["owner_unique_id"] = status_snapshot.owner_unique_id;
       output["owner_device_name"] = status_snapshot.owner_device_name;
       output["viewer_count"] = status_snapshot.viewer_count;
@@ -11590,6 +11614,16 @@ namespace nvhttp {
         if (result.observation_published) {
           output["media_loss_pct"] = result.media_loss_pct;
           output["media_loss_source"] = "client_media_counters";
+        }
+        // Optional frame-submission section (#611), read only once the legacy counters above were
+        // accepted and published, so it cannot change their status, body or controller calls. Its
+        // receipt is observational; a malformed section only makes the new evidence unavailable.
+        const auto frame_section = stream_frame_feedback::parse_section(sample);
+        if (frame_section.state != stream_frame_feedback::section_t::state_e::absent) {
+          output[stream_frame_feedback::k_receipt_key] = stream_frame_feedback::receipt_json(
+            stream_stats::ingest_frame_submission(
+              named_cert_p->uuid, requested_scope->app_session_id,
+              requested_scope->session_generation, frame_section));
         }
         if (doctor_v2::shadow_enabled()) {
           auto shadow_body = body;

@@ -186,6 +186,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_media_gate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_source_safety_contracts.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_fec.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_frame_feedback.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_pacing.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_reset_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_v2.cpp

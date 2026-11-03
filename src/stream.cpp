@@ -48,6 +48,7 @@ extern "C" {
 #include "stream_applied_pacing.h"
 #include "stream_fec.h"
 #include "stream_fec_status.h"
+#include "stream_frame_feedback.h"
 #include "stream_pacing.h"
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
@@ -634,6 +635,14 @@ namespace stream {
     // stream_stats uses this to reject a stale write/stop that arrives
     // after this uuid's slot has already been handed to a newer session.
     std::uint64_t session_generation = 0;
+
+    // This generation's frame-submission sender ledger (#611), made in alloc() before any thread can
+    // send for it and never replaced. Written only by videoBroadcastThread(), whatever the trace
+    // setting; diagnostic, never a send, pacing, FEC or bitrate input. Null when it could not be made.
+    std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_submission_ledger;
+    // The exact launch/resume attempt nonce this session was admitted with (#611), copied unchanged
+    // from its launch session, or empty. Bound to this generation's timing scope only.
+    std::string frame_submission_launch_nonce;
 
     // Accessed only by videoBroadcastThread(). Keeping one tracker per
     // session prevents multi-client summaries from being combined.
@@ -2024,17 +2033,30 @@ namespace stream {
         continue;
       }
       auto session = static_cast<session_t *>(delivery.get());
+      // Frame-submission ledger (#611): this frame's identity and immutable encoder setting, recorded at
+      // the acquired destination before any send. Its disposition comes only from the actual send API
+      // return values below and is completed when this iteration ends, however it ends.
+      stream_frame_feedback::frame_send_record_t submission_record {
+        session->frame_submission_ledger.get(), packet->frame_index(), packet->encoder_setting};
       auto lowseq = session->video.lowseq;
       trace_initial_lowseq = trace_published_lowseq = lowseq;
       if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_context").u("packet", packet->trace_packet)
         .u("session_generation", session->session_generation).i("initial_lowseq", lowseq).o("video_epoch_steady_ns", vrr_trace::ns(video_epoch)));
       std::optional<std::uint32_t> source_rtp_timestamp;
       if (packet->source_clock_timestamp) {
-        if (!packet->frame_timestamp) { trace_disposition = "source_timestamp_unavailable"; continue; }
+        if (!packet->frame_timestamp) {
+          trace_disposition = "source_timestamp_unavailable";
+          submission_record.not_sent();
+          continue;
+        }
         source_rtp_timestamp = vrr_pacing::rtp_timestamp(
           std::chrono::duration_cast<std::chrono::nanoseconds>(packet->frame_timestamp->time_since_epoch()).count(),
           std::chrono::duration_cast<std::chrono::nanoseconds>(video_epoch.time_since_epoch()).count());
-        if (!source_rtp_timestamp) { trace_disposition = "source_rtp_unrepresentable"; continue; }
+        if (!source_rtp_timestamp) {
+          trace_disposition = "source_rtp_unrepresentable";
+          submission_record.not_sent();
+          continue;
+        }
       }
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
@@ -2453,6 +2475,7 @@ namespace stream {
                   static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send), current_batch_size, "send_batch"};
                 ++trace_send_calls;
                 const bool batch_result = platf::send_batch(batch_info);
+                submission_record.send_returned(true, batch_result);
                 trace_batch.finish(batch_result);
                 if (!batch_result) {
                   if (delivery.cancelled()) { trace_disposition = "cancelled_after_batch"; return; }
@@ -2479,6 +2502,7 @@ namespace stream {
                       static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send) + y, 1, "send", trace_batch.id()};
                     ++trace_send_calls;
                     const bool single_result = platf::send(send_info);
+                    submission_record.send_returned(false, single_result);
                     trace_single.finish(single_result);
                   }
                 }
@@ -2512,8 +2536,11 @@ namespace stream {
         session->video.lowseq = lowseq;
         trace_sequence_published = true;
         trace_published_lowseq = lowseq;
+        // Retirement is sticky, so any cancelled return above is still visible here.
+        submission_record.path_finished(delivery.cancelled());
         if (!delivery.cancelled()) trace_disposition = "send_loop_returned_lowseq_published";
       } catch (const std::exception &e) {
+        submission_record.exception();
         trace_disposition = "exception_before_lowseq_publication";
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);
@@ -3661,7 +3688,9 @@ namespace stream {
       // Frozen in alloc(); recorded once against this generation's own entry.
       stream_stats::record_vrr_session(session.vrr);
       stream_stats::start_session_timing(
-        session.device_uuid, session.session_generation, session.session_token
+        session.device_uuid, session.session_generation, session.session_token,
+        session.frame_submission_ledger,
+        session.watch_only ? std::string {} : session.frame_submission_launch_nonce
       );
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
@@ -3787,7 +3816,15 @@ namespace stream {
       session->device_uuid = launch_session.unique_id;
       session->client_family = launch_session.client_family;
       session->session_token = launch_session.session_token;
+      session->frame_submission_launch_nonce = launch_session.frame_submission_launch_nonce;
       session->session_generation = next_session_generation.fetch_add(1, std::memory_order_relaxed);
+      try {
+        session->frame_submission_ledger =
+          std::make_shared<stream_frame_feedback::sender_ledger_t>(session->session_generation);
+      } catch (const std::bad_alloc &) {
+        // Diagnostic retention must never fail a stream; its receipts then say the ledger is unavailable.
+        session->frame_submission_ledger.reset();
+      }
       session->requested_fps = launch_session.requested_fps;
       session->session_target_fps = launch_session.fps;
       session->pacing_policy = launch_session.pacing_policy;

@@ -31,6 +31,7 @@
 #include "stream_bitrate.h"
 #include "stream_fec.h"
 #include "stream_fec_status.h"
+#include "stream_frame_feedback.h"
 #include "vrr_session_policy.h"
 #include "vrr_pacing_receipt.h"
 #include "vrr_trace.h"
@@ -524,6 +525,14 @@ namespace stream_stats {
     std::uint64_t session_generation = 0;
   };
 
+  /** One stream scope's latest frame-submission receipt, as copied for a stats snapshot. */
+  struct frame_submission_readback_t {
+    /// Scope fence; never serialized.
+    std::uint64_t session_generation = 0;
+    std::string app_session_id;
+    stream_frame_feedback::receipt_t receipt;
+  };
+
   struct stats_t {
     std::uint64_t session_generation = 0;
     std::string app_session_id;
@@ -685,6 +694,9 @@ namespace stream_stats {
     /// The newest client media interval receipt, copied by get_current() as an as-of diagnostic. Served
     /// only for the scope it was recorded in; a snapshot built any other way carries none.
     client_media_interval_receipt_t client_media_interval_receipt;
+    /// The newest frame-submission receipt (#611) of this snapshot's stream scope, copied by get_current()
+    /// as an as-of diagnostic. Served only for the scope it was recorded in; never a policy input.
+    std::optional<frame_submission_readback_t> frame_submission;
     /// Live Tuning's history, copied by get_current() from the same controller snapshot as the
     /// adaptive fields above. Serialized only for the stream scope it was recorded in; a snapshot built
     /// any other way carries none.
@@ -1448,6 +1460,18 @@ namespace stream_stats {
   client_media_ingest_result_t ingest_client_media_counters(
     const client_media_counters_t &sample);
 
+  /**
+   * Fold one telemetry request's optional frame-submission section (#611) into its exact stream
+   * scope, rechecking owner, app session and generation under the ingest serialization. Observational
+   * only: it never touches the legacy counter baseline, network evidence or any controller, and its
+   * receipt is never media loss. A scope that is no longer current answers scope_mismatch.
+   */
+  stream_frame_feedback::receipt_t ingest_frame_submission(
+    const std::string &owner_uuid,
+    const std::string &app_session_id,
+    std::uint64_t session_generation,
+    const stream_frame_feedback::section_t &section);
+
   std::string_view from_client_media_ingest_state(
     client_media_ingest_state_e state);
 
@@ -1946,6 +1970,12 @@ namespace stream_stats {
     /// above reflect only the most recent capacity's worth of frames, not
     /// every frame since this generation started.
     bool ring_complete = false;
+
+    /// The app session token this same scope was registered with. Never serialized.
+    std::string session_token;
+    /// The exact valid frame-submission launch nonce (#611) this same scope was admitted with, or
+    /// empty. Copied under the same lock as session_generation, so the two always belong together.
+    std::string frame_submission_launch_nonce;
   };
 
   /**
@@ -1957,10 +1987,16 @@ namespace stream_stats {
    * tail.
    * @param device_uuid The connecting device's paired UUID (session_t::device_uuid).
    * @param session_generation The new session_t's own generation (session_t::session_generation).
+   * @param frame_ledger The session's own frame-submission sender ledger (#611), bound to this scope
+   *        only when it belongs to the same generation. Retired with the scope.
+   * @param frame_submission_launch_nonce The exact launch/resume attempt nonce this stream session
+   *        was admitted with (#611), or empty. Kept only when valid; never authority of its own.
    */
   void start_session_timing(const std::string &device_uuid,
                             std::uint64_t session_generation,
-                            std::string session_token = {});
+                            std::string session_token = {},
+                            std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_ledger = {},
+                            std::string frame_submission_launch_nonce = {});
 
   /**
    * @brief Stop and discard per-session T0-T2 timing state for one device -
