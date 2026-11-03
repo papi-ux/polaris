@@ -13,7 +13,7 @@ def receipt(host="polaris", scenario="1440p120", run=1, host_cpu=20.0, **changes
     base = {
         "schema": compare.SCHEMA, "host": host, "scenario": scenario, "run": run, "complete": True,
         "target": {"fps": 120.0, "resolution": "2560x1440", "bitrate_mbps": 50.0, "codec": "hevc", "dynamic_range": "sdr"},
-        "host_settings": {"min_log_level": "debug"},
+        "host_settings": {"min_log_level": "debug", "fec_percentage": "20"},
         "environment": {
             "kernel": "7.2.9-2-cachyos",
             "packages": {"mesa": "26.2.4", "kwin": "6.7.5", "pipewire": "1.6.9", "polaris": "1.4.13"},
@@ -256,15 +256,52 @@ class ReportTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(compare.parse_mode(text))
 
-    def test_settings_that_differ_between_hosts(self):
+    def test_settings_compare_the_values_each_host_runs_with(self):
+        # Neither file sets fec_percentage, so each host runs its own default.
         report = report_for([
-            receipt(host_settings={"min_log_level": "debug", "encoder": "vaapi", "fec_percentage": "20", "qp": "24"}),
-            receipt("polaris-mod", host_settings={"min_log_level": "debug", "encoder": "vaapi", "fec_percentage": "20"}),
-            receipt("hermes", host_settings={"min_log_level": "debug", "encoder": "vaapi"}),
+            receipt(host_settings={"min_log_level": "debug", "encoder": "vaapi", "qp": "24"}),
+            receipt("hermes", host_settings={"min_log_level": "debug", "encoder": "VAAPI"}),
         ])
         self.assertEqual(report["warnings"], [
-            "fec_percentage differs between hosts: polaris 20, hermes not set, polaris-mod 20",
+            "fec_percentage differs between hosts: polaris 10 (default), hermes 20 (default)",
         ])
+
+    def test_settings_that_match_in_effect(self):
+        report = report_for([
+            receipt(host_settings={"fec_percentage": "20", "limit_framerate": "enabled", "minimum_fps_target": "0.0"}),
+            receipt("polaris-mod", host_settings={"fec_percentage": "20", "limit_framerate": "1", "max_bitrate": "0"}),
+            receipt("hermes", host_settings={}),
+        ])
+        self.assertEqual(report["warnings"], [])
+
+    def test_settings_that_differ_or_cannot_be_compared(self):
+        report = report_for([
+            receipt(host_settings={"fec_percentage": "20", "limit_framerate": "disabled", "encoder": "(not recorded)"}),
+            receipt("hermes", host_settings={"encoder": "vaapi"}),
+            receipt("sunshine", host_settings={"fec_percentage": "20", "encoder": "vaapi", "limit_framerate": "off"}),
+        ])
+        self.assertEqual(report["warnings"], [
+            "encoder cannot be compared between hosts: polaris (not recorded), hermes vaapi, sunshine vaapi",
+            "max_bitrate cannot be compared between hosts: polaris 0 (default), hermes 0 (default), sunshine not set, default unknown",
+            "minimum_fps_target cannot be compared between hosts: polaris 0 (default), hermes 0 (default), sunshine not set, default unknown",
+            "limit_framerate differs between hosts: polaris disabled, hermes true (default), sunshine off",
+        ])
+
+    def test_effective_values(self):
+        for host, key, value, expected in (
+            ("polaris", "fec_percentage", None, ("10", "10 (default)")),
+            ("hermes-kms", "fec_percentage", None, ("20", "20 (default)")),
+            ("polaris", "encoder", None, ("", "auto (default)")),
+            ("hermes", "fec_percentage", "020", ("20", "020")),
+            ("hermes", "minimum_fps_target", "59.940", ("59.94", "59.940")),
+            ("polaris", "limit_framerate", "Yes", ("true", "Yes")),
+            ("polaris", "limit_framerate", "no", ("false", "no")),
+            ("polaris", "max_bitrate", "fast", ("fast", "fast")),
+            ("other", "max_bitrate", None, (None, "not set, default unknown")),
+        ):
+            with self.subTest(host=host, key=key, value=value):
+                settings = {} if value is None else {key: value}
+                self.assertEqual(compare.effective_setting(host, key, settings), expected)
 
     def test_versions_that_differ_or_change(self):
         report = report_for([

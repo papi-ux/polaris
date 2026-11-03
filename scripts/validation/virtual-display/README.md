@@ -60,8 +60,9 @@ Both hosts need `min_log_level = debug` in their config file for the periodic li
 Set `encoder = vaapi` and `fec_percentage` the same in both config files. The
 defaults differ: Polaris takes 10% of the bitrate for FEC and Hermes 20%, so at
 50 Mb/s Polaris's encoder would get about 44 Mb/s and Hermes's about 39. compare_runs
-warns when these or a few other stream settings differ between hosts, and a key left
-out of one file counts as different.
+warns when these or a few other stream settings differ between hosts. It compares the
+values each host runs with, so a key a file leaves out counts as that host's default,
+and two files that both leave out `fec_percentage` still differ.
 
 The VA-API rate control also differs. On AMD, Hermes always uses VBR with a one-frame
 buffer, whatever its settings say. Polaris picks CBR with a standard buffer unless

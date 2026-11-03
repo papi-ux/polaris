@@ -28,9 +28,16 @@ CLOCK_PERIOD_S = 100.0
 # A scenario's resolution, or a display mode with its frame rate: 2560x1440, 2560x1440x120.
 MODE = re.compile(r"([0-9]+)x([0-9]+)(?:x([0-9]+(?:\.[0-9]+)?))?")
 # Settings both hosts read that change the stream. A key a host's file leaves out runs on that
-# host's own default, and the defaults differ: fec_percentage is 10 in Polaris and 20 in Hermes.
-# So a key set on one host and left out on the other counts as a difference.
+# host's own default, so the hosts are compared on the values they run with.
 MATCHED_SETTINGS = ("encoder", "fec_percentage", "max_bitrate", "minimum_fps_target", "limit_framerate")
+# Each host's default for those keys, from its src/config.cpp. The defaults differ in FEC: 10% in
+# Polaris and 20% in Hermes. An empty encoder means each host picks the first that works.
+HOST_DEFAULTS = {
+    "polaris": {"encoder": "", "fec_percentage": "10", "max_bitrate": "0", "minimum_fps_target": "0", "limit_framerate": "true"},
+    "hermes": {"encoder": "", "fec_percentage": "20", "max_bitrate": "0", "minimum_fps_target": "0", "limit_framerate": "true"},
+}
+# What both hosts read as true. Either host also reads any other value holding a 1 as true.
+TRUE_WORDS = ("true", "yes", "enable", "enabled", "on", "1")
 
 
 def number_at(*keys):
@@ -356,6 +363,27 @@ def environment_rows(runs: list[dict]) -> list[tuple[str, str]]:
     ]
 
 
+def effective_setting(host: str, key: str, settings: dict) -> tuple[str | None, str]:
+    """The value a host runs a matched setting at, and how to show it; None when it cannot be known."""
+    value = settings.get(key, "")
+    if value == "(not recorded)":
+        return None, value
+    shown = value
+    if not value:
+        family = next((family for family in HOST_DEFAULTS if host.startswith(family)), None)
+        if family is None:
+            return None, "not set, default unknown"
+        value = HOST_DEFAULTS[family][key]
+        shown = f"{value or 'auto'} (default)"
+    if key == "limit_framerate":
+        return str(value.lower() in TRUE_WORDS or "1" in value).lower(), shown
+    try:
+        number = float(value) if key == "minimum_fps_target" else int(value)
+    except ValueError:
+        return value.lower(), shown
+    return f"{number:g}", shown
+
+
 def environment_drift(host: str, runs: list[dict], warnings: list[str]) -> None:
     def fingerprint(run: dict) -> tuple:
         environment = run.get("environment", {})
@@ -413,9 +441,11 @@ def build_report(runs: dict, photos: list[dict], warnings: list[str]) -> dict:
         if len({rows[label] for rows in environments.values()}) > 1:
             warnings.append(f"{label} differs between hosts: " + ", ".join(f"{host} {rows[label]}" for host, rows in environments.items()))
     for key in MATCHED_SETTINGS:
-        values = {host: host_settings.get(key, "not set") for host, host_settings in settings.items()}
-        if len(set(values.values())) > 1:
-            warnings.append(f"{key} differs between hosts: " + ", ".join(f"{host} {value}" for host, value in values.items()))
+        values = {host: effective_setting(host, key, host_settings) for host, host_settings in settings.items()}
+        effective = {value for value, _ in values.values()}
+        if len(values) > 1 and (len(effective) > 1 or None in effective):
+            verdict = "cannot be compared between hosts" if None in effective else "differs between hosts"
+            warnings.append(f"{key} {verdict}: " + ", ".join(f"{host} {shown}" for host, (_, shown) in values.items()))
     return {"scenarios": scenarios, "environment": environments, "warnings": warnings}
 
 
