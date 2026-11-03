@@ -260,7 +260,15 @@ def check_run(run: dict, warnings: list[str]) -> None:
         return
     summary = run["summary"]
     if not run.get("complete", False):
-        warnings.append(f"{name}: stopped early")
+        warnings.extend(f"{name}: {reason}" for reason in run.get("incomplete") or ["stopped early"])
+    stats = summary.get("polaris_stats")
+    # measure_run.py marks a Polaris run incomplete when its stats went stale, and names why.
+    # Older receipts and runs without the stats request never had that check.
+    if run["host"].startswith("polaris") and run.get("stats_coverage") is None:
+        warnings.append(f"{name}: " + (
+            "no Polaris stats; measure it again with --api-key-file" if stats is None
+            else "the receipt does not show that Polaris stats stayed fresh; measure it again with the current measure_run.py"
+        ))
     if not summary.get("periodic"):
         warnings.append(f"{name}: no host timing lines; was the stream running with min_log_level = debug?")
     processes = summary.get("processes", {})
@@ -268,7 +276,6 @@ def check_run(run: dict, warnings: list[str]) -> None:
         warnings.append(f"{name}: the host process was not found")
     if processes.get("workload") == 0:
         warnings.append(f"{name}: the test page was not running")
-    stats = summary.get("polaris_stats")
     target = run.get("target", {})
     if stats is not None:
         if not stats.get("streaming_records"):

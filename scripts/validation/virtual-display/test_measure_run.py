@@ -196,12 +196,39 @@ class StatsTests(unittest.TestCase):
             "streaming": True, "client_name": "Living room", "client_ip": "192.0.2.4", "fps": 119.8,
             "encode_time_ms": 2.5, "codec": "hevc", "stream_path_id": "host_virtual_display",
             "capture_cpu_copy": False, "width": True, "display_mode_decision": {"requested": "x"},
+            "video_sample_revision": 412, "network_sample_revision": 90,
         }
         kept = measure.select_stats(payload)
         self.assertEqual(kept, {
             "fps": 119.8, "encode_time_ms": 2.5, "streaming": True, "codec": "hevc",
-            "stream_path_id": "host_virtual_display", "capture_cpu_copy": False,
+            "stream_path_id": "host_virtual_display", "capture_cpu_copy": False, "video_sample_revision": 412,
         })
+        self.assertNotIn("video_sample_revision", measure.select_stats({"video_sample_revision": True}))
+
+    def test_fresh_records_need_a_new_revision_while_streaming(self):
+        records = [
+            {"t": 0.4, "streaming": False, "video_sample_revision": 10},
+            {"t": 1.4, "streaming": True, "video_sample_revision": 12},
+            {"t": 2.4, "streaming": True, "video_sample_revision": 12},
+            {"t": 3.4, "streaming": True},
+            {"t": 4.4, "streaming": True, "video_sample_revision": 11},
+            {"t": 5.4, "streaming": True, "video_sample_revision": 14},
+        ]
+        self.assertEqual([record["t"] for record in measure.fresh_stats(records)], [1.4, 5.4])
+
+    def test_coverage_needs_fresh_stats_from_start_to_end(self):
+        def records(times):
+            return [{"t": t, "streaming": True, "video_sample_revision": index} for index, t in enumerate(times)]
+
+        steady = measure.stats_coverage(records([0.9, 1.9, 2.9, 3.9, 4.9]), 6.0)
+        self.assertEqual(steady, {"fresh_records": 5, "longest_gap_s": 1.1, "max_gap_s": 3.0, "fresh": True})
+        for name, times in (("stalled in the middle", [0.9, 1.9, 5.9]), ("late start", [3.5, 4.5, 5.5]),
+                            ("early end", [0.9, 1.9, 2.9]), ("none", [])):
+            with self.subTest(name):
+                self.assertFalse(measure.stats_coverage(records(times), 6.0)["fresh"])
+        # A stalled encoder keeps sending its last sample, which is not fresh.
+        stale = [{"t": t, "streaming": True, "video_sample_revision": 7} for t in (0.9, 1.9, 2.9, 3.9, 4.9, 5.9)]
+        self.assertEqual(measure.stats_coverage(stale, 6.0)["longest_gap_s"], 5.1)
 
     def test_display_mode_decision_keeps_mode_strings_only(self):
         decision = {"requested": "2560x1440x120", "applied": "1920x1080x59.94", "pinned_by_host": True}
@@ -372,11 +399,13 @@ class SummaryTests(unittest.TestCase):
             {"kind": "hermes_capture", "label": "hermes", "avg_us": 100.0, "peak_us": 1500.0, "frames": 60},
         ]
         stats = [
-            {"t": 0.1, "streaming": False, "fps": 0},
+            {"t": 0.1, "streaming": False, "fps": 0, "video_sample_revision": 1},
             {"t": 1.1, "streaming": True, "fps": 119.0, "encode_time_ms": 2.0, "codec": "hevc",
-             "display_mode_applied": "2560x1440x120"},
+             "display_mode_applied": "2560x1440x120", "video_sample_revision": 3},
+            {"t": 1.6, "streaming": True, "fps": 119.0, "encode_time_ms": 2.0, "codec": "hevc",
+             "display_mode_applied": "2560x1440x120", "video_sample_revision": 3},
             {"t": 2.1, "streaming": True, "fps": 121.0, "encode_time_ms": 3.0, "codec": "hevc",
-             "display_mode_applied": "2560x1440x120"},
+             "display_mode_applied": "2560x1440x120", "video_sample_revision": 5},
         ]
         summary = measure.summarize(samples, events, stats, {"URLError": 1}, 120.0, 2.0, 50)
 
@@ -394,8 +423,10 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["polaris_capture"]["dmabuf"], {"lines": 2, "frames": 1200, "total_us_p50": 250, "total_us_p99": 1500})
         self.assertEqual(summary["hermes_capture"]["hermes"], {"lines": 2, "frames": 180, "avg_us": 60.0, "peak_us": 1500.0})
         polaris = summary["polaris_stats"]
-        self.assertEqual((polaris["records"], polaris["streaming_records"]), (3, 2))
+        self.assertEqual((polaris["records"], polaris["streaming_records"], polaris["fresh_records"]), (4, 3, 2))
+        # The repeated sample at 1.6 s is counted once.
         self.assertEqual(polaris["fps"]["mean"], 120.0)
+        self.assertNotIn("video_sample_revision", polaris)
         self.assertEqual(polaris["codec"], "hevc")
         self.assertEqual(polaris["display_mode_applied"], "2560x1440x120")
         self.assertEqual(polaris["errors"], {"URLError": 1})
@@ -423,6 +454,8 @@ class CommandLineTests(unittest.TestCase):
                 self.assertEqual(self.main("--host", "hermes", *common[:-2], "--log", str(log) + ".missing"), 2)
                 self.assertEqual(self.main("--host", "hermes", *common, "--interval", "0.01"), 2)
                 self.assertEqual(self.main("--host", "hermes", "--run", "1", "--fps", "60"), 2)
+                # A Polaris run without the stats request could never show fresh stats.
+                self.assertEqual(self.main("--host", "polaris-kms", *common), 2)
                 sampled.assert_not_called()
 
     def test_receipt_is_written_whole(self):

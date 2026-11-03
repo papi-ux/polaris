@@ -116,10 +116,11 @@ fixed bitrate, and the performance overlay on. Use standard Moonlight for both h
      --out ~/vd-compare/receipts
    ```
 
-   For Hermes, pass `--host hermes` and leave out `--api-key-file`. The host label picks
-   the log and config file to read, and `--log` and `--config` override them. The key
-   file must be readable only by you. Polaris keeps its key in `polaris_state.json`,
-   and that copy wins over an `api_key` line in `polaris.conf`.
+   For Hermes, pass `--host hermes` and leave out `--api-key-file`. A host label that
+   starts with `polaris` needs it. The host label picks the log and config file to read,
+   and `--log` and `--config` override them. The key file must be readable only by you.
+   Polaris keeps its key in `polaris_state.json`, and that copy wins over an `api_key`
+   line in `polaris.conf`.
 4. While it runs, photograph the host monitor and the client screen together with a fast
    shutter, 1/1000 s or faster. Leave out photos where either clock is caught between
    two values. About 7 per run gives the 20 or so per host and scenario over three runs.
@@ -129,7 +130,11 @@ fixed bitrate, and the performance overlay on. Use standard Moonlight for both h
    stream ends, in its `Moonlight-*.log` in `%TEMP%` on Windows and on stderr on Linux.
    Those include the first seconds of the stream, before the sampler starts.
 6. Disconnect once the receipt is written. The sampler exits with status 1 and marks the
-   receipt incomplete if it was stopped early.
+   receipt incomplete, with the reason, if it was stopped early. For Polaris it does the
+   same unless fresh stats arrived the whole way through: Polaris moves
+   `video_sample_revision` each time it publishes a new sample, about once a second, and
+   a gap of more than 3 s between new samples, or at either end of the window, fails
+   the run. A record that repeats the last sample is left out of the figures.
 
 For the HDR check, use a scenario label of its own, such as `4k60-hdr`, and pass
 `--dynamic-range hdr`. Polaris cannot stream HDR from a KWin virtual output, so it
@@ -146,10 +151,10 @@ python3 scripts/validation/virtual-display/compare_runs.py ~/vd-compare/receipts
 Each table cell is the mean over runs, with the lowest and highest run in brackets.
 Other hosts are set against Polaris where both measured the same thing. The report ends
 with the versions each host ran with and a list of things to check before the results
-are shared: runs that stopped early, missing timing lines, a stream that did not use
-Host Virtual Display, a bitrate that moved, a display mode, frame rate or bitrate other
-than the run's, and versions or stream settings that changed between runs or differ
-between hosts.
+are shared: runs that stopped early, Polaris runs without fresh stats the whole way
+through, missing timing lines, a stream that did not use Host Virtual Display, a
+bitrate that moved, a display mode, frame rate or bitrate other than the run's, and
+versions or stream settings that changed between runs or differ between hosts.
 
 `client.csv` has one row per run. Any reading may be left blank, and lines starting
 with `#` are ignored:

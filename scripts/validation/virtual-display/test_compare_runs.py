@@ -30,7 +30,8 @@ def receipt(host="polaris", scenario="1440p120", run=1, host_cpu=20.0, **changes
             "gpu": {}, "polaris_capture": {}, "hermes_capture": {},
         },
     }
-    if host == "polaris":
+    if host.startswith("polaris"):
+        base["stats_coverage"] = {"fresh_records": 120, "longest_gap_s": 1.1, "max_gap_s": 3.0, "fresh": True}
         base["summary"]["polaris_stats"] = {
             "records": 120, "streaming_records": 120, "stream_path_id": "host_virtual_display",
             "stream_display_mode": "Host Virtual Display", "codec": "hevc", "stream_hdr_enabled": False,
@@ -182,7 +183,8 @@ class ReportTests(unittest.TestCase):
         self.assertIn("| Median (ms) | 45.0 | n/a |", markdown)
 
     def test_runs_that_need_a_second_look(self):
-        bad = receipt(complete=False, summary__periodic={}, summary__processes={"host": 0, "workload": 0})
+        bad = receipt(complete=False, incomplete=["stopped early", "no fresh Polaris stats while streaming"],
+                      summary__periodic={}, summary__processes={"host": 0, "workload": 0})
         bad["summary"]["polaris_stats"].update({
             "streaming_records": 0, "errors": {"http_401": 2}, "stream_path_id": "windowed_stream",
             "stream_display_mode": "Windowed Stream", "adaptive_bitrate_active": True, "codec": "h264",
@@ -197,6 +199,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["warnings"], [
             "1440p120 hermes run 1: hermes_kms was not loaded",
             "1440p120 polaris run 1: stopped early",
+            "1440p120 polaris run 1: no fresh Polaris stats while streaming",
             "1440p120 polaris run 1: no host timing lines; was the stream running with min_log_level = debug?",
             "1440p120 polaris run 1: the host process was not found",
             "1440p120 polaris run 1: the test page was not running",
@@ -210,6 +213,17 @@ class ReportTests(unittest.TestCase):
             "1440p120 polaris run 1: Polaris encoded 1920x1440, the run asked for 2560x1440",
             "1440p120 polaris run 1: Polaris aimed for 60 fps, the run asked for 120",
             "1440p120 polaris run 1: Polaris streamed HDR, the run asked for SDR",
+        ])
+
+    def test_polaris_runs_without_proof_of_fresh_stats(self):
+        older = receipt(complete=False)
+        del older["stats_coverage"]
+        keyless = receipt(run=2)
+        del keyless["stats_coverage"], keyless["summary"]["polaris_stats"]
+        self.assertEqual(report_for([older, keyless, receipt("hermes")])["warnings"], [
+            "1440p120 polaris run 1: stopped early",
+            "1440p120 polaris run 1: the receipt does not show that Polaris stats stayed fresh; measure it again with the current measure_run.py",
+            "1440p120 polaris run 2: no Polaris stats; measure it again with --api-key-file",
         ])
 
     def test_a_size_off_on_one_side_only(self):

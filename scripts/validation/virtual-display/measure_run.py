@@ -84,6 +84,12 @@ STATS_NUMBERS = (
     "width", "height", "latency_ms", "packet_loss", "gpu_usage", "idr_requests_total",
     "invalidate_ref_frames_requests_total",
 )
+# Polaris moves this counter each time the encode loop publishes its once-a-second figures, so
+# a record whose counter has not moved repeats the sample before it.
+STATS_REVISION = "video_sample_revision"
+# Polaris pushes a record a second. A Polaris run counts as complete only if fresh records
+# arrive the whole way through the window, with no gap longer than this one, edges included.
+STATS_MAX_GAP_S = 3.0
 STATS_LABELS = (
     "streaming", "codec", "encoder_backend", "dynamic_range", "stream_hdr_enabled", "color_coding",
     "stream_chroma", "stream_display_mode", "stream_path_id", "runtime_backend", "capture_path", "capture_transport",
@@ -471,6 +477,9 @@ def select_stats(payload: dict) -> dict:
         value = payload.get(name)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             result[name] = value
+    revision = payload.get(STATS_REVISION)
+    if isinstance(revision, int) and not isinstance(revision, bool):
+        result[STATS_REVISION] = revision
     for name in STATS_LABELS:
         value = payload.get(name)
         if isinstance(value, (str, int, float, bool)):
@@ -571,6 +580,30 @@ class StatsStream:
                 for record in self.records if begin <= record["at"] <= end
             ]
             return records, dict(self.errors)
+
+
+def fresh_stats(records: list[dict]) -> list[dict]:
+    """The streaming records that carry a new sample: their revision moved past every earlier one."""
+    fresh, last = [], None
+    for record in records:
+        revision = record.get(STATS_REVISION)
+        if revision is None:
+            continue
+        if record.get("streaming") is True and (last is None or revision > last):
+            fresh.append(record)
+        last = revision if last is None else max(last, revision)
+    return fresh
+
+
+def stats_coverage(records: list[dict], seconds: float) -> dict:
+    """Whether fresh stats arrived the whole way through a window of the given length."""
+    times = [record["t"] for record in fresh_stats(records)]
+    edges = [0.0, *times, seconds]
+    gap = max(later - earlier for earlier, later in zip(edges, edges[1:]))
+    return {
+        "fresh_records": len(times), "longest_gap_s": round(gap, 3), "max_gap_s": STATS_MAX_GAP_S,
+        "fresh": bool(times) and gap <= STATS_MAX_GAP_S,
+    }
 
 
 def read_settings(path: Path) -> dict[str, str]:
@@ -773,11 +806,14 @@ def summarize(samples: list[dict], events: list[dict], stats_records: list[dict]
 
     if stats_records or stats_errors:
         streaming = [record for record in stats_records if record.get("streaming") is True]
-        stats: dict = {"records": len(stats_records), "streaming_records": len(streaming)}
+        # The figures come from fresh records only, so a sample repeated by a stalled encoder
+        # is neither counted twice nor counted at all after the stall.
+        fresh = fresh_stats(stats_records)
+        stats: dict = {"records": len(stats_records), "streaming_records": len(streaming), "fresh_records": len(fresh)}
         if stats_errors:
             stats["errors"] = stats_errors
         for name in STATS_NUMBERS:
-            values = [record[name] for record in streaming if name in record]
+            values = [record[name] for record in fresh if name in record]
             if values:
                 stats[name] = describe(values)
         for name in STATS_LABELS + DISPLAY_MODE_LABELS:
@@ -878,6 +914,15 @@ def measure(args: argparse.Namespace, log_path: Path, config_path: Path) -> dict
         stats.stop()
         stats_records, stats_errors = stats.collected(begin, end)
     seconds = round(end - begin, 3)
+    incomplete = []
+    if stop.requested or seconds < args.duration - args.interval:
+        incomplete.append("stopped early")
+    coverage = stats_coverage(stats_records, seconds) if stats is not None else None
+    if coverage and not coverage["fresh"]:
+        incomplete.append(
+            f"Polaris stats went {coverage['longest_gap_s']:g} s without a fresh sample" if coverage["fresh_records"]
+            else "no fresh Polaris stats while streaming"
+        )
     return {
         "schema": SCHEMA,
         "host": args.host,
@@ -892,7 +937,9 @@ def measure(args: argparse.Namespace, log_path: Path, config_path: Path) -> dict
         "warmup_s": args.warmup,
         "measured_s": seconds,
         "interval_s": args.interval,
-        "complete": not stop.requested and seconds >= args.duration - args.interval,
+        "complete": not incomplete,
+        "incomplete": incomplete,
+        "stats_coverage": coverage,
         "log_file": log_path.name,
         "host_settings": read_settings(config_path),
         "environment": environment(args.package),
@@ -926,7 +973,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compositor", action="append", default=None, help="compositor process name (kwin_wayland)")
     parser.add_argument("--workload-match", default=DEFAULT_WORKLOAD, help="text in the test browser's command line")
     parser.add_argument("--card", help="DRM card to read GPU counters from (first amdgpu card)")
-    parser.add_argument("--api-key-file", type=Path, help="Polaris's polaris_state.json, or another private file with the key")
+    parser.add_argument("--api-key-file", type=Path, help="Polaris's polaris_state.json, or another private file with the key; needed for a Polaris host")
     parser.add_argument("--stats-url", default=DEFAULT_STATS_URL)
     parser.add_argument("--duration", type=float, default=120.0)
     parser.add_argument("--warmup", type=float, default=10.0)
@@ -937,6 +984,9 @@ def main(argv: list[str] | None = None) -> int:
     args.compositor = args.compositor or ["kwin_wayland"]
     if args.interval < 0.1 or args.duration < args.interval or args.warmup < 0:
         parser.error("need --interval >= 0.1, --duration >= --interval and --warmup >= 0")
+
+    if args.host.startswith("polaris") and not args.api_key_file:
+        parser.error("a Polaris run needs --api-key-file, since it counts as complete only with fresh stats throughout")
 
     log_path = (args.log or Path(DEFAULT_LOGS.get(args.host, ""))).expanduser()
     if not log_path.is_file():
@@ -951,7 +1001,8 @@ def main(argv: list[str] | None = None) -> int:
     partial = target.with_suffix(".json.partial")
     partial.write_text(json.dumps(receipt, indent=1) + "\n")
     partial.replace(target)
-    print(f"wrote {target}" + ("" if receipt["complete"] else " (stopped early, marked incomplete)"))
+    reasons = "; ".join(receipt.get("incomplete") or ["stopped early"])
+    print(f"wrote {target}" + ("" if receipt["complete"] else f" (marked incomplete: {reasons})"))
     return 0 if receipt["complete"] else 1
 
 
