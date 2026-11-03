@@ -911,8 +911,10 @@ TEST(DoctorAiExplanationTransport, HttpOutputDeadlineAndShapeAreBounded) {
     fake_endpoint_t endpoint;
     EXPECT_EQ(ai_optimizer::explain_paired_doctor(endpoint.config(5000), "{}", cancel).status,
               ai_optimizer::paired_explanation_status_e::provider_not_ready);
-    GTEST_SKIP() << "libcurl here has no asynchronous resolver; the paired HTTP transport is refused";
+    RecordProperty("http_resolver_bounded", "false");
+    return;  // this build's refusal is the behavior under test; nothing else may run the transport
   }
+  RecordProperty("http_resolver_bounded", "true");
   fake_endpoint_t endpoint;
   ASSERT_NE(endpoint.port.load(), 0);
   using status_e = ai_optimizer::paired_explanation_status_e;
