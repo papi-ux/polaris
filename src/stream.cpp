@@ -49,6 +49,7 @@ extern "C" {
 #include "stream_fec.h"
 #include "stream_fec_status.h"
 #include "stream_frame_feedback.h"
+#include "stream_native_reception.h"
 #include "stream_pacing.h"
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
@@ -640,6 +641,7 @@ namespace stream {
     // send for it and never replaced. Written only by videoBroadcastThread(), whatever the trace
     // setting; diagnostic, never a send, pacing, FEC or bitrate input. Null when it could not be made.
     std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_submission_ledger;
+    std::shared_ptr<stream_native_reception::scope_t> native_reception;
     // The exact launch/resume attempt nonce this session was admitted with (#611), copied unchanged
     // from its launch session, or empty. Bound to this generation's timing scope only.
     std::string frame_submission_launch_nonce;
@@ -1570,6 +1572,16 @@ namespace stream {
       }
     });
 
+    // Protocol13's dispatcher rejects plaintext before any callback and only reinjects after GCM.
+    // Session-ID mapping and negotiated encrypted control are required at admission.
+    server->map(stream_native_reception::packet_type, [](session_t *session, const std::string_view &payload) {
+      if (session->state.load() != session::state_e::RUNNING || !session->control.peer ||
+          !session->native_reception || !stream_native_reception::negotiated(true,
+            session->config.native_reception_enabled, "1", 1, session->config.mlFeatureFlags,
+            session->config.controlProtocolType, session->config.encryptionFlagsEnabled)) return;
+      session->native_reception->accept(payload, true);
+    });
+
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
@@ -2474,7 +2486,17 @@ namespace stream {
                 vrr_trace::send_attempt_t trace_batch {packet->trace_packet, blockIndex,
                   static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send), current_batch_size, "send_batch"};
                 ++trace_send_calls;
+                const auto reception_begin = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
                 const bool batch_result = platf::send_batch(batch_info);
+                const auto reception_end = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+                if (session->native_reception) {
+                  for (size_t n = 0; n < current_batch_size; ++n) {
+                    const auto shard = next_shard_to_send + n;
+                    session->native_reception->record(packet->frame_index(), static_cast<std::uint16_t>(lowseq + shard),
+                      static_cast<std::uint32_t>(shards.blocksize + shards.prefixsize), shard >= shards.data_shards,
+                      reception_begin, reception_end, batch_result);
+                  }
+                }
                 submission_record.send_returned(true, batch_result);
                 trace_batch.finish(batch_result);
                 if (!batch_result) {
@@ -2501,7 +2523,15 @@ namespace stream {
                     vrr_trace::send_attempt_t trace_single {packet->trace_packet, blockIndex,
                       static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send) + y, 1, "send", trace_batch.id()};
                     ++trace_send_calls;
+                    const auto reception_single_begin = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
                     const bool single_result = platf::send(send_info);
+                    const auto reception_single_end = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+                    if (session->native_reception) {
+                      const auto shard = next_shard_to_send + y;
+                      session->native_reception->record(packet->frame_index(), static_cast<std::uint16_t>(lowseq + shard),
+                        static_cast<std::uint32_t>(shards.blocksize + shards.prefixsize), shard >= shards.data_shards,
+                        reception_single_begin, reception_single_end, single_result);
+                    }
                     submission_record.send_returned(false, single_result);
                     trace_single.finish(single_result);
                   }
@@ -3355,6 +3385,7 @@ namespace stream {
 
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
+      if (session.native_reception) session.native_reception->retire();
       session.packet_owner.close();
       auto expected = state_e::RUNNING;
       const auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
@@ -3690,7 +3721,8 @@ namespace stream {
       stream_stats::start_session_timing(
         session.device_uuid, session.session_generation, session.session_token,
         session.frame_submission_ledger,
-        session.watch_only ? std::string {} : session.frame_submission_launch_nonce
+        session.watch_only ? std::string {} : session.frame_submission_launch_nonce,
+        session.native_reception
       );
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
@@ -3824,6 +3856,16 @@ namespace stream {
       } catch (const std::bad_alloc &) {
         // Diagnostic retention must never fail a stream; its receipts then say the ledger is unavailable.
         session->frame_submission_ledger.reset();
+      }
+      if (config.native_reception_enabled && session->frame_submission_ledger) {
+        try {
+          session->native_reception = std::make_shared<stream_native_reception::scope_t>(
+            session->session_generation, session->frame_submission_ledger, true,
+            (config.encryptionFlagsEnabled & SS_ENC_VIDEO) != 0);
+        } catch (const std::bad_alloc &) {
+          // Optional diagnostic retention cannot fail a stream or change negotiated encryption.
+          session->native_reception.reset();
+        }
       }
       session->requested_fps = launch_session.requested_fps;
       session->session_target_fps = launch_session.fps;

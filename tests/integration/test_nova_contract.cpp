@@ -561,7 +561,7 @@ TEST(NovaContractTests, EveryObjectNamesTheFunctionScopingItsNovaReads) {
 TEST(NovaContractTests, FormatTwoKeepsSubsetAndRequiredNullablePresenceExplicit) {
   const auto contract = manifest();
   EXPECT_EQ(contract.at("version"), 2);
-  EXPECT_EQ(contract.at("objects").size(), 37);
+  EXPECT_EQ(contract.at("objects").size(), 41);
   const auto &space = contract.at("objects").at("space_launch_mode");
   const auto &parent = contract.at("objects").at(space.at("subset_of").get<std::string>());
   std::set<std::string> served, omitted, parent_fields;

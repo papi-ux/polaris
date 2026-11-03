@@ -40,6 +40,7 @@ extern "C" {
 #include "rtsp_handler_parsing.h"
 #include "stream.h"
 #include "stream_bitrate.h"
+#include "stream_native_reception.h"
 #include "sync.h"
 #include "video.h"
 #ifdef POLARIS_BUILD_PYROWAVE
@@ -1576,6 +1577,11 @@ namespace rtsp_stream {
     // Report supported and required encryption flags
     ss << "a=x-ss-general.encryptionSupported:" << encryption_flags_supported << std::endl;
     ss << "a=x-ss-general.encryptionRequested:" << encryption_flags_requested << std::endl;
+    const bool reception_offered = (encryption_flags_supported & SS_ENC_CONTROL_V2) != 0;
+    session.packet_reception_feedback_offered.store(reception_offered);
+    if (reception_offered) {
+      ss << "a=" << stream_native_reception::offer_attribute << ":1" << std::endl;
+    }
 
     const bool worker_owned = session.worker_connection_requirement()->load();
     if (!worker_owned && video::last_encoder_probe_supported_ref_frames_invalidation) {
@@ -1751,6 +1757,8 @@ namespace rtsp_stream {
 
     std::string_view client;
     std::unordered_map<std::string_view, std::string_view> args;
+    std::size_t reception_echoes = 0;
+    std::string_view reception_echo;
 
     for (auto line : lines) {
       auto type = line.substr(0, 2);
@@ -1761,6 +1769,10 @@ namespace rtsp_stream {
 
         auto name = line.substr(2, pos - 2);
         auto val = announce_attribute_value(line.substr(pos + 1));
+        if (name == stream_native_reception::echo_attribute) {
+          ++reception_echoes;
+          reception_echo = line.substr(pos + 1);  // Exact optional version, without numeric coercion.
+        }
         args.emplace(name, val);
       }
     }
@@ -1801,6 +1813,9 @@ namespace rtsp_stream {
       config.audioQosType = util::from_view(args.at("x-nv-aqos.qosTrafficType"sv));
       config.videoQosType = util::from_view(args.at("x-nv-vqos[0].qosTrafficType"sv));
       config.encryptionFlagsEnabled = util::from_view(args.at("x-ss-general.encryptionEnabled"sv));
+      config.native_reception_enabled = stream_native_reception::negotiated(
+        true, session.packet_reception_feedback_offered.load(), reception_echo, reception_echoes,
+        config.mlFeatureFlags, config.controlProtocolType, config.encryptionFlagsEnabled);
 
       // Legacy clients use nvFeatureFlags to indicate support for audio encryption
       if (util::from_view(args.at("x-nv-general.featureFlags"sv)) & 0x20) {

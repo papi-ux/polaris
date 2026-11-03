@@ -226,6 +226,59 @@ namespace stream_frame_feedback {
       return out;
     }
 
+    /// Const inclusive access for native packet correlation, including frame zero. The historical
+    /// exclusive join above and its callers keep their original behavior and locking.
+    join_t join_inclusive(std::uint32_t first_inclusive, std::uint32_t to_inclusive,
+                clock::time_point now, clock::duration bound) const noexcept {
+      std::lock_guard lock {mutex_};
+      join_t out;
+      const auto fail = [&out](const char *reason, std::optional<std::uint32_t> frame = std::nullopt) {
+        out.reason = reason;
+        out.frame_index = frame;
+        return out;
+      };
+      if (retired_) return fail("scope_retired");
+      if (poison_) return fail(poison_);
+      if (to_inclusive < first_inclusive) return fail("no_frames_in_interval");
+      if (!high_water_ || static_cast<std::int64_t>(to_inclusive) > *high_water_) {
+        return fail("cursor_beyond_sender_high_water");
+      }
+      if (static_cast<std::uint64_t>(to_inclusive) - first_inclusive + 1 > k_ledger_capacity) {
+        return fail("range_exceeds_ledger", first_inclusive);
+      }
+      for (std::uint64_t index = static_cast<std::uint64_t>(first_inclusive); index <= to_inclusive; ++index) {
+        const auto frame = static_cast<std::uint32_t>(index);
+        const auto &slot = slots_[index % k_ledger_capacity];
+        if (!slot.used || slot.full_index < static_cast<std::int64_t>(index)) return fail("host_frame_missing", frame);
+        if (slot.full_index > static_cast<std::int64_t>(index)) return fail("ledger_evicted", frame);
+        if (!slot.setting_known) return fail("encoder_setting_missing", frame);
+        if (slot.setting.stream_generation != generation_) return fail("encoder_setting_generation_mismatch", frame);
+        switch (slot.disposition) {
+          case send_disposition_e::sent: break;
+          case send_disposition_e::pending: return fail("send_pending", frame);
+          case send_disposition_e::send_failed: return fail("send_failed", frame);
+          case send_disposition_e::batch_fallback: return fail("send_batch_fallback", frame);
+          case send_disposition_e::cancelled: return fail("send_cancelled", frame);
+          case send_disposition_e::exception: return fail("send_exception", frame);
+          case send_disposition_e::incomplete: return fail("send_incomplete", frame);
+          case send_disposition_e::not_sent: return fail("frame_not_sent", frame);
+        }
+        // Both boundaries: a fresh return alone cannot cover a send that entered long before it.
+        if (now < slot.path_ended || slot.path_ended < slot.begun_at ||
+            now - slot.begun_at > bound || now - slot.path_ended > bound) {
+          return fail("host_send_stale", frame);
+        }
+        if (index == static_cast<std::uint64_t>(first_inclusive)) {
+          out.setting = slot.setting;
+        } else if (!(slot.setting == out.setting)) {
+          return fail("mixed_encoder_settings", frame);
+        }
+      }
+      out.available = true;
+      out.reason = "joined";
+      return out;
+    }
+
   private:
     struct slot_t {
       bool used = false;

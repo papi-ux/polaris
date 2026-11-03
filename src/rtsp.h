@@ -113,6 +113,8 @@ namespace rtsp_stream {
     // The exact valid frameSubmissionLaunchNonce of this launch/resume attempt (#611), or empty. An
     // optional observational association only; it never changes launch semantics or grants authority.
     std::string frame_submission_launch_nonce;
+    // This launch received the host offer; an unsolicited ANNOUNCE echo cannot negotiate it.
+    std::atomic_bool packet_reception_feedback_offered {false};
     // Set by the profile service after checking this paired device's access.
     std::string worker_profile_key;
     // Validated against this Space library before controller admission.

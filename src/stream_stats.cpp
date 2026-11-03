@@ -664,6 +664,7 @@ namespace stream_stats {
       // scope ends. Null when it could not be made: its receipts then say so.
       std::string frame_submission_launch_nonce;
       std::shared_ptr<stream_frame_feedback::scope_feedback_t> frame_feedback;
+      std::shared_ptr<stream_native_reception::scope_t> native_reception;
     };
 
     std::mutex frame_timing_mutex;
@@ -6473,9 +6474,11 @@ namespace stream_stats {
                             std::uint64_t session_generation,
                             std::string session_token,
                             std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_ledger,
-                            std::string frame_submission_launch_nonce) {
+                            std::string frame_submission_launch_nonce,
+                            std::shared_ptr<stream_native_reception::scope_t> native_reception) {
     // A ledger of another generation is never this scope's evidence, and only an exact nonce is kept.
     if (frame_ledger && frame_ledger->stream_generation() != session_generation) frame_ledger.reset();
+    if (native_reception && native_reception->generation() != session_generation) native_reception.reset();
     if (!stream_frame_feedback::valid_nonce(frame_submission_launch_nonce)) frame_submission_launch_nonce.clear();
     std::shared_ptr<stream_frame_feedback::scope_feedback_t> frame_feedback;
     try {
@@ -6492,6 +6495,7 @@ namespace stream_stats {
         [&device_uuid](const session_timing_state_t &s) {
           if (s.device_uuid != device_uuid) return false;
           if (s.frame_feedback) s.frame_feedback->retire();
+          if (s.native_reception) s.native_reception->retire();
           return true;
         }),
       session_timings.end());
@@ -6502,6 +6506,7 @@ namespace stream_stats {
     state.session_token = std::move(session_token);
     state.frame_submission_launch_nonce = std::move(frame_submission_launch_nonce);
     state.frame_feedback = std::move(frame_feedback);
+    state.native_reception = std::move(native_reception);
     session_timings.push_back(std::move(state));
     // Taken alone, after frame_timing_mutex is released.
     lock.unlock();
@@ -6521,6 +6526,7 @@ namespace stream_stats {
         [&device_uuid, session_generation](const session_timing_state_t &s) {
           if (s.device_uuid != device_uuid || s.session_generation != session_generation) return false;
           if (s.frame_feedback) s.frame_feedback->retire();
+          if (s.native_reception) s.native_reception->retire();
           return true;
         }),
       session_timings.end());
@@ -6575,6 +6581,7 @@ namespace stream_stats {
     result.ring_complete = state->capture_to_encode_ring.filled < FRAME_TIMING_RING_CAPACITY;
     result.session_token = state->session_token;
     result.frame_submission_launch_nonce = state->frame_submission_launch_nonce;
+    if (state->native_reception) result.native_reception = state->native_reception->readback();
     return result;
   }
 

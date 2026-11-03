@@ -116,6 +116,7 @@
 #include "confighttp.h"
 #include "settings_metadata.h"
 #include "stream_frame_feedback_json.h"
+#include "stream_native_reception_json.h"
 #include "stream_stats.h"
 #include "video.h"
 #ifdef __linux__
@@ -9531,6 +9532,11 @@ namespace nvhttp {
           session_timing.session_token == session_token &&
           stream_frame_feedback::valid_nonce(session_timing.frame_submission_launch_nonce)) {
         output["frame_submission_launch_nonce"] = session_timing.frame_submission_launch_nonce;
+      }
+      if (session_timing.session_active && owned_by_client && !stop_in_progress && !session_token.empty() &&
+          session_timing.session_token == session_token &&
+          stop_snapshot.requester_role == rtsp_stream::session_role_e::controller && session_timing.native_reception) {
+        output["native_reception"] = stream_native_reception::readback_json(*session_timing.native_reception);
       }
       output["owner_unique_id"] = status_snapshot.owner_unique_id;
       output["owner_device_name"] = status_snapshot.owner_device_name;

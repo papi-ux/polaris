@@ -4078,6 +4078,298 @@
         "likely_cause",
         "try_first"
       ]
+    },
+    "native_reception": {
+      "$comment": [
+        "Optional native_reception on paired own-current controller session status only, after matching RTSP version/session-ID/encrypted control13+v2. Both existing video encryption modes supported without changing encryption policy. Absence means unavailable/unnegotiated, never clean media.",
+        "Version1 observes queue-accepted original native packets separately from frame_submission and Java/media counters. All reasons/loop/packet kinds are fixed enumerations; no controller consumes this object.",
+        "host_report_age_ms is host-local. Reports and every sampled sender boundary expire after2s; no rejected report refreshes state. Zero, incomplete, gaps, sparse samples and clock failure remain explicit. Raw host timestamps and identities are not serialized.",
+        "media_authenticated comes only from actual host session video flags; control_authenticated becomes true only after verified encrypted control dispatch. Unencrypted video has on-path integrity limitations; accepted-original facts never authorize capacity/clean/recovery or a writer."
+      ],
+      "fields": [
+        "version",
+        "negotiated",
+        "available",
+        "reason",
+        "host_report_age_ms",
+        "missing_reports",
+        "receive_loop",
+        "frame_reason",
+        "report",
+        "setting",
+        "samples",
+        "media_authenticated",
+        "control_authenticated",
+        "coverage"
+      ],
+      "informational_ok": [
+        "version",
+        "negotiated",
+        "available",
+        "reason",
+        "host_report_age_ms",
+        "missing_reports",
+        "receive_loop",
+        "frame_reason",
+        "report",
+        "setting",
+        "samples",
+        "media_authenticated",
+        "control_authenticated",
+        "coverage"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "readback_json",
+          "declaration": "nlohmann::json output {",
+          "style": "initializer_list",
+          "fields": [
+            "version",
+            "negotiated",
+            "available",
+            "reason",
+            "media_authenticated",
+            "control_authenticated",
+            "coverage"
+          ]
+        },
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "readback_json",
+          "style": "bracket_assignment",
+          "variable": "output",
+          "fields": [
+            "host_report_age_ms",
+            "missing_reports",
+            "receive_loop",
+            "frame_reason",
+            "report",
+            "setting",
+            "samples"
+          ]
+        }
+      ],
+      "generated": true,
+      "required_present": [
+        "version",
+        "negotiated",
+        "available",
+        "reason",
+        "media_authenticated",
+        "control_authenticated",
+        "coverage"
+      ],
+      "types": {
+        "version": "integer",
+        "negotiated": "boolean",
+        "available": "boolean",
+        "reason": "string",
+        "host_report_age_ms": "integer",
+        "missing_reports": "integer",
+        "receive_loop": "string",
+        "frame_reason": "string",
+        "report": "object",
+        "setting": "object",
+        "samples": "array",
+        "media_authenticated": "boolean",
+        "control_authenticated": "boolean",
+        "coverage": "string"
+      },
+      "optional": [
+        "host_report_age_ms",
+        "missing_reports",
+        "receive_loop",
+        "frame_reason",
+        "report",
+        "setting",
+        "samples"
+      ]
+    },
+    "native_reception_report": {
+      "$comment": [
+        "Untrusted connection-local native acceptance facts. Counters cover observer commits; they are not a packet-loss denominator, kernel ingress or capacity. interval_us and age units are microseconds; UINT32_MAX age means unavailable/saturated.",
+        "flags1 HAS_ACCEPTED,2 INCOMPLETE,4 CLOCK_UNAVAILABLE,8 TIMING_SAMPLE_LIMIT. Complete intervals <=2s. Longer incomplete reports have no samples or derived metrics; zero-time clock sentinel disables observation until a new native connection."
+      ],
+      "fields": [
+        "sequence",
+        "flags",
+        "interval_us",
+        "receive_loop_tick",
+        "accepted_data_packets",
+        "accepted_parity_packets",
+        "accepted_data_udp_bytes",
+        "accepted_parity_udp_bytes",
+        "last_accepted_age_us",
+        "first_frame",
+        "last_frame"
+      ],
+      "informational_ok": [
+        "sequence",
+        "flags",
+        "interval_us",
+        "receive_loop_tick",
+        "accepted_data_packets",
+        "accepted_parity_packets",
+        "accepted_data_udp_bytes",
+        "accepted_parity_udp_bytes",
+        "last_accepted_age_us",
+        "first_frame",
+        "last_frame"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_native_reception_json.h",
+        "function": "report_json",
+        "declaration": "nlohmann::json output {",
+        "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "sequence",
+        "flags",
+        "interval_us",
+        "receive_loop_tick",
+        "accepted_data_packets",
+        "accepted_parity_packets",
+        "accepted_data_udp_bytes",
+        "accepted_parity_udp_bytes",
+        "last_accepted_age_us",
+        "first_frame",
+        "last_frame"
+      ],
+      "types": {
+        "sequence": "integer",
+        "flags": "integer",
+        "interval_us": "integer",
+        "receive_loop_tick": "integer",
+        "accepted_data_packets": "integer",
+        "accepted_parity_packets": "integer",
+        "accepted_data_udp_bytes": "integer",
+        "accepted_parity_udp_bytes": "integer",
+        "last_accepted_age_us": "integer",
+        "first_frame": "integer",
+        "last_frame": "integer"
+      }
+    },
+    "native_reception_sample": {
+      "$comment": [
+        "At most16 native originals, never FEC reconstructions. Sample age is report-end minus userspace socket-read timestamp, can predate acceptance interval, bounded2s. Exact frame32+RTP16 matches use a fixed16384x32-byte host ledger.",
+        "Derived packet_kind(data/parity),UDP payload bytes and host API duration require every packet and the entire accepted frame range to join one exact immutable tuple. Missing/stale/ambiguous/fallback/mixed data carries no derived values.",
+        "Optional dispersion bounds use only time differences: receive_delta-(endB-beginA) through receive_delta-(beginB-endA). They include batch/kernel/receiver scheduling and clock skew, not absolute one-way delay, media RTT or pure network queue. Reordered pairs carry no dispersion."
+      ],
+      "fields": [
+        "frame_index",
+        "rtp_sequence",
+        "socket_read_age_us",
+        "packet_kind",
+        "udp_bytes",
+        "handoff_duration_ns",
+        "dispersion_lower_ns",
+        "dispersion_upper_ns"
+      ],
+      "informational_ok": [
+        "frame_index",
+        "rtp_sequence",
+        "socket_read_age_us",
+        "packet_kind",
+        "udp_bytes",
+        "handoff_duration_ns",
+        "dispersion_lower_ns",
+        "dispersion_upper_ns"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "sample_json",
+          "declaration": "nlohmann::json output {",
+          "style": "initializer_list",
+          "fields": [
+            "frame_index",
+            "rtp_sequence",
+            "socket_read_age_us"
+          ]
+        },
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "sample_json",
+          "style": "bracket_assignment",
+          "variable": "output",
+          "fields": [
+            "packet_kind",
+            "udp_bytes",
+            "handoff_duration_ns",
+            "dispersion_lower_ns",
+            "dispersion_upper_ns"
+          ]
+        }
+      ],
+      "generated": true,
+      "required_present": [
+        "frame_index",
+        "rtp_sequence",
+        "socket_read_age_us"
+      ],
+      "types": {
+        "frame_index": "integer",
+        "rtp_sequence": "integer",
+        "socket_read_age_us": "integer",
+        "packet_kind": "string",
+        "udp_bytes": "integer",
+        "handoff_duration_ns": "integer",
+        "dispersion_lower_ns": "integer",
+        "dispersion_upper_ns": "integer"
+      },
+      "optional": [
+        "packet_kind",
+        "udp_bytes",
+        "handoff_duration_ns",
+        "dispersion_lower_ns",
+        "dispersion_upper_ns"
+      ]
+    },
+    "native_reception_setting": {
+      "$comment": [
+        "Exact immutable sender encoder tuple, diagnostic only. Every retained frame in inclusive first..last must be successful/fresh and tuple-equal; same kbps with different application sequence or origin is mixed. No control value or permission follows."
+      ],
+      "fields": [
+        "encoder_lifetime",
+        "stream_generation",
+        "application_sequence",
+        "origin_revision",
+        "configured_encoder_kbps",
+        "receipt_origin"
+      ],
+      "informational_ok": [
+        "encoder_lifetime",
+        "stream_generation",
+        "application_sequence",
+        "origin_revision",
+        "configured_encoder_kbps",
+        "receipt_origin"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_native_reception_json.h",
+        "function": "setting_json",
+        "declaration": "nlohmann::json output {",
+        "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "encoder_lifetime",
+        "stream_generation",
+        "application_sequence",
+        "origin_revision",
+        "configured_encoder_kbps",
+        "receipt_origin"
+      ],
+      "types": {
+        "encoder_lifetime": "integer",
+        "stream_generation": "integer",
+        "application_sequence": "integer",
+        "origin_revision": "integer",
+        "configured_encoder_kbps": "integer",
+        "receipt_origin": "string"
+      }
     }
   },
   "known_drift": {

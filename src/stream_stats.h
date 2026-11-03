@@ -32,6 +32,7 @@
 #include "stream_fec.h"
 #include "stream_fec_status.h"
 #include "stream_frame_feedback.h"
+#include "stream_native_reception.h"
 #include "vrr_session_policy.h"
 #include "vrr_pacing_receipt.h"
 #include "vrr_trace.h"
@@ -1976,6 +1977,8 @@ namespace stream_stats {
     /// The exact valid frame-submission launch nonce (#611) this same scope was admitted with, or
     /// empty. Copied under the same lock as session_generation, so the two always belong together.
     std::string frame_submission_launch_nonce;
+    /// This exact active stream's optional native reception snapshot; no global latest fallback.
+    std::optional<stream_native_reception::readback_t> native_reception;
   };
 
   /**
@@ -1996,7 +1999,8 @@ namespace stream_stats {
                             std::uint64_t session_generation,
                             std::string session_token = {},
                             std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_ledger = {},
-                            std::string frame_submission_launch_nonce = {});
+                            std::string frame_submission_launch_nonce = {},
+                            std::shared_ptr<stream_native_reception::scope_t> native_reception = {});
 
   /**
    * @brief Stop and discard per-session T0-T2 timing state for one device -
