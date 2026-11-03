@@ -1395,7 +1395,7 @@ TEST_F(DoctorExplanationHttp, RevocationRecordReplacementAndOptOutDuringTheAttem
 
   const auto replaced = pending(2, [&] {
     EXPECT_EQ(nvhttp::update_device_info_result(k_owner, "Canary Owner Phone", "", 0, {}, {}, crypto::PERM::_all,
-                                                true, false, false), nvhttp::client_mutation_result_t::updated);
+                                                true, false, false), nvhttp::client_mutation_result_t::success);
   });
   EXPECT_EQ(replaced.status, 409) << replaced.body.dump();
   EXPECT_EQ(replaced.body["code"], "certificate_changed");
