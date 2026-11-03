@@ -3905,6 +3905,179 @@
           "literal_key_list": true
         }
       }
+    },
+    "doctor_ai_explanation_request": {
+      "$comment": [
+        "Served at doctor.ai_explanation_request on GET /polaris/v1/session/status (#613). A pure",
+        "descriptor of whether the current Doctor reading can be explained on one explicit paired POST",
+        "/polaris/v1/doctor/explanation; it allocates, captures and starts nothing. enabled is host",
+        "opt-in with a fully configured provider, permitted is _allow_view plus sole active ownership of",
+        "exactly this app session, and available is everything else the POST checks again on its own.",
+        "finding_fingerprint and controller_revision are comparison metadata for that POST, never",
+        "authority, and stay empty and 0 without a permitted scope. features.doctor_ai_explanation_v1",
+        "says only that the protocol exists."
+      ],
+      "fields": [
+        "available",
+        "blocked_reason",
+        "controller_revision",
+        "enabled",
+        "finding_fingerprint",
+        "permitted",
+        "schema",
+        "source_result_id"
+      ],
+      "polaris_emitter": {
+        "file": "src/doctor_ai_explanation.cpp",
+        "function": "request_descriptor_json",
+        "variable": "out",
+        "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "available": "boolean",
+        "blocked_reason": "string",
+        "controller_revision": "integer",
+        "enabled": "boolean",
+        "finding_fingerprint": "string",
+        "permitted": "boolean",
+        "schema": "integer",
+        "source_result_id": "string"
+      },
+      "required_present": [
+        "available",
+        "blocked_reason",
+        "controller_revision",
+        "enabled",
+        "finding_fingerprint",
+        "permitted",
+        "schema",
+        "source_result_id"
+      ]
+    },
+    "doctor_ai_explanation_response": {
+      "$comment": [
+        "Every response of POST /polaris/v1/doctor/explanation (#613), success and fallback alike: at",
+        "most 8 KiB and Cache-Control no-store. status is true only with code explained and a non-null",
+        "explanation; otherwise fallback is true, explanation null and expires_in_ms 0, and the client",
+        "keeps its deterministic Doctor. changed is always false and authority explanation_only, because",
+        "nothing on the host moves. The request tuple is echoed only for an authorized, well-formed",
+        "request, and snapshot_id is allocated only once a POST was admitted."
+      ],
+      "fields": [
+        "app_session_id",
+        "authority",
+        "changed",
+        "code",
+        "controller_revision",
+        "expires_in_ms",
+        "explanation",
+        "fallback",
+        "finding_fingerprint",
+        "may_define_settings",
+        "request_id",
+        "retry_after_ms",
+        "schema",
+        "session_generation",
+        "snapshot_age_ms",
+        "snapshot_id",
+        "source",
+        "source_result_id",
+        "status"
+      ],
+      "polaris_emitter": {
+        "file": "src/doctor_ai_explanation.cpp",
+        "function": "explanation_response_json",
+        "variable": "out",
+        "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "app_session_id": "string",
+        "authority": "string",
+        "changed": "boolean",
+        "code": "string",
+        "controller_revision": "integer",
+        "expires_in_ms": "integer",
+        "explanation": "object",
+        "fallback": "boolean",
+        "finding_fingerprint": "string",
+        "may_define_settings": "boolean",
+        "request_id": "string",
+        "retry_after_ms": "integer",
+        "schema": "integer",
+        "session_generation": "integer",
+        "snapshot_age_ms": "integer",
+        "snapshot_id": "string",
+        "source": "object",
+        "source_result_id": "string",
+        "status": "boolean"
+      },
+      "nullable": [
+        "explanation",
+        "retry_after_ms",
+        "snapshot_age_ms"
+      ],
+      "required_present": [
+        "app_session_id",
+        "authority",
+        "changed",
+        "code",
+        "controller_revision",
+        "expires_in_ms",
+        "explanation",
+        "fallback",
+        "finding_fingerprint",
+        "may_define_settings",
+        "request_id",
+        "retry_after_ms",
+        "schema",
+        "session_generation",
+        "snapshot_age_ms",
+        "snapshot_id",
+        "source",
+        "source_result_id",
+        "status"
+      ]
+    },
+    "doctor_ai_explanation": {
+      "$comment": [
+        "The explanation of a successful doctor_ai_explanation_response (#613): the host-configured",
+        "provider's six fields after strict validation, per-field code point and UTF-8 caps, plain-text",
+        "checks and redaction. Informational prose only, never a setting, target value, action or the",
+        "Doctor's confidence grade."
+      ],
+      "fields": [
+        "advanced_detail",
+        "confidence",
+        "destructive_action_allowed",
+        "evidence",
+        "likely_cause",
+        "try_first"
+      ],
+      "polaris_emitter": {
+        "file": "src/doctor_ai_explanation.cpp",
+        "function": "bounded_explanation_json",
+        "variable": "clean",
+        "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "advanced_detail": "string",
+        "confidence": "string",
+        "destructive_action_allowed": "boolean",
+        "evidence": "array",
+        "likely_cause": "string",
+        "try_first": "array"
+      },
+      "required_present": [
+        "advanced_detail",
+        "confidence",
+        "destructive_action_allowed",
+        "evidence",
+        "likely_cause",
+        "try_first"
+      ]
     }
   },
   "known_drift": {

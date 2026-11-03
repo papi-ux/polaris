@@ -84,13 +84,13 @@ class ContractGeneratorTests(unittest.TestCase):
     def test_real_schema_retains_all_objects_and_generates_only_used_s1_names(self):
         raw = (ROOT / generator.SCHEMA).read_bytes()
         schema = generator.load_schema(raw)
-        self.assertEqual(len(schema['objects']), 34)
-        self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 357)
+        self.assertEqual(len(schema['objects']), 37)
+        self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 390)
         migrated = {name for name, obj in schema['objects'].items() if obj.get('generated')}
         self.assertEqual(migrated, set(schema['objects']))
         outputs = generator.render(schema, raw, Path(generator.__file__).read_bytes())
         definitions = generator.generated_values(outputs[generator.CPP].decode())
-        self.assertEqual(len(definitions), 320)
+        self.assertEqual(len(definitions), 353)
         generator.audit_emitters(ROOT, schema, definitions)
         self.assertNotIn(b'::space_launch_mode {', outputs[generator.CPP])
         self.assertNotIn(b'LIVE_TUNING', outputs[generator.JS])

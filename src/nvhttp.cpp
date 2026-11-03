@@ -107,6 +107,7 @@
 #include "device_db.h"
 #include "launch_profile.h"
 #include "doctor_actions.h"
+#include "doctor_ai_explanation.h"
 #include "doctor_v2.h"
 #include "doctor_trial.h"
 #include "recovery_profile.h"
@@ -2449,7 +2450,9 @@ namespace nvhttp {
         {"doctor_v2_shadow_enabled", doctor_v2::shadow_enabled()},
         {"doctor_trials_v1", true},
         {"doctor_trials_enabled", doctor_v2::trials_enabled()},
-        {"doctor_ai_explanation_v1", false}
+        // Protocol support for POST /polaris/v1/doctor/explanation (#613), as on capabilities. It is
+        // not host opt-in, provider health or caller authority: doctor.ai_explanation_request says those.
+        {"doctor_ai_explanation_v1", true}
       };
       settings["sync_status"] = build_client_settings_sync_status(
         client,
@@ -6641,6 +6644,266 @@ namespace nvhttp {
     }
   }
 
+  namespace {
+    // ---- The final paired Doctor, shared by session status and the explanation request (#613) ----
+    //
+    // Session status and POST /polaris/v1/doctor/explanation build the same final Doctor from the same
+    // reads, so the finding a client observed on status is the finding the POST rechecks.
+
+    /// doctor_v2's host evidence for the requester's own stream; empty while nothing streams.
+    nlohmann::json doctor_v2_host_evidence_json(const stream_stats::stats_t &stats,
+                                                const std::string &stream_display_mode,
+                                                std::uint64_t requester_generation) {
+      nlohmann::json evidence = nlohmann::json::object();
+      if (!stats.streaming) {
+        return evidence;
+      }
+      evidence["source_capture"] = {
+        {"source_fps", stats.capture_source_fps},
+        {"duplicate_frame_ratio", stats.duplicate_frame_ratio},
+        {"capture_pacing", stats.capture_pacing},
+        {"capture_to_encoder_latency_ms", stats.avg_frame_age_ms}
+      };
+      evidence["encode"] = {
+        {"encoded_fps", stats.fps},
+        {"encode_latency_ms", stats.encode_time_ms},
+        {"target_fps", stats.encode_target_fps},
+        {"dropped_frame_ratio", stats.dropped_frame_ratio}
+      };
+      evidence["transport"] = {
+        {"bytes_sent", stats.bytes_sent},
+        {"confirmed_media_loss_available", stats.packet_loss_available},
+        {"confirmed_media_loss_pct", stats.packet_loss_available ? nlohmann::json(stats.packet_loss) : nlohmann::json(nullptr)},
+        {"confirmed_media_loss_source", stats.packet_loss_source}
+      };
+      evidence["effective_settings"] = {
+        {"topology", stream_display_mode},
+        {"width", stats.width},
+        {"height", stats.height},
+        {"codec", stats.codec},
+        {"hdr", stats.stream_hdr_enabled},
+        {"bitrate_kbps", stats.bitrate_kbps},
+        {"target_fps", stats.session_target_fps > 0.0 ? stats.session_target_fps : stats.fps},
+        {"refresh_rate_hz", stats.runtime_reported_refresh_hz}
+      };
+      // Only the requester's own generation: another owner's or a Watch session's record never
+      // stands in for it, and no record means no vrr evidence rather than a default.
+      if (auto vrr = stream_stats::vrr_json(stats, requester_generation); !vrr.is_null()) {
+        evidence["vrr"] = std::move(vrr);
+      }
+      return evidence;
+    }
+
+    /// The optional doctor_v2 shadow overlay on the served Doctor, unchanged from session status.
+    void apply_doctor_v2_overlay(nlohmann::json &compat, const nlohmann::json &shadow) {
+      if (!shadow.value("enabled", false)) {
+        return;
+      }
+      compat["derived_from"] = "doctor_v2";
+      compat["primary_issue"] = shadow.value("primary_issue", std::string {"undetermined"});
+      compat["observations"] = shadow.value("observations", nlohmann::json::array());
+      compat["hypotheses"] = shadow.value("hypotheses", nlohmann::json::array());
+      compat["missing_evidence"] = shadow.value("missing_evidence", nlohmann::json::array());
+      compat["stable"] = shadow.value("stable", false);
+      if (shadow.value("state", std::string {}) == "classified" &&
+          !shadow.value("stable", false)) {
+        compat["status"] = "watch";
+        compat["traffic_light"] = "amber";
+        compat["status_color"] = "amber";
+        compat["severity"] = "warning";
+        compat["simple_state"] = "Needs attention";
+      }
+    }
+
+    /// The health's Doctor bound to the requester's action scope, with the paired contract labels.
+    nlohmann::json bound_paired_doctor(const nlohmann::json &health,
+                                       const std::string &session_token,
+                                       std::uint64_t session_generation,
+                                       std::uint64_t controller_revision,
+                                       std::uint64_t network_sample_revision,
+                                       std::uint64_t video_sample_revision) {
+      auto doctor = health.value("doctor", nlohmann::json::object());
+      stream_stats::bind_doctor_action_scope(
+        doctor,
+        session_token,
+        session_generation,
+        controller_revision,
+        network_sample_revision,
+        video_sample_revision
+      );
+      doctor["contract"] = "doctor_v1_observational";
+      doctor["launch_policy_authority"] = false;
+      doctor["recovery_profile_action_supported"] = false;
+      return doctor;
+    }
+
+    /// The caller's explanation scope from values session status has already read.
+    doctor_ai_explanation::scope_view_t paired_explanation_scope(
+      const crypto::p_named_cert_t &client,
+      const proc::session_status_snapshot_t &status,
+      const stream_stats::session_timing_t &timing,
+      const stream_stats::stats_t &stats,
+      std::uint64_t controller_revision,
+      bool stopping,
+      nlohmann::json doctor
+    ) {
+      doctor_ai_explanation::scope_view_t scope;
+      if (!client) {
+        return scope;
+      }
+      const auto &stop = status.stop;
+      scope.cert_record = client;
+      scope.cert_uuid = client->uuid;
+      scope.permission_view = static_cast<bool>(client->perm & PERM::_allow_view);
+      scope.stopping = stopping;
+      scope.app_session_id = stop.session_token;
+      scope.session_generation = timing.session_active ? timing.session_generation : 0;
+      // The conservative first scope: one non-viewer stream, owned by this certificate, whose timing
+      // scope is this exact app session. Viewer, shared, idle and worker sessions are excluded.
+      scope.sole_active_owner =
+        stop.owned_by_client &&
+        stop.requester_role == rtsp_stream::session_role_e::controller &&
+        stop.active_sessions == 1 &&
+        status.viewer_count == 0 &&
+        boost::iequals(status.owner_unique_id, client->uuid) &&
+        stats.streaming &&
+        timing.session_active &&
+        timing.session_generation > 0 &&
+        !stop.session_token.empty() &&
+        timing.session_token == stop.session_token;
+      scope.controller_revision = controller_revision;
+      scope.doctor = std::move(doctor);
+      scope.projection.capture_reason = stream_stats::capture_path_reason(stats);
+      if (stats.streaming && stats.bitrate_kbps > 0) {
+        scope.projection.observed_encoder_kbps = static_cast<std::int64_t>(stats.bitrate_kbps);
+      }
+      const std::initializer_list<const std::string *> private_strings {
+        &client->name, &client->uuid, &stop.session_token, &status.owner_unique_id, &status.owner_device_name,
+        &status.game, &status.game_uuid, &stats.client_name, &stats.encode_target_device, &stats.capture_device
+      };
+      for (const auto *identity : private_strings) {
+        if (!identity->empty()) {
+          scope.identities.push_back(*identity);
+        }
+      }
+      return scope;
+    }
+
+    /**
+     * Read the caller's current explanation scope for the paired POST: the same final Doctor session
+     * status serves, from the same reads, under only the existing short lifecycle guard, which is
+     * released before this returns. Never called while a provider attempt holds anything.
+     */
+    doctor_ai_explanation::scope_view_t read_paired_explanation_scope(const crypto::p_named_cert_t &candidate,
+                                                                     const std::string &path,
+                                                                     bool check_controller_session = true) {
+      const auto named_cert_p = get_verified_cert(candidate, path);
+      if (!named_cert_p) {
+        return {};
+      }
+#ifdef __linux__
+      if (multiseat::profile_service_for(named_cert_p->uuid)) {
+        doctor_ai_explanation::scope_view_t worker;
+        worker.cert_record = named_cert_p;
+        worker.cert_uuid = named_cert_p->uuid;
+        worker.permission_view = static_cast<bool>(named_cert_p->perm & PERM::_allow_view);
+        worker.unsupported_scope = true;
+        return worker;
+      }
+#endif
+      const bool can_launch = static_cast<bool>(named_cert_p->perm & PERM::launch);
+      auto status_view = proc::proc.get_session_status_view(named_cert_p->uuid, can_launch);
+      const auto &status_snapshot = status_view.snapshot;
+      const auto stats = stream_stats::get_current();
+      const auto doctor_controller = adaptive_bitrate::get_doctor_state();
+      const auto session_timing = stream_stats::get_session_timing(named_cert_p->uuid);
+      const auto requester_generation = session_timing.session_active ? session_timing.session_generation : 0;
+      const auto health = build_session_health_json(
+        stats,
+        status_snapshot.virtual_display,
+        named_cert_p->name,
+        status_snapshot.game,
+        status_snapshot.game_uuid,
+        requester_generation
+      );
+      auto doctor = bound_paired_doctor(
+        health,
+        status_snapshot.stop.session_token,
+        requester_generation,
+        doctor_controller.action_authority_revision,
+        stats.network_sample_revision,
+        stats.video_sample_revision
+      );
+      const auto stream_display_mode = settings_metadata::effective_stream_display_mode_selection(
+        stats,
+        status_snapshot.virtual_display
+      );
+      const auto shadow = doctor_v2::status(
+        named_cert_p->uuid,
+        status_snapshot.game_uuid,
+        doctor_v2_host_evidence_json(stats, stream_display_mode, requester_generation)
+      );
+      apply_doctor_v2_overlay(doctor, shadow);
+      auto scope = paired_explanation_scope(
+        named_cert_p,
+        status_snapshot,
+        session_timing,
+        stats,
+        doctor_controller.action_authority_revision,
+        !status_view.guard.owns_snapshot() || status_snapshot.stop.stop_in_progress,
+        std::move(doctor)
+      );
+      if (scope.sole_active_owner && check_controller_session) {
+        // The existing sole-owner guard, in lifecycle -> controller order, released at once.
+        auto controller_guard = doctor_actions::acquire_paired_global_control(
+          named_cert_p->uuid,
+          scope.session_generation,
+          scope.app_session_id
+        );
+        scope.sole_active_owner = static_cast<bool>(controller_guard);
+      }
+      return scope;
+    }
+  }  // namespace
+
+  /**
+   * POST /polaris/v1/doctor/explanation. Authorization and strict body admission happen here; the
+   * service checks every claim against current host state, captures the bounded reading and makes
+   * at most one provider attempt on its own worker, never on this server's thread.
+   */
+  void doctorExplanation(doctor_ai_explanation::service_t &service, resp_https_t response, req_https_t request) {
+    namespace dae = doctor_ai_explanation;
+    const auto candidate = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    const std::string path = request->path;
+    const dae::writer_t write = [response](int status, const std::string &body) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(static_cast<SimpleWeb::StatusCode>(status), body, headers);
+    };
+    if (!get_verified_cert(candidate, path)) {
+      write(dae::http_status(dae::code_e::unauthorized),
+        dae::response_body(dae::code_e::unauthorized, {}, 0, std::nullopt, std::nullopt));
+      return;
+    }
+    std::string content_type;
+    if (const auto header = request->header.find("Content-Type"); header != request->header.end()) {
+      content_type = header->second;
+    }
+    // One byte past the limit is enough to refuse an oversized body without reading it all.
+    std::string body(dae::k_max_request_bytes + 1, '\0');
+    request->content.read(body.data(), static_cast<std::streamsize>(body.size()));
+    body.resize(static_cast<std::size_t>(std::max<std::streamsize>(request->content.gcount(), 0)));
+    const auto parsed = dae::parse_request(content_type, request->query_string, body);
+    if (!parsed.request) {
+      write(dae::http_status(parsed.code), dae::response_body(parsed.code, {}, 0, std::nullopt, std::nullopt));
+      return;
+    }
+    service.submit(*parsed.request, [candidate, path] {
+      return read_paired_explanation_scope(candidate, path);
+    }, write);
+  }
+
   bool record_client_seen(const crypto::p_named_cert_t &candidate,
                           std::int64_t seen_at,
                           bool persist = true,
@@ -8888,6 +9151,9 @@ namespace nvhttp {
     tailscale_connection::status_collector_t network_collector;
     http_server_t http_server;
     native_end_worker_t native_ends; // declared after servers, drained before their destruction
+    // #613: the one paired Doctor explanation worker, scoped to this HTTPS server and drained before
+    // it goes. Its provider attempts never run on the server's single thread.
+    doctor_ai_explanation::service_t explanation_service {doctor_ai_explanation::service_t::hooks_t {}};
 
     https_server.config.thread_pool_size = 1;
     https_server.verify = verify_https_client;
@@ -8948,7 +9214,8 @@ namespace nvhttp {
             {"client_settings_v1", false}, {"live_tuning_v1", false},
             {"live_media_telemetry_v1", false}, {"live_media_frame_submission_v1", false},
             {"diagnostics_doctor_v1", false},
-            {"doctor_actions_v1", false}, {"doctor_trials_v1", false}}}};
+            {"doctor_actions_v1", false}, {"doctor_trials_v1", false},
+            {"doctor_ai_explanation_v1", false}}}};
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(output.dump(), headers);
@@ -9044,7 +9311,9 @@ namespace nvhttp {
       features["doctor_trials_enabled"] = doctor_v2::trials_enabled();
       features["recovery_profile_next_launch_v1"] = false;
       features["recovery_profile_next_launch_deprecated_v1"] = true;
-      features["doctor_ai_explanation_v1"] = false;
+      // Protocol support only (#613): the paired explanation request exists. Host opt-in, provider
+      // readiness and this caller's permission are doctor.ai_explanation_request on session status.
+      features["doctor_ai_explanation_v1"] = true;
       features["cursor_visibility_control"] = true;
       features["lock_screen_control"] = false;
 #ifdef __linux__
@@ -9205,7 +9474,7 @@ namespace nvhttp {
 #endif
     };
 
-    auto polarisSessionStatus = [](resp_https_t response, req_https_t request) {
+    auto polarisSessionStatus = [&explanation_service](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
 
       const auto named_cert_p = get_verified_cert(request);
@@ -9431,78 +9700,39 @@ namespace nvhttp {
         requester_generation
       );
       output["health"] = health;
-      auto doctor_v1 = health.value("doctor", nlohmann::json::object());
-      stream_stats::bind_doctor_action_scope(
-        doctor_v1,
+      output["doctor"] = bound_paired_doctor(
+        health,
         session_token,
         session_timing.session_active ? session_timing.session_generation : 0,
         doctor_controller.action_authority_revision,
         stats.network_sample_revision,
         stats.video_sample_revision
       );
-      doctor_v1["contract"] = "doctor_v1_observational";
-      doctor_v1["launch_policy_authority"] = false;
-      doctor_v1["recovery_profile_action_supported"] = false;
-      output["doctor"] = doctor_v1;
-      nlohmann::json doctor_v2_host_evidence = nlohmann::json::object();
-      if (stats.streaming) {
-        doctor_v2_host_evidence["source_capture"] = {
-          {"source_fps", stats.capture_source_fps},
-          {"duplicate_frame_ratio", stats.duplicate_frame_ratio},
-          {"capture_pacing", stats.capture_pacing},
-          {"capture_to_encoder_latency_ms", stats.avg_frame_age_ms}
-        };
-        doctor_v2_host_evidence["encode"] = {
-          {"encoded_fps", stats.fps},
-          {"encode_latency_ms", stats.encode_time_ms},
-          {"target_fps", stats.encode_target_fps},
-          {"dropped_frame_ratio", stats.dropped_frame_ratio}
-        };
-        doctor_v2_host_evidence["transport"] = {
-          {"bytes_sent", stats.bytes_sent},
-          {"confirmed_media_loss_available", stats.packet_loss_available},
-          {"confirmed_media_loss_pct", stats.packet_loss_available ? nlohmann::json(stats.packet_loss) : nlohmann::json(nullptr)},
-          {"confirmed_media_loss_source", stats.packet_loss_source}
-        };
-        doctor_v2_host_evidence["effective_settings"] = {
-          {"topology", stream_display_mode},
-          {"width", stats.width},
-          {"height", stats.height},
-          {"codec", stats.codec},
-          {"hdr", stats.stream_hdr_enabled},
-          {"bitrate_kbps", stats.bitrate_kbps},
-          {"target_fps", stats.session_target_fps > 0.0 ? stats.session_target_fps : stats.fps},
-          {"refresh_rate_hz", stats.runtime_reported_refresh_hz}
-        };
-        // Only the requester's own generation: another owner's or a Watch session's record never
-        // stands in for it, and no record means no vrr evidence rather than a default.
-        if (auto vrr = stream_stats::vrr_json(stats, requester_generation); !vrr.is_null()) {
-          doctor_v2_host_evidence["vrr"] = std::move(vrr);
-        }
-      }
+      const auto doctor_v2_host_evidence = doctor_v2_host_evidence_json(stats, stream_display_mode, requester_generation);
       const auto doctor_v2_status = doctor_v2::status(
         named_cert_p->uuid,
         status_snapshot.game_uuid,
         doctor_v2_host_evidence
       );
       output["doctor_v2"] = doctor_v2_status;
-      if (doctor_v2_status.value("enabled", false)) {
-        auto &compat = output["doctor"];
-        compat["derived_from"] = "doctor_v2";
-        compat["primary_issue"] = doctor_v2_status.value("primary_issue", std::string {"undetermined"});
-        compat["observations"] = doctor_v2_status.value("observations", nlohmann::json::array());
-        compat["hypotheses"] = doctor_v2_status.value("hypotheses", nlohmann::json::array());
-        compat["missing_evidence"] = doctor_v2_status.value("missing_evidence", nlohmann::json::array());
-        compat["stable"] = doctor_v2_status.value("stable", false);
-        if (doctor_v2_status.value("state", std::string {}) == "classified" &&
-            !doctor_v2_status.value("stable", false)) {
-          compat["status"] = "watch";
-          compat["traffic_light"] = "amber";
-          compat["status_color"] = "amber";
-          compat["severity"] = "warning";
-          compat["simple_state"] = "Needs attention";
-        }
-      }
+      apply_doctor_v2_overlay(output["doctor"], doctor_v2_status);
+      // #613: whether this exact reading can be explained on an explicit request. A pure read over the
+      // final Doctor and the scope already read above: it allocates, captures and starts nothing, and
+      // the POST enforces every condition again on its own.
+      auto ai_explanation_request = doctor_ai_explanation::descriptor(
+        paired_explanation_scope(
+          named_cert_p,
+          status_snapshot,
+          session_timing,
+          stats,
+          doctor_controller.action_authority_revision,
+          stop_in_progress,
+          output["doctor"]
+        ),
+        explanation_service.config(),
+        explanation_service.peek(named_cert_p->uuid)
+      );
+      output["doctor"]["ai_explanation_request"] = std::move(ai_explanation_request);
       if (!doctor_v2::trials_enabled()) {
         output["doctor_trial"] = {
           {"status", false}, {"changed", false}, {"enabled", false},
@@ -12919,6 +13149,9 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/doctor/v2/trial$"]["DELETE"] = polarisDoctorTrial;
     https_server.resource["^/polaris/v1/doctor/v2/evidence$"]["POST"] = polarisDoctorV2Evidence;
     https_server.resource["^/polaris/v1/doctor/action$"]["POST"] = polarisDoctorAction;
+    https_server.resource["^/polaris/v1/doctor/explanation$"]["POST"] = [&explanation_service](resp_https_t response, req_https_t request) {
+      doctorExplanation(explanation_service, std::move(response), std::move(request));
+    };
     https_server.resource["^/polaris/v1/session/bitrate$"]["POST"] = polarisSetBitrate;
     https_server.resource["^/polaris/v1/session/adaptive-bitrate$"]["POST"] = polarisSetAdaptiveBitrate;
     https_server.resource["^/polaris/v1/session/ai-optimizer$"]["POST"] = polarisSetAiOptimizer;
@@ -12971,6 +13204,7 @@ namespace nvhttp {
     // Wait for any event
     shutdown_event->view();
 
+    explanation_service.stop_accepting();
     native_ends.stop_accepting();
     https_server.stop();
     http_server.stop();
@@ -12978,6 +13212,9 @@ namespace nvhttp {
     ssl.join();
     tcp.join();
     native_ends.shutdown();
+    // An explanation still in flight finishes within its bounded provider deadline, then is answered
+    // (or dropped with its closed socket) before the server is destroyed.
+    explanation_service.shutdown();
     // Any network-evidence request still waiting is answered unknown before the server goes.
     network_collector.stop();
 
@@ -13203,6 +13440,84 @@ namespace nvhttp {
 
   unsigned short launch_route_for_tests_t::port() const {
     return impl->port;
+  }
+
+  struct doctor_explanation_route_for_tests_t::impl_t {
+    impl_t(const std::string &cert_file, const std::string &key_file, doctor_ai_explanation::service_t::hooks_t hooks):
+        server {cert_file, key_file},
+        explanations {std::move(hooks)} {}
+
+    https_server_t server;
+    // After the server, so it is destroyed first; drained explicitly below as well.
+    doctor_ai_explanation::service_t explanations;
+    std::atomic<unsigned short> port {0};
+    std::thread worker;
+  };
+
+  doctor_explanation_route_for_tests_t::doctor_explanation_route_for_tests_t(
+    const std::string &cert_file,
+    const std::string &key_file,
+    doctor_ai_explanation::service_t::hooks_t hooks
+  ):
+      impl {std::make_unique<impl_t>(cert_file, key_file, std::move(hooks))} {
+    auto *state = impl.get();
+    state->server.config.address = "127.0.0.1";
+    state->server.config.port = 0;
+    state->server.config.timeout_request = 5;
+    state->server.config.timeout_content = 5;
+    state->server.config.thread_pool_size = 1;
+    state->server.verify = verify_https_client;
+    state->server.on_verify_failed = [](resp_https_t response, req_https_t) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      response->close_connection_after_response = true;
+    };
+    state->server.default_resource["GET"] = not_found<PolarisHTTPS>;
+    state->server.resource["^/polaris/v1/doctor/explanation$"]["POST"] = [state](resp_https_t response, req_https_t request) {
+      doctorExplanation(state->explanations, std::move(response), std::move(request));
+    };
+    state->server.resource["^/polaris/v1/doctor/explanation/descriptor$"]["GET"] = [state](resp_https_t response, req_https_t request) {
+      const auto candidate = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+      // Session status semantics: no controller-session guard, which only the POST takes.
+      const auto scope = read_paired_explanation_scope(candidate, request->path, false);
+      if (!scope.cert_record) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+      const auto descriptor = doctor_ai_explanation::descriptor(
+        scope, state->explanations.config(), state->explanations.peek(scope.cert_uuid));
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      response->write(nlohmann::json {{"descriptor", descriptor}, {"doctor", scope.doctor}}.dump(), headers);
+    };
+    state->worker = std::thread([state]() {
+      try {
+        state->server.start([state](unsigned short assigned) {
+          state->port = assigned;
+        });
+      } catch (boost::system::system_error &err) {
+        BOOST_LOG(error) << "Couldn't start the Doctor explanation route for tests: "sv << err.what();
+      }
+    });
+    for (int waited = 0; state->port == 0 && waited < 500; ++waited) {
+      std::this_thread::sleep_for(10ms);
+    }
+  }
+
+  doctor_explanation_route_for_tests_t::~doctor_explanation_route_for_tests_t() {
+    impl->explanations.stop_accepting();
+    impl->server.stop();
+    if (impl->worker.joinable()) {
+      impl->worker.join();
+    }
+    impl->explanations.shutdown();
+  }
+
+  unsigned short doctor_explanation_route_for_tests_t::port() const {
+    return impl->port;
+  }
+
+  doctor_ai_explanation::service_t &doctor_explanation_route_for_tests_t::service() {
+    return impl->explanations;
   }
 #endif
 #endif

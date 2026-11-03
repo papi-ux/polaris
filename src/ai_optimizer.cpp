@@ -48,6 +48,9 @@ namespace ai_optimizer {
   // HTTP threads. Every read copies the settings under this lock; it is a leaf
   // lock, never held while taking another.
   static std::mutex cfg_mutex;
+  // Guarded by cfg_mutex. Moves on every settings change so a paired Doctor explanation (#613)
+  // captured under one configuration is never released under another.
+  static std::uint64_t cfg_generation = 1;
   static std::mutex cache_mutex;
   static std::mutex history_mutex;
   static std::mutex inflight_mutex;
@@ -3245,11 +3248,283 @@ namespace ai_optimizer {
     return explain_doctor_json_with_config(config_snapshot(), redacted_evidence_json);
   }
 
+  // ---- Paired Doctor explanation (#613) ----
+  //
+  // A separate, bounded adapter for the paired route. The web route above keeps its behavior. This
+  // path never logs provider errors, provider/model names or evidence, never retries and never
+  // switches provider: a transport without the paired bounds reports provider_not_ready.
+
+  namespace {
+    constexpr std::size_t k_paired_transport_cap = 64 * 1024;
+    // ai_claude_cli checks sign-in with its own bounded 5 s status call before inference.
+    constexpr int k_claude_status_budget_ms = 5000;
+
+    struct paired_http_sink_t {
+      std::string *out = nullptr;
+      std::size_t cap = 0;
+      bool overflow = false;
+    };
+
+    size_t paired_write_callback(char *contents, size_t size, size_t nmemb, void *userdata) {
+      auto *sink = static_cast<paired_http_sink_t *>(userdata);
+      const auto bytes = size * nmemb;
+      if (sink->out->size() + bytes > sink->cap) {
+        // Returning short ends the transfer with CURLE_WRITE_ERROR instead of growing the body.
+        sink->overflow = true;
+        return 0;
+      }
+      sink->out->append(contents, bytes);
+      return bytes;
+    }
+
+    int paired_cancel_callback(void *userdata, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+      return static_cast<const std::atomic<bool> *>(userdata)->load(std::memory_order_relaxed) ? 1 : 0;
+    }
+
+    struct paired_http_result_t {
+      CURLcode curl_code = CURLE_OK;
+      long http_code = 0;
+      std::string body;
+      bool overflow = false;
+    };
+
+    paired_http_result_t paired_post_json(const std::string &url,
+                                          const std::string &post_data,
+                                          int timeout_ms,
+                                          const std::vector<std::string> &header_values,
+                                          const std::atomic<bool> &cancel) {
+      paired_http_result_t result;
+      CURL *curl = curl_easy_init();
+      if (!curl) {
+        result.curl_code = CURLE_FAILED_INIT;
+        return result;
+      }
+      struct curl_slist *headers = nullptr;
+      headers = curl_slist_append(headers, "Content-Type: application/json");
+      for (const auto &header_value : header_values) {
+        headers = curl_slist_append(headers, header_value.c_str());
+      }
+      paired_http_sink_t sink {&result.body, k_paired_transport_cap, false};
+      curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(post_data.size()));
+      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, paired_write_callback);
+      curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout_ms));
+      curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(timeout_ms));
+      curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+      curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+      curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, paired_cancel_callback);
+      curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool> *>(&cancel));
+      result.curl_code = curl_easy_perform(curl);
+      curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &result.http_code);
+      result.overflow = sink.overflow;
+      curl_slist_free_all(headers);
+      curl_easy_cleanup(curl);
+      return result;
+    }
+
+    // OpenAI-compatible assistant text, without logging a refusal or any other provider text.
+    std::optional<std::string> paired_message_text(const nlohmann::json &api_response) {
+      if (!api_response.is_object()) return std::nullopt;
+      const auto choices = api_response.find("choices");
+      if (choices == api_response.end() || !choices->is_array() || choices->empty() || !(*choices)[0].is_object()) {
+        return std::nullopt;
+      }
+      const auto &choice = (*choices)[0];
+      const auto message = choice.find("message");
+      if (message == choice.end() || !message->is_object()) return std::nullopt;
+      const auto content = message->find("content");
+      if (content == message->end()) return std::nullopt;
+      if (content->is_string()) return content->get<std::string>();
+      if (content->is_array()) {
+        for (const auto &part : *content) {
+          if (part.is_object() && part.value("type", std::string {}) == "text" &&
+              part.contains("text") && part["text"].is_string()) {
+            return part["text"].get<std::string>();
+          }
+        }
+      }
+      return std::nullopt;
+    }
+
+    paired_explanation_result_t paired_result(paired_explanation_status_e status) {
+      paired_explanation_result_t result;
+      result.status = status;
+      return result;
+    }
+
+    // The reused six-field explanation contract, on output that is already within the transport cap.
+    paired_explanation_result_t paired_result_from_text(const std::string &text) {
+      if (text.empty() || text.size() > k_paired_transport_cap) {
+        return paired_result(paired_explanation_status_e::invalid_explanation);
+      }
+      const auto start = text.find('{');
+      const auto end = text.rfind('}');
+      if (start == std::string::npos || end == std::string::npos || end <= start) {
+        return paired_result(paired_explanation_status_e::invalid_explanation);
+      }
+      const auto parsed = nlohmann::json::parse(text.substr(start, end - start + 1), nullptr, false);
+      if (parsed.is_discarded() || doctor_explanation_contract_error(parsed)) {
+        return paired_result(paired_explanation_status_e::invalid_explanation);
+      }
+      auto result = paired_result(paired_explanation_status_e::explained);
+      result.explanation_json = parsed.dump();
+      return result;
+    }
+
+    std::string paired_user_prompt(const std::string &evidence_json) {
+      return "A bounded host projection of one captured Polaris Doctor reading follows. "
+             "It holds only fixed categories and measurements. Explain it without adding unsupported facts.\n" +
+             evidence_json;
+    }
+
+    paired_explanation_result_t paired_http(const config_t &active_cfg,
+                                            const std::string &evidence_json,
+                                            int deadline_ms,
+                                            const std::atomic<bool> &cancel) {
+      nlohmann::json request_body;
+      request_body["model"] = active_cfg.model;
+      request_body["temperature"] = 0;
+      request_body["max_tokens"] = 600;
+      request_body["messages"] = nlohmann::json::array({
+        {{"role", "system"}, {"content", doctor_explanation_system_prompt()}},
+        {{"role", "user"}, {"content", paired_user_prompt(evidence_json)}}
+      });
+      apply_chat_response_format(active_cfg, request_body, doctor_explanation_response_format());
+      std::vector<std::string> headers;
+      if (active_cfg.auth_mode == AUTH_API_KEY && !active_cfg.api_key.empty()) {
+        headers.push_back("Authorization: Bearer " + active_cfg.api_key);
+      }
+      const auto response = paired_post_json(join_url(active_cfg.base_url, "/chat/completions"),
+        request_body.dump(), deadline_ms, headers, cancel);
+      if (response.curl_code == CURLE_OPERATION_TIMEDOUT) {
+        return paired_result(paired_explanation_status_e::provider_timeout);
+      }
+      if (response.overflow || response.curl_code != CURLE_OK || response.http_code != 200) {
+        return paired_result(paired_explanation_status_e::provider_failed);
+      }
+      const auto api_response = nlohmann::json::parse(response.body, nullptr, false);
+      if (api_response.is_discarded()) {
+        return paired_result(paired_explanation_status_e::invalid_explanation);
+      }
+      const auto text = paired_message_text(api_response);
+      if (!text) {
+        return paired_result(paired_explanation_status_e::invalid_explanation);
+      }
+      return paired_result_from_text(*text);
+    }
+
+#ifndef _WIN32
+    paired_explanation_result_t paired_claude(const config_t &active_cfg,
+                                              const std::string &evidence_json,
+                                              int deadline_ms,
+                                              const std::string &executable) {
+      // The sign-in check spends at most its own 5 s first, so inference gets the rest of the deadline.
+      const auto result = claude_cli::explain(active_cfg.model, doctor_explanation_system_prompt(),
+        doctor_explanation_response_format().at("json_schema").at("schema").dump(),
+        paired_user_prompt(evidence_json), deadline_ms - k_claude_status_budget_ms, executable);
+      if (result.response) {
+        return paired_result_from_text(*result.response);
+      }
+      if (result.code == "inference_timeout") {
+        return paired_result(paired_explanation_status_e::provider_timeout);
+      }
+      if (result.code == "cli_unavailable" || result.code == "authentication_failed" || result.code == "cli_auth_unverified") {
+        return paired_result(paired_explanation_status_e::provider_not_ready);
+      }
+      if (result.code == "invalid_response") {
+        return paired_result(paired_explanation_status_e::invalid_explanation);
+      }
+      return paired_result(paired_explanation_status_e::provider_failed);
+    }
+#endif
+  }  // namespace
+
+  int paired_explanation_deadline_ms(int configured_timeout_ms) {
+    return std::min(std::max(configured_timeout_ms, 1000), 30000);
+  }
+
+  bool paired_explanation_http_resolver_bounded() {
+    // CURLOPT_NOSIGNAL is required off the main thread, and with the synchronous resolver libcurl
+    // cannot time out name resolution. Only an asynchronous resolver keeps the whole deadline.
+    const auto *info = curl_version_info(CURLVERSION_NOW);
+    return info != nullptr && (info->features & CURL_VERSION_ASYNCHDNS) != 0;
+  }
+
+  bool paired_explanation_transport_ready(const config_t &config) {
+    return paired_explanation_transport_ready(config, paired_explanation_http_resolver_bounded());
+  }
+
+  bool paired_explanation_transport_ready(const config_t &config, bool http_resolver_bounded) {
+    if (config.provider == PROVIDER_OPENAI && config.auth_mode == AUTH_SUBSCRIPTION) {
+      // Codex exec is an agent with host file access even under --sandbox read-only, and its process and
+      // output bounds are not proven for this route. It stays unavailable here; the web path is unchanged.
+      return false;
+    }
+    if (config.provider == PROVIDER_ANTHROPIC && config.auth_mode == AUTH_SUBSCRIPTION) {
+#ifndef _WIN32
+      // Tools, MCP, hooks and slash commands disabled; output capped; the process group is killed at
+      // the deadline. Its sign-in check spends at most 5 s, so inference needs at least 1 s more.
+      return paired_explanation_deadline_ms(config.timeout_ms) >= k_claude_status_budget_ms + 1000;
+#else
+      return false;
+#endif
+    }
+    // Same refusal as the web explanation path: no explanation transport for these modes.
+    if (config.provider == PROVIDER_ANTHROPIC || config.auth_mode == AUTH_SUBSCRIPTION) {
+      return false;
+    }
+    return http_resolver_bounded && !config.base_url.empty();
+  }
+
+  paired_explanation_config_t paired_explanation_config() {
+    paired_explanation_config_t snapshot;
+    {
+      std::lock_guard<std::mutex> lock(cfg_mutex);
+      snapshot.config = cfg;
+      snapshot.generation = cfg_generation;
+    }
+    snapshot.enabled = is_config_enabled(snapshot.config);
+    snapshot.transport_ready = snapshot.enabled && paired_explanation_transport_ready(snapshot.config);
+    return snapshot;
+  }
+
+  paired_explanation_result_t explain_paired_doctor(const config_t &config,
+                                                    const std::string &evidence_json,
+                                                    const std::atomic<bool> &cancel,
+                                                    const paired_explanation_overrides_t &overrides) {
+    if (!is_config_enabled(config) || !paired_explanation_transport_ready(config)) {
+      return paired_result(paired_explanation_status_e::provider_not_ready);
+    }
+    if (cancel.load(std::memory_order_relaxed)) {
+      return paired_result(paired_explanation_status_e::provider_failed);
+    }
+    const auto deadline_ms = paired_explanation_deadline_ms(config.timeout_ms);
+    try {
+      if (config.provider == PROVIDER_ANTHROPIC && config.auth_mode == AUTH_SUBSCRIPTION) {
+#ifndef _WIN32
+        return paired_claude(config, evidence_json, deadline_ms, overrides.claude_executable);
+#else
+        return paired_result(paired_explanation_status_e::provider_not_ready);
+#endif
+      }
+      return paired_http(config, evidence_json, deadline_ms, cancel);
+    } catch (...) {
+      // Exceptions can carry provider or evidence text; report only the fixed failure.
+      return paired_result(paired_explanation_status_e::provider_failed);
+    }
+  }
+
   void init(const config_t &config) {
     const auto resolved = resolved_config(config);
     {
       std::lock_guard<std::mutex> lock(cfg_mutex);
       cfg = resolved;
+      ++cfg_generation;
     }
     load_cache();
     const bool history_repaired = load_history();
@@ -3278,6 +3553,7 @@ namespace ai_optimizer {
     {
       std::lock_guard<std::mutex> lock(cfg_mutex);
       cfg.enabled = enabled;
+      ++cfg_generation;
     }
     config::video.ai_optimizer.enabled = enabled;
     BOOST_LOG(info) << "ai_optimizer: "sv << (enabled ? "enabled" : "disabled") << " at runtime"sv;
@@ -3288,6 +3564,7 @@ namespace ai_optimizer {
     {
       std::lock_guard<std::mutex> lock(cfg_mutex);
       cfg = resolved;
+      ++cfg_generation;
     }
     config::video.ai_optimizer.enabled = resolved.enabled;
     BOOST_LOG(info) << "ai_optimizer: settings applied at runtime ("sv << (resolved.enabled ? "enabled"sv : "disabled"sv)
