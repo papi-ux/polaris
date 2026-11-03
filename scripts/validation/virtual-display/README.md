@@ -181,8 +181,9 @@ the kernel, CPU and GPU models, package versions, DRM connector states and the h
 settings listed in `CONFIG_KEYS` that change per-frame work. A setting whose value
 contains the home directory, or does not look like a plain value, is recorded as
 `(not recorded)`. From Polaris's stats it keeps only the fields in `STATS_NUMBERS` and
-`STATS_LABELS` and the mode strings of the display mode decision, so the client's name
-and address are dropped. Read a receipt before attaching it anywhere.
+`STATS_LABELS`, `video_sample_revision` and the mode strings of the display mode
+decision, so the client's name and address are dropped. The receipt is written readable by you only, whatever the
+umask. Read a receipt before attaching it anywhere.
 
 ## Tests
 

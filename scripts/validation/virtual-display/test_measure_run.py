@@ -463,13 +463,35 @@ class CommandLineTests(unittest.TestCase):
             log = Path(directory) / "host.log"
             log.write_text("")
             out = Path(directory) / "receipts"
-            receipt = {"complete": False}
-            with patch.object(measure, "measure", return_value=receipt), contextlib.redirect_stdout(io.StringIO()):
+            receipt = {"complete": False, "incomplete": ["stopped early"]}
+            output = io.StringIO()
+            with patch.object(measure, "measure", return_value=receipt), contextlib.redirect_stdout(output):
                 code = measure.main(["--host", "hermes", "--scenario", "s", "--run", "2", "--fps", "60",
                                      "--out", str(out), "--log", str(log)])
             self.assertEqual(code, 1)
+            self.assertIn("(marked incomplete: stopped early)", output.getvalue())
             self.assertEqual(json.loads((out / "s-hermes-run2.json").read_text()), receipt)
             self.assertEqual(sorted(os.listdir(out)), ["s-hermes-run2.json"])
+
+    def test_receipt_is_private_whatever_the_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "host.log"
+            log.write_text("")
+            out = Path(directory) / "receipts"
+            out.mkdir()
+            # A partial file an earlier run left behind, readable by everyone.
+            (out / "s-hermes-run1.json.partial").write_text("{")
+            os.chmod(out / "s-hermes-run1.json.partial", 0o644)
+            previous = os.umask(0o022)
+            try:
+                with patch.object(measure, "measure", return_value={"complete": True}), contextlib.redirect_stdout(io.StringIO()):
+                    code = measure.main(["--host", "hermes", "--scenario", "s", "--run", "1", "--fps", "60",
+                                         "--out", str(out), "--log", str(log)])
+            finally:
+                os.umask(previous)
+            self.assertEqual(code, 0)
+            self.assertEqual((out / "s-hermes-run1.json").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads((out / "s-hermes-run1.json").read_text()), {"complete": True})
 
 
 if __name__ == "__main__":

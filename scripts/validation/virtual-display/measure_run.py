@@ -999,7 +999,11 @@ def main(argv: list[str] | None = None) -> int:
     receipt = measure(args, log_path, config_path)
     args.out.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".json.partial")
-    partial.write_text(json.dumps(receipt, indent=1) + "\n")
+    # Only the user who ran it can read the receipt, whatever the shell's umask. A partial file
+    # left by an earlier run keeps its old mode through O_CREAT, so the mode is set again.
+    with os.fdopen(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(json.dumps(receipt, indent=1) + "\n")
     partial.replace(target)
     reasons = "; ".join(receipt.get("incomplete") or ["stopped early"])
     print(f"wrote {target}" + ("" if receipt["complete"] else f" (marked incomplete: {reasons})"))
