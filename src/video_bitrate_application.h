@@ -190,6 +190,10 @@ namespace video::bitrate_application {
     ~adapter_t() noexcept { retire(); }
 
     update_observation_t begin_native_update(std::optional<origin_t> origin) noexcept {
+      // Any update attempt supersedes a staged, unpublished open, including an
+      // unfinished (SDK error) or same-rate no-op one. A published setting is
+      // the ledger's, which an explicit no-op still preserves.
+      if (state_) state_->native_opening.reset();
       return update_observation_t {state_, origin};
     }
 

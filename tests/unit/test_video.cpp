@@ -798,6 +798,17 @@ TEST(VideoNvencCudaTests, InitializationOrLaterConstructionFailureCannotPublishA
   }
 }
 
+TEST(VideoNvencCudaTests, AnOriginForAnotherRateLeavesTheAcceptedOpenUnattributed) {
+  fake_nvenc_driver_t driver;
+  fake_cuda_nvenc_t encoder {driver};
+  // The SDK's accepted average decides, not the origin: 15 Mbps cannot label a 20 Mbps open.
+  ASSERT_TRUE(create_fake_nvenc(encoder, 0, video::bitrate_application::origin_t {10, 15000}, 605));
+  EXPECT_EQ(driver.initialized_average_bps, 20'000'000u);
+  EXPECT_FALSE(encoder.publish_usable_bitrate_open());
+  EXPECT_EQ(encoder.encode_frame(41, false).frame_index, 41u);
+  EXPECT_FALSE(encoder.take_bitrate_observation(41));
+}
+
 TEST(VideoNvencCudaTests, RegistersTheConverterOnceAndReconfiguresBetweenFrames) {
   fake_nvenc_driver_t driver;
   {

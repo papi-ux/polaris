@@ -232,6 +232,35 @@ TEST(VideoBitrateApplication, AttributedNativeOpenRefusesMissingOriginRatesAndRe
   EXPECT_FALSE(wrong_backend.publish_usable_nvenc_open());
 }
 
+TEST(VideoBitrateApplication, AnyNativeUpdateAttemptBeforeUsablePublicationSupersedesTheStagedOpen) {
+  // An SDK error/early return leaves the attempt unfinished; a same-rate update
+  // is an explicit no-op. Neither may leave the earlier staged open publishable.
+  for (const bool noop : {false, true}) {
+    SCOPED_TRACE(noop ? "same-rate no-op" : "unfinished attempt");
+    adapter_t instance {7, native};
+    instance.nvenc_initialize_success(app::origin_t {20, 10000}, 10'000'000, true);
+    {
+      auto update = instance.begin_native_update(app::origin_t {21, 10000});
+      if (noop) update.unchanged();
+    }
+    EXPECT_FALSE(instance.publish_usable_nvenc_open());
+    { auto input = instance.capture_before_submit(0); EXPECT_FALSE(input.accepted(nv_submit)); }
+    EXPECT_FALSE(instance.take_output(nv_output, 0));
+  }
+
+  // After usable publication, a same-rate no-op still keeps the open's record.
+  adapter_t published {7, native};
+  published.nvenc_initialize_success(app::origin_t {20, 10000}, 10'000'000, true);
+  ASSERT_TRUE(published.publish_usable_nvenc_open());
+  { auto update = published.begin_native_update(app::origin_t {21, 10000}); update.unchanged(); }
+  { auto input = published.capture_before_submit(0); ASSERT_TRUE(input.accepted(nv_submit)); }
+  const auto kept = published.take_output(nv_output, 0);
+  ASSERT_TRUE(kept);
+  EXPECT_EQ(kept->origin(), video::bitrate_provenance::receipt_origin_e::successful_open);
+  EXPECT_EQ(kept->authority_revision(), 20u);
+  EXPECT_EQ(kept->application_sequence(), 1u);
+}
+
 TEST(VideoBitrateApplication, InnerAcceptedSubmitSurvivesOuterErrorsAndDelayedExactOutput) {
   adapter_t ffmpeg {7, avcodec};
   ffmpeg.avcodec_open_success(app::origin_t {40, 10000}, exact_a, exact_a);
