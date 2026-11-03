@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -23,6 +24,7 @@
 #include <string>
 
 #if defined(__unix__) || defined(__APPLE__)
+  #include <fcntl.h>
   #include <spawn.h>
   #include <sys/wait.h>
   #include <unistd.h>
@@ -382,7 +384,7 @@ TEST(VideoPacketTraceFields, StrictPythonReaderFixturesRunOnceOnTheSelectedNativ
 #endif
 }
 
-TEST(VideoPacketTraceFields, ProductionRecorderBytesPassTheStrictPythonInspector) {
+TEST(VideoPacketTraceFields, ProductionRecorderTwoFourBytesAreRefusedByTheFrozenTwoThreeInspector) {
 #ifdef __linux__
   recording_t recording;
   ASSERT_TRUE(recording.recorder);
@@ -414,19 +416,54 @@ TEST(VideoPacketTraceFields, ProductionRecorderBytesPassTheStrictPythonInspector
   recording.recorder->record(positive);
   recording.stop();
 
+  // The actual production bytes are a complete 2.4 capture, so the refusal below is the version.
+  std::istringstream lines(recording.bytes());
+  std::string first, line, last;
+  ASSERT_TRUE(std::getline(lines, first));
+  while (std::getline(lines, line)) last = line;
+  const auto head = json::parse(first);
+  const auto footer = json::parse(last);
+  EXPECT_EQ(head.at("schema"), "polaris.vrr-host-trace");
+  EXPECT_EQ(head.at("major"), 2);
+  EXPECT_EQ(head.at("minor"), 4);
+  EXPECT_EQ(footer.at("type"), "footer");
+  EXPECT_TRUE(footer.at("producer_complete").get<bool>());
+
+  // The frozen 2.3-only inspector, unchanged: argument list, no shell. Only the child's stdout is
+  // redirected, to a new private file in this test's own temporary directory (removed with it).
   const auto script = (std::filesystem::path(POLARIS_SOURCE_DIR) / "scripts/validation/live-tuning/inspect_frame_records.py").string();
   const auto raw_path = recording.path.string();
   const auto close_path = raw_path + ".close.json";
+  const auto output_path = (recording.directory / "inspector.stdout").string();
   std::array<char *, 6> arguments {{const_cast<char *>("python3"), const_cast<char *>("-B"),
     const_cast<char *>(script.c_str()), const_cast<char *>(raw_path.c_str()), const_cast<char *>(close_path.c_str()), nullptr}};
+  posix_spawn_file_actions_t actions;
+  ASSERT_EQ(::posix_spawn_file_actions_init(&actions), 0);
+  const int opened = ::posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output_path.c_str(),
+    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
   pid_t child = -1;
-  ASSERT_EQ(::posix_spawnp(&child, "python3", nullptr, nullptr, arguments.data(), environ), 0);
+  const int spawned = opened == 0 ? ::posix_spawnp(&child, "python3", &actions, nullptr, arguments.data(), environ) : opened;
+  ::posix_spawn_file_actions_destroy(&actions);
+  ASSERT_EQ(opened, 0);
+  ASSERT_EQ(spawned, 0);
   int wait_status = 0;
   pid_t waited;
   do { waited = ::waitpid(child, &wait_status, 0); } while (waited < 0 && errno == EINTR);
   ASSERT_EQ(waited, child);
   ASSERT_TRUE(WIFEXITED(wait_status));
-  EXPECT_EQ(WEXITSTATUS(wait_status), 0);
+  // The reader's own non-complete exit: a missing interpreter (127) or a crash is a different failure.
+  EXPECT_EQ(WEXITSTATUS(wait_status), 1);
+  std::ifstream output_input(output_path, std::ios::binary);
+  const std::string output {std::istreambuf_iterator<char>(output_input), std::istreambuf_iterator<char>()};
+  ASSERT_FALSE(output.empty());
+  EXPECT_EQ(output.back(), '\n');
+  EXPECT_EQ(std::count(output.begin(), output.end(), '\n'), 1);
+  const auto verdict = json::parse(output);
+  EXPECT_EQ(verdict.at("schema"), "polaris.packet-historical-receipts-inspection/v1");
+  EXPECT_EQ(verdict.at("status"), "INCONCLUSIVE");
+  EXPECT_EQ(verdict.at("reason"), "unsupported_version");
+  EXPECT_TRUE(verdict.at("records").is_null());
+  EXPECT_FALSE(verdict.at("physical_acceptance").get<bool>());
 #else
   GTEST_SKIP() << "Actual recorder/inspector interoperability requires Linux";
 #endif

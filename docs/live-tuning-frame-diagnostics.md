@@ -164,9 +164,11 @@ checks that a disabled recorder scope adds no event. These public operation
 observations are metadata tests; they do not execute an FFmpeg/NVENC SDK call or
 the real sender loop. An owned-session trace would supply that later witness.
 A separate Linux guard passes actual production-recorder raw and close bytes to
-the new inspector through a single argument-list child invocation and requires
-its complete-diagnostic exit status. Hand-authored fixtures alone cannot provide
-that producer/reader interoperability witness.
+this inspector through a single argument-list child invocation. Since the producer
+moved to 2.4, the guard requires the inspector's exit status 1 and its typed
+`unsupported_version` refusal, never a complete diagnostic. Hand-authored fixtures
+alone cannot provide that producer/reader interoperability witness; the unchanged
+fixtures keep the positive 2.3 coverage.
 
 One Unix GTest invokes the exact source-relative Python fixture file once with
 `posix_spawnp`, argument list `python3 -B FILE -v`, inherited stdout/stderr and no
