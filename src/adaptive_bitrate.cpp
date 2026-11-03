@@ -1133,11 +1133,7 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
     if (!generation || generation != scope_generation || !scope_exclusive ||
-        !operator_revision || configured_encoder_kbps <= 0 || target != configured_encoder_kbps ||
-        (!enabled.load(std::memory_order_relaxed) &&
-         !doctor_override_active.load(std::memory_order_relaxed) &&
-         !explicit_live_override_active.load(std::memory_order_relaxed) &&
-         !pending_live_update_active.load(std::memory_order_relaxed))) {
+        !operator_revision || configured_encoder_kbps <= 0 || target != configured_encoder_kbps) {
       return std::nullopt;
     }
     // In particular, do not reaffirm encoder_applied_revision or create a

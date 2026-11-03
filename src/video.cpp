@@ -6292,8 +6292,10 @@ namespace video {
   // encoder changes: native NVENC can acknowledge a bitrate update in place.
   class cuda_nvenc_encode_device_t final: public platf::nvenc_encode_device_t {
   public:
-    explicit cuda_nvenc_encode_device_t(std::unique_ptr<platf::avcodec_encode_device_t> input):
-        converter(std::move(input)) {
+    explicit cuda_nvenc_encode_device_t(std::unique_ptr<platf::avcodec_encode_device_t> input,
+                                       bool attribute_open = false):
+        converter(std::move(input)),
+        attribute_open(attribute_open) {
     }
 
     ~cuda_nvenc_encode_device_t() override {
@@ -6340,8 +6342,8 @@ namespace video {
       // The native CUDA device opens before encode_run's runtime-support
       // publication. Capture only an already matching sole-session target;
       // this read does not change the rate or borrow a later encoder ACK.
-      const auto opening_origin = bitrate_application_origin(
-        adaptive_bitrate::get_encoder_open_request(config.session_generation, config.bitrate));
+      const auto opening_origin = attribute_open ? bitrate_application_origin(
+        adaptive_bitrate::get_encoder_open_request(config.session_generation, config.bitrate)) : std::nullopt;
       if (!candidate->create_encoder(config::video.nv, config,
                                     nvenc::nvenc_colorspace_from_sunshine_colorspace(space),
                                     NV_ENC_BUFFER_FORMAT_NV12, opening_origin)) return false;
@@ -6372,11 +6374,12 @@ namespace video {
     avcodec_buffer_t hw_frames;
     std::unique_ptr<platf::avcodec_encode_device_t> converter;
     std::unique_ptr<nvenc::nvenc_cuda> native;
+    const bool attribute_open;
   };
 
   void try_native_cuda_fec_device(std::unique_ptr<platf::encode_device_t> &result,
                                  platf::display_t &display, const encoder_t &encoder, const config_t &config,
-                                 const sunshine_colorspace_t &colorspace) {
+                                 const sunshine_colorspace_t &colorspace, bool attribute_open) {
     auto *input = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
     const auto *formats = dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get());
     if (encoder_probe_in_progress || !config.client_media_feedback_expected ||
@@ -6391,7 +6394,7 @@ namespace video {
 
     const bool prefer_8bit = input->prefer_8bit_encode;
     auto candidate = std::make_unique<cuda_nvenc_encode_device_t>(
-      boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(result)));
+      boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(result)), attribute_open);
     candidate->colorspace = colorspace;
     candidate->prefer_8bit_encode = prefer_8bit;
     if (candidate->init_encoder(config, colorspace)) {
@@ -6415,7 +6418,8 @@ namespace video {
   }
 #endif
 
-  std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
+  std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder,
+                                                         const config_t &config, bool attribute_native_open = false) {
     std::unique_ptr<platf::encode_device_t> result;
 
     const auto hdr_probe = probe_display_hdr(disp, config);
@@ -6526,7 +6530,7 @@ namespace video {
       }
     }
 #if !defined(__ANDROID__)
-    try_native_cuda_fec_device(result, disp, encoder, config, colorspace);
+    try_native_cuda_fec_device(result, disp, encoder, config, colorspace, attribute_native_open);
 #endif
 #endif
 
@@ -7012,7 +7016,7 @@ namespace video {
         config.bitrate = request->target_bitrate_kbps;
       }
 
-      auto encode_device = make_encode_device(*display, encoder, config);
+      auto encode_device = make_encode_device(*display, encoder, config, !config.input_only);
       if (!encode_device) {
         invalidate_live_probe_reuse();
         return;

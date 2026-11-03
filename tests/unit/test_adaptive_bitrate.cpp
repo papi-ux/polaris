@@ -524,7 +524,7 @@ TEST(AdaptiveBitrateController, SnapshotsTheFirstOpenWithoutAcknowledgingApplica
   EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
 }
 
-TEST(AdaptiveBitrateController, RefusesAnUnownedMismatchedOrInactiveOpen) {
+TEST(AdaptiveBitrateController, RefusesAnUnownedOrMismatchedOpenWithoutBorrowingSupport) {
   encoder_open_scope_t scope;
   EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(0, 20000));
   EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(606, 20000));
@@ -535,7 +535,26 @@ TEST(AdaptiveBitrateController, RefusesAnUnownedMismatchedOrInactiveOpen) {
   adaptive_bitrate::set_session_scope(605, "opening", true);
   ASSERT_TRUE(adaptive_bitrate::get_encoder_open_request(605, 20000));
   adaptive_bitrate::set_enabled(false);
+  // Historical open attribution is separate from permission to pace a frame.
+  EXPECT_TRUE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  EXPECT_FALSE(adaptive_bitrate::get_live_pacing_cap(605));
+}
+
+TEST(AdaptiveBitrateController, PendingRecreationCanObserveItsExactLowerOpenTarget) {
+  encoder_open_scope_t scope;
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  adaptive_bitrate::set_live_bitrate(10000);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  ASSERT_EQ(request->target_bitrate_kbps, 10000);
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision, 10000));
+  EXPECT_FALSE(adaptive_bitrate::get_live_pacing_cap(605));
+  const auto origin = adaptive_bitrate::get_encoder_open_request(605, 10000);
+  ASSERT_TRUE(origin);
+  EXPECT_EQ(origin->revision, request->revision);
+  EXPECT_EQ(origin->target_bitrate_kbps, 10000);
   EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 0);
 }
 
 TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {

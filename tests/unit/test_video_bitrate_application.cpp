@@ -181,6 +181,7 @@ TEST(VideoBitrateApplication, AttributedNativeOpenPublishesOnlyAtUsableOuterAndK
   adapter_t instance {7, native};
   app::origin_t request {20, 10000};
   instance.nvenc_initialize_success(request, 10'000'000, true);
+  EXPECT_FALSE(instance.publish_usable_avcodec_open());
   request = {21, 20000};  // A later poll is not this initialization's origin.
   instance.nvenc_initialize_success(request, 20'000'000, true);
   ASSERT_TRUE(instance.publish_usable_nvenc_open());
@@ -221,6 +222,11 @@ TEST(VideoBitrateApplication, AttributedNativeOpenRefusesMissingOriginRatesAndRe
     if (retire) instance.retire(); else instance.setting_unavailable();
     EXPECT_FALSE(instance.publish_usable_nvenc_open());
   }
+  adapter_t updated {7, native};
+  updated.nvenc_initialize_success(app::origin_t {20, 10000}, 10'000'000, true);
+  { auto update = updated.begin_native_update(app::origin_t {21, 6000});
+    ASSERT_TRUE(update.nvenc_reconfigure_success(6'000'000)); }
+  EXPECT_FALSE(updated.publish_usable_nvenc_open());
   adapter_t wrong_backend {7, avcodec};
   wrong_backend.nvenc_initialize_success(app::origin_t {20, 10000}, 10'000'000, true);
   EXPECT_FALSE(wrong_backend.publish_usable_nvenc_open());
