@@ -73,9 +73,11 @@ def shortfall(run: dict) -> float | None:
     return 100.0 * (target - received) / target if received is not None and target else None
 
 
+# Processing latency runs from the frame's capture stamp to the send thread's handoff, before
+# FEC and the send. Each host stamps the frame at its own point; the README says where.
 SHARED = (
-    ("Frame processing latency, mean of 20 s averages", "ms", number_at("summary", "periodic", "frame_processing", "avg_ms")),
-    ("Frame processing latency, slowest frame", "ms", number_at("summary", "periodic", "frame_processing", "max_ms")),
+    ("Processing latency to send handoff, mean of 20 s averages", "ms", number_at("summary", "periodic", "frame_processing", "avg_ms")),
+    ("Processing latency to send handoff, slowest frame", "ms", number_at("summary", "periodic", "frame_processing", "max_ms")),
     ("Frame network latency, mean", "ms", number_at("summary", "periodic", "frame_network", "avg_ms")),
     ("Host process CPU, mean", "% of a core", number_at("summary", "cpu", "host_pct", "mean")),
     ("Host process CPU, p95", "% of a core", number_at("summary", "cpu", "host_pct", "p95")),
@@ -97,20 +99,22 @@ CLIENT = (
     ("Rendered frame rate", "fps", number_at("client", "rendered_fps")),
     ("Frames dropped by the network", "%", number_at("client", "network_drop_pct")),
     ("Frames dropped by jitter", "%", number_at("client", "jitter_drop_pct")),
-    ("Host processing latency, mean", "ms", number_at("client", "host_latency_avg_ms")),
-    ("Host processing latency, max", "ms", number_at("client", "host_latency_max_ms")),
+    ("Host processing latency to send handoff, mean", "ms", number_at("client", "host_latency_avg_ms")),
+    ("Host processing latency to send handoff, max", "ms", number_at("client", "host_latency_max_ms")),
     ("Network round trip", "ms", number_at("client", "rtt_ms")),
     ("Decode time", "ms", number_at("client", "decode_ms")),
     ("Frame queue delay", "ms", number_at("client", "queue_ms")),
     ("Render time with V-sync", "ms", number_at("client", "render_ms")),
 )
+# Polaris publishes its encode time once a second, as the time of the frame that closes the
+# second, so its mean and p95 are over one frame a second rather than every frame.
 HOST_SPECIFIC = (
     ("Polaris capture, total p50", "us", busiest_entry("polaris_capture", "total_us_p50")),
     ("Polaris capture, total p99 (worst window)", "us", busiest_entry("polaris_capture", "total_us_p99")),
     ("Polaris capture, dispatch p50", "us", busiest_entry("polaris_capture", "dispatch_us_p50")),
     ("Polaris capture, ingest p50", "us", busiest_entry("polaris_capture", "ingest_us_p50")),
-    ("Polaris encode time, mean", "ms", number_at("summary", "polaris_stats", "encode_time_ms", "mean")),
-    ("Polaris encode time, p95", "ms", number_at("summary", "polaris_stats", "encode_time_ms", "p95")),
+    ("Polaris encode time, one frame a second, mean", "ms", number_at("summary", "polaris_stats", "encode_time_ms", "mean")),
+    ("Polaris encode time, one frame a second, p95", "ms", number_at("summary", "polaris_stats", "encode_time_ms", "p95")),
     ("Polaris stream frame rate, mean", "fps", number_at("summary", "polaris_stats", "fps", "mean")),
     ("Polaris encoder bitrate, mean", "Mb/s", scaled(number_at("summary", "polaris_stats", "bitrate_kbps", "mean"), 0.001)),
     ("Polaris dropped frames, mean", "%", scaled(number_at("summary", "polaris_stats", "dropped_frame_ratio", "mean"), 100)),

@@ -20,25 +20,26 @@ the machine back afterwards.
 
 | Figure | Source | Notes |
 |---|---|---|
-| Frame processing latency | Both hosts log `Frame processing latency (min/max/avg)` at debug level for each 20 s window | From the moment the host's capture code has a frame to the moment its packets go to the network, so it includes encoding. Moonlight shows the same figure as host processing latency. |
+| Processing latency | Both hosts log `Frame processing latency (min/max/avg)` at debug level for each 20 s window | From the frame's capture stamp to the send thread's handoff, before FEC and the send. It includes encoding. Moonlight shows the same figure as host processing latency. |
 | Network latencies | The other three periodic lines: `send_batch()`, FEC block and the frame's overall network latency | Same logger as above |
 | CPU | `/proc/PID/stat`, every 0.5 s | In percent of one core for the host (its process and children, except the test page), KWin, Xwayland, PipeWire (`pipewire`, `pipewire-pulse`, `wireplumber`), the desktop portals and the test page. Whole-system CPU is in percent of all cores. |
 | GPU busy, VCN busy, GPU power | amdgpu's sysfs files | The first amdgpu card, unless `--card` names another |
 | VCN busy time per frame | VCN busy share times the target frame interval | Stands in for encode time, which Hermes does not report. Any other video work on the GPU adds to it. |
 | Network send rate | `/proc/net/dev` | The busiest interface is the stream: video, FEC and audio |
 | Polaris capture timings | `capture_telemetry` lines, written every 600 frames with `linux_capture_profile = enabled` | Polaris only |
-| Polaris encode time, frame rate, dropped and duplicate frames | `/api/stats/stream-sse` | Polaris only. One request stays open for the whole run because Polaris logs every web request at debug level. |
+| Polaris encode time, frame rate, dropped and duplicate frames | `/api/stats/stream-sse` | Polaris only. One request stays open for the whole run because Polaris logs every web request at debug level. Polaris publishes these once a second, and the encode time is the time of one frame, so its mean and p95 are over one frame a second, not every frame. |
 | Hermes KMS acquire time | `[capture-metric/...]` lines, every 120 frames | Hermes only. Times the KMS acquire call and nothing else. |
 | Client figures | Moonlight's performance overlay, typed into `client.csv` | Frame rates, drops, host processing latency, network round trip, decode, queue and render times |
 | Glass to glass | Photos of the host monitor and the client screen together, typed into `photos.csv` | How far the stream's clock trails the host monitor's |
 
 Points to keep in mind when reading the results:
 
-- Each host starts its processing clock when its own capture code has the frame:
-  Polaris once the PipeWire buffer is attached, Hermes once the KMS acquire returns.
-  Time spent before that, in KWin or PipeWire for Polaris and in the KMS commit for
-  Hermes, is not counted in it. Glass to glass is the only figure that covers the whole
-  path.
+- Each host stamps the frame in its own capture code, and processing latency starts
+  there. Polaris, on the PipeWire shared-memory path that VA-API takes here, stamps it
+  after copying the frame out of PipeWire. Hermes stamps it once the KMS acquire
+  returns. Time before the stamp, in KWin, PipeWire and Polaris's copy or in the KMS
+  commit for Hermes, is not counted, and neither are FEC and the send after the send
+  thread's handoff. Glass to glass is the only figure that covers the whole path.
 - The capture timings are listed in their own table because the two hosts time
   different steps. They are not compared with each other.
 - A process that starts and exits within one 0.5 s sample is only partly counted.
