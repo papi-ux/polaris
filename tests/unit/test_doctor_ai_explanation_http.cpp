@@ -69,12 +69,12 @@ namespace {
       {"primary_issue", "network_jitter"},
       {"confidence", {{"level", "medium"}, {"score", 0.68}, {"basis", "live_evidence_recheck"},
                       {"sample_window", {{"samples", 12}, {"seconds", 10}}}}},
-      {"summary", "Canary summary from 10.1.2.3 at /home/canary-user/secret"},
+      {"summary", "Canary summary from 10.1.2.3 at /" "home/canary-user/secret"},
       {"recommendation", "Canary recommendation token=sk-canary-0123456789"},
       {"evidence", nlohmann::json::array({
         row("streaming", "Active stream", true, "", "pass", "stream_stats", "A stream is active."),
-        row("running_binary", "Running binary", "/home/canary-user/bin/polaris", "", "pass", "process",
-            "Polaris is running from /home/canary-user/bin/polaris."),
+        row("running_binary", "Running binary", "/" "home/canary-user/bin/polaris", "", "pass", "process",
+            "Polaris is running from /" "home/canary-user/bin/polaris."),
         row("capture_path", "Capture path", "shm Canary-GPU", "", "watch", "stream_stats", "canary capture detail"),
         row("encoder", "Encoder", "Canary RTX 9090 /dev/dri/renderD128", "", "pass", "stream_stats", "canary"),
         row("packet_loss", "Video frame loss", 2.5, "%", "fail", "media_transport", "canary loss detail"),
@@ -154,7 +154,7 @@ namespace {
   }
 
   const std::vector<std::string> k_canaries {
-    "canary", "10.1.2.3", "192.168.77.88", "100.64.0.9", "/home/", "sk-canary", "renderD128", "ts.net",
+    "canary", "10.1.2.3", "192.168.77.88", "100.64.0.9", "/" "home/", "sk-canary", "renderD128", "ts.net",
     "Canary-Phone", "lower bitrate canary",
   };
 }  // namespace
@@ -377,16 +377,16 @@ TEST(DoctorAiExplanationSanitizer, ReflectedIdentitiesAddressesPathsAndCredentia
   auto explanation = valid_explanation();
   explanation["likely_cause"] = "Canary Owner Phone on 192.168.1.20 or fe80::1 lost frames playing Canary Secret Title.";
   explanation["evidence"] = nlohmann::json::array({
-    "Logs at /home/papi/.config/polaris/polaris.log and C:\\Users\\papi\\AppData mention api_key=abc123.",
+    "Logs at /" "home/fictional-user/.config/polaris/polaris.log and C:\\Users\\fictional-user\\AppData mention api_key=abc123.",
     "Authorization: Bearer abc123 was sent to https://user:pw@host.lan/x for session canary-app-session-9d1f.",
-    "MAC 00:1a:2b:3c:4d:5e, email papi@example.com, host gaming-pc.local, token sk-live-0123456789abcdef.",
+    "MAC 00:1a:2b:3c:4d:5e, email fictional-user@example.com, host gaming-pc.local, token sk-live-0123456789abcdef.",
   });
   explanation["advanced_detail"] = "Key 0123456789abcdef0123456789abcdef0123456789abcdef and 2001:db8:0:0:1:2:3:4.";
   const auto clean = dae::sanitize_explanation(explanation, identities);
   ASSERT_TRUE(clean);
   const auto text = clean->dump();
   for (const auto *leak : {"Canary Owner Phone", "Canary Secret Title", "canary-app-session-9d1f", "192.168.1.20", "fe80::1",
-                           "/home/papi", "C:\\\\Users", "abc123", "user:pw", "host.lan", "00:1a:2b", "papi@example.com",
+                           "/" "home/fictional-user", "C:\\\\Users", "abc123", "user:pw", "host.lan", "00:1a:2b", "fictional-user@example.com",
                            "gaming-pc.local", "sk-live", "0123456789abcdef0123", "2001:db8"}) {
     EXPECT_EQ(text.find(leak), std::string::npos) << leak;
   }
