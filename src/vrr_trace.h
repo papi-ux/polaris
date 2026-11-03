@@ -16,9 +16,10 @@
 
 namespace vrr_trace {
   inline constexpr unsigned k_schema_major = 2;
-  // Minor 3 adds historical packet records at dequeue; minor 2 added host_history_run.
+  // Minor 4 adds native_admission/native_admission_sample rows (stream_native_reception_trace.h);
+  // minor 3 added historical packet records at dequeue; minor 2 added host_history_run.
   // Readers must explicitly support this minor; older reader predicates stay unchanged.
-  inline constexpr unsigned k_schema_minor = 3;
+  inline constexpr unsigned k_schema_minor = 4;
   inline constexpr std::size_t k_fields = 40;
   inline constexpr std::size_t k_queue_capacity = 512;
   inline constexpr std::uint64_t k_event_budget = 2'000'000;

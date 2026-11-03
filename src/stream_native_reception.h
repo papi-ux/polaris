@@ -1,6 +1,7 @@
 /** @file
  * Bounded native accepted-original reception observations (#615). No controller consumes this.
  * Packet API handoff and client socket-read clocks are kept separate; only differences are joined.
+ * An optional admission_trace_t copy feeds only the opt-in private host trace; nothing reads it back.
  */
 #pragma once
 
@@ -146,6 +147,32 @@ namespace stream_native_reception {
     std::array<correlated_sample_t, max_samples> samples {};
   };
 
+  /// Values copied from one accept() call for the private host trace, under that call's lock.
+  /// Everything after `admitted` describes only this call's own newly admitted payload, never an
+  /// earlier report: a refusal leaves it default. Availability is as judged at admission.
+  struct admission_trace_t {
+    struct sample_t {
+      std::uint32_t frame = 0;
+      std::uint16_t rtp_sequence = 0;
+      std::uint32_t socket_read_age_us = 0;  ///< Client clock: age before this report's end_us.
+      std::int64_t sender_api_begin_ns = 0, sender_api_end_ns = 0;  ///< Host steady clock.
+      bool parity = false;
+      std::uint32_t udp_bytes = 0;
+    };
+    reason_e admission = reason_e::waiting;  ///< accept()'s own result: admission, not availability.
+    bool admitted = false;
+    std::uint64_t generation = 0;
+    std::int64_t received_steady_ns = -1;  ///< The host steady time accept() judged this payload at.
+    report_t report;
+    reason_e availability = reason_e::waiting;
+    std::uint32_t missing_reports = 0;
+    loop_e receive_loop = loop_e::baseline;
+    const char *frame_reason = "unavailable";
+    std::optional<stream_frame_feedback::encoder_setting_t> setting;  ///< Only when availability joined.
+    std::uint8_t sample_count = 0;  ///< Only when availability joined.
+    std::array<sample_t, max_samples> samples {};
+  };
+
   /// One allocated instance per trusted stream generation. 512KiB packet storage, no packet heap.
   class scope_t {
   public:
@@ -182,44 +209,16 @@ namespace stream_native_reception {
         ns(begin), ns(end), bytes, 0};
     }
 
-    reason_e accept(std::string_view payload, bool authenticated, clock::time_point now = clock::now()) noexcept {
+    /// With @p trace, the same decision plus a copy of only this call's own published facts.
+    reason_e accept(std::string_view payload, bool authenticated, clock::time_point now = clock::now(),
+                    admission_trace_t *trace = nullptr) noexcept {
       const auto parsed = parse(payload);
       std::lock_guard lock {mutex_};
-      if (retired_) return reason_e::retired;
-      if (!enabled_) return reason_e::not_negotiated;
-      if (!authenticated) return reason_e::unauthenticated;
-      if (!parsed.report) return parsed.reason;
-      const auto &r = *parsed.report;
-      if (clock_failed_) return reason_e::clock_unavailable;
-      if (latest_.has_report) {
-        if (r.sequence <= latest_.report.sequence) return reason_e::report_order;
-        if (!(r.flags & clock_unavailable) && r.end_us <= latest_.report.end_us) return reason_e::clock_regression;
-        if (!(r.flags & clock_unavailable)) {
-          const auto elapsed = r.end_us - latest_.report.end_us;
-          if (elapsed < r.interval_us || (r.sequence == latest_.report.sequence + 1 &&
-              r.interval_us != std::numeric_limits<std::uint32_t>::max() && elapsed != r.interval_us))
-            return reason_e::malformed_time;
-        }
-        const auto loop_delta = r.loop_tick - latest_.report.loop_tick;
-        if (loop_delta >= 0x80000000u) return reason_e::loop_regression;
-        if (now < received_at_) return reason_e::clock_regression;
-      }
-      readback_t next;
-      next.negotiated = true; next.has_report = true; next.report = r;
-      next.media_authenticated = media_authenticated_; next.control_authenticated = true;
-      if (latest_.has_report) {
-        next.missing_reports = r.sequence - latest_.report.sequence - 1;
-        next.receive_loop = r.loop_tick == latest_.report.loop_tick ? loop_e::unchanged : loop_e::advancing;
-      }
-      // Publish only structurally and temporally accepted reports. No rejected packet refreshes age.
-      next.reason = correlate(next, now);
-      // A contradiction with retained sender identity/bytes is malformed input, not a new reading.
-      if (next.reason == reason_e::sample_counts) return next.reason;
-      next.available = next.reason == reason_e::joined;
-      latest_ = next;
-      received_at_ = now;
-      clock_failed_ = (r.flags & clock_unavailable) != 0;
-      return reason_e::joined;  // Admission, not a claim that the measurement joined.
+      if (!trace) return admit_locked(parsed, authenticated, now, nullptr);
+      std::array<packet_t, max_samples> matched {};
+      const auto reason = admit_locked(parsed, authenticated, now, &matched);
+      note_locked(*trace, reason, parsed, now, matched);
+      return reason;
     }
 
     std::optional<readback_t> readback(clock::time_point now = clock::now()) const noexcept {
@@ -262,7 +261,70 @@ namespace stream_native_reception {
     static void clear_metrics(readback_t &out, reason_e reason) noexcept {
       out.available = false; out.reason = reason; out.setting.reset(); out.samples = {};
     }
-    reason_e correlate(readback_t &out, clock::time_point now) noexcept {
+    // The admission decision, under mutex_. @p matched receives the joined samples' ledger copies.
+    reason_e admit_locked(const parsed_t &parsed, bool authenticated, clock::time_point now,
+                          std::array<packet_t, max_samples> *matched) noexcept {
+      if (retired_) return reason_e::retired;
+      if (!enabled_) return reason_e::not_negotiated;
+      if (!authenticated) return reason_e::unauthenticated;
+      if (!parsed.report) return parsed.reason;
+      const auto &r = *parsed.report;
+      if (clock_failed_) return reason_e::clock_unavailable;
+      if (latest_.has_report) {
+        if (r.sequence <= latest_.report.sequence) return reason_e::report_order;
+        if (!(r.flags & clock_unavailable) && r.end_us <= latest_.report.end_us) return reason_e::clock_regression;
+        if (!(r.flags & clock_unavailable)) {
+          const auto elapsed = r.end_us - latest_.report.end_us;
+          if (elapsed < r.interval_us || (r.sequence == latest_.report.sequence + 1 &&
+              r.interval_us != std::numeric_limits<std::uint32_t>::max() && elapsed != r.interval_us))
+            return reason_e::malformed_time;
+        }
+        const auto loop_delta = r.loop_tick - latest_.report.loop_tick;
+        if (loop_delta >= 0x80000000u) return reason_e::loop_regression;
+        if (now < received_at_) return reason_e::clock_regression;
+      }
+      readback_t next;
+      next.negotiated = true; next.has_report = true; next.report = r;
+      next.media_authenticated = media_authenticated_; next.control_authenticated = true;
+      if (latest_.has_report) {
+        next.missing_reports = r.sequence - latest_.report.sequence - 1;
+        next.receive_loop = r.loop_tick == latest_.report.loop_tick ? loop_e::unchanged : loop_e::advancing;
+      }
+      // Publish only structurally and temporally accepted reports. No rejected packet refreshes age.
+      next.reason = correlate(next, now, matched);
+      // A contradiction with retained sender identity/bytes is malformed input, not a new reading.
+      if (next.reason == reason_e::sample_counts) return next.reason;
+      next.available = next.reason == reason_e::joined;
+      latest_ = next;
+      received_at_ = now;
+      clock_failed_ = (r.flags & clock_unavailable) != 0;
+      return reason_e::joined;  // Admission, not a claim that the measurement joined.
+    }
+    // Under mutex_, directly after admit_locked. Only reason joined published latest_ in this call,
+    // and latest_ must then be this payload's own report: a refusal copies nothing from latest_, so
+    // an earlier report is never re-emitted.
+    void note_locked(admission_trace_t &out, reason_e reason, const parsed_t &parsed, clock::time_point now,
+                     const std::array<packet_t, max_samples> &matched) const noexcept {
+      out = {};
+      out.admission = reason; out.generation = generation_; out.received_steady_ns = ns(now);
+      out.admitted = reason == reason_e::joined && parsed.report && latest_.has_report &&
+                     latest_.report.sequence == parsed.report->sequence && latest_.report.end_us == parsed.report->end_us;
+      if (!out.admitted) return;
+      out.report = latest_.report; out.availability = latest_.reason;
+      out.missing_reports = latest_.missing_reports; out.receive_loop = latest_.receive_loop;
+      out.frame_reason = latest_.frame_reason;
+      if (!latest_.available || !latest_.setting) return;
+      out.setting = latest_.setting;
+      out.sample_count = latest_.report.count;
+      for (std::size_t i = 0; i < out.sample_count; ++i) {
+        const auto &wire = latest_.report.samples[i];
+        const auto &sent = matched[i];
+        out.samples[i] = {wire.frame, wire.sequence, wire.age_us, sent.begin_ns, sent.end_ns,
+                          (sent.state & is_parity) != 0, sent.bytes};
+      }
+    }
+    reason_e correlate(readback_t &out, clock::time_point now,
+                       std::array<packet_t, max_samples> *matched = nullptr) noexcept {
       const auto &r = out.report;
       if (r.flags & clock_unavailable) return reason_e::clock_unavailable;
       if (r.flags & incomplete) return reason_e::incomplete;
@@ -324,6 +386,7 @@ namespace stream_native_reception {
           s.dispersion_upper_ns = receive_delta_ns - (p.begin_ns - packets[i - 1].end_ns);
         }
       }
+      if (matched) *matched = packets;  // The exact retained copies this join used.
       return reason_e::joined;
     }
 

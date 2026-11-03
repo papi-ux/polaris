@@ -304,7 +304,7 @@ TEST(VideoPacketTraceFields, ProductionRecorderRoundTripsMinorThreeNullAndHistor
   while (std::getline(input, line)) rows.push_back(json::parse(line));
   ASSERT_EQ(rows.size(), 5u);
   EXPECT_EQ(rows.front().at("major"), 2);
-  EXPECT_EQ(rows.front().at("minor"), 3);
+  EXPECT_EQ(rows.front().at("minor"), 4);
   for (std::size_t index = 1; index <= 3; ++index) {
     EXPECT_EQ(rows[index].size(), 30u);
     EXPECT_EQ(rows[index].at("order"), index);

@@ -113,3 +113,43 @@ whole-link cost, lock/scheduling cost and timing discrimination require later me
 Pure tests exercise real parser, ledgers, negotiation and JSON plus the peer production
 C serializer's four frozen golden encodings. Production RTSP/control/status and actual
 stream behavior require full required CI and matched runtime acceptance.
+
+## Private host trace rows (schema 2.4)
+
+Only while the existing opt-in `POLARIS_VRR_TRACE_V2` recorder is running does the `0x7F10`
+callback also record raw admission rows. The trace minor becomes 4 because they are a new row
+family. Readers that accept exactly 2.3, including
+`scripts/validation/live-tuning/inspect_frame_records.py`, keep refusing 2.4 unchanged, and
+none of their qualifiers widen. With the recorder off, the callback performs the same `accept()`
+after a single enabled check, with no copy or join. Status, JSON, contract and wire are
+unchanged, and nothing in Live Tuning, FEC, Doctor or the policy reads these rows.
+
+Every callback writes one fixed 34-field `native_admission` row:
+- the opaque trace scope, session generation, native scope generation and callback ids;
+- the host's own admission result (or `not_dispatched` when the existing guard refused), which
+  is never a statement about wire loss;
+- the host steady time `accept()` judged it at;
+- the ENet peer's smoothed `roundTripTime`, read in that same callback.
+
+Report facts are attributed (`report_attribution=admitted_payload`) only to a newly admitted
+report whose nonzero scope generation equals the callback's session generation. An admitted
+snapshot from any other or unknown generation is marked `generation_mismatch` and carries no
+report, tuple or samples; a refusal is `none`. For an attributed report the row also carries its sequence, `end_us`, interval, flags,
+receive-loop tick and state, gap count, accepted counters, frame range, sample count,
+availability and frame reason. The full immutable encoder tuple appears only when that report's
+availability joined. Each refused, duplicate, malformed or contradicting payload copies nothing
+from an earlier report, because `accept()` fills `admission_trace_t` under its own lock only
+when this payload's sequence and end were just published.
+
+At most 16 fixed 12-field `native_admission_sample` rows follow, only for that attributed joined report.
+Each carries:
+- the sample's frame, RTP sequence and client socket-read age (client connection microseconds);
+- the retained sender API begin/end bounds the join used (host steady nanoseconds);
+- packet kind and UDP payload bytes.
+
+The two clock domains are never subtracted in the trace. The facts include sender kernel and
+receiver scheduling, so they are not queue delay, one-way delay, capacity or loss. Rows never
+contain an address, session token, client identity or name, certificate, key or packet buffer.
+
+The recorder's 40-field, 512-slot queue, 2,000,000-event, 256 MiB and 30-minute limits are
+unchanged. These rows add at most 17 per callback, and loss is counted in the existing footer.

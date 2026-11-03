@@ -1,12 +1,16 @@
-/** @file Real native reception parser/correlation tests; no network, tracing, probe or controller. */
+/** @file Real native reception parser/correlation tests; no network, probe or controller. The trace
+ * tests inspect pure private-trace row values; no recorder writes a file here. */
 #include "src/stream_native_reception.h"
 #include "src/stream_native_reception_json.h"
+#include "src/stream_native_reception_trace.h"
 #include <gtest/gtest.h>
 #include <chrono>
 #include <atomic>
 #include <thread>
 #include <memory>
+#include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 using namespace std::chrono_literals;
 namespace {
@@ -433,4 +437,237 @@ TEST_F(NativeReception, EvictionCompletenessMetadataIsSerializedBetweenSenderAnd
     if(current) { EXPECT_FALSE(current->available);EXPECT_STREQ(nr::name(current->reason),"retention_limited"); }
   }
   sender.join();observer->retire();EXPECT_FALSE(observer->readback(now));
+}
+
+namespace {
+  namespace nrt = stream_native_reception::trace;
+  using row_t = vrr_trace::event_t;
+  using type_e = vrr_trace::field_t::type_e;
+  struct rows_t {
+    std::vector<row_t> rows;
+    void operator()(const row_t &row) { rows.push_back(row); }
+  };
+  const vrr_trace::field_t *field(const row_t &row, std::string_view key) {
+    for(std::size_t i=0;i<row.size;++i) if(key==row.fields[i].key) return &row.fields[i];
+    return nullptr;
+  }
+  std::uint64_t u(const row_t &row, std::string_view key) {
+    const auto *f=field(row,key); EXPECT_TRUE(f && f->type==type_e::unsigned_integer) << key; return f ? f->u : 0;
+  }
+  std::int64_t i64(const row_t &row, std::string_view key) {
+    const auto *f=field(row,key); EXPECT_TRUE(f && f->type==type_e::signed_integer) << key; return f ? f->i : 0;
+  }
+  std::string_view text(const row_t &row, std::string_view key) {
+    const auto *f=field(row,key); EXPECT_TRUE(f && f->type==type_e::text) << key; return f ? f->text : std::string_view {};
+  }
+  bool null(const row_t &row, std::string_view key) {
+    const auto *f=field(row,key); return f && f->type==type_e::null;
+  }
+  std::int64_t steady_ns(test_clock::time_point at) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(at.time_since_epoch()).count();
+  }
+  nrt::callback_t facts(std::uint64_t generation=615) {
+    nrt::callback_t c; c.dispatched=true; c.generation=generation; c.trace_scope=77; c.callback=78; c.enet_smoothed_rtt_ms=4;
+    return c;
+  }
+  constexpr const char *k_report_keys[] {
+    "report_sequence","report_end_us","report_interval_us","report_flags","report_receive_loop_tick","receive_loop",
+    "missing_reports","report_data_packets","report_parity_packets","report_data_udp_bytes","report_parity_udp_bytes",
+    "report_last_accepted_age_us","report_first_frame","report_last_frame","report_sample_count","availability","frame_reason"};
+  constexpr const char *k_tuple_keys[] {
+    "encoder_lifetime","encoder_stream_generation","encoder_application_sequence","encoder_origin_revision",
+    "configured_encoder_kbps","encoder_receipt_origin"};
+  void expect_refusal_row(const row_t &row, std::string_view admission) {
+    EXPECT_STREQ(row.kind,nrt::admission_kind); EXPECT_EQ(row.size,nrt::admission_fields); EXPECT_FALSE(row.overflow);
+    EXPECT_EQ(text(row,"admission"),admission); EXPECT_EQ(u(row,"admitted"),0u); EXPECT_EQ(u(row,"sample_rows"),0u);
+    EXPECT_EQ(text(row,"report_attribution"),"none");
+    for(const auto *key:k_report_keys) EXPECT_TRUE(null(row,key)) << key;
+    for(const auto *key:k_tuple_keys) EXPECT_TRUE(null(row,key)) << key;
+  }
+}
+TEST_F(NativeReception, TraceCopiesExactlyThisAdmittedJoinedPayloadAndItsRetainedApiBounds) {
+  frame(1);packet(1,0);observer->record(1,1,1200,true,now-90ms,now-88ms,true);
+  auto r=reading(2);r.data_packets=1;r.data_bytes=1000;r.parity_packets=1;r.parity_bytes=1200;
+  r.samples[0].age_us=30000;r.samples[1]={1,1,15000};r.end_us=1'000'000'000'000ULL;
+  nr::admission_trace_t t;
+  ASSERT_EQ(observer->accept(wire(r),true,now,&t),nr::reason_e::joined);
+  rows_t out;ASSERT_EQ(nrt::emit(t,facts(),out),3u);ASSERT_EQ(out.rows.size(),3u);
+  const auto &h=out.rows[0];
+  EXPECT_STREQ(h.kind,"native_admission");EXPECT_EQ(h.size,34u);EXPECT_FALSE(h.overflow);
+  EXPECT_EQ(u(h,"trace_scope"),77u);EXPECT_EQ(u(h,"session_generation"),615u);EXPECT_EQ(u(h,"callback"),78u);
+  EXPECT_EQ(u(h,"scope_generation"),615u);EXPECT_EQ(text(h,"report_attribution"),"admitted_payload");
+  EXPECT_EQ(text(h,"admission"),"joined");EXPECT_EQ(u(h,"admitted"),1u);
+  EXPECT_EQ(i64(h,"received_steady_ns"),steady_ns(now));EXPECT_EQ(u(h,"enet_smoothed_rtt_ms"),4u);
+  EXPECT_EQ(u(h,"report_sequence"),1u);EXPECT_EQ(u(h,"report_end_us"),1'000'000'000'000ULL);
+  EXPECT_EQ(u(h,"report_interval_us"),100000u);EXPECT_EQ(u(h,"report_flags"),nr::has_accepted);
+  EXPECT_EQ(u(h,"report_receive_loop_tick"),10u);EXPECT_EQ(text(h,"receive_loop"),"baseline");
+  EXPECT_EQ(u(h,"missing_reports"),0u);EXPECT_EQ(u(h,"report_data_packets"),1u);EXPECT_EQ(u(h,"report_parity_packets"),1u);
+  EXPECT_EQ(u(h,"report_data_udp_bytes"),1000u);EXPECT_EQ(u(h,"report_parity_udp_bytes"),1200u);
+  EXPECT_EQ(u(h,"report_last_accepted_age_us"),10000u);EXPECT_EQ(u(h,"report_first_frame"),1u);
+  EXPECT_EQ(u(h,"report_last_frame"),1u);EXPECT_EQ(u(h,"report_sample_count"),2u);
+  EXPECT_EQ(text(h,"availability"),"joined");EXPECT_EQ(text(h,"frame_reason"),"joined");
+  EXPECT_EQ(u(h,"encoder_lifetime"),setting.encoder_lifetime);EXPECT_EQ(u(h,"encoder_stream_generation"),setting.stream_generation);
+  EXPECT_EQ(u(h,"encoder_application_sequence"),setting.application_sequence);
+  EXPECT_EQ(u(h,"encoder_origin_revision"),setting.origin_revision);
+  EXPECT_EQ(i64(h,"configured_encoder_kbps"),setting.configured_encoder_kbps);
+  EXPECT_EQ(text(h,"encoder_receipt_origin"),"successful_open");EXPECT_EQ(u(h,"sample_rows"),2u);
+  EXPECT_EQ(text(h,"clock_domains"),"host_steady_ns;client_connection_us");
+  // Raw copies in their own clock domains; no subtraction, no derived delay field.
+  const struct { std::uint16_t seq; std::uint32_t age; test_clock::time_point begin, end; const char *kind; std::uint64_t bytes; } want[] {
+    {0,30000,now-100ms,now-99ms,"data",1000},{1,15000,now-90ms,now-88ms,"parity",1200}};
+  for(std::size_t n=0;n<2;++n) {
+    const auto &s=out.rows[n+1];
+    EXPECT_STREQ(s.kind,"native_admission_sample");EXPECT_EQ(s.size,12u);EXPECT_FALSE(s.overflow);
+    EXPECT_EQ(u(s,"trace_scope"),77u);EXPECT_EQ(u(s,"session_generation"),615u);EXPECT_EQ(u(s,"callback"),78u);
+    EXPECT_EQ(u(s,"report_sequence"),1u);EXPECT_EQ(u(s,"sample_index"),n);EXPECT_EQ(u(s,"frame_index"),1u);
+    EXPECT_EQ(u(s,"rtp_sequence"),want[n].seq);EXPECT_EQ(u(s,"socket_read_age_us"),want[n].age);
+    EXPECT_EQ(i64(s,"sender_api_begin_ns"),steady_ns(want[n].begin));EXPECT_EQ(i64(s,"sender_api_end_ns"),steady_ns(want[n].end));
+    EXPECT_EQ(text(s,"packet_kind"),want[n].kind);EXPECT_EQ(u(s,"udp_bytes"),want[n].bytes);
+    for(const auto *derived:{"dispersion_lower_ns","dispersion_upper_ns","handoff_duration_ns","queue_delay","one_way_delay"})
+      EXPECT_FALSE(field(s,derived)) << derived;
+  }
+}
+TEST_F(NativeReception, TraceOfAnAdmittedButUnavailableReportCarriesNoTupleOrSamples) {
+  frame(1);frame(3);packet();auto r=reading();r.last_frame=3;
+  nr::admission_trace_t t;ASSERT_EQ(observer->accept(wire(r),true,now,&t),nr::reason_e::joined);
+  EXPECT_TRUE(t.admitted);EXPECT_EQ(t.availability,nr::reason_e::frame_unavailable);EXPECT_FALSE(t.setting);EXPECT_EQ(t.sample_count,0u);
+  rows_t out;ASSERT_EQ(nrt::emit(t,facts(),out),1u);
+  const auto &h=out.rows[0];EXPECT_EQ(h.size,34u);
+  EXPECT_EQ(text(h,"admission"),"joined");EXPECT_EQ(u(h,"admitted"),1u);  // admission is not availability
+  EXPECT_EQ(text(h,"report_attribution"),"admitted_payload");
+  EXPECT_EQ(u(h,"report_sequence"),1u);EXPECT_EQ(u(h,"report_last_frame"),3u);
+  EXPECT_EQ(text(h,"availability"),"frame_unavailable");EXPECT_EQ(text(h,"frame_reason"),"host_frame_missing");
+  for(const auto *key:k_tuple_keys) EXPECT_TRUE(null(h,key)) << key;
+  EXPECT_EQ(u(h,"sample_rows"),0u);
+}
+TEST_F(NativeReception, TraceRefusalAfterValidAndDuplicateNeverReemitsOrRefreshes) {
+  frame(1);packet();
+  const auto valid=wire(reading());
+  nr::admission_trace_t t;ASSERT_EQ(observer->accept(valid,true,now,&t),nr::reason_e::joined);
+  rows_t first;ASSERT_EQ(nrt::emit(t,facts(),first),2u);
+  now+=50ms;
+  // The same bytes again, malformed bytes, unauthenticated bytes and a retained-identity contradiction.
+  auto contradiction=reading();contradiction.sequence=2;contradiction.end_us=200000;
+  contradiction.data_packets=0;contradiction.data_bytes=0;contradiction.parity_packets=1;contradiction.parity_bytes=1000;
+  const struct { std::string payload; bool authenticated; const char *admission; } refused[] {
+    {valid,true,"report_order"},{"x",true,"malformed_size"},{wire(contradiction),false,"unauthenticated"},
+    {wire(contradiction),true,"sample_counts"}};
+  for(const auto &input:refused) {
+    nr::admission_trace_t again;
+    EXPECT_STREQ(nr::name(observer->accept(input.payload,input.authenticated,now,&again)),input.admission);
+    EXPECT_FALSE(again.admitted);EXPECT_EQ(again.generation,615u);EXPECT_EQ(again.received_steady_ns,steady_ns(now));
+    EXPECT_EQ(again.report.sequence,0u);EXPECT_EQ(again.sample_count,0u);EXPECT_FALSE(again.setting);
+    rows_t out;ASSERT_EQ(nrt::emit(again,facts(),out),1u) << input.admission;
+    expect_refusal_row(out.rows[0],input.admission);
+  }
+  // The earlier observation is neither re-emitted nor refreshed by any refusal.
+  auto current=observer->readback(now);ASSERT_TRUE(current);
+  EXPECT_EQ(current->report.sequence,1u);EXPECT_EQ(current->host_report_age_ms,50u);EXPECT_TRUE(current->available);
+}
+TEST_F(NativeReception, TraceRetirementAndANewGenerationStartFresh) {
+  frame(1);packet();
+  nr::admission_trace_t t;ASSERT_EQ(observer->accept(wire(reading()),true,now,&t),nr::reason_e::joined);
+  ASSERT_EQ(t.sample_count,1u);
+  observer->retire();
+  auto next=reading();next.sequence=2;next.end_us=200000;
+  nr::admission_trace_t retired;EXPECT_EQ(observer->accept(wire(next),true,now,&retired),nr::reason_e::retired);
+  rows_t out;ASSERT_EQ(nrt::emit(retired,facts(),out),1u);expect_refusal_row(out.rows[0],"retired");
+  // A new generation has its own ledger, scope and tuple; its first report starts again at sequence 1.
+  auto frames616=std::make_shared<ff::sender_ledger_t>(616);nr::scope_t fresh(616,frames616,true);
+  const auto setting616=actual_setting(616);
+  auto ticket=frames616->begin(1,setting616,now-110ms);ASSERT_TRUE(ticket);
+  frames616->complete(*ticket,ff::send_disposition_e::sent,now-20ms);
+  fresh.record(1,0,1000,false,now-100ms,now-99ms,true);
+  nr::admission_trace_t first;ASSERT_EQ(fresh.accept(wire(reading()),true,now,&first),nr::reason_e::joined);
+  rows_t rows;ASSERT_EQ(nrt::emit(first,facts(616),rows),2u);
+  EXPECT_EQ(first.generation,616u);EXPECT_EQ(u(rows.rows[0],"session_generation"),616u);
+  EXPECT_EQ(u(rows.rows[0],"report_sequence"),1u);EXPECT_EQ(u(rows.rows[0],"encoder_stream_generation"),616u);
+  EXPECT_EQ(text(rows.rows[0],"receive_loop"),"baseline");EXPECT_EQ(u(rows.rows[0],"missing_reports"),0u);
+}
+TEST_F(NativeReception, TraceRowsAreBoundedFixedStaticAndCarryNoIdentity) {
+  frame(1);for(unsigned n=0;n<16;++n) packet(1,static_cast<std::uint16_t>(n));
+  const auto payload=wire(reading(16));
+  nr::admission_trace_t t;ASSERT_EQ(observer->accept(payload,true,now,&t),nr::reason_e::joined);
+  rows_t out;ASSERT_EQ(nrt::emit(t,facts(),out),17u);
+  ASSERT_EQ(out.rows.size(),1u+nr::max_samples);
+  static_assert(nrt::admission_fields<=vrr_trace::k_fields && nrt::sample_fields<=vrr_trace::k_fields);
+  for(std::size_t n=0;n<out.rows.size();++n) {
+    const auto &row=out.rows[n];
+    EXPECT_FALSE(row.overflow);EXPECT_EQ(row.size,n ? nrt::sample_fields : nrt::admission_fields);
+    if(n) EXPECT_EQ(u(row,"sample_index"),n-1);
+    std::set<std::string_view> keys;
+    for(std::size_t k=0;k<row.size;++k) {
+      const std::string_view key=row.fields[k].key;
+      EXPECT_TRUE(keys.insert(key).second) << key;
+      for(const auto *forbidden:{"token","uuid","addr","cert","nonce","owner","device","client","name","payload","key","app_"})
+        EXPECT_EQ(key.find(forbidden),std::string_view::npos) << key;
+      // Text never borrows the received payload's bytes.
+      const auto &f=row.fields[k];
+      if(f.type==type_e::text) EXPECT_TRUE(f.text.data()<payload.data() || f.text.data()>=payload.data()+payload.size()) << key;
+    }
+  }
+  // A refusal row has the same fixed shape; a corrupted count can never exceed sixteen rows.
+  nr::admission_trace_t refused;EXPECT_EQ(observer->accept(payload,true,now,&refused),nr::reason_e::report_order);
+  rows_t one;ASSERT_EQ(nrt::emit(refused,facts(),one),1u);EXPECT_EQ(one.rows[0].size,nrt::admission_fields);
+  auto forced=t;forced.sample_count=200;
+  rows_t capped;EXPECT_EQ(nrt::emit(forced,facts(),capped),1u+nr::max_samples);
+}
+TEST_F(NativeReception, TraceMarksAnUndispatchedCallbackWithoutAnyReport) {
+  frame(1);packet();
+  nr::admission_trace_t t;ASSERT_EQ(observer->accept(wire(reading()),true,now,&t),nr::reason_e::joined);
+  auto c=facts();c.dispatched=false;c.trace_scope=0;c.enet_smoothed_rtt_ms.reset();
+  nr::admission_trace_t undispatched;undispatched.received_steady_ns=5;
+  for(const auto *a:{&undispatched,&t}) {  // even facts left in a reused value cannot leak rows
+    rows_t out;ASSERT_EQ(nrt::emit(*a,c,out),1u);
+    expect_refusal_row(out.rows[0],"not_dispatched");
+    EXPECT_TRUE(null(out.rows[0],"trace_scope"));EXPECT_TRUE(null(out.rows[0],"enet_smoothed_rtt_ms"));
+  }
+}
+TEST_F(NativeReception, UntracedAndTracedAcceptMakeIdenticalDecisionsAndRecorderStateCannotChangeThem) {
+  nr::scope_t twin(615,frames,true);
+  const auto both=[&](std::uint32_t f,std::uint16_t s) { observer->record(f,s,1000,false,now-100ms,now-99ms,true);
+    twin.record(f,s,1000,false,now-100ms,now-99ms,true); };
+  frame(1);frame(3);both(1,0);both(3,0);
+  std::vector<std::string> inputs;
+  auto r=reading();inputs.push_back(wire(r));inputs.push_back(wire(r));inputs.push_back("x");
+  r.sequence=2;r.end_us=200000;r.first_frame=1;r.last_frame=2;inputs.push_back(wire(r));  // frame 2 absent
+  auto contradiction=reading();contradiction.sequence=3;contradiction.end_us=300000;contradiction.data_packets=0;
+  contradiction.data_bytes=0;contradiction.parity_packets=1;contradiction.parity_bytes=1000;inputs.push_back(wire(contradiction));
+  r=reading();r.sequence=3;r.end_us=300000;r.first_frame=r.last_frame=3;r.samples[0]={3,0,50000};inputs.push_back(wire(r));
+  // A refused recorder is installed while traced rows are emitted: admission never depends on it.
+  auto refused=vrr_trace::recorder_t::open("relative-path-refused");ASSERT_TRUE(refused);
+  EXPECT_NE(refused->status(),vrr_trace::status_e::running);
+  vrr_trace::test_recorder_scope_t active(refused.get());
+  for(const auto &input:inputs) {
+    nr::admission_trace_t t;
+    const auto plain=observer->accept(input,true,now);
+    const auto traced=twin.accept(input,true,now,&t);
+    EXPECT_EQ(plain,traced);EXPECT_EQ(nrt::emit(t,facts(),[](const row_t &row) { vrr_trace::record(row); }) >= 1u,true);
+    auto a=observer->readback(now),b=twin.readback(now);ASSERT_TRUE(a && b);
+    EXPECT_EQ(nr::readback_json(*a).dump(),nr::readback_json(*b).dump());
+    now+=10ms;
+  }
+  auto last=twin.readback(now);ASSERT_TRUE(last);EXPECT_EQ(last->report.sequence,3u);EXPECT_TRUE(last->available);
+}
+TEST_F(NativeReception, TraceNeverRelabelsAnotherGenerationsOrAnOldSnapshot) {
+  frame(1);packet();
+  nr::admission_trace_t t;ASSERT_EQ(observer->accept(wire(reading()),true,now,&t),nr::reason_e::joined);
+  ASSERT_EQ(t.generation,615u);ASSERT_EQ(t.sample_count,1u);
+  rows_t own;ASSERT_EQ(nrt::emit(t,facts(615),own),2u);  // the discriminating control: same snapshot, own callback
+  // The identical retained snapshot under another generation's callback, after this scope retired,
+  // or with no scope generation at all, must neither relabel its report nor emit its samples.
+  observer->retire();
+  auto zero=t;zero.generation=0;
+  const struct { const nr::admission_trace_t *a; std::uint64_t callback_generation; } cases[] {{&t,616},{&t,0},{&zero,0},{&zero,615}};
+  for(const auto &c:cases) {
+    rows_t out;ASSERT_EQ(nrt::emit(*c.a,facts(c.callback_generation),out),1u) << c.callback_generation;
+    const auto &h=out.rows[0];EXPECT_EQ(h.size,nrt::admission_fields);
+    EXPECT_EQ(text(h,"admission"),"joined");EXPECT_EQ(u(h,"admitted"),1u);
+    EXPECT_EQ(text(h,"report_attribution"),"generation_mismatch");
+    EXPECT_EQ(u(h,"session_generation"),c.callback_generation);
+    if(c.a->generation) EXPECT_EQ(u(h,"scope_generation"),615u); else EXPECT_TRUE(null(h,"scope_generation"));
+    EXPECT_EQ(u(h,"sample_rows"),0u);
+    for(const auto *key:k_report_keys) EXPECT_TRUE(null(h,key)) << key;
+    for(const auto *key:k_tuple_keys) EXPECT_TRUE(null(h,key)) << key;
+  }
 }

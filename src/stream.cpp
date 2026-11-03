@@ -50,6 +50,7 @@ extern "C" {
 #include "stream_fec_status.h"
 #include "stream_frame_feedback.h"
 #include "stream_native_reception.h"
+#include "stream_native_reception_trace.h"
 #include "stream_pacing.h"
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
@@ -642,6 +643,9 @@ namespace stream {
     // setting; diagnostic, never a send, pacing, FEC or bitrate input. Null when it could not be made.
     std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_submission_ledger;
     std::shared_ptr<stream_native_reception::scope_t> native_reception;
+    // Opaque private-trace id for that scope, set in alloc() only while POLARIS_VRR_TRACE_V2 is on; 0
+    // otherwise. Never a bearer, session token or client identity, and never read outside the trace.
+    std::uint64_t native_reception_trace_scope = 0;
     // The exact launch/resume attempt nonce this session was admitted with (#611), copied unchanged
     // from its launch session, or empty. Bound to this generation's timing scope only.
     std::string frame_submission_launch_nonce;
@@ -1575,11 +1579,28 @@ namespace stream {
     // Protocol13's dispatcher rejects plaintext before any callback and only reinjects after GCM.
     // Session-ID mapping and negotiated encrypted control are required at admission.
     server->map(stream_native_reception::packet_type, [](session_t *session, const std::string_view &payload) {
-      if (session->state.load() != session::state_e::RUNNING || !session->control.peer ||
+      const bool dispatch = !(session->state.load() != session::state_e::RUNNING || !session->control.peer ||
           !session->native_reception || !stream_native_reception::negotiated(true,
             session->config.native_reception_enabled, "1", 1, session->config.mlFeatureFlags,
-            session->config.controlProtocolType, session->config.encryptionFlagsEnabled)) return;
-      session->native_reception->accept(payload, true);
+            session->config.controlProtocolType, session->config.encryptionFlagsEnabled));
+      if (!vrr_trace::enabled()) {
+        if (dispatch) session->native_reception->accept(payload, true);
+        return;
+      }
+      // Opt-in private trace only: the same accept, plus value copies of this callback's own facts.
+      // The scope lock is released before recording; the recorder never waits or touches files here.
+      const auto now = std::chrono::steady_clock::now();
+      stream_native_reception::admission_trace_t observed;
+      if (dispatch) session->native_reception->accept(payload, true, now, &observed);
+      else observed.received_steady_ns = vrr_trace::ns(now).value_or(-1);
+      stream_native_reception::trace::callback_t facts;
+      facts.dispatched = dispatch;
+      facts.generation = session->session_generation;
+      facts.trace_scope = session->native_reception_trace_scope;
+      facts.callback = vrr_trace::next_id();
+      // The same ENet peer RTT IDX_PERIODIC_PING reads, in this control callback that owns the peer.
+      if (session->control.peer) facts.enet_smoothed_rtt_ms = session->control.peer->roundTripTime;
+      stream_native_reception::trace::emit(observed, facts, [](const vrr_trace::event_t &row) { vrr_trace::record(row); });
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
@@ -3862,6 +3883,7 @@ namespace stream {
           session->native_reception = std::make_shared<stream_native_reception::scope_t>(
             session->session_generation, session->frame_submission_ledger, true,
             (config.encryptionFlagsEnabled & SS_ENC_VIDEO) != 0);
+          if (vrr_trace::enabled()) session->native_reception_trace_scope = vrr_trace::next_id();
         } catch (const std::bad_alloc &) {
           // Optional diagnostic retention cannot fail a stream or change negotiated encryption.
           session->native_reception.reset();
