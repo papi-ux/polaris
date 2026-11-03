@@ -43,7 +43,9 @@ namespace nvenc {
      * @param buffer_format Platform-agnostic input surface format.
      * @return `true` on success, `false` on error
      */
-    bool create_encoder(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format);
+    bool create_encoder(const nvenc_config &config, const video::config_t &client_config,
+                        const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format,
+                        std::optional<video::bitrate_application::origin_t> opening_origin = std::nullopt);
 
     /**
      * @brief Destroy the encoder.
@@ -79,6 +81,7 @@ namespace nvenc {
 
     // Passive local history only; no SDK/broker calls or ownership of packets.
     std::optional<video::bitrate_provenance::record_t> take_bitrate_observation(uint64_t output_timestamp) noexcept;
+    bool publish_usable_bitrate_open() noexcept;
     void retire_bitrate_observations() noexcept;
 
   protected:

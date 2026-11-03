@@ -5245,7 +5245,11 @@ namespace video {
       conversion_request->target_format
     );
 
-    return std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
+    auto session = std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
+    if (auto *device = session->device(); device && device->nvenc) {
+      device->nvenc->publish_usable_bitrate_open();
+    }
+    return session;
   }
 
   /**
@@ -6333,9 +6337,14 @@ namespace video {
       if (!cuda_context || !cuda_context->cuda_ctx) return false;
       auto candidate = std::make_unique<nvenc::nvenc_cuda>(
         cuda_context->cuda_ctx, frame->data[0], frame->linesize[0]);
+      // The native CUDA device opens before encode_run's runtime-support
+      // publication. Capture only an already matching sole-session target;
+      // this read does not change the rate or borrow a later encoder ACK.
+      const auto opening_origin = bitrate_application_origin(
+        adaptive_bitrate::get_encoder_open_request(config.session_generation, config.bitrate));
       if (!candidate->create_encoder(config::video.nv, config,
                                     nvenc::nvenc_colorspace_from_sunshine_colorspace(space),
-                                    NV_ENC_BUFFER_FORMAT_NV12)) return false;
+                                    NV_ENC_BUFFER_FORMAT_NV12, opening_origin)) return false;
       native = std::move(candidate);
       nvenc = native.get();
       return true;

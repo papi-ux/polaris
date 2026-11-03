@@ -99,7 +99,9 @@ namespace nvenc {
     // Use destroy_encoder() instead
   }
 
-  bool nvenc_base::create_encoder(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format) {
+  bool nvenc_base::create_encoder(const nvenc_config &config, const video::config_t &client_config,
+                                  const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format,
+                                  std::optional<video::bitrate_application::origin_t> opening_origin) {
     // Pick the minimum NvEncode API version required to support the specified codec
     // to maximize driver compatibility. AV1 was introduced in SDK v12.0.
     minimum_api_version = (client_config.videoFormat <= 1) ? MAKE_NVENC_VER(11U, 0U) : MAKE_NVENC_VER(12U, 0U);
@@ -393,9 +395,16 @@ namespace nvenc {
       return false;
     }
 
-    // All native opens remain unattributed in APPLY01, including CUDA's early
-    // initialization. A later poll must never relabel this accepted operation.
-    if (bitrate_observations) bitrate_observations->nvenc_initialize_success();
+    // Preserve the origin captured before this call and the literal CBR target
+    // accepted by this SDK operation. Later polls cannot relabel the open.
+    if (bitrate_observations) {
+      if (opening_origin) {
+        bitrate_observations->nvenc_initialize_success(opening_origin,
+          enc_config.rcParams.averageBitRate, enc_config.rcParams.rateControlMode == NV_ENC_PARAMS_RC_CBR);
+      } else {
+        bitrate_observations->nvenc_initialize_success();
+      }
+    }
 
     // Save the initialization parameters for runtime reconfiguration (e.g., adaptive bitrate)
     saved_enc_config = enc_config;
@@ -753,6 +762,10 @@ namespace nvenc {
     return bitrate_observations ? bitrate_observations->take_output(
       video::bitrate_application::output_stage_e::nvenc_output_timestamp,
       video::bitrate_application::checked_timestamp(output_timestamp)) : std::nullopt;
+  }
+
+  bool nvenc_base::publish_usable_bitrate_open() noexcept {
+    return bitrate_observations && bitrate_observations->publish_usable_nvenc_open();
   }
 
   void nvenc_base::retire_bitrate_observations() noexcept {

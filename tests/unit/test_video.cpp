@@ -561,6 +561,10 @@ namespace {
   };
 
   struct fake_nvenc_driver_t {
+    NVENCSTATUS initialize_result = NV_ENC_SUCCESS;
+    NVENCSTATUS bitstream_result = NV_ENC_SUCCESS;
+    std::uint32_t initialized_average_bps = 0;
+    NV_ENC_PARAMS_RC_MODE initialized_rate_mode {};
     std::vector<NVENCSTATUS> reconfigure_results;  // in order, then success
     std::vector<fake_nvenc_reconfigure_t> reconfigures;
     std::vector<std::string> events;
@@ -614,13 +618,15 @@ namespace {
     return NV_ENC_SUCCESS;
   }
 
-  NVENCSTATUS NVENCAPI fake_nvenc_initialize(void *, NV_ENC_INITIALIZE_PARAMS *) {
-    return NV_ENC_SUCCESS;
+  NVENCSTATUS NVENCAPI fake_nvenc_initialize(void *, NV_ENC_INITIALIZE_PARAMS *params) {
+    fake_nvenc_driver->initialized_average_bps = params->encodeConfig->rcParams.averageBitRate;
+    fake_nvenc_driver->initialized_rate_mode = params->encodeConfig->rcParams.rateControlMode;
+    return fake_nvenc_driver->initialize_result;
   }
 
   NVENCSTATUS NVENCAPI fake_nvenc_create_bitstream(void *, NV_ENC_CREATE_BITSTREAM_BUFFER *params) {
     params->bitstreamBuffer = &fake_nvenc_bitstream;
-    return NV_ENC_SUCCESS;
+    return fake_nvenc_driver->bitstream_result;
   }
 
   NVENCSTATUS NVENCAPI fake_nvenc_destroy_bitstream(void *, NV_ENC_OUTPUT_PTR) {
@@ -688,7 +694,9 @@ namespace {
   };
 
   // A 1080p60 HEVC stream at 20 Mbps, created through the real create_encoder().
-  bool create_fake_nvenc(nvenc::nvenc_base &encoder, int vbv_increase = 0) {
+  bool create_fake_nvenc(nvenc::nvenc_base &encoder, int vbv_increase = 0,
+                         std::optional<video::bitrate_application::origin_t> origin = std::nullopt,
+                         std::uint64_t generation = 0) {
     video::config_t client_config {};
     client_config.width = 1920;
     client_config.height = 1080;
@@ -696,6 +704,7 @@ namespace {
     client_config.bitrate = 20000;
     client_config.slicesPerFrame = 1;
     client_config.videoFormat = 1;
+    client_config.session_generation = generation;
     const nvenc::nvenc_colorspace_t colorspace {
       NV_ENC_VUI_COLOR_PRIMARIES_BT709,
       NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709,
@@ -704,7 +713,7 @@ namespace {
     };
     nvenc::nvenc_config settings;
     settings.vbv_percentage_increase = vbv_increase;
-    return encoder.create_encoder(settings, client_config, colorspace, NV_ENC_BUFFER_FORMAT_NV12);
+    return encoder.create_encoder(settings, client_config, colorspace, NV_ENC_BUFFER_FORMAT_NV12, origin);
   }
 
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -752,6 +761,43 @@ namespace {
 }  // namespace
 
 #if defined(__linux__) && !defined(__ANDROID__)
+TEST(VideoNvencCudaTests, FirstFrameCarriesTheAcceptedOpenWithoutARateChange) {
+  fake_nvenc_driver_t driver;
+  fake_cuda_nvenc_t encoder {driver};
+  ASSERT_TRUE(create_fake_nvenc(encoder, 0, video::bitrate_application::origin_t {10, 20000}, 605));
+  EXPECT_EQ(driver.initialized_average_bps, 20'000'000u);
+  EXPECT_EQ(driver.initialized_rate_mode, NV_ENC_PARAMS_RC_CBR);
+  EXPECT_FALSE(encoder.take_bitrate_observation(41));
+  ASSERT_TRUE(encoder.publish_usable_bitrate_open());
+  EXPECT_EQ(encoder.encode_frame(41, false).frame_index, 41u);
+  const auto first = encoder.take_bitrate_observation(41);
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->origin(), video::bitrate_provenance::receipt_origin_e::successful_open);
+  EXPECT_EQ(first->authority_revision(), 10u);
+  EXPECT_EQ(first->configured_encoder_kbps(), 20000);
+  EXPECT_EQ(first->scope().stream_generation, 605u);
+  // A newer same-rate no-op cannot relabel this SDK initialization.
+  ASSERT_TRUE(encoder.update_bitrate(20000, video::bitrate_application::origin_t {11, 20000}));
+  EXPECT_TRUE(driver.reconfigures.empty());
+  EXPECT_EQ(encoder.encode_frame(42, false).frame_index, 42u);
+  const auto next = encoder.take_bitrate_observation(42);
+  ASSERT_TRUE(next);
+  EXPECT_EQ(next->authority_revision(), 10u);
+  EXPECT_EQ(next->application_sequence(), first->application_sequence());
+}
+
+TEST(VideoNvencCudaTests, InitializationOrLaterConstructionFailureCannotPublishAnOpen) {
+  for (const bool fail_initialize : {false, true}) {
+    fake_nvenc_driver_t driver;
+    if (fail_initialize) driver.initialize_result = NV_ENC_ERR_INVALID_PARAM;
+    else driver.bitstream_result = NV_ENC_ERR_INVALID_PARAM;
+    fake_cuda_nvenc_t encoder {driver};
+    EXPECT_FALSE(create_fake_nvenc(encoder, 0, video::bitrate_application::origin_t {10, 20000}, 605));
+    EXPECT_FALSE(encoder.publish_usable_bitrate_open());
+    EXPECT_FALSE(encoder.take_bitrate_observation(41));
+  }
+}
+
 TEST(VideoNvencCudaTests, RegistersTheConverterOnceAndReconfiguresBetweenFrames) {
   fake_nvenc_driver_t driver;
   {

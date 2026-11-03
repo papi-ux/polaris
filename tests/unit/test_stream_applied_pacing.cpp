@@ -100,6 +100,25 @@ TEST(StreamAppliedPacing, BackendSettingWithoutSuccessfulSubmissionCannotSupplyA
   EXPECT_EQ(output->input_pts(), 8);
 }
 
+TEST(StreamAppliedPacing, NativeFirstFrameUsesItsOpenRateAndKeepsIdentityUnderALowerCap) {
+  application::adapter_t adapter {generation, application::backend_e::native_nvenc};
+  adapter.nvenc_initialize_success(application::origin_t {10, 10000}, 10'000'000, true);
+  ASSERT_TRUE(adapter.publish_usable_nvenc_open());
+  { auto input = adapter.capture_before_submit(7);
+    ASSERT_TRUE(input.accepted(application::submit_stage_e::nvenc_encode_picture_success)); }
+  const auto value = adapter.take_output(application::output_stage_e::nvenc_output_timestamp, 7);
+  ASSERT_TRUE(value);
+  const auto initial = select(&*value, cap_t {generation, 10, 10000});
+  ASSERT_TRUE(initial.applied());
+  EXPECT_LT(initial.rate.bits_per_second, select(nullptr).rate.bits_per_second);
+  const auto down = select(&*value, cap_t {generation, 11, 6000});
+  ASSERT_TRUE(down.applied());
+  EXPECT_LT(down.rate.bits_per_second, initial.rate.bits_per_second);
+  EXPECT_EQ(value->origin(), provenance::receipt_origin_e::successful_open);
+  EXPECT_EQ(value->authority_revision(), 10u);
+  EXPECT_EQ(value->configured_encoder_kbps(), 10000);
+}
+
 TEST(StreamAppliedPacing, PendingDownConstrictsAnOldFrameWithoutRestampingIt) {
   const auto old = frame(16000);
   ASSERT_TRUE(old);

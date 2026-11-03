@@ -359,6 +359,12 @@ namespace adaptive_bitrate {
   /** Return the current encoder request, including one-shot rollback work. */
   std::optional<live_bitrate_request_t> get_live_bitrate_request();
 
+  // Historical origin for an encoder about to open at this exact rate. Unlike
+  // a live update, initialization precedes runtime-support publication. This
+  // snapshot neither authorizes an SDK operation nor acknowledges application.
+  std::optional<live_bitrate_request_t> get_encoder_open_request(
+    std::uint64_t generation, int configured_encoder_kbps);
+
   // A read-only ceiling for an already submission-bound frame, never an
   // applied-setting receipt. Missing/contaminated/busy scopes keep legacy for
   // new frames; already admitted frames must freeze or tighten.

@@ -171,6 +171,61 @@ TEST(VideoBitrateApplication, EarlyNativeOpenCannotBorrowLaterOriginAndFallbackO
   }
 }
 
+TEST(VideoBitrateApplication, AttributedNativeOpenPublishesOnlyAtUsableOuterAndKeepsItsOrigin) {
+  adapter_t premature {7, native};
+  premature.nvenc_initialize_success(app::origin_t {20, 10000}, 10'000'000, true);
+  { auto input = premature.capture_before_submit(0); EXPECT_FALSE(input.accepted(nv_submit)); }
+  EXPECT_FALSE(premature.publish_usable_nvenc_open());
+  EXPECT_FALSE(premature.take_output(nv_output, 0));
+
+  adapter_t instance {7, native};
+  app::origin_t request {20, 10000};
+  instance.nvenc_initialize_success(request, 10'000'000, true);
+  request = {21, 20000};  // A later poll is not this initialization's origin.
+  instance.nvenc_initialize_success(request, 20'000'000, true);
+  ASSERT_TRUE(instance.publish_usable_nvenc_open());
+  EXPECT_FALSE(instance.publish_usable_nvenc_open());
+  { auto input = instance.capture_before_submit(0); ASSERT_TRUE(input.accepted(nv_submit)); }
+  { auto update = instance.begin_native_update(app::origin_t {22, 6000});
+    ASSERT_TRUE(update.nvenc_reconfigure_success(6'000'000)); }
+  { auto input = instance.capture_before_submit(1); ASSERT_TRUE(input.accepted(nv_submit)); }
+  const auto old = instance.take_output(nv_output, 0);
+  const auto newer = instance.take_output(nv_output, 1);
+  ASSERT_TRUE(old); ASSERT_TRUE(newer);
+  EXPECT_EQ(old->origin(), video::bitrate_provenance::receipt_origin_e::successful_open);
+  EXPECT_EQ(old->authority_revision(), 20u);
+  EXPECT_EQ(old->configured_encoder_kbps(), 10000);
+  EXPECT_EQ(old->application_sequence(), 1u);
+  EXPECT_EQ(newer->authority_revision(), 22u);
+  EXPECT_EQ(newer->configured_encoder_kbps(), 6000);
+  EXPECT_EQ(newer->application_sequence(), 2u);
+}
+
+TEST(VideoBitrateApplication, AttributedNativeOpenRefusesMissingOriginRatesAndRetiredCandidates) {
+  struct invalid_t { std::optional<app::origin_t> origin; std::uint64_t bps; bool cbr; };
+  for (const auto &value : {invalid_t {std::nullopt, 10'000'000, true},
+                            invalid_t {app::origin_t {0, 10000}, 10'000'000, true},
+                            invalid_t {app::origin_t {20, 0}, 10'000'000, true},
+                            invalid_t {app::origin_t {20, 10000}, 0, true},
+                            invalid_t {app::origin_t {20, 10000}, 9'999'999, true},
+                            invalid_t {app::origin_t {20, 10000}, 10'000'000, false}}) {
+    adapter_t instance {7, native};
+    instance.nvenc_initialize_success(value.origin, value.bps, value.cbr);
+    EXPECT_FALSE(instance.publish_usable_nvenc_open());
+    { auto input = instance.capture_before_submit(0); EXPECT_FALSE(input.accepted(nv_submit)); }
+    EXPECT_FALSE(instance.take_output(nv_output, 0));
+  }
+  for (const bool retire : {false, true}) {
+    adapter_t instance {7, native};
+    instance.nvenc_initialize_success(app::origin_t {20, 10000}, 10'000'000, true);
+    if (retire) instance.retire(); else instance.setting_unavailable();
+    EXPECT_FALSE(instance.publish_usable_nvenc_open());
+  }
+  adapter_t wrong_backend {7, avcodec};
+  wrong_backend.nvenc_initialize_success(app::origin_t {20, 10000}, 10'000'000, true);
+  EXPECT_FALSE(wrong_backend.publish_usable_nvenc_open());
+}
+
 TEST(VideoBitrateApplication, InnerAcceptedSubmitSurvivesOuterErrorsAndDelayedExactOutput) {
   adapter_t ffmpeg {7, avcodec};
   ffmpeg.avcodec_open_success(app::origin_t {40, 10000}, exact_a, exact_a);

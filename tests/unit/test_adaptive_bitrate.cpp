@@ -489,6 +489,55 @@ TEST(AdaptiveBitrateFecScope, RequiresTheTrustedSoleScopeAndKeepsRecreatingEncod
   adaptive_bitrate::set_session_scope(0, {}, false);
 }
 
+namespace {
+  struct encoder_open_scope_t {
+    encoder_open_scope_t() {
+      enable_controller();
+      adaptive_bitrate::set_runtime_update_supported(false, "not_open_yet");
+      adaptive_bitrate::set_session_scope(605, "opening", true);
+    }
+    ~encoder_open_scope_t() {
+      adaptive_bitrate::reset();
+      adaptive_bitrate::set_session_scope(0, {}, false);
+    }
+  };
+}
+
+TEST(AdaptiveBitrateController, SnapshotsTheFirstOpenWithoutAcknowledgingApplication) {
+  encoder_open_scope_t scope;
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
+  const auto before = adaptive_bitrate::get_doctor_state();
+  const auto history = adaptive_bitrate::get_state_with_history().history.entries;
+  for (int i = 0; i < 3; ++i) {
+    const auto origin = adaptive_bitrate::get_encoder_open_request(605, 20000);
+    ASSERT_TRUE(origin);
+    EXPECT_EQ(origin->target_bitrate_kbps, 20000);
+    EXPECT_EQ(origin->revision, before.revision);
+  }
+  const auto after = adaptive_bitrate::get_doctor_state();
+  EXPECT_FALSE(after.runtime_update_supported);
+  EXPECT_EQ(after.revision, before.revision);
+  EXPECT_EQ(after.action_authority_revision, before.action_authority_revision);
+  EXPECT_EQ(after.live_bitrate_kbps, before.live_bitrate_kbps);
+  EXPECT_EQ(adaptive_bitrate::get_state_with_history().history.entries.size(), history.size());
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 0);
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
+}
+
+TEST(AdaptiveBitrateController, RefusesAnUnownedMismatchedOrInactiveOpen) {
+  encoder_open_scope_t scope;
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(0, 20000));
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(606, 20000));
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 0));
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 10000));
+  adaptive_bitrate::set_session_scope(605, "shared", false);
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  adaptive_bitrate::set_session_scope(605, "opening", true);
+  ASSERT_TRUE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  adaptive_bitrate::set_enabled(false);
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+}
+
 TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   enable_controller();
 

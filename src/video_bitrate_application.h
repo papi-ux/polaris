@@ -60,6 +60,12 @@ namespace video::bitrate_application {
       avcodec_rate_t before;
       avcodec_rate_t after;
     };
+    struct native_open_t {
+      std::optional<origin_t> origin;
+      std::uint64_t sequence;
+      std::uint64_t average_bps;
+      bool cbr;
+    };
     struct state_t {
       state_t(bitrate_provenance::scope_t scope, backend_e backend, std::uint64_t limit) noexcept:
           scope {scope}, ledger {scope}, backend {backend}, operation_limit {limit} {}
@@ -71,9 +77,11 @@ namespace video::bitrate_application {
       bool retired = false;
       bool open_seen = false;
       std::optional<open_t> opening;
+      std::optional<native_open_t> native_opening;
 
       std::uint64_t next_operation() noexcept {
         opening.reset();
+        native_opening.reset();
         ledger.setting_unavailable();
         if (retired) return 0;
         if (operation_sequence == operation_limit ||
@@ -185,12 +193,34 @@ namespace video::bitrate_application {
       return update_observation_t {state_, origin};
     }
 
-    // Native opens deliberately have no attributable origin in APPLY01. Count
-    // the actual initialization, but never borrow the later encode_run poll.
+    // Unattributed native opens stay unknown. Never borrow a later poll.
     void nvenc_initialize_success() noexcept {
       if (!state_ || state_->backend != backend_e::native_nvenc || state_->open_seen) return;
       state_->open_seen = true;
       state_->next_operation();
+    }
+
+    // Explicit supported path: the caller captured this origin BEFORE the
+    // actual successful SDK initialization at the literal CBR average rate.
+    // SDK success alone stages a candidate, not a usable frame interval.
+    void nvenc_initialize_success(std::optional<origin_t> origin,
+                                  std::uint64_t accepted_average_bps, bool cbr) noexcept {
+      if (!state_ || state_->backend != backend_e::native_nvenc || state_->open_seen) return;
+      state_->open_seen = true;
+      const auto sequence = state_->next_operation();
+      if (sequence) state_->native_opening = native_open_t {origin, sequence, accepted_average_bps, cbr};
+    }
+
+    bool publish_usable_nvenc_open() noexcept {
+      if (!state_ || state_->backend != backend_e::native_nvenc) return false;
+      const auto candidate = std::exchange(state_->native_opening, std::nullopt);
+      if (!candidate) return false;
+      if (!candidate->cbr) {
+        state_->ledger.setting_unavailable();
+        return false;
+      }
+      return state_->bind(candidate->origin, candidate->sequence, candidate->average_bps,
+                          bitrate_provenance::receipt_origin_e::successful_open);
     }
 
     // Call once, immediately after this actual avcodec_open2 succeeds. Failed
@@ -234,6 +264,7 @@ namespace video::bitrate_application {
     void setting_unavailable() noexcept {
       if (state_) {
         state_->opening.reset();
+        state_->native_opening.reset();
         state_->ledger.setting_unavailable();
       }
     }
@@ -241,6 +272,7 @@ namespace video::bitrate_application {
       if (state_) {
         state_->retired = true;
         state_->opening.reset();
+        state_->native_opening.reset();
         state_->ledger.retire();
       }
     }
