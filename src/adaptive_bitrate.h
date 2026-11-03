@@ -19,6 +19,7 @@
 #include <vector>
 #include <utility>
 #include "stream_bitrate.h"
+#include "live_tuning_fec.h"
 #include "vrr_trace.h"
 
 namespace adaptive_bitrate {
@@ -390,6 +391,9 @@ namespace adaptive_bitrate {
   void note_fec_partial_deficit(std::uint64_t generation,
                                std::chrono::steady_clock::time_point received_at);
   /// Packetizer-only: one coherent immutable publication, scoped to this frame.
+  live_tuning_fec::selection_t frame_fec_selection(std::uint64_t generation, std::int64_t frame_index,
+                                                 int configured_fallback);
+  /// Allocation-only compatibility wrapper over the same selection operation.
   std::pair<int, int> frame_fec_allocation(std::uint64_t generation, std::int64_t frame_index,
                                           int configured_fallback);
 

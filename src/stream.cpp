@@ -2120,8 +2120,9 @@ namespace stream {
 
       payload = std::string_view {(char *) concat_buf.data(), concat_buf.size()};
 
-      const auto [configured_fec, adaptive_fec] = adaptive_bitrate::frame_fec_allocation(
+      const auto fec_selection = adaptive_bitrate::frame_fec_selection(
         session->session_generation, packet->frame_index(), fecPercentage);
+      const auto [configured_fec, adaptive_fec] = fec_selection.allocation;
       fecPercentage = configured_fec;
       // Applied pacing inverts the frame's encoder allocation in this domain;
       // the fit and oversized fallback below change only its packetization.
@@ -2315,10 +2316,28 @@ namespace stream {
             send_batch_size = stream_pacing::send_batch_limit(pacing, legacy_send_batch_size);
           };
           refresh_pacing();
-          if (blockIndex == 0 && vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
-            .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
-            .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage)
-            .s("pacing", stream_pacing::rate_name(pacing)).u("packets_per_second", pacing.packets_per_second));
+          if (blockIndex == 0 && vrr_trace::enabled()) {
+            auto event = vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
+              .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
+              .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage)
+              .s("pacing", stream_pacing::rate_name(pacing)).u("packets_per_second", pacing.packets_per_second)
+              .s("fec_selection_basis", live_tuning_fec::selection_basis_name(fec_selection.basis));
+            // Selection is frozen before fitting/constructing this frame's FEC.
+            // An unavailable scope must not borrow the session or latest request.
+            if (fec_selection.generation) {
+              event.u("fec_selection_generation", *fec_selection.generation)
+                .i("fec_configured_percentage", configured_fec).i("fec_nominal_percentage", adaptive_fec);
+            } else {
+              event.n("fec_selection_generation").n("fec_configured_percentage").n("fec_nominal_percentage");
+            }
+            if (fec_selection.authority_revision) {
+              event.u("fec_selection_authority_revision", *fec_selection.authority_revision);
+            } else {
+              event.n("fec_selection_authority_revision");
+            }
+            event.o("fec_selection_from_frame", fec_selection.from_frame);
+            vrr_trace::record(event);
+          }
 
           auto peer_address = session->video.peer.address();
           auto batch_info = platf::batched_send_info_t {

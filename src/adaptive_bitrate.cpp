@@ -609,9 +609,14 @@ namespace adaptive_bitrate {
     }
   }
 
+  live_tuning_fec::selection_t frame_fec_selection(std::uint64_t generation, std::int64_t frame_index,
+                                                 int configured_fallback) {
+    return fec_actuator.selection_for_frame(generation, frame_index, configured_fallback);
+  }
+
   std::pair<int, int> frame_fec_allocation(std::uint64_t generation, std::int64_t frame_index,
                                           int configured_fallback) {
-    return fec_actuator.allocation_for_frame(generation, frame_index, configured_fallback);
+    return frame_fec_selection(generation, frame_index, configured_fallback).allocation;
   }
 
   // This stream's policy, following every writer outside it. Requires state_mutex and a base bitrate.

@@ -177,6 +177,239 @@ TEST(LiveTuningFecActuator, PacketizerReadsOneCoherentGenerationAndPercentage) {
   EXPECT_FALSE(invalid.load());
 }
 
+TEST(LiveTuningFecActuator, SelectionRetainsTheCheckedRevisionOnlyAtItsConfirmedFrameBoundary) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  const auto pending = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(pending.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(pending.basis, basis_e::configured_baseline);
+  EXPECT_EQ(pending.generation, 1u);
+  EXPECT_FALSE(pending.authority_revision);
+  EXPECT_FALSE(pending.from_frame);
+  EXPECT_EQ(actuator.confirm(1, 7, *encoder + 1, 100, true, true), result_e::none);
+  EXPECT_FALSE(actuator.selection_for_frame(1, 100, 77).authority_revision);
+  ASSERT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  const auto old_frame = actuator.selection_for_frame(1, 99, 77);
+  EXPECT_EQ(old_frame.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(old_frame.basis, basis_e::configured_baseline);
+  EXPECT_EQ(old_frame.generation, 1u);
+  EXPECT_FALSE(old_frame.authority_revision);
+  EXPECT_FALSE(old_frame.from_frame);
+  const auto selected = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(selected.basis, basis_e::encoder_confirmed_trial);
+  EXPECT_EQ(selected.generation, 1u);
+  EXPECT_EQ(selected.authority_revision, 7u);
+  EXPECT_EQ(selected.from_frame, 100);
+  // A later callback cannot relabel the immutable, already confirmed publication.
+  EXPECT_EQ(actuator.confirm(1, 8, *encoder, 101, false, false), result_e::none);
+  const auto later = actuator.selection_for_frame(1, 101, 77);
+  EXPECT_EQ(later.authority_revision, 7u);
+  EXPECT_EQ(later.from_frame, 100);
+}
+
+TEST(LiveTuningFecActuator, RefusedOrStaleConfirmationNeverAddsTrialIdentity) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  const auto budget = fec_budget();
+  for (const int refusal : {0, 1, 2, 3, 4}) {
+    SCOPED_TRACE(refusal);
+    live_tuning_fec::actuator_t actuator;
+    ASSERT_TRUE(actuator.configure(1, budget));
+    const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+    ASSERT_TRUE(encoder);
+    EXPECT_EQ(actuator.confirm(refusal == 3 ? 2 : 1, refusal == 4 ? 8 : 7,
+      *encoder, refusal == 0 ? 0 : 100, refusal != 1, refusal != 2),
+      refusal >= 3 ? result_e::stale : result_e::refused);
+    EXPECT_FALSE(actuator.pending());
+    const auto selected = actuator.selection_for_frame(1, 100, 77);
+    EXPECT_EQ(selected.allocation, (std::pair {10, 10}));
+    EXPECT_EQ(selected.basis, basis_e::configured_baseline);
+    EXPECT_EQ(selected.generation, 1u);
+    EXPECT_FALSE(selected.authority_revision);
+    EXPECT_FALSE(selected.from_frame);
+    // Refusal is not sticky identity: only a fresh, exactly confirmed request can supply it.
+    ASSERT_TRUE(actuator.request(budget.encoder_kbps, 15, 2000, true, 9));
+    ASSERT_EQ(actuator.confirm(1, 9, *encoder, 101, true, true), result_e::published);
+    const auto admitted = actuator.selection_for_frame(1, 101, 77);
+    EXPECT_EQ(admitted.basis, basis_e::encoder_confirmed_trial);
+    EXPECT_EQ(admitted.authority_revision, 9u);
+    EXPECT_EQ(admitted.from_frame, 101);
+  }
+}
+
+TEST(LiveTuningFecActuator, SamePercentageAbaCannotBorrowEitherRequestsTrialIdentity) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto first = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(first);
+  actuator.restore();
+  const auto second = actuator.request(budget.encoder_kbps, 15, 2000, true, 9);
+  ASSERT_EQ(first, second);  // Same percentage and bitrate, distinct checked authority.
+  EXPECT_EQ(actuator.confirm(1, 7, *first, 100, true, true), result_e::stale);
+  const auto stale = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(stale.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(stale.basis, basis_e::configured_baseline);
+  EXPECT_FALSE(stale.authority_revision);
+  EXPECT_FALSE(stale.from_frame);
+  EXPECT_EQ(actuator.confirm(1, 9, *second, 101, true, true), result_e::none);
+  EXPECT_FALSE(actuator.selection_for_frame(1, 101, 77).authority_revision);
+  ASSERT_TRUE(actuator.request(budget.encoder_kbps, 15, 2000, true, 11));
+  ASSERT_EQ(actuator.confirm(1, 11, *first, 102, true, true), result_e::published);
+  const auto selected = actuator.selection_for_frame(1, 102, 77);
+  EXPECT_EQ(selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(selected.authority_revision, 11u);
+  EXPECT_EQ(selected.from_frame, 102);
+}
+
+TEST(LiveTuningFecActuator, RestoreAndReconfigureExposeOnlyConfiguredBaselineScope) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  ASSERT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  const auto selected = actuator.selection_for_frame(1, 100, 77);
+  const auto restored_rate = actuator.request(budget.encoder_kbps, 10, 2000, false, 8);
+  ASSERT_TRUE(restored_rate);
+  for (const bool confirmed : {false, true}) {
+    if (confirmed) {
+      ASSERT_EQ(actuator.confirm(1, 8, *restored_rate, 101, true, true), result_e::restored);
+    }
+    const auto baseline = actuator.selection_for_frame(1, 100, 77);
+    EXPECT_EQ(baseline.allocation, (std::pair {10, 10}));
+    EXPECT_EQ(baseline.basis, basis_e::configured_baseline);
+    EXPECT_EQ(baseline.generation, 1u);
+    EXPECT_FALSE(baseline.authority_revision);
+    EXPECT_FALSE(baseline.from_frame);
+  }
+  // The previously selected frame keeps the tuple it obtained before restore.
+  EXPECT_EQ(selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(selected.basis, basis_e::encoder_confirmed_trial);
+  EXPECT_EQ(selected.authority_revision, 7u);
+  EXPECT_EQ(selected.from_frame, 100);
+  // Reusing a configured scope does not manufacture a baseline publication epoch.
+  ASSERT_TRUE(actuator.configure(1, fec_budget(0)));
+  const auto zero_baseline = actuator.selection_for_frame(1, 102, 77);
+  EXPECT_EQ(zero_baseline.allocation, (std::pair {0, 0}));
+  EXPECT_EQ(zero_baseline.basis, basis_e::configured_baseline);
+  EXPECT_EQ(zero_baseline.generation, 1u);
+  EXPECT_FALSE(zero_baseline.authority_revision);
+  EXPECT_FALSE(zero_baseline.from_frame);
+}
+
+TEST(LiveTuningFecActuator, InvalidFramesAndForeignGenerationsKeepLegacyValuesWithoutIdentity) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  ASSERT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  for (const std::int64_t frame : {std::numeric_limits<std::int64_t>::min(),
+       std::int64_t {-1}, std::int64_t {0}, std::int64_t {99}, std::int64_t {100},
+       std::numeric_limits<std::int64_t>::max()}) {
+    for (const std::uint64_t generation : {0u, 1u, 2u}) {
+      SCOPED_TRACE(frame);
+      SCOPED_TRACE(generation);
+      const auto expected = generation == 1 ? std::pair {10, frame >= 100 ? 15 : 10} : std::pair {77, 77};
+      const auto selected = actuator.selection_for_frame(generation, frame, 77);
+      EXPECT_EQ(selected.allocation, expected);
+      EXPECT_EQ(actuator.allocation_for_frame(generation, frame, 77), expected);
+      EXPECT_EQ(actuator.percentage_for_frame(generation, frame, 77), expected.second);
+      if (generation != 1 || frame <= 0) {
+        EXPECT_EQ(selected.basis, basis_e::unavailable);
+        EXPECT_FALSE(selected.generation);
+        EXPECT_FALSE(selected.authority_revision);
+        EXPECT_FALSE(selected.from_frame);
+      } else {
+        EXPECT_EQ(selected.generation, 1u);
+        EXPECT_EQ(selected.basis, frame < 100 ? basis_e::configured_baseline : basis_e::encoder_confirmed_trial);
+      }
+    }
+  }
+  ASSERT_TRUE(actuator.configure(2, fec_budget(20)));
+  const auto foreign = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(foreign.allocation, (std::pair {77, 77}));
+  EXPECT_EQ(foreign.basis, basis_e::unavailable);
+  EXPECT_FALSE(foreign.generation);
+  EXPECT_FALSE(foreign.authority_revision);
+  actuator.reset();
+  const auto absent = actuator.selection_for_frame(2, 100, 77);
+  EXPECT_EQ(absent.allocation, (std::pair {77, 77}));
+  EXPECT_EQ(absent.basis, basis_e::unavailable);
+  EXPECT_FALSE(absent.generation);
+  EXPECT_FALSE(absent.authority_revision);
+  EXPECT_FALSE(absent.from_frame);
+}
+
+TEST(LiveTuningFecActuator, ConcurrentSelectionKeepsAllocationRevisionAndBoundaryInOneTuple) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  std::atomic<bool> done {false};
+  std::atomic<bool> invalid {false};
+  std::promise<void> first_read;
+  auto started = first_read.get_future();
+  std::thread reader([&] {
+    const auto valid = [](const live_tuning_fec::selection_t &selected) {
+      if (selected.basis == basis_e::unavailable) {
+        return selected.allocation == std::pair {77, 77} && !selected.generation &&
+          !selected.authority_revision && !selected.from_frame;
+      }
+      if (selected.generation != 1u || selected.allocation.first != 10) return false;
+      if (selected.basis == basis_e::configured_baseline) {
+        return selected.allocation.second == 10 && !selected.authority_revision && !selected.from_frame;
+      }
+      if (!selected.authority_revision || *selected.authority_revision < 1 ||
+          *selected.authority_revision > 1000 || !selected.from_frame) return false;
+      const auto revision = *selected.authority_revision;
+      return selected.basis == basis_e::encoder_confirmed_trial &&
+        selected.allocation.second == (revision % 2 ? 15 : 20) &&
+        *selected.from_frame == 100 + static_cast<std::int64_t>(revision);
+    };
+    if (!valid(actuator.selection_for_frame(1, 5000, 77))) invalid.store(true);
+    first_read.set_value();
+    while (!done.load(std::memory_order_acquire)) {
+      if (!valid(actuator.selection_for_frame(1, 5000, 77))) {
+        invalid.store(true, std::memory_order_relaxed);
+      }
+    }
+  });
+  started.wait();
+  bool writer_ok = true;
+  for (std::uint64_t revision = 1; revision <= 1000; ++revision) {
+    const auto encoder = actuator.request(budget.encoder_kbps, revision % 2 ? 15 : 20, 2000, true, revision);
+    if (!encoder || actuator.confirm(1, revision, *encoder, 100 + static_cast<std::int64_t>(revision), true, true) !=
+        result_e::published) {
+      writer_ok = false;
+      break;
+    }
+    actuator.restore();
+    if (!actuator.configure(2, fec_budget(20)) || !actuator.configure(1, budget)) {
+      writer_ok = false;
+      break;
+    }
+  }
+  done.store(true, std::memory_order_release);
+  reader.join();
+  EXPECT_TRUE(writer_ok);
+  EXPECT_FALSE(invalid.load());
+}
+
 namespace {
   void enable_controller(int base_bitrate_kbps = 20000) {
     config::video.adaptive_bitrate.enabled = true;

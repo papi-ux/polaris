@@ -53,6 +53,61 @@ Such a packet can have both historical records unavailable. Present setting or
 work receipts still require their original nonnegative exact matching PTS; the
 inspector never guesses or replaces that index.
 
+## Passive FEC selection at `send_constants`
+
+The separate existing `send_constants` event adds six fixed fields at block 0,
+under its original opt-in `vrr_trace::enabled()` predicate. Its existing `packet`
+trace ID joins it to the frame's packet history; it does not supply missing FEC
+identity. The event uses 14 of the existing 40 field slots. There is no additional
+event, observer, ring, writer or packet-record field, and no raw-version change.
+The packet inspector above does not validate or interpret these separate fields.
+
+| Fields | Meaning |
+| --- | --- |
+| `fec_selection_basis` | Static `encoder_confirmed_trial`, `configured_baseline` or `unavailable`. |
+| `fec_selection_generation` | Matching configured publication scope, or null when unavailable. It is not a unique baseline publication epoch. |
+| `fec_selection_authority_revision` | Exact pending authority revision checked by the successful encoder confirmation that published the selected trial; otherwise null. It is separate from encoder/operator revisions and trace IDs. |
+| `fec_selection_from_frame` | Positive accepted next-frame boundary of that same selected trial; otherwise null. |
+| `fec_configured_percentage` | Nominal configured F0 from the selected publication; null when unavailable. |
+| `fec_nominal_percentage` | Nominal allocation selected for this frame before FEC fitting or oversized fallback; null when unavailable. |
+
+Allocation and identity come from one atomic read of the same immutable shared
+publication, once per frame. Thin allocation/percentage wrappers preserve the
+existing values. The sender carries that scalar selection through packetization;
+it does not read a newer publication to label an older allocation. A subsequent
+restore or publication cannot relabel the already selected tuple. This observes
+selection at the packetizer, not the publication in effect at encoder submission
+or permission current at event emission. The atomic shared-pointer read is not
+claimed to be lock-free; no new controller lock, wait, poll, SDK call or sender
+allocation is added.
+
+Only a confirmed raise at a positive boundary, in the matching generation and
+at or after that boundary, has trial identity. Pending, refused, stale-authority,
+same-percentage ABA and wrong-generation requests cannot provide it. A configured
+baseline, a restore and a queued frame before the raised boundary report
+`configured_baseline` with configured scope and value only: revision and boundary
+are null. A restore reuses the preallocated baseline without allocation, and even
+a later encoder acknowledgement of the restore does not give baseline a trial
+identity. No baseline epoch is manufactured; zero, the latest request and a
+future trial cannot supply a missing confirmed revision.
+
+Absent/mismatched publications and nonpositive frame arguments report
+`unavailable`, with all five payload fields null. Their existing allocation values
+remain unchanged, including fallback and invalid/zero-frame behavior. They never
+borrow another generation's identity. Nominal allocation can differ from the
+existing `fec_percentage`, which keeps its fitted/constructed packetizer meaning
+after fit and oversized fallback. Neither field measures actual sent bytes,
+achieved bitrate, client recovery, causal loss or FEC benefit; the checked revision
+does not confer policy authority or change percentage-only `fec_applied` behavior.
+Wire/audio/warp accounting and pacing behavior are unchanged.
+
+New cases in the existing `LiveTuningFecActuator` group exercise exact checked
+revision and boundary, pending/refused/stale/ABA identity, restore/reconfiguration,
+foreign generations, invalid frame allocation compatibility and concurrent tuple
+coherence. They do not exercise the real sender or an encoder SDK. Compilation,
+the actual native roster, event serialization and owned-stream behavior require
+separately selected exact-head execution; static source checks cannot supply them.
+
 ## Inspect private bytes
 
 After an independently authorized collection has closed, run from the source
