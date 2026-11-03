@@ -1359,13 +1359,18 @@ TEST_F(DoctorExplanationHttp, NumericDriftIsAllowedButAChangedFindingReconnectOr
 
   // Reconnect: the same app on a new stream generation.
   const auto reconnect = pending(4, [&] {
+    doctor_actions::session_ended(k_owner, k_generation);
     stream_stats::stop_session_timing(k_owner, k_generation);
     stream_stats::start_session_timing(k_owner, k_generation + 1, k_token);
+    doctor_actions::session_started(k_owner, k_generation + 1, k_token, 20000);
+    EXPECT_TRUE(static_cast<bool>(doctor_actions::acquire_paired_global_control(k_owner, k_generation + 1, k_token)));
   });
   EXPECT_EQ(reconnect.status, 409) << reconnect.body.dump();
   EXPECT_EQ(reconnect.body["code"], "scope_changed");
+  doctor_actions::session_ended(k_owner, k_generation + 1);
   stream_stats::stop_session_timing(k_owner, k_generation + 1);
   stream_stats::start_session_timing(k_owner, k_generation, k_token);
+  doctor_actions::session_started(k_owner, k_generation, k_token, 20000);
 
   // Expiry while the provider is still running.
   const auto expired = pending(5, [&] { clock.advance(61s); });
