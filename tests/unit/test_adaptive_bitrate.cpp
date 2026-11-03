@@ -360,8 +360,13 @@ TEST(LiveTuningFecActuator, ConcurrentSelectionKeepsAllocationRevisionAndBoundar
   live_tuning_fec::actuator_t actuator;
   const auto budget = fec_budget();
   ASSERT_TRUE(actuator.configure(1, budget));
+  const auto initial_encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 1);
+  ASSERT_TRUE(initial_encoder);
+  ASSERT_EQ(actuator.confirm(1, 1, *initial_encoder, 101, true, true), result_e::published);
   std::atomic<bool> done {false};
   std::atomic<bool> invalid {false};
+  live_tuning_fec::selection_t first_selected {};
+  live_tuning_fec::selection_t last_selected {};
   std::promise<void> first_read;
   auto started = first_read.get_future();
   std::thread reader([&] {
@@ -381,17 +386,22 @@ TEST(LiveTuningFecActuator, ConcurrentSelectionKeepsAllocationRevisionAndBoundar
         selected.allocation.second == (revision % 2 ? 15 : 20) &&
         *selected.from_frame == 100 + static_cast<std::int64_t>(revision);
     };
-    if (!valid(actuator.selection_for_frame(1, 5000, 77))) invalid.store(true);
+    first_selected = actuator.selection_for_frame(1, 5000, 77);
+    if (!valid(first_selected)) invalid.store(true);
     first_read.set_value();
     while (!done.load(std::memory_order_acquire)) {
       if (!valid(actuator.selection_for_frame(1, 5000, 77))) {
         invalid.store(true, std::memory_order_relaxed);
       }
     }
+    last_selected = actuator.selection_for_frame(1, 5000, 77);
+    if (!valid(last_selected)) invalid.store(true);
   });
-  started.wait();
-  bool writer_ok = true;
-  for (std::uint64_t revision = 1; revision <= 1000; ++revision) {
+  // Bound test-thread startup only; this is not an actuator or product deadline.
+  const auto ready = started.wait_for(10s);
+  bool writer_ok = ready == std::future_status::ready;
+  actuator.restore();
+  for (std::uint64_t revision = 2; writer_ok && revision <= 1000; ++revision) {
     const auto encoder = actuator.request(budget.encoder_kbps, revision % 2 ? 15 : 20, 2000, true, revision);
     if (!encoder || actuator.confirm(1, revision, *encoder, 100 + static_cast<std::int64_t>(revision), true, true) !=
         result_e::published) {
@@ -404,10 +414,24 @@ TEST(LiveTuningFecActuator, ConcurrentSelectionKeepsAllocationRevisionAndBoundar
       break;
     }
   }
+  actuator.restore();
   done.store(true, std::memory_order_release);
   reader.join();
+  EXPECT_EQ(ready, std::future_status::ready);
   EXPECT_TRUE(writer_ok);
   EXPECT_FALSE(invalid.load());
+  // The reader must witness an actual trial and then the restored baseline;
+  // a baseline/fallback-only schedule cannot satisfy this concurrent guard.
+  EXPECT_EQ(first_selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(first_selected.basis, basis_e::encoder_confirmed_trial);
+  EXPECT_EQ(first_selected.generation, 1u);
+  EXPECT_EQ(first_selected.authority_revision, 1u);
+  EXPECT_EQ(first_selected.from_frame, 101);
+  EXPECT_EQ(last_selected.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(last_selected.basis, basis_e::configured_baseline);
+  EXPECT_EQ(last_selected.generation, 1u);
+  EXPECT_FALSE(last_selected.authority_revision);
+  EXPECT_FALSE(last_selected.from_frame);
 }
 
 namespace {
