@@ -824,6 +824,8 @@ namespace doctor_ai_explanation {
     std::string evidence;
     std::string snapshot_id;
     steady::time_point created {};
+    /// The caller's own private strings as captured, kept for redaction only.
+    std::vector<std::string> identities;
   };
 
   service_t::service_t(hooks_t hooks):
@@ -962,6 +964,7 @@ namespace doctor_ai_explanation {
           job->evidence = std::move(*evidence);
           job->snapshot_id = std::move(id);
           job->created = now;
+          job->identities = scope.identities;
           _job = std::move(job);
           _changed.notify_all();
         }
@@ -970,7 +973,7 @@ namespace doctor_ai_explanation {
     if (refusal) refuse(*refusal, retry_after_ms);
   }
 
-  std::optional<code_e> service_t::recheck(const snapshot_t &snapshot) {
+  std::optional<code_e> service_t::recheck(const snapshot_t &snapshot, std::vector<std::string> *identities) {
     {
       std::lock_guard lock(_mutex);
       if (!_accepting) return code_e::server_stopping;
@@ -996,6 +999,7 @@ namespace doctor_ai_explanation {
     const auto config = _hooks.read_config();
     if (!config.enabled) return code_e::host_ai_disabled;
     if (!config.transport_ready || config.generation != snapshot.config_generation) return code_e::provider_not_ready;
+    if (identities) *identities = scope.identities;
     return std::nullopt;
   }
 
@@ -1047,14 +1051,16 @@ namespace doctor_ai_explanation {
           outcome = {};
           outcome.code = code_e::provider_failed;
         }
-        // The caller, finding, controller and configuration must still be the captured ones.
-        result = recheck(*snapshot);
+        // The caller, finding, controller and configuration must still be the captured ones. This one
+        // validated view is the only one publication uses: no later, unchecked read can supply anything.
+        std::vector<std::string> identities;
+        result = recheck(*snapshot, &identities);
         if (!result) {
           if (outcome.code != code_e::explained || !outcome.explanation) {
             result = outcome.code == code_e::explained ? code_e::invalid_explanation : outcome.code;
           } else {
-            const auto current = snapshot->read_scope();
-            explanation = sanitize_explanation(*outcome.explanation, current.identities);
+            identities.insert(identities.end(), snapshot->identities.begin(), snapshot->identities.end());
+            explanation = sanitize_explanation(*outcome.explanation, identities);
             result = explanation ? code_e::explained : code_e::invalid_explanation;
           }
         }

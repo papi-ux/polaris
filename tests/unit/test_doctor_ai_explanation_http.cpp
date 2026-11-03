@@ -650,6 +650,47 @@ TEST(DoctorAiExplanationStore, PendingTextIsDroppedWhenTheCapturedContextChanges
   }
 }
 
+TEST(DoctorAiExplanationStore, PublicationUsesTheValidatedCompletionReadAndNoLaterView) {
+  // Read 1 admits, read 2 is the pre-dispatch recheck, read 3 validates the completion. A read 4 would
+  // see a revoked caller: it must never happen, and nothing from it may shape the published text.
+  for (const bool revoke_at_completion : {false, true}) {
+    SCOPED_TRACE(revoke_at_completion ? "completion read revoked" : "completion read valid");
+    fake_world_t world;
+    std::atomic<int> reads {0};
+    const auto base = world.reader();
+    const dae::scope_reader_t reader = [&] {
+      const int read = ++reads;
+      auto scope = base();
+      static const char *names[] = {"Admission Alpha", "Dispatch Bravo", "Completion Charlie", "Late Delta"};
+      scope.identities = {names[std::min(read, 4) - 1]};
+      if (read >= 4 || (revoke_at_completion && read == 3)) scope.cert_record.reset();
+      return scope;
+    };
+    fake_provider_t provider;
+    provider.reply = [] {
+      auto e = valid_explanation();
+      e["likely_cause"] = "Admission Alpha, Dispatch Bravo, Completion Charlie and Late Delta.";
+      return dae::provider_outcome_t {dae::code_e::explained, e};
+    };
+    replies_t replies;
+    dae::service_t service {{.read_config = ready_config, .provider = provider.hook(), .clock = {}, .snapshot_id = {}}};
+    service.submit(world.request(1), reader, replies.writer());
+    const auto [status, body] = replies.wait(1);
+    service.shutdown();
+    EXPECT_EQ(reads.load(), 3) << "admission, dispatch recheck and completion recheck only";
+    if (revoke_at_completion) {
+      EXPECT_EQ(status, 401);
+      EXPECT_TRUE(body["explanation"].is_null());
+      continue;
+    }
+    ASSERT_EQ(status, 200) << body.dump();
+    const auto text = body["explanation"]["likely_cause"].get<std::string>();
+    EXPECT_EQ(text.find("Admission Alpha"), std::string::npos) << "the captured identities stay redacted";
+    EXPECT_EQ(text.find("Completion Charlie"), std::string::npos) << "the validated completion view redacts";
+    EXPECT_NE(text.find("Late Delta"), std::string::npos) << "no later, unchecked view was read";
+  }
+}
+
 TEST(DoctorAiExplanationStore, OptOutReconfigureStopAndFailuresAnswerOnceWithoutText) {
   {
     fake_provider_t provider;

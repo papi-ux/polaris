@@ -265,7 +265,8 @@ namespace doctor_ai_explanation {
     struct snapshot_t;
     void run();
     void finish(snapshot_t &snapshot, code_e code, const std::optional<nlohmann::json> &explanation);
-    std::optional<code_e> recheck(const snapshot_t &snapshot);
+    /// Validate the current scope against the capture; on success `identities` come from that same view.
+    std::optional<code_e> recheck(const snapshot_t &snapshot, std::vector<std::string> *identities = nullptr);
 
     hooks_t _hooks;
     mutable std::mutex _mutex;
