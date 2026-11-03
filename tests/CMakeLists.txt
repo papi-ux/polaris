@@ -342,6 +342,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_nvhttp_tls_close.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_http.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_frame_feedback_scope.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_mode_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_space_launch_mode_contract.cpp
