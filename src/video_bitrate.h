@@ -5,6 +5,8 @@
 
 #include "adaptive_bitrate.h"
 
+#include <optional>
+
 namespace video::bitrate {
   enum class result_e { unchanged, superseded, applied, recreate_session, rejected };
 
@@ -12,6 +14,15 @@ namespace video::bitrate {
     result_e result = result_e::unchanged;
     int target_bitrate_kbps = 0;
   };
+
+  // The rate a usable session starts at: its open trace, runtime-support readiness and the encode
+  // loop's applied rate. An encoder can open before the loop's own poll moves the configuration to
+  // a newer target (native CUDA NVENC opens while its device is built), so the rate its SDK accepted
+  // wins and that newer target remains a real update after the first encode. Without such a rate,
+  // the session opened at the configured one. Passive: no SDK call, broker read or acknowledgement.
+  inline int opened_bitrate_kbps(std::optional<int> accepted_kbps, int configured_kbps) noexcept {
+    return accepted_kbps && *accepted_kbps > 0 ? *accepted_kbps : configured_kbps;
+  }
 
   // Called after a successful encode, independently of statistics aggregation. The caller polls
   // the request; the actuator still checks its exact revision/target under its mutex at application.

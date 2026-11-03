@@ -5,6 +5,7 @@
 #include "../tests_common.h"
 
 #include <src/video.h>
+#include <src/video_bitrate.h>
 #include <src/nvenc/nvenc_base.h>
 #include <src/encoder_probe_reuse.h>
 #include <src/launch_failure.h>
@@ -901,6 +902,161 @@ TEST(VideoNvencBitrateTests, PreservesTheConfiguredVbvIncreaseAcrossRefusalAndRe
   EXPECT_EQ(driver.reconfigures[0].vbv_buffer_size, 500000u);
   EXPECT_EQ(driver.reconfigures[1].vbv_buffer_size, 500000u);
   EXPECT_EQ(driver.reconfigures[2].vbv_buffer_size, 666667u);
+}
+
+namespace {
+  // The broker as an FFmpeg session at 30 Mbps leaves it after asking for a rebuild at 20 Mbps:
+  // runtime support stays published, so the rebuild's poll and encode_run's own poll both return
+  // live requests.
+  class native_rebuild_broker_t {
+  public:
+    native_rebuild_broker_t():
+        saved {config::video.adaptive_bitrate} {
+      config::video.adaptive_bitrate.enabled = true;
+      config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+      config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+      adaptive_bitrate::set_base_bitrate(30000);
+      adaptive_bitrate::set_runtime_update_supported(true, {}, 30000, true, 1);
+      adaptive_bitrate::set_live_bitrate(20000);
+      const auto request = adaptive_bitrate::get_live_bitrate_request();
+      rebuilding = request && request->target_bitrate_kbps == 20000 &&
+        adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision, 20000);
+    }
+    ~native_rebuild_broker_t() {
+      adaptive_bitrate::set_runtime_update_supported(false);
+      config::video.adaptive_bitrate = saved;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+    }
+    bool rebuilding = false;
+  private:
+    decltype(config::video.adaptive_bitrate) saved;
+  };
+
+  // The native session's answer to the one locked update: the real nvenc_base SDK call.
+  struct native_update_session_t {
+    using bitrate_update_e = video::encode_session_t::bitrate_update_e;
+    nvenc::nvenc_base &encoder;
+    bitrate_update_e update_bitrate(int kbps) {
+      return encoder.update_bitrate(kbps) ? bitrate_update_e::applied : bitrate_update_e::rejected;
+    }
+  };
+
+  video::bitrate::result_t native_after_encode(native_update_session_t &session, int &applied, std::int64_t next_frame) {
+    return video::bitrate::apply_after_encode(adaptive_bitrate::get_live_bitrate_request(), session, applied,
+      next_frame, false, [](auto &&...) {});
+  }
+}  // namespace
+
+TEST(VideoNvencBitrateTests, AnOpenBeforeANewerTargetIsReadyAtItsAcceptedRateAndUpdatesOnce) {
+  for (const bool sdk_accepts : {true, false}) {
+    SCOPED_TRACE(sdk_accepts ? "update accepted" : "update refused");
+    native_rebuild_broker_t broker;
+    ASSERT_TRUE(broker.rebuilding);
+    fake_nvenc_driver_t driver;
+    if (!sdk_accepts) driver.reconfigure_results = {NV_ENC_ERR_INVALID_PARAM};
+    fake_nvenc_t encoder {driver};
+
+    // make_encode_device opens the native encoder at the rebuild poll's target...
+    const auto opened = adaptive_bitrate::get_live_bitrate_request();
+    ASSERT_TRUE(opened);
+    ASSERT_EQ(opened->target_bitrate_kbps, 20000);
+    ASSERT_TRUE(create_fake_nvenc(encoder));
+    ASSERT_EQ(driver.initialized_average_bps, 20'000'000u);
+    // ...and a newer target lands before encode_run's own poll moves config.bitrate past it.
+    adaptive_bitrate::set_live_bitrate(14000);
+    const auto newer = adaptive_bitrate::get_live_bitrate_request();
+    ASSERT_TRUE(newer);
+    ASSERT_EQ(newer->target_bitrate_kbps, 14000);
+
+    // Readiness and the applied rate start from what the SDK accepted, asking it nothing.
+    const int ready = video::bitrate::opened_bitrate_kbps(encoder.accepted_bitrate_kbps(), newer->target_bitrate_kbps);
+    EXPECT_EQ(ready, 20000);
+    adaptive_bitrate::set_runtime_update_supported(true, {}, ready, true, 1);
+    int applied = ready;
+    EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 20000);
+    EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(newer->revision, 14000));
+    EXPECT_TRUE(driver.reconfigures.empty());
+
+    // After the first encode the newer target reaches the SDK once, and only success acknowledges it.
+    native_update_session_t session {encoder};
+    const auto first = native_after_encode(session, applied, 2);
+    ASSERT_EQ(driver.reconfigures.size(), 1u);
+    EXPECT_EQ(driver.reconfigures[0].average_bitrate, 14'000'000u);
+    native_after_encode(session, applied, 3);
+    EXPECT_EQ(driver.reconfigures.size(), 1u);
+    if (sdk_accepts) {
+      EXPECT_EQ(first.result, video::bitrate::result_e::applied);
+      EXPECT_EQ(applied, 14000);
+      EXPECT_EQ(encoder.accepted_bitrate_kbps(), 14000);
+      EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(newer->revision, 14000));
+    } else {
+      // A refusal keeps the existing failure semantics and the rate the SDK still holds.
+      EXPECT_EQ(first.result, video::bitrate::result_e::rejected);
+      EXPECT_EQ(applied, 20000);
+      EXPECT_EQ(encoder.accepted_bitrate_kbps(), 20000);
+      EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(newer->revision, 14000));
+      EXPECT_FALSE(adaptive_bitrate::get_state().runtime_update_supported);
+    }
+  }
+}
+
+TEST(VideoNvencBitrateTests, AnOpenAtTheCurrentTargetIsReadyWithoutAReconfiguration) {
+  native_rebuild_broker_t broker;
+  ASSERT_TRUE(broker.rebuilding);
+  fake_nvenc_driver_t driver;
+  fake_nvenc_t encoder {driver};
+  ASSERT_TRUE(create_fake_nvenc(encoder));
+  const auto current = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(current);
+  ASSERT_EQ(current->target_bitrate_kbps, 20000);
+  const int ready = video::bitrate::opened_bitrate_kbps(encoder.accepted_bitrate_kbps(), current->target_bitrate_kbps);
+  EXPECT_EQ(ready, 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, ready, true, 1);
+  int applied = ready;
+  native_update_session_t session {encoder};
+  EXPECT_EQ(native_after_encode(session, applied, 2).result, video::bitrate::result_e::unchanged);
+  EXPECT_EQ(native_after_encode(session, applied, 3).result, video::bitrate::result_e::unchanged);
+  EXPECT_TRUE(driver.reconfigures.empty());
+  EXPECT_EQ(applied, 20000);
+  EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(current->revision, 20000));
+}
+
+TEST(VideoNvencBitrateTests, OnlyALiveEncoderHandleReportsTheRateItsSdkAccepted) {
+  {
+    fake_nvenc_driver_t driver;
+    fake_nvenc_t never_created {driver};
+    EXPECT_FALSE(never_created.accepted_bitrate_kbps());
+    // The FFmpeg fallback has no rate of its own either, so the configured one stands.
+    EXPECT_EQ(video::bitrate::opened_bitrate_kbps(never_created.accepted_bitrate_kbps(), 14000), 14000);
+  }
+  for (const bool fail_initialize : {true, false}) {
+    // Construction after a successful SDK initialization can still fail and destroy the handle.
+    fake_nvenc_driver_t driver;
+    if (fail_initialize) driver.initialize_result = NV_ENC_ERR_INVALID_PARAM;
+    else driver.bitstream_result = NV_ENC_ERR_INVALID_PARAM;
+    fake_nvenc_t encoder {driver};
+    EXPECT_FALSE(create_fake_nvenc(encoder));
+    EXPECT_FALSE(encoder.accepted_bitrate_kbps());
+  }
+
+  fake_nvenc_driver_t driver;
+  driver.reconfigure_results = {NV_ENC_ERR_INVALID_PARAM};
+  fake_nvenc_t encoder {driver};
+  ASSERT_TRUE(create_fake_nvenc(encoder));
+  EXPECT_EQ(encoder.accepted_bitrate_kbps(), 20000);
+  EXPECT_FALSE(encoder.update_bitrate(15000));  // A refusal is not an accepted rate.
+  EXPECT_EQ(encoder.accepted_bitrate_kbps(), 20000);
+  EXPECT_TRUE(encoder.update_bitrate(15000));
+  EXPECT_EQ(encoder.accepted_bitrate_kbps(), 15000);
+  encoder.destroy_encoder();
+  EXPECT_FALSE(encoder.accepted_bitrate_kbps());
+  // A recreated handle reports its own open, never its predecessor's later rate.
+  ASSERT_TRUE(create_fake_nvenc(encoder));
+  EXPECT_EQ(encoder.accepted_bitrate_kbps(), 20000);
+  EXPECT_EQ(driver.reconfigures.size(), 2u);
 }
 
 TEST(VideoCacheTests, EncoderProbeCachePersistsCodecModesAndInvalidatesOnTopologyMismatch) {

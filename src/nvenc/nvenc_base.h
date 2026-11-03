@@ -79,6 +79,12 @@ namespace nvenc {
      */
     bool update_bitrate(int new_bitrate_kbps, std::optional<video::bitrate_application::origin_t> origin = std::nullopt);
 
+    /**
+     * @brief The average rate this encoder's SDK last accepted, at creation or a later reconfiguration.
+     * @return Whole kbps, or empty without a created encoder. Reads saved state only; no SDK call.
+     */
+    std::optional<int> accepted_bitrate_kbps() const noexcept;
+
     // Passive local history only; no SDK/broker calls or ownership of packets.
     std::optional<video::bitrate_provenance::record_t> take_bitrate_observation(uint64_t output_timestamp) noexcept;
     bool publish_usable_bitrate_open() noexcept;

@@ -758,6 +758,13 @@ namespace nvenc {
     return true;
   }
 
+  std::optional<int> nvenc_base::accepted_bitrate_kbps() const noexcept {
+    // A failed creation destroys its handle, so a live one has saved what it accepted.
+    const auto bps = saved_enc_config.rcParams.averageBitRate;
+    if (!encoder || !bps || bps % 1000) return std::nullopt;
+    return static_cast<int>(bps / 1000);
+  }
+
   std::optional<video::bitrate_provenance::record_t> nvenc_base::take_bitrate_observation(uint64_t output_timestamp) noexcept {
     return bitrate_observations ? bitrate_observations->take_output(
       video::bitrate_application::output_stage_e::nvenc_output_timestamp,

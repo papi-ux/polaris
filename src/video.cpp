@@ -2344,6 +2344,11 @@ namespace video {
         encode_device->nvenc->take_bitrate_observation(output_timestamp) : std::nullopt;
     }
 
+    std::optional<int> accepted_bitrate_kbps() const noexcept {
+      auto *encode_device = device();
+      return encode_device && encode_device->nvenc ? encode_device->nvenc->accepted_bitrate_kbps() : std::nullopt;
+    }
+
     bool supports_runtime_bitrate_update() const override {
       return true;
     }
@@ -5562,6 +5567,14 @@ namespace video {
         end_stream_encoder_cannot_serve(mail);
       }
       return;
+    }
+
+    // Native CUDA NVENC opens while make_encode_device builds its device, before the poll above can
+    // move config.bitrate to a newer target, and is not reopened here. Start this session's trace,
+    // readiness and applied rate from what its SDK accepted; a newer target then reaches the encoder
+    // through the update after the first encode. Other sessions opened at config.bitrate.
+    if (const auto *native = dynamic_cast<const nvenc_encode_session_t *>(session.get())) {
+      config.bitrate = bitrate::opened_bitrate_kbps(native->accepted_bitrate_kbps(), config.bitrate);
     }
 
     trace_encoder_open(*session, config, pacing_state ? std::optional {pacing_state->trace_id} : std::nullopt, false);
