@@ -44,7 +44,7 @@ namespace stream_native_reception {
     malformed_flags, malformed_counts, malformed_range, malformed_time, malformed_sample,
     report_order, clock_regression, loop_regression, clock_unavailable, incomplete, no_accepted,
     frame_unavailable, packet_missing, packet_ambiguous, packet_stale, sample_counts,
-    report_stale, no_samples,
+    report_stale, no_samples, retention_limited,
   };
   inline const char *name(reason_e reason) noexcept {
     switch (reason) {
@@ -58,6 +58,7 @@ namespace stream_native_reception {
       RECEPTION_REASON(frame_unavailable); RECEPTION_REASON(packet_missing); RECEPTION_REASON(packet_ambiguous);
       RECEPTION_REASON(packet_stale); RECEPTION_REASON(sample_counts); RECEPTION_REASON(report_stale);
       RECEPTION_REASON(no_samples);
+      RECEPTION_REASON(retention_limited);
 #undef RECEPTION_REASON
     }
     return "waiting";
@@ -165,6 +166,17 @@ namespace stream_native_reception {
       if (frame < 0 || frame > std::numeric_limits<std::uint32_t>::max()) { key_poison_ = true; return; }
       auto &slot = slots_[index(static_cast<std::uint32_t>(frame), sequence)];
       const bool reused = slot.state && slot.frame == frame && slot.sequence == sequence;
+      if (slot.state && !reused) {
+        // A different key destroys retention, not evidence of what was sent. Keep only a bounded
+        // per-class frame high-water: older overlapping ranges may be incomplete. Frame wrap is
+        // already terminal in the immutable frame ledger, so no serial unwrap is invented here.
+        for (unsigned kind = 0; kind < evicted_through_.size(); ++kind) {
+          if ((slot.state & ambiguous) || kind == static_cast<unsigned>((slot.state & is_parity) != 0)) {
+            auto &watermark = evicted_through_[kind];
+            watermark = watermark ? std::max(*watermark, slot.frame) : slot.frame;
+          }
+        }
+      }
       slot = packet_t {static_cast<std::uint32_t>(frame), sequence,
         static_cast<std::uint16_t>(used | (parity ? is_parity : 0) | ((!succeeded || reused) ? ambiguous : 0)),
         ns(begin), ns(end), bytes, 0};
@@ -264,17 +276,17 @@ namespace stream_native_reception {
       const auto now_ns = ns(now);
       const auto bound = std::chrono::duration_cast<std::chrono::nanoseconds>(retention).count();
       auto oldest = now_ns;
-      std::uint64_t offered_data = 0, offered_parity = 0, offered_data_bytes = 0, offered_parity_bytes = 0;
-      // Fixed 16384-entry upper-bound scan, not a packet census. If retained sender records cannot
-      // bound claimed accepted counters, refuse them; eviction never fabricates missing sends.
+      std::uint64_t retained_data = 0, retained_parity = 0, retained_data_bytes = 0, retained_parity_bytes = 0;
+      // After different-key eviction this scan is only a retained subset. Its totals are an upper
+      // bound on accepted counters only for a class whose entire range is still known complete.
       for (const auto &p : slots_) {
         if (!p.state || p.frame < r.first_frame || p.frame > r.last_frame) continue;
         if (p.state & ambiguous) return reason_e::packet_ambiguous;
         if (!p.bytes || p.bytes > 65535 || p.begin_ns > p.end_ns || p.end_ns > now_ns || now_ns - p.begin_ns > bound)
           return reason_e::packet_stale;
         oldest = std::min(oldest, p.begin_ns);
-        if (p.state & is_parity) { ++offered_parity; offered_parity_bytes += p.bytes; }
-        else { ++offered_data; offered_data_bytes += p.bytes; }
+        if (p.state & is_parity) { ++retained_parity; retained_parity_bytes += p.bytes; }
+        else { ++retained_data; retained_data_bytes += p.bytes; }
       }
       for (std::size_t i = 0; i < r.count; ++i) {
         const auto &s = r.samples[i];
@@ -290,8 +302,13 @@ namespace stream_native_reception {
       }
       if (data_count > r.data_packets || parity_count > r.parity_packets || data_bytes > r.data_bytes || parity_bytes > r.parity_bytes)
         return reason_e::sample_counts;
-      if (r.data_packets > offered_data || r.parity_packets > offered_parity ||
-          r.data_bytes > offered_data_bytes || r.parity_bytes > offered_parity_bytes) return reason_e::sample_counts;
+      const bool data_exceeds = r.data_packets > retained_data || r.data_bytes > retained_data_bytes;
+      const bool parity_exceeds = r.parity_packets > retained_parity || r.parity_bytes > retained_parity_bytes;
+      const auto complete = [&](unsigned kind) {
+        return !evicted_through_[kind] || *evicted_through_[kind] < r.first_frame;
+      };
+      if ((data_exceeds && complete(0)) || (parity_exceeds && complete(1))) return reason_e::sample_counts;
+      if (data_exceeds || parity_exceeds) return reason_e::retention_limited;
       // Populate derived fields only after every sample and the whole frame range passed.
       out.setting = frames.setting;
       oldest_send_ = clock::time_point(std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(oldest)));
@@ -317,6 +334,8 @@ namespace stream_native_reception {
     bool retired_ = false, key_poison_ = false, clock_failed_ = false;
     clock::time_point received_at_ {}, oldest_send_ {};
     readback_t latest_;
+    // Constant-size conservative completeness metadata; generation-local and mutex-protected.
+    std::array<std::optional<std::uint32_t>, 2> evicted_through_ {};
     std::array<packet_t, ledger_capacity> slots_ {};
   };
 }  // namespace stream_native_reception

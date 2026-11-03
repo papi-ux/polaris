@@ -4084,7 +4084,8 @@
         "Optional native_reception on paired own-current controller session status only, after matching RTSP version/session-ID/encrypted control13+v2. Both existing video encryption modes supported without changing encryption policy. Absence means unavailable/unnegotiated, never clean media.",
         "Version1 observes queue-accepted original native packets separately from frame_submission and Java/media counters. All reasons/loop/packet kinds are fixed enumerations; no controller consumes this object.",
         "host_report_age_ms is host-local. Reports and every sampled sender boundary expire after2s; no rejected report refreshes state. Zero, incomplete, gaps, sparse samples and clock failure remain explicit. Raw host timestamps and identities are not serialized.",
-        "media_authenticated comes only from actual host session video flags; control_authenticated becomes true only after verified encrypted control dispatch. Unencrypted video has on-path integrity limitations; accepted-original facts never authorize capacity/clean/recovery or a writer."
+        "media_authenticated comes only from actual host session video flags; control_authenticated becomes true only after verified encrypted control dispatch. Unencrypted video has on-path integrity limitations; accepted-original facts never authorize capacity/clean/recovery or a writer.",
+        "retention_limited is a fresh unavailable observation when lost unsampled sender retention prevents proving an aggregate bound; derived fields are cleared. Complete-class or matched-sample contradictions still reject without state/freshness mutation. Per-class evicted-frame high-water metadata is fixed-size and generation-local."
       ],
       "fields": [
         "version",

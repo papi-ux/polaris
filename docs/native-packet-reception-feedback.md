@@ -73,9 +73,13 @@ The host records before/after `steady_clock` bounds around actual batch/single s
 Successful batch shards share bounds. API acceptance is not on-wire transmission. Exact
 `(frame32, rtp16)` keys live in a per-generation, fixed 16,384 by 32-byte packet ledger
 (512KiB), with bounded metadata and two-second expiry. Key reuse is ambiguous; collisions
-can evict retention, never reconstruct missing sends. A fixed scan bounds counters by
-retained offered data/parity packets and bytes. Contradictory counts, bytes or sample
-identities are refused without refreshing sequence, age or state.
+can evict retention, never reconstruct missing sends. A scan after eviction is only a
+retained subset, not an upper bound on sends. Two generation-local, per-class evicted-frame
+high-water marks conservatively distinguish complete data/parity ranges. Counters above a
+proved complete class total, or matched sample sums above claimed acceptance, are refused
+without refreshing state. Excess above a retention-limited subset instead publishes a fresh
+unavailable `retention_limited` observation and clears derived metrics. The constant-size
+marks can conservatively limit older overlapping ranges; they do not guess missing sends.
 
 The existing 4,096-frame ledger records the immutable encoder tuple before sending.
 Only the new const inclusive-range access is added; its historical exclusive join and

@@ -342,3 +342,95 @@ TEST_F(NativeReception, ConcurrentSenderReadbackAndRetirementHaveNoLockInversion
   sender.join();consumer.join();EXPECT_FALSE(observer->readback(now));
   EXPECT_EQ(observer->accept(wire(reading()),true,now),nr::reason_e::retired);
 }
+
+TEST_F(NativeReception, UnsampledSequentialFrameCollisionPublishesFreshUnavailableObservation) {
+  // Production scope, ledger and index: frame84/seq834 is overwritten by frame94/seq936.
+  // The report samples830 and930, so neither sample itself is missing. This is retention,
+  // not a proved contradiction of the client's legitimate110 accepted packets/110000 bytes.
+  frame(83);
+  for(unsigned n=0;n<10;++n) packet(83,static_cast<std::uint16_t>(820+n));
+  auto previous=reading();previous.first_frame=previous.last_frame=83;
+  previous.data_packets=10;previous.data_bytes=10000;previous.samples[0]={83,820,50000};
+  ASSERT_TRUE(accept(previous).available);
+  now+=100ms;
+  for(unsigned f=84;f<=94;++f) {
+    frame(f);
+    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>((f-1)*10+n));
+  }
+  auto report=reading(2);report.sequence=2;report.end_us=200000;report.loop_tick=11;
+  report.first_frame=84;report.last_frame=94;report.data_packets=110;report.data_bytes=110000;
+  report.samples[0]={84,830,50000};report.samples[1]={94,930,40000};
+  EXPECT_EQ(observer->accept(wire(report),true,now),nr::reason_e::joined);
+  auto current=observer->readback(now);ASSERT_TRUE(current);
+  EXPECT_EQ(current->report.sequence,2u);EXPECT_EQ(current->host_report_age_ms,0u);
+  EXPECT_FALSE(current->available);EXPECT_STREQ(nr::name(current->reason),"retention_limited");
+  EXPECT_FALSE(current->setting);EXPECT_FALSE(current->samples[0].matched);
+  EXPECT_EQ(current->report.data_packets,110u);EXPECT_EQ(current->report.data_bytes,110000u);
+}
+
+TEST_F(NativeReception, RetentionLossDoesNotHideMatchedSampleContradictionOrPoisonLaterCompleteRange) {
+  for(unsigned f=84;f<=94;++f) {
+    frame(f);
+    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>((f-1)*10+n));
+  }
+  auto report=reading(2);report.first_frame=84;report.last_frame=94;
+  report.data_packets=110;report.data_bytes=110000;
+  report.samples[0]={84,830,50000};report.samples[1]={94,930,40000};
+  auto retained=accept(report);ASSERT_FALSE(retained.available);
+  ASSERT_STREQ(nr::name(retained.reason),"retention_limited");
+  now+=100ms;
+  auto bad=reading();bad.sequence=2;bad.end_us=200000;bad.loop_tick=11;
+  bad.first_frame=84;bad.last_frame=94;bad.samples[0]={84,830,50000};
+  bad.data_packets=bad.data_bytes=0;bad.parity_packets=1;bad.parity_bytes=1000;
+  EXPECT_EQ(observer->accept(wire(bad),true,now),nr::reason_e::sample_counts);
+  auto unchanged=observer->readback(now);ASSERT_TRUE(unchanged);
+  EXPECT_EQ(unchanged->report.sequence,1u);EXPECT_EQ(unchanged->host_report_age_ms,100u);
+  // A later complete range is not permanently poisoned by older retention loss.
+  frame(95);packet(95,940);
+  auto fresh=reading();fresh.sequence=3;fresh.end_us=300000;fresh.loop_tick=12;
+  fresh.first_frame=fresh.last_frame=95;fresh.samples[0]={95,940,50000};
+  ASSERT_TRUE(accept(fresh).available);
+  now+=100ms;fresh.sequence=4;fresh.end_us=400000;fresh.loop_tick=13;
+  fresh.data_packets=2;fresh.data_bytes=2000;
+  EXPECT_EQ(observer->accept(wire(fresh),true,now),nr::reason_e::sample_counts);
+  unchanged=observer->readback(now);ASSERT_TRUE(unchanged);
+  EXPECT_EQ(unchanged->report.sequence,3u);EXPECT_EQ(unchanged->host_report_age_ms,100u);
+}
+TEST_F(NativeReception, ParityEvictionCannotExcuseAProvedCompleteDataClassContradiction) {
+  // Sequential RTP: frame84 has two data/five parity packets, subsequent frames ten data.
+  // Only parity84/834 is evicted by data94/936. All102 data records remain, so103 is impossible.
+  std::uint16_t sequence=830;
+  for(unsigned f=84;f<=94;++f) {
+    frame(f);
+    for(unsigned n=0;n<(f==84 ? 7u : 10u);++n) packet(f,sequence++,f==84 && n>=2);
+  }
+  auto report=reading();report.first_frame=84;report.last_frame=94;
+  report.samples[0]={84,830,50000};report.data_packets=103;report.data_bytes=103000;
+  EXPECT_EQ(observer->accept(wire(report),true,now),nr::reason_e::sample_counts);
+  auto snapshot=observer->readback(now);ASSERT_TRUE(snapshot);EXPECT_FALSE(snapshot->has_report);
+}
+
+TEST_F(NativeReception, EvictionCompletenessMetadataIsSerializedBetweenSenderAndControl) {
+  for(unsigned f=84;f<=94;++f) {
+    frame(f);
+    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>((f-1)*10+n));
+  }
+  std::atomic_bool start {false};
+  std::thread sender([&] {
+    while(!start.load()) std::this_thread::yield();
+    for(unsigned n=0;n<128;++n) {
+      packet(84,834);packet(94,936); // alternate the same known different-key collision.
+      std::this_thread::yield();
+    }
+  });
+  start.store(true);
+  for(unsigned n=1;n<=32;++n) {
+    auto report=reading(2);report.sequence=n;report.end_us=n*100000;report.loop_tick=10+n;
+    report.first_frame=84;report.last_frame=94;report.data_packets=110;report.data_bytes=110000;
+    report.samples[0]={84,830,50000};report.samples[1]={94,930,40000};
+    EXPECT_EQ(observer->accept(wire(report),true,now),nr::reason_e::joined);
+    auto current=observer->readback(now);EXPECT_TRUE(current);
+    if(current) { EXPECT_FALSE(current->available);EXPECT_STREQ(nr::name(current->reason),"retention_limited"); }
+  }
+  sender.join();observer->retire();EXPECT_FALSE(observer->readback(now));
+}
