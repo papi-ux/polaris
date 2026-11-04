@@ -630,13 +630,13 @@ TEST_F(NativeReception, UntracedAndTracedAcceptMakeIdenticalDecisionsAndRecorder
   nr::scope_t twin(615,frames,true);
   const auto both=[&](std::uint32_t f,std::uint16_t s) { observer->record(f,s,1000,false,now-100ms,now-99ms,true);
     twin.record(f,s,1000,false,now-100ms,now-99ms,true); };
-  frame(1);frame(3);both(1,0);both(3,0);
+  frame(1);frame(3);both(1,0);both(3,1);
   std::vector<std::string> inputs;
   auto r=reading();inputs.push_back(wire(r));inputs.push_back(wire(r));inputs.push_back("x");
   r.sequence=2;r.end_us=200000;r.first_frame=1;r.last_frame=2;inputs.push_back(wire(r));  // frame 2 absent
   auto contradiction=reading();contradiction.sequence=3;contradiction.end_us=300000;contradiction.data_packets=0;
   contradiction.data_bytes=0;contradiction.parity_packets=1;contradiction.parity_bytes=1000;inputs.push_back(wire(contradiction));
-  r=reading();r.sequence=3;r.end_us=300000;r.first_frame=r.last_frame=3;r.samples[0]={3,0,50000};inputs.push_back(wire(r));
+  r=reading();r.sequence=3;r.end_us=300000;r.first_frame=r.last_frame=3;r.samples[0]={3,1,50000};inputs.push_back(wire(r));
   // A refused recorder is installed while traced rows are emitted: admission never depends on it.
   auto refused=vrr_trace::recorder_t::open("relative-path-refused");ASSERT_TRUE(refused);
   EXPECT_NE(refused->status(),vrr_trace::status_e::running);
