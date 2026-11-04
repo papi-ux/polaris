@@ -1,11 +1,12 @@
 /** @file src/stream_native_reception_trace.h
- * Private native admission rows for the opt-in POLARIS_VRR_TRACE_V2 recorder (schema 2.4).
+ * Private native admission and passive signal rows for the opt-in recorder (schema 2.5).
  *
  * Values only: no controller, status, wire or policy reads them. A row copies one 0x7F10 callback's
  * admission result and, for a newly admitted joined report of the callback's own generation, its
  * samples' retained sender API bounds.
  * Host steady nanoseconds and client connection-relative microseconds stay in separate fields and
- * are never subtracted here: these are raw facts, not queue delay, one-way delay, capacity or loss.
+ * are never subtracted in the original admission/sample rows. New companion rows copy the pure
+ * adapter's signed elapsed outcome and coherent diagnostic context, never a policy decision.
  * No address, session token, client identity, name, certificate, key or packet buffer enters a row.
  * Every key and text value is a static literal.
  */
@@ -22,6 +23,9 @@ namespace stream_native_reception::trace {
   inline constexpr const char *admission_kind = "native_admission";
   inline constexpr const char *sample_kind = "native_admission_sample";
   inline constexpr std::size_t admission_fields = 34, sample_fields = 12;
+  inline constexpr const char *signal_kind = "native_signal_context", *signal_sample_kind = "native_signal_sample";
+  inline constexpr std::size_t signal_fields = 40, signal_sample_fields = 12;
+  static_assert(signal_fields <= vrr_trace::k_fields && signal_sample_fields <= vrr_trace::k_fields);
 
   /// Facts the control callback itself owns, read in that callback.
   struct callback_t {
@@ -121,5 +125,57 @@ namespace stream_native_reception::trace {
     const auto rows = sample_rows(a, c);
     for (std::size_t i = 0; i < rows; ++i) sink(sample_event(a, i, c));
     return 1 + rows;
+  }
+
+  inline vrr_trace::event_t signal_event(const native_video_signal::signal_t &s, bool published,
+                                        const callback_t &c) noexcept {
+    vrr_trace::event_t e(signal_kind);
+    const bool own = c.dispatched && s.admitted && s.sequence && s.generation && s.generation == c.generation;
+    native_video_signal::signal_t empty;
+    empty.received_steady_ns = s.received_steady_ns;
+    const auto &value = own ? s : empty;
+    if (c.trace_scope) e.u("trace_scope", c.trace_scope); else e.n("trace_scope");
+    e.u("session_generation", c.generation);
+    if (c.callback) e.u("callback", c.callback); else e.n("callback");
+    if (own) e.u("report_sequence", value.sequence); else e.n("report_sequence");
+    e.i("received_steady_ns", value.received_steady_ns).s("signal_reason", native_video_signal::name(value.reason))
+      .u("measurement_available", value.measurement_available).u("inspection_ready", value.inspection_ready)
+      .u("sparse", value.sparse).u("running", value.caller.running).u("watch_or_input_only", value.caller.watch_or_input_only)
+      .u("negotiated", value.caller.negotiated).u("control_authenticated", value.caller.control_authenticated)
+      .u("media_authenticated", value.caller.media_authenticated);
+    const auto &x = value.context;
+    e.s("context_reason", native_video_signal::name(x.reason)).u("context_observed", x.observed)
+      .i("inspection_steady_ns", x.inspected_steady_ns).u("generation_matches", x.generation_matches)
+      .u("app_matches", x.app_matches).u("exclusive", x.exclusive).u("configured_enabled", x.configured_enabled)
+      .u("runtime_enabled", x.enabled).u("paused", x.paused).u("runtime_supported", x.runtime_supported)
+      .u("in_place", x.in_place).u("doctor_override", x.doctor_override).u("explicit_writer", x.explicit_writer)
+      .u("pending_update", x.pending_update).u("applied_known", x.applied_known)
+      .i("base_kbps", x.base_kbps).i("requested_kbps", x.requested_kbps).i("floor_kbps", x.floor_kbps)
+      .i("applied_kbps", x.applied_kbps).u("operator_revision", x.operator_revision)
+      .u("action_revision", x.action_revision).u("applied_revision", x.applied_revision)
+      .o("applied_age_ns", x.applied_age_ns).s("native_availability", value.native_availability)
+      .u("sample_count", value.sample_count).u("published", own && published);
+    return e;
+  }
+  inline vrr_trace::event_t signal_sample_event(const native_video_signal::signal_t &s, std::size_t index,
+                                               const callback_t &c) noexcept {
+    vrr_trace::event_t e(signal_sample_kind);
+    const auto &p = s.samples[index < native_video_signal::max_samples ? index : native_video_signal::max_samples - 1];
+    if (c.trace_scope) e.u("trace_scope", c.trace_scope); else e.n("trace_scope");
+    e.u("session_generation", c.generation);
+    if (c.callback) e.u("callback", c.callback); else e.n("callback");
+    e.u("report_sequence", s.sequence).u("sample_index", index).u("frame_index", p.frame)
+      .u("rtp_sequence", p.rtp_sequence).s("packet_kind", p.parity ? "parity" : "data")
+      .u("udp_bytes", p.udp_bytes).s("elapsed_reason", native_video_signal::name(p.reason))
+      .o("elapsed_lower_ns", p.elapsed_lower_ns).o("elapsed_upper_ns", p.elapsed_upper_ns);
+    return e;
+  }
+  template<class Sink>
+  std::size_t emit_signal(const native_video_signal::signal_t &s, bool published, const callback_t &c, Sink &&sink) noexcept {
+    sink(signal_event(s, published, c));
+    const auto count = c.dispatched && s.admitted && s.generation && s.generation == c.generation && s.setting ?
+      std::min<std::size_t>(s.sample_count, native_video_signal::max_samples) : 0;
+    for (std::size_t i = 0; i < count; ++i) sink(signal_sample_event(s, i, c));
+    return 1 + count;
   }
 }  // namespace stream_native_reception::trace

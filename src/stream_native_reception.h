@@ -6,6 +6,7 @@
 #pragma once
 
 #include "stream_frame_feedback.h"
+#include "native_video_signal.h"
 
 #include <algorithm>
 #include <array>
@@ -23,6 +24,7 @@ namespace stream_native_reception {
   inline constexpr std::string_view offer_attribute = "x-ss-video.packetReceptionFeedbackVersion";
   inline constexpr std::string_view echo_attribute = "x-ml-video.packetReceptionFeedbackVersion";
   inline constexpr std::size_t header_bytes = 52, sample_bytes = 10, max_samples = 16;
+  static_assert(max_samples == native_video_signal::max_samples);
   inline constexpr std::size_t max_payload_bytes = header_bytes + max_samples * sample_bytes;
   inline constexpr std::size_t ledger_capacity = 16384;
   inline constexpr auto retention = std::chrono::seconds(2);
@@ -145,12 +147,15 @@ namespace stream_native_reception {
     report_t report;
     std::optional<stream_frame_feedback::encoder_setting_t> setting;
     std::array<correlated_sample_t, max_samples> samples {};
+    /// Internal typed production observation; intentionally absent from the public JSON serializer.
+    std::optional<native_video_signal::signal_t> signal;
   };
 
-  /// Values copied from one accept() call for the private host trace, under that call's lock.
+  /// Values copied from one accept() call for the passive adapter/private trace, under that call's lock.
   /// Everything after `admitted` describes only this call's own newly admitted payload, never an
   /// earlier report: a refusal leaves it default. Availability is as judged at admission.
   struct admission_trace_t {
+    static constexpr auto freshness_bound = retention; // Reuse the existing bound; no new signal threshold.
     struct sample_t {
       std::uint32_t frame = 0;
       std::uint16_t rtp_sequence = 0;
@@ -225,6 +230,7 @@ namespace stream_native_reception {
       std::lock_guard lock {mutex_};
       if (retired_ || !enabled_) return std::nullopt;
       auto result = latest_;
+      result.signal = signal_;
       if (result.has_report) {
         if (now < received_at_ || now - received_at_ > retention) clear_metrics(result, reason_e::report_stale);
         if (now >= received_at_) result.host_report_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - received_at_).count();
@@ -240,7 +246,34 @@ namespace stream_native_reception {
       }
       return result;
     }
-    void retire() noexcept { std::lock_guard lock {mutex_}; retired_ = true; latest_ = {}; }
+    /// Called after controller inspection, with no controller/frame locks held. Recheck this scope's
+    /// report so a stop or a newer admission cannot publish an old observation as current.
+    bool publish_signal(const native_video_signal::signal_t &signal,
+                        std::optional<clock::time_point> observed_now = std::nullopt,
+                        native_video_signal::reason_e *refusal = nullptr) noexcept {
+      std::lock_guard lock {mutex_};
+      const auto fail = [refusal](native_video_signal::reason_e reason) {
+        if (refusal) *refusal = reason;
+        return false;
+      };
+      if (retired_ || !enabled_) return fail(native_video_signal::reason_e::scope_changed);
+      if (!signal.admitted) { signal_.reset(); return fail(native_video_signal::reason_e::not_admitted); }
+      if (signal.generation != generation_) return fail(native_video_signal::reason_e::scope_changed);
+      if (!latest_.has_report || signal.sequence != latest_.report.sequence ||
+          signal.received_steady_ns != ns(received_at_)) return fail(native_video_signal::reason_e::scope_changed);
+      // Observe publication time after acquiring the scope lock, not before a potentially delayed lock.
+      const auto now = observed_now ? *observed_now : clock::now();
+      if (now < received_at_ || now - received_at_ > retention) return fail(native_video_signal::reason_e::report_stale);
+      if (latest_.available) {
+        if (now < oldest_send_ || now - oldest_send_ > retention) return fail(native_video_signal::reason_e::sender_stale);
+        const auto frames = frames_->join_inclusive(latest_.report.first_frame, latest_.report.last_frame, now, retention);
+        if (!frames.available || !latest_.setting || !(frames.setting == *latest_.setting))
+          return fail(native_video_signal::reason_e::frame_unavailable);
+      }
+      signal_ = signal;
+      return true;
+    }
+    void retire() noexcept { std::lock_guard lock {mutex_}; retired_ = true; latest_ = {}; signal_.reset(); }
 
   private:
     enum : std::uint16_t { used = 1, is_parity = 2, ambiguous = 4 };
@@ -259,7 +292,7 @@ namespace stream_native_reception {
       return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
     }
     static void clear_metrics(readback_t &out, reason_e reason) noexcept {
-      out.available = false; out.reason = reason; out.setting.reset(); out.samples = {};
+      out.available = false; out.reason = reason; out.setting.reset(); out.samples = {}; out.signal.reset();
     }
     // The admission decision, under mutex_. @p matched receives the joined samples' ledger copies.
     reason_e admit_locked(const parsed_t &parsed, bool authenticated, clock::time_point now,
@@ -296,6 +329,7 @@ namespace stream_native_reception {
       if (next.reason == reason_e::sample_counts) return next.reason;
       next.available = next.reason == reason_e::joined;
       latest_ = next;
+      signal_.reset(); // The new report cannot borrow its predecessor's adapter/context facts.
       received_at_ = now;
       clock_failed_ = (r.flags & clock_unavailable) != 0;
       return reason_e::joined;  // Admission, not a claim that the measurement joined.
@@ -397,6 +431,7 @@ namespace stream_native_reception {
     bool retired_ = false, key_poison_ = false, clock_failed_ = false;
     clock::time_point received_at_ {}, oldest_send_ {};
     readback_t latest_;
+    std::optional<native_video_signal::signal_t> signal_;
     // Constant-size conservative completeness metadata; generation-local and mutex-protected.
     std::array<std::optional<std::uint32_t>, 2> evicted_through_ {};
     std::array<packet_t, ledger_capacity> slots_ {};

@@ -1583,16 +1583,30 @@ namespace stream {
           !session->native_reception || !stream_native_reception::negotiated(true,
             session->config.native_reception_enabled, "1", 1, session->config.mlFeatureFlags,
             session->config.controlProtocolType, session->config.encryptionFlagsEnabled));
-      if (!vrr_trace::enabled()) {
-        if (dispatch) session->native_reception->accept(payload, true);
-        return;
-      }
-      // Opt-in private trace only: the same accept, plus value copies of this callback's own facts.
-      // The scope lock is released before recording; the recorder never waits or touches files here.
+      // One admission value copy on both paths. accept releases native/frame locks before the
+      // nonblocking controller inspection; no policy, writer or recorder can affect admission.
       const auto now = std::chrono::steady_clock::now();
       stream_native_reception::admission_trace_t observed;
       if (dispatch) session->native_reception->accept(payload, true, now, &observed);
       else observed.received_steady_ns = vrr_trace::ns(now).value_or(-1);
+      const native_video_signal::caller_t caller {session->session_generation,
+        session->state.load() == session::state_e::RUNNING,
+        session->watch_only || session->vrr.watch_or_input_only,
+        stream_native_reception::negotiated(true, session->config.native_reception_enabled, "1", 1,
+          session->config.mlFeatureFlags, session->config.controlProtocolType, session->config.encryptionFlagsEnabled),
+        dispatch, (session->config.encryptionFlagsEnabled & SS_ENC_VIDEO) != 0};
+      // Control authentication and the actual media-encryption flag remain separate from permission.
+      const auto context = dispatch ? adaptive_bitrate::inspect_native_context(
+        session->session_generation, session->session_token) : native_video_signal::context_t {};
+      auto signal = native_video_signal::project(observed, caller, context);
+      auto publication_reason = native_video_signal::reason_e::scope_changed;
+      const bool published = session->native_reception &&
+        session->native_reception->publish_signal(signal, std::nullopt, &publication_reason);
+      if (signal.admitted && !published) {
+        signal.inspection_ready = false;
+        signal.reason = publication_reason;
+      }
+      if (!vrr_trace::enabled()) return; // Internal typed readback is already available with trace off.
       stream_native_reception::trace::callback_t facts;
       facts.dispatched = dispatch;
       facts.generation = session->session_generation;
@@ -1601,6 +1615,7 @@ namespace stream {
       // The same ENet peer RTT IDX_PERIODIC_PING reads, in this control callback that owns the peer.
       if (session->control.peer) facts.enet_smoothed_rtt_ms = session->control.peer->roundTripTime;
       stream_native_reception::trace::emit(observed, facts, [](const vrr_trace::event_t &row) { vrr_trace::record(row); });
+      stream_native_reception::trace::emit_signal(signal, published, facts, [](const vrr_trace::event_t &row) { vrr_trace::record(row); });
     });
 
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {

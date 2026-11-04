@@ -306,7 +306,7 @@ TEST(VideoPacketTraceFields, ProductionRecorderRoundTripsMinorThreeNullAndHistor
   while (std::getline(input, line)) rows.push_back(json::parse(line));
   ASSERT_EQ(rows.size(), 5u);
   EXPECT_EQ(rows.front().at("major"), 2);
-  EXPECT_EQ(rows.front().at("minor"), 4);
+  EXPECT_EQ(rows.front().at("minor"), 5);
   for (std::size_t index = 1; index <= 3; ++index) {
     EXPECT_EQ(rows[index].size(), 30u);
     EXPECT_EQ(rows[index].at("order"), index);
@@ -384,7 +384,7 @@ TEST(VideoPacketTraceFields, StrictPythonReaderFixturesRunOnceOnTheSelectedNativ
 #endif
 }
 
-TEST(VideoPacketTraceFields, ProductionRecorderTwoFourBytesAreRefusedByTheFrozenTwoThreeInspector) {
+TEST(VideoPacketTraceFields, ProductionRecorderTwoFiveBytesAreRefusedByTheFrozenTwoThreeInspector) {
 #ifdef __linux__
   recording_t recording;
   ASSERT_TRUE(recording.recorder);
@@ -416,7 +416,7 @@ TEST(VideoPacketTraceFields, ProductionRecorderTwoFourBytesAreRefusedByTheFrozen
   recording.recorder->record(positive);
   recording.stop();
 
-  // The actual production bytes are a complete 2.4 capture, so the refusal below is the version.
+  // The actual production bytes are a complete 2.5 capture, so the refusal below is the version.
   std::istringstream lines(recording.bytes());
   std::string first, line, last;
   ASSERT_TRUE(std::getline(lines, first));
@@ -425,7 +425,7 @@ TEST(VideoPacketTraceFields, ProductionRecorderTwoFourBytesAreRefusedByTheFrozen
   const auto footer = json::parse(last);
   EXPECT_EQ(head.at("schema"), "polaris.vrr-host-trace");
   EXPECT_EQ(head.at("major"), 2);
-  EXPECT_EQ(head.at("minor"), 4);
+  EXPECT_EQ(head.at("minor"), 5);
   EXPECT_EQ(footer.at("type"), "footer");
   EXPECT_TRUE(footer.at("producer_complete").get<bool>());
 

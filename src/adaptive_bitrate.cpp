@@ -1141,6 +1141,52 @@ namespace adaptive_bitrate {
     return live_bitrate_request_t {target, operator_revision};
   }
 
+  native_video_signal::context_t inspect_native_context(std::uint64_t expected_generation,
+                                                       std::string_view expected_app_session) noexcept {
+    using reason_e = native_video_signal::context_reason_e;
+    native_video_signal::context_t out;
+    std::unique_lock<std::mutex> lock(state_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return out;
+    const auto now = std::chrono::steady_clock::now();
+    out.inspected_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    out.observed = true;
+    out.generation_matches = expected_generation && expected_generation == scope_generation;
+    out.app_matches = !expected_app_session.empty() && expected_app_session == scope_app_session_id;
+    if (!out.generation_matches || !out.app_matches) {
+      out.reason = reason_e::scope_mismatch;
+      return out; // Do not borrow another scope's rates, writers or revisions.
+    }
+    out.exclusive = scope_exclusive;
+    out.configured_enabled = current_config.enabled;
+    out.enabled = enabled.load(std::memory_order_relaxed);
+    out.paused = paused_for_stream;
+    out.runtime_supported = runtime_update_supported.load(std::memory_order_relaxed);
+    out.in_place = runtime_bitrate_in_place;
+    out.doctor_override = doctor_override_active.load(std::memory_order_relaxed);
+    out.explicit_writer = explicit_live_override_active.load(std::memory_order_relaxed);
+    out.pending_update = pending_live_update_active.load(std::memory_order_relaxed);
+    out.base_kbps = base_bitrate_kbps.load(std::memory_order_relaxed);
+    out.requested_kbps = target_bitrate_kbps.load(std::memory_order_relaxed);
+    out.floor_kbps = std::max(current_config.min_bitrate_kbps, runtime_bitrate_floor_kbps);
+    out.applied_kbps = encoder_applied_bitrate_kbps;
+    out.operator_revision = operator_revision;
+    out.action_revision = action_authority_revision;
+    out.applied_revision = encoder_applied_revision;
+    out.applied_known = encoder_applied_bitrate_kbps > 0 && encoder_applied_revision &&
+      encoder_applied_at != std::chrono::steady_clock::time_point {} && encoder_applied_at <= now;
+    if (out.applied_known)
+      out.applied_age_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - encoder_applied_at).count();
+    out.reason = !out.generation_matches || !out.app_matches ? reason_e::scope_mismatch :
+      !out.exclusive ? reason_e::shared_scope : !out.enabled || out.paused ? reason_e::disabled :
+      !out.runtime_supported ? reason_e::runtime_unavailable : !out.in_place ? reason_e::not_in_place :
+      out.doctor_override ? reason_e::doctor_override : out.explicit_writer ? reason_e::explicit_writer :
+      out.pending_update ? reason_e::pending_update : !out.applied_known ? reason_e::applied_unknown :
+      out.base_kbps <= 0 || out.floor_kbps <= 0 || out.requested_kbps > out.base_kbps ||
+        out.requested_kbps != out.applied_kbps || out.requested_kbps < out.floor_kbps ? reason_e::rate_mismatch :
+      out.requested_kbps == out.floor_kbps ? reason_e::at_floor : reason_e::ready;
+    return out;
+  }
+
   std::optional<live_pacing_cap_t> get_live_pacing_cap(std::uint64_t generation) {
     // The shared sender must not wait behind an encoder/SDK reconfiguration.
     // No field is read until this coherent, non-blocking snapshot is owned.

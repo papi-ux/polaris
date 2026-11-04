@@ -470,7 +470,7 @@ TEST(VrrTraceTests, HostHistoryRunKeepsClientReportAndWriterOutcomesDistinct) {
 }
 
 TEST(VrrTraceTests, HostHistoryRunIsBoundedStaticVersionedAndOffWhenTraceIsOff) {
-  EXPECT_EQ(vrr_trace::k_schema_minor,4u);
+  EXPECT_EQ(vrr_trace::k_schema_minor,5u);
   const auto full = vrr_trace::host_history_run_event(ended_run(41,41,7));
   const auto empty = vrr_trace::host_history_run_event({});
   EXPECT_FALSE(full.overflow); EXPECT_FALSE(empty.overflow);
@@ -504,7 +504,7 @@ TEST(VrrTraceTests, HostHistoryRunIsBoundedStaticVersionedAndOffWhenTraceIsOff) 
     vrr_trace::record_host_history_run(ended_run(43,43,7));
   }
   c.stop(); const auto all = c.rows(); const auto rows = select(all,"host_history_run"); ASSERT_EQ(rows.size(),2u);
-  EXPECT_EQ(all.front()["minor"],4u);
+  EXPECT_EQ(all.front()["minor"],5u);
   EXPECT_EQ(rows[0]["codec"],"av1"); EXPECT_EQ(rows[0]["encoder_backend"],"vaapi"); EXPECT_EQ(rows[0]["start_outcome"],"no_ping");
   EXPECT_EQ(rows[0]["launch_policy_available"],1u); EXPECT_EQ(rows[0]["launch_requested_client_fps_milli"],119880);
   EXPECT_EQ(rows[0]["launch_session_target_fps_milli"],59940);
@@ -555,7 +555,7 @@ TEST(VrrTraceTests, HostPauseRowUsesTheJoinGenerationAndTheSnapshotItsWriterUsed
     EXPECT_EQ(at(forbidden),std::string::npos) << forbidden;
   }
 }
-TEST(VrrTraceTests, NativeAdmissionRowsSerializeAsSchemaTwoFourWithFixedKeys) {
+TEST(VrrTraceTests, NativeAdmissionRowsKeepTheirFixedKeysUnderSchemaTwoFive) {
   collection_t c;
   ASSERT_EQ(c.recorder->status(), vrr_trace::status_e::running);
   stream_native_reception::admission_trace_t admitted;
@@ -575,7 +575,7 @@ TEST(VrrTraceTests, NativeAdmissionRowsSerializeAsSchemaTwoFourWithFixedKeys) {
     EXPECT_EQ(stream_native_reception::trace::emit(refused, facts, sink), 1u);
   }
   c.stop(); const auto all = c.rows();
-  ASSERT_FALSE(all.empty()); EXPECT_EQ(all.front()["minor"], 4u);
+  ASSERT_FALSE(all.empty()); EXPECT_EQ(all.front()["minor"], 5u);
   const auto headers = select(all, "native_admission"); const auto samples = select(all, "native_admission_sample");
   ASSERT_EQ(headers.size(), 2u); ASSERT_EQ(samples.size(), 1u);
   EXPECT_EQ(headers[0].size(), 37u); EXPECT_EQ(headers[1].size(), 37u); EXPECT_EQ(samples[0].size(), 15u);

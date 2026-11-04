@@ -6,6 +6,68 @@ feature bit. It observes original RTP packets accepted by the native queue. It d
 provide a packet census, loss denominator, clean/recovery signal or capacity estimate.
 No bitrate, FEC, Doctor, action, permission or policy writer consumes it.
 
+## Passive native signal and controller inspection (private trace 2.5)
+
+Each native control callback now projects the newly admitted value copy into a stateless typed
+`native_video_signal::signal_t`, with tracing either on or off. The existing native scope's internal
+readback retains at most its current report's diagnostic value; public JSON and the wire payload do
+not change. No policy, bitrate/FEC writer, Doctor action or AI consumes this projection.
+
+For matched sender API bounds `[B,E]`, admission host steady receive time `R`, and client socket-read
+age `a` in microseconds, each sample carries signed elapsed bounds `[R-E-1000*a, R-B-1000*a]`.
+These are admission-time durations, never recomputed at status-poll time. Negative bounds remain
+signed and unavailable. Data/parity and full report counters remain separate from sparse timing
+samples. Configured encoder bitrate and accepted bytes/interval are not capacity or a loss
+denominator. No baseline, window, floor/background learning, congestion threshold or clean/recovery
+credit is created. Absolute host/client clock offsets are not subtracted; client clock-rate error,
+media/return-path and scheduling terms remain in the elapsed measurement.
+
+Native/frame locks are released before one nonblocking controller `state_mutex` inspection.
+The expected generation and app token are compared under that lock; only match booleans are copied,
+never a token or address. A mismatch exports no foreign rates/writers/revisions. Busy context is
+explicitly unobserved. The snapshot copies enabled/configured/paused, runtime support/in-place,
+sole-scope and writer/pending facts, requested/base/applied values, revisions and applied age.
+`floor_kbps` is the diagnostic maximum of the existing session/configuration floor and backend
+in-place runtime floor; inspection changes neither floor nor any policy or target. Historical source
+encoder lifetime/application/origin tuple stays separate from current controller revisions: a no-op
+reaffirmation is not a new backend application.
+
+`inspection_ready` describes observation-time checks only, not permission or a capability. Source
+measurement availability is separate from readiness. Caller RUNNING/watch/input-only/negotiation,
+verified control authentication and actual media-encryption facts remain separate. After inspection,
+publication reacquires only the native scope lock and rechecks current report identity plus the
+existing two-second report/oldest-sender/frame freshness. A newer report clears the prior projection;
+refused callbacks cannot reuse it; reconnect/retirement is terminal. A future actual writer must
+serialize and recheck its own current scope, permissions, freshness and writer state.
+
+Opt-in private trace minor **2.5** adds two bounded companion row kinds; the original minor-4
+`native_admission` (34 payload fields) and `native_admission_sample` (12) shapes stay unchanged.
+One `native_signal_context` row has exactly 40 payload fields (the unchanged recorder maximum),
+and up to 16 `native_signal_sample` rows have 12 each. Ordinary `type`, `order` and
+`observed_steady_ns` metadata are additional. Companion keys join the same opaque callback and
+report sequence to the unchanged raw admission/encoder tuple and raw sample rows.
+
+Context keys are `trace_scope`, `session_generation`, `callback`, `report_sequence`,
+`received_steady_ns`, `signal_reason`, `measurement_available`, `inspection_ready`, `sparse`,
+`running`, `watch_or_input_only`, `negotiated`, `control_authenticated`, `media_authenticated`,
+`context_reason`, `context_observed`, `inspection_steady_ns`, `generation_matches`, `app_matches`,
+`exclusive`, `configured_enabled`, `runtime_enabled`, `paused`, `runtime_supported`, `in_place`,
+`doctor_override`, `explicit_writer`, `pending_update`, `applied_known`, `base_kbps`,
+`requested_kbps`, `floor_kbps`, `applied_kbps`, `operator_revision`, `action_revision`,
+`applied_revision`, `applied_age_ns`, `native_availability`, `sample_count`, and `published`.
+`applied_age_ns` is null when unknown; unobserved/busy context uses explicit default scalars and
+inspection time -1, not proof of false exclusions or a zero floor. Report sequence is null for an
+unattributed/refused callback. Zero opaque scope/callback IDs are null. Foreign or undispatched
+callbacks cannot relabel another report's context or sample outcomes.
+
+Sample-outcome keys are `trace_scope`, `session_generation`, `callback`, `report_sequence`,
+`sample_index`, `frame_index`, `rtp_sequence`, `packet_kind`, `udp_bytes`, `elapsed_reason`,
+`elapsed_lower_ns`, and `elapsed_upper_ns`. Invalid host ordering yields null elapsed bounds;
+negative arithmetic remains signed with `negative_interval`. No payload, token, address or client
+identity is emitted. Existing event/byte/time/sample/ledger budgets stay unchanged. Frozen 2.4/2.3
+artifacts and readers remain byte-identical; a new reader must explicitly support this minor and
+validate the companion relationship rather than upgrade an old reader's predicates.
+
 The host offers `a=x-ss-video.packetReceptionFeedbackVersion:1` in this launch's DESCRIBE.
 The client echoes `a=x-ml-video.packetReceptionFeedbackVersion:1` in ANNOUNCE. Exactly one
 attribute and the single token `1` are accepted after surrounding ASCII whitespace trim;

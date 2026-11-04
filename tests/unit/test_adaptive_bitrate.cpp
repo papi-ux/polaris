@@ -570,6 +570,123 @@ TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   EXPECT_EQ("packet_loss", state.reason);
 }
 
+namespace {
+  struct NativeContextInspection : ::testing::Test {
+    void SetUp() override {
+      enable_controller();
+      adaptive_bitrate::set_session_scope(615,"native-inspection-private-token",true);
+      adaptive_bitrate::set_runtime_update_supported(true,{},20000,true);
+    }
+    void TearDown() override {
+      adaptive_bitrate::reset();adaptive_bitrate::set_session_scope(0,{},false);
+    }
+    static native_video_signal::context_t inspect() {
+      return adaptive_bitrate::inspect_native_context(615,"native-inspection-private-token");
+    }
+  };
+}
+
+TEST_F(NativeContextInspection, OneCoherentSnapshotIsPassiveAndKeepsEncoderAndEvidenceRevisionsSeparate) {
+  const auto before=adaptive_bitrate::get_state_with_history();
+  const auto authority=adaptive_bitrate::get_doctor_state();
+  const auto first=inspect();ASSERT_EQ(first.reason,native_video_signal::context_reason_e::ready);
+  EXPECT_TRUE(first.observed && first.generation_matches && first.app_matches && first.exclusive);
+  EXPECT_TRUE(first.enabled && first.runtime_supported && first.in_place && first.applied_known);
+  EXPECT_FALSE(first.doctor_override || first.explicit_writer || first.pending_update || first.paused);
+  EXPECT_EQ(first.base_kbps,20000);EXPECT_EQ(first.requested_kbps,20000);EXPECT_EQ(first.applied_kbps,20000);
+  EXPECT_EQ(first.floor_kbps,2000);EXPECT_EQ(first.operator_revision,authority.revision);
+  EXPECT_EQ(first.action_revision,authority.action_authority_revision);ASSERT_TRUE(first.applied_age_ns);
+  EXPECT_GE(*first.applied_age_ns,0);EXPECT_GE(first.inspected_steady_ns,0);
+  for(unsigned i=0;i<64;++i) EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::ready);
+  const auto after=adaptive_bitrate::get_state_with_history();const auto same=adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(same.revision,authority.revision);EXPECT_EQ(same.action_authority_revision,authority.action_authority_revision);
+  EXPECT_EQ(same.live_bitrate_kbps,authority.live_bitrate_kbps);EXPECT_EQ(after.target_bitrate_kbps,before.target_bitrate_kbps);
+  EXPECT_EQ(after.applied_bitrate_kbps,before.applied_bitrate_kbps);EXPECT_EQ(after.state,before.state);EXPECT_EQ(after.reason,before.reason);
+  EXPECT_EQ(after.ceiling_bitrate_kbps,before.ceiling_bitrate_kbps);EXPECT_EQ(after.current_fec_percentage,before.current_fec_percentage);
+  EXPECT_EQ(after.fec_phase,before.fec_phase);ASSERT_EQ(after.history.entries.size(),before.history.entries.size());
+  for(unsigned i=0;i<after.history.entries.size();++i) {
+    EXPECT_EQ(after.history.entries[i].sequence,before.history.entries[i].sequence);
+    EXPECT_EQ(after.history.entries[i].repeat_count,before.history.entries[i].repeat_count);
+    EXPECT_EQ(after.history.entries[i].operator_revision,before.history.entries[i].operator_revision);
+  }
+  adaptive_bitrate::note_network_evidence_arrival(false);
+  const auto rotated=inspect();EXPECT_GT(rotated.operator_revision,first.operator_revision);
+  EXPECT_EQ(rotated.applied_revision,first.applied_revision);EXPECT_EQ(rotated.reason,native_video_signal::context_reason_e::ready);
+}
+
+TEST_F(NativeContextInspection, ScopeMismatchExportsOnlyMatchFactsWithoutBorrowingRatesOrRevisions) {
+  for(const auto &[generation,token]:std::vector<std::pair<std::uint64_t,std::string>>{
+      {0,"native-inspection-private-token"},{616,"native-inspection-private-token"},{615,""},{615,"foreign-private-token"}}) {
+    const auto c=adaptive_bitrate::inspect_native_context(generation,token);
+    EXPECT_TRUE(c.observed);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::scope_mismatch);
+    EXPECT_EQ(c.base_kbps,0);EXPECT_EQ(c.requested_kbps,0);EXPECT_EQ(c.operator_revision,0u);EXPECT_FALSE(c.applied_age_ns);
+  }
+  adaptive_bitrate::set_session_scope(615,"native-inspection-private-token",false);
+  const auto shared=inspect();EXPECT_FALSE(shared.exclusive);EXPECT_EQ(shared.reason,native_video_signal::context_reason_e::shared_scope);
+}
+
+TEST_F(NativeContextInspection, DisabledPausedRuntimeAndInPlaceExclusionsRemainExplicit) {
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,false);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::not_in_place);
+  adaptive_bitrate::set_runtime_update_supported(false,"unsupported");
+  EXPECT_FALSE(inspect().runtime_supported);EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::runtime_unavailable);
+  adaptive_bitrate::set_runtime_update_supported(true,{},0,true);
+  EXPECT_FALSE(inspect().applied_known);EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::applied_unknown);
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true);
+  adaptive_bitrate::set_runtime_enabled(false);EXPECT_FALSE(inspect().enabled);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::disabled);
+  adaptive_bitrate::set_runtime_enabled(true);adaptive_bitrate::set_live_bitrate_for_stream(18000);
+  const auto paused=inspect();EXPECT_TRUE(paused.paused);EXPECT_TRUE(paused.explicit_writer);EXPECT_FALSE(paused.enabled);
+  EXPECT_EQ(paused.reason,native_video_signal::context_reason_e::disabled);
+}
+
+TEST_F(NativeContextInspection, DoctorPendingAppliedMismatchAndFloorAreNotReady) {
+  const auto state=adaptive_bitrate::get_doctor_state();
+  ASSERT_TRUE(adaptive_bitrate::set_doctor_bitrate_if_revision(state.revision,18000));
+  EXPECT_TRUE(inspect().doctor_override);EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::doctor_override);
+  adaptive_bitrate::set_runtime_enabled(true);adaptive_bitrate::set_live_bitrate(17000);
+  const auto request=adaptive_bitrate::get_live_bitrate_request();ASSERT_TRUE(request);
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision,17000));
+  EXPECT_TRUE(inspect().pending_update);EXPECT_FALSE(inspect().applied_known);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::pending_update);
+  adaptive_bitrate::set_runtime_update_supported(true,{},17000,true);
+  adaptive_bitrate::acknowledge_live_bitrate_applied(adaptive_bitrate::get_doctor_state().revision,17000);
+  adaptive_bitrate::set_runtime_update_supported(true,{},16000,true);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::rate_mismatch);
+  adaptive_bitrate::set_runtime_update_supported(true,{},17000,true);adaptive_bitrate::set_session_floor(17000,"test-floor");
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::at_floor);
+}
+
+TEST_F(NativeContextInspection, BusyEncoderBoundaryReturnsImmediatelyWithoutWaitingOrMutation) {
+  adaptive_bitrate::set_live_bitrate(18000);const auto request=adaptive_bitrate::get_live_bitrate_request();ASSERT_TRUE(request);
+  std::promise<void> entered,release;auto entered_future=entered.get_future();auto release_future=release.get_future();
+  auto applying=std::async(std::launch::async,[&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request,[&] {
+      entered.set_value();release_future.wait();return true;
+    });
+  });
+  const auto entered_status=entered_future.wait_for(2s);
+  if(entered_status!=std::future_status::ready) { release.set_value();applying.wait(); }
+  ASSERT_EQ(entered_status,std::future_status::ready);
+  auto inspection=std::async(std::launch::async,[] { return inspect(); });
+  const auto status=inspection.wait_for(2s);
+  release.set_value();EXPECT_EQ(status,std::future_status::ready);
+  const auto busy=inspection.get();EXPECT_FALSE(busy.observed);EXPECT_EQ(busy.reason,native_video_signal::context_reason_e::busy);
+  EXPECT_EQ(busy.inspected_steady_ns,-1);EXPECT_EQ(busy.operator_revision,0u);EXPECT_FALSE(busy.applied_age_ns);
+  EXPECT_TRUE(applying.get());EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::ready);
+}
+
+TEST_F(NativeContextInspection, EffectiveDiagnosticFloorIncludesExistingBackendRuntimeBound) {
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true,15000);
+  auto c=inspect();EXPECT_EQ(c.floor_kbps,15000);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::ready);
+  EXPECT_EQ(adaptive_bitrate::get_state().min_bitrate_kbps,2000) << "inspection does not change the policy floor";
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true,20000);
+  c=inspect();EXPECT_EQ(c.floor_kbps,20000);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::at_floor);
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true,21000);
+  c=inspect();EXPECT_EQ(c.floor_kbps,21000);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::rate_mismatch);
+  EXPECT_EQ(adaptive_bitrate::get_state().min_bitrate_kbps,2000);EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps,20000);
+}
+
 TEST(AdaptiveBitrateFecScope, ARealPolicyEpisodePublishesAfterAckAndRetiresBeforeAnOutsideWriter) {
   struct encoder_t {
     enum class bitrate_update_e { rejected, applied, recreate_session };

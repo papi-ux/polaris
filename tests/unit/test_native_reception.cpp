@@ -671,3 +671,159 @@ TEST_F(NativeReception, TraceNeverRelabelsAnotherGenerationsOrAnOldSnapshot) {
     for(const auto *key:k_tuple_keys) EXPECT_TRUE(null(h,key)) << key;
   }
 }
+
+namespace {
+  namespace nvs = native_video_signal;
+  nvs::context_t signal_context(std::int64_t now_ns, int rate = 18000) {
+    nvs::context_t c;
+    c.reason=nvs::context_reason_e::ready;c.observed=true;c.generation_matches=c.app_matches=c.exclusive=true;
+    c.configured_enabled=c.enabled=c.runtime_supported=c.in_place=c.applied_known=true;
+    c.base_kbps=c.requested_kbps=c.applied_kbps=rate;c.floor_kbps=2000;
+    c.operator_revision=c.action_revision=c.applied_revision=80;c.inspected_steady_ns=now_ns;c.applied_age_ns=1;
+    return c;
+  }
+  nvs::caller_t signal_caller() { return {615,true,false,true,true,false}; }
+}
+
+TEST_F(NativeReception, SignalUsesSignedApiBoundsAndCancelsHostAndClientClockOffsets) {
+  frame(1);packet();observer->record(1,1,1200,true,now-90ms,now-88ms,true);
+  auto r=reading(2);r.parity_packets=1;r.parity_bytes=1200;r.data_packets=1;r.data_bytes=1000;
+  r.samples[0].age_us=30000;r.samples[1]={1,1,15000};r.end_us=1'000'000'000'000ULL;
+  nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(r),true,now,&a),nr::reason_e::joined);
+  auto c=signal_context(a.received_steady_ns);
+  const auto s=nvs::project(a,signal_caller(),c);
+  ASSERT_TRUE(s.inspection_ready);ASSERT_TRUE(s.measurement_available);ASSERT_TRUE(s.setting);
+  EXPECT_EQ(s.samples[0].elapsed_lower_ns,69'000'000);EXPECT_EQ(s.samples[0].elapsed_upper_ns,70'000'000);
+  EXPECT_EQ(s.samples[1].elapsed_lower_ns,73'000'000);EXPECT_EQ(s.samples[1].elapsed_upper_ns,75'000'000);
+  EXPECT_FALSE(s.samples[0].parity);EXPECT_TRUE(s.samples[1].parity);
+  EXPECT_EQ(s.data_bytes,1000u);EXPECT_EQ(s.parity_bytes,1200u);
+  for(unsigned i=0;i<2;++i) EXPECT_EQ(*s.samples[i].elapsed_upper_ns-*s.samples[i].elapsed_lower_ns,
+    a.samples[i].sender_api_end_ns-a.samples[i].sender_api_begin_ns);
+  a.received_steady_ns+=1'000'000'000'000LL;c.inspected_steady_ns=a.received_steady_ns;
+  for(unsigned i=0;i<2;++i) { a.samples[i].sender_api_begin_ns+=1'000'000'000'000LL;a.samples[i].sender_api_end_ns+=1'000'000'000'000LL; }
+  a.report.end_us+=2'000'000'000'000ULL;
+  const auto shifted=nvs::project(a,signal_caller(),c);
+  EXPECT_EQ(shifted.samples[0].elapsed_lower_ns,s.samples[0].elapsed_lower_ns);
+  EXPECT_EQ(shifted.samples[1].elapsed_upper_ns,s.samples[1].elapsed_upper_ns);
+}
+
+TEST_F(NativeReception, SignalRetainsNegativeIntervalsWithoutClampingOrReadiness) {
+  frame(1);packet();auto r=reading();r.end_us=1'000'000;r.samples[0].age_us=200000;
+  nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(r),true,now,&a),nr::reason_e::joined);
+  auto s=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));
+  EXPECT_EQ(s.reason,nvs::reason_e::negative_interval);EXPECT_FALSE(s.measurement_available);EXPECT_FALSE(s.inspection_ready);
+  EXPECT_EQ(s.samples[0].elapsed_lower_ns,-101'000'000);EXPECT_EQ(s.samples[0].elapsed_upper_ns,-100'000'000);
+  a.samples[0].sender_api_end_ns=a.received_steady_ns+1;
+  s=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));
+  EXPECT_EQ(s.reason,nvs::reason_e::invalid_time);EXPECT_FALSE(s.samples[0].elapsed_lower_ns);
+  EXPECT_FALSE(s.samples[0].elapsed_upper_ns);
+}
+
+TEST_F(NativeReception, SignalIsPerReportAndSparseSamplesDoNotMultiplyCountersOrBorrowRevision) {
+  frame(1);for(unsigned i=0;i<30;++i) packet(1,static_cast<std::uint16_t>(i));
+  auto r=reading(16);r.flags|=nr::timing_sample_limit;r.data_packets=30;r.data_bytes=30000;
+  nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(r),true,now,&a),nr::reason_e::joined);
+  auto c=signal_context(a.received_steady_ns);c.operator_revision=9999;c.applied_revision=9999;
+  auto s=nvs::project(a,signal_caller(),c);
+  ASSERT_TRUE(s.inspection_ready);EXPECT_TRUE(s.sparse);EXPECT_EQ(s.sample_count,16u);EXPECT_EQ(s.data_packets,30u);
+  EXPECT_EQ(s.setting->origin_revision,8u);EXPECT_EQ(s.context.operator_revision,9999u);
+  c.applied_kbps=17000;s=nvs::project(a,signal_caller(),c);
+  EXPECT_TRUE(s.measurement_available);EXPECT_FALSE(s.inspection_ready);EXPECT_EQ(s.reason,nvs::reason_e::source_rate_mismatch);
+  a.sample_count=17;s=nvs::project(a,signal_caller(),c);EXPECT_EQ(s.reason,nvs::reason_e::invalid_samples);EXPECT_EQ(s.sample_count,0u);
+}
+
+TEST_F(NativeReception, SignalUnavailableAndCallerOrContextExclusionsNeverReemitOldDerivedFacts) {
+  frame(1);packet();nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(reading()),true,now,&a),nr::reason_e::joined);
+  auto c=signal_context(a.received_steady_ns);
+  for(auto reason:{nr::reason_e::incomplete,nr::reason_e::no_accepted,nr::reason_e::no_samples,nr::reason_e::packet_stale,
+      nr::reason_e::packet_missing,nr::reason_e::packet_ambiguous,nr::reason_e::retention_limited,nr::reason_e::frame_unavailable,
+      nr::reason_e::report_stale,nr::reason_e::clock_unavailable}) {
+    auto unavailable=a;unavailable.availability=reason;
+    const auto s=nvs::project(unavailable,signal_caller(),c);EXPECT_FALSE(s.inspection_ready);EXPECT_FALSE(s.measurement_available);
+    EXPECT_FALSE(s.setting);EXPECT_EQ(s.sample_count,0u);EXPECT_FALSE(s.samples[0].elapsed_lower_ns);
+  }
+  for(unsigned i=0;i<4;++i) {
+    auto caller=signal_caller();if(i==0)caller.running=false;if(i==1)caller.watch_or_input_only=true;
+    if(i==2)caller.negotiated=false;if(i==3)caller.control_authenticated=false;
+    const auto s=nvs::project(a,caller,c);EXPECT_TRUE(s.measurement_available);EXPECT_FALSE(s.inspection_ready);
+    EXPECT_EQ(s.reason,nvs::reason_e::caller_unready);
+  }
+  c.reason=nvs::context_reason_e::busy;c.observed=false;
+  const auto s=nvs::project(a,signal_caller(),c);EXPECT_TRUE(s.measurement_available);EXPECT_FALSE(s.inspection_ready);
+  EXPECT_EQ(s.reason,nvs::reason_e::context_unready);
+}
+
+TEST_F(NativeReception, SignalProductionReadbackWorksWithTraceOffAndNeverRecomputesAtPollTime) {
+  vrr_trace::test_recorder_scope_t off(nullptr);EXPECT_FALSE(vrr_trace::enabled());
+  frame(1);packet();nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(reading()),true,now,&a),nr::reason_e::joined);
+  const auto s=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));ASSERT_TRUE(observer->publish_signal(s,now));
+  const auto current=observer->readback(now+50ms);ASSERT_TRUE(current && current->signal);
+  EXPECT_TRUE(current->signal->inspection_ready);EXPECT_EQ(current->signal->samples[0].elapsed_lower_ns,s.samples[0].elapsed_lower_ns);
+  EXPECT_EQ(current->host_report_age_ms,50u);
+  const auto j=nr::readback_json(*current).dump();EXPECT_EQ(j.find("inspection"),std::string::npos);EXPECT_EQ(j.find("elapsed_lower"),std::string::npos);
+  const auto stale=observer->readback(now+2001ms);ASSERT_TRUE(stale);EXPECT_FALSE(stale->signal);EXPECT_FALSE(stale->available);
+}
+
+TEST_F(NativeReception, SignalPublicationRechecksCurrentReportAndTerminalRetirement) {
+  frame(1);packet();nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(reading()),true,now,&a),nr::reason_e::joined);
+  const auto old=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));ASSERT_TRUE(observer->publish_signal(old,now));
+  auto r=reading();r.sequence=2;r.end_us+=100000;now+=100ms;
+  nr::admission_trace_t b;ASSERT_EQ(observer->accept(wire(r),true,now,&b),nr::reason_e::joined);
+  EXPECT_FALSE(observer->readback(now)->signal);EXPECT_FALSE(observer->publish_signal(old,now));
+  const auto newer=nvs::project(b,signal_caller(),signal_context(b.received_steady_ns));ASSERT_TRUE(observer->publish_signal(newer,now));
+  EXPECT_FALSE(observer->publish_signal(nvs::signal_t{},now)); // An undispatched callback has no scope copy.
+  EXPECT_FALSE(observer->readback(now)->signal);ASSERT_TRUE(observer->publish_signal(newer,now));
+  nr::admission_trace_t duplicate;EXPECT_EQ(observer->accept(wire(r),true,now,&duplicate),nr::reason_e::report_order);
+  EXPECT_FALSE(observer->publish_signal(nvs::project(duplicate,signal_caller(),signal_context(duplicate.received_steady_ns)),now));
+  EXPECT_FALSE(observer->readback(now)->signal);EXPECT_EQ(observer->readback(now)->report.sequence,2u);
+  observer->retire();EXPECT_FALSE(observer->publish_signal(newer,now));EXPECT_FALSE(observer->readback(now));
+}
+
+TEST_F(NativeReception, SignalDelayedInspectionAndPublicationReuseExistingReportSenderAndFrameFreshness) {
+  frame(1);packet();nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(reading()),true,now,&a),nr::reason_e::joined);
+  auto c=signal_context(a.received_steady_ns+2'000'000'001LL);
+  auto s=nvs::project(a,signal_caller(),c);EXPECT_TRUE(s.measurement_available);EXPECT_FALSE(s.inspection_ready);
+  EXPECT_EQ(s.reason,nvs::reason_e::report_stale);
+  c=signal_context(a.received_steady_ns+1'950'000'000LL);
+  s=nvs::project(a,signal_caller(),c);EXPECT_FALSE(s.inspection_ready);EXPECT_EQ(s.reason,nvs::reason_e::sender_stale);
+  s=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));ASSERT_TRUE(s.inspection_ready);
+  auto why=nvs::reason_e::ready;
+  EXPECT_FALSE(observer->publish_signal(s,now+2001ms,&why));EXPECT_EQ(why,nvs::reason_e::report_stale);
+  EXPECT_FALSE(observer->readback(now)->signal);
+  EXPECT_FALSE(observer->publish_signal(s,now+1950ms,&why));EXPECT_EQ(why,nvs::reason_e::sender_stale);
+  frames->retire();EXPECT_FALSE(observer->publish_signal(s,now,&why));EXPECT_EQ(why,nvs::reason_e::frame_unavailable);
+}
+
+TEST_F(NativeReception, SignalMixedSameKbpsNewApplicationAndForeignGenerationCannotBorrowReadiness) {
+  frame(1);packet();auto next=setting;++next.application_sequence;frame(2,ff::send_disposition_e::sent,next);
+  auto r=reading();r.last_frame=2;nr::admission_trace_t a;
+  ASSERT_EQ(observer->accept(wire(r),true,now,&a),nr::reason_e::joined);EXPECT_EQ(a.availability,nr::reason_e::frame_unavailable);
+  auto s=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));EXPECT_FALSE(s.setting);EXPECT_FALSE(s.inspection_ready);
+  a.admitted=true;a.availability=nr::reason_e::joined;a.setting=setting;a.generation=616;
+  s=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));EXPECT_EQ(s.reason,nvs::reason_e::generation_mismatch);
+  EXPECT_FALSE(s.setting);EXPECT_EQ(s.sample_count,0u);EXPECT_FALSE(s.admitted);EXPECT_EQ(s.sequence,0u);
+  EXPECT_FALSE(s.context.observed);EXPECT_EQ(s.context.operator_revision,0u);
+}
+
+TEST_F(NativeReception, SignalCompanionRowsKeepFortyFieldBoundAndCannotRelabelAReport) {
+  frame(1);for(unsigned i=0;i<16;++i) packet(1,static_cast<std::uint16_t>(i));
+  nr::admission_trace_t a;ASSERT_EQ(observer->accept(wire(reading(16)),true,now,&a),nr::reason_e::joined);
+  const auto s=nvs::project(a,signal_caller(),signal_context(a.received_steady_ns));
+  rows_t rows;EXPECT_EQ(nrt::emit_signal(s,true,facts(),rows),17u);ASSERT_EQ(rows.rows.size(),17u);
+  EXPECT_EQ(rows.rows[0].size,40u);EXPECT_FALSE(rows.rows[0].overflow);EXPECT_EQ(u(rows.rows[0],"inspection_ready"),1u);
+  for(std::size_t i=1;i<rows.rows.size();++i) { EXPECT_EQ(rows.rows[i].size,12u);EXPECT_FALSE(rows.rows[i].overflow); }
+  for(const auto &row:rows.rows) for(std::size_t i=0;i<row.size;++i) {
+    const std::string key=row.fields[i].key;
+    for(const auto *secret:{"token","address","uuid","certificate","key_material"}) EXPECT_EQ(key.find(secret),std::string::npos);
+  }
+  auto wrong=facts(616);rows_t denied;EXPECT_EQ(nrt::emit_signal(s,true,wrong,denied),1u);
+  EXPECT_TRUE(null(denied.rows[0],"report_sequence"));EXPECT_EQ(u(denied.rows[0],"inspection_ready"),0u);
+  EXPECT_EQ(u(denied.rows[0],"published"),0u);EXPECT_TRUE(null(denied.rows[0],"applied_age_ns"));
+  auto refusal=a;refusal.admitted=false;
+  const auto not_admitted=nvs::project(refusal,signal_caller(),signal_context(a.received_steady_ns));
+  EXPECT_FALSE(not_admitted.context.observed);EXPECT_EQ(not_admitted.sequence,0u);
+  rows_t refused;EXPECT_EQ(nrt::emit_signal(not_admitted,true,facts(),refused),1u);
+  EXPECT_TRUE(null(refused.rows[0],"report_sequence"));EXPECT_EQ(u(refused.rows[0],"context_observed"),0u);
+  EXPECT_EQ(u(refused.rows[0],"operator_revision"),0u);EXPECT_EQ(u(refused.rows[0],"sample_count"),0u);
+  EXPECT_LT(sizeof(nr::scope_t),540000u);EXPECT_EQ(nr::ledger_capacity,16384u);EXPECT_EQ(nvs::max_samples,16u);
+}

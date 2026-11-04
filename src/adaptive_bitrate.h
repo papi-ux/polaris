@@ -21,6 +21,7 @@
 #include "stream_bitrate.h"
 #include "live_tuning_fec.h"
 #include "vrr_trace.h"
+#include "native_video_signal.h"
 
 namespace adaptive_bitrate {
 
@@ -358,6 +359,10 @@ namespace adaptive_bitrate {
 
   /** Return the current encoder request, including one-shot rollback work. */
   std::optional<live_bitrate_request_t> get_live_bitrate_request();
+
+  /// Passive nonblocking native diagnostic inspection only; never a policy input or write capability.
+  native_video_signal::context_t inspect_native_context(std::uint64_t expected_generation,
+                                                       std::string_view expected_app_session) noexcept;
 
   // Historical origin for an encoder about to open at this exact rate. Unlike
   // a live update, initialization precedes runtime-support publication. This
