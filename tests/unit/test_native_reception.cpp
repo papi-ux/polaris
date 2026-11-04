@@ -348,7 +348,7 @@ TEST_F(NativeReception, ConcurrentSenderReadbackAndRetirementHaveNoLockInversion
 }
 
 TEST_F(NativeReception, UnsampledSequentialFrameCollisionPublishesFreshUnavailableObservation) {
-  // Production scope, ledger and index: frame84/seq834 is overwritten by frame94/seq936.
+  // Genuine capacity alias: frame84/seq834 is overwritten by frame94/seq(834+16384).
   // The report samples830 and930, so neither sample itself is missing. This is retention,
   // not a proved contradiction of the client's legitimate110 accepted packets/110000 bytes.
   frame(83);
@@ -359,7 +359,7 @@ TEST_F(NativeReception, UnsampledSequentialFrameCollisionPublishesFreshUnavailab
   now+=100ms;
   for(unsigned f=84;f<=94;++f) {
     frame(f);
-    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>((f-1)*10+n));
+    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>(f==94 && n==6 ? 834+nr::ledger_capacity : (f-1)*10+n));
   }
   auto report=reading(2);report.sequence=2;report.end_us=200000;report.loop_tick=11;
   report.first_frame=84;report.last_frame=94;report.data_packets=110;report.data_bytes=110000;
@@ -375,7 +375,7 @@ TEST_F(NativeReception, UnsampledSequentialFrameCollisionPublishesFreshUnavailab
 TEST_F(NativeReception, RetentionLossDoesNotHideMatchedSampleContradictionOrPoisonLaterCompleteRange) {
   for(unsigned f=84;f<=94;++f) {
     frame(f);
-    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>((f-1)*10+n));
+    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>(f==94 && n==6 ? 834+nr::ledger_capacity : (f-1)*10+n));
   }
   auto report=reading(2);report.first_frame=84;report.last_frame=94;
   report.data_packets=110;report.data_bytes=110000;
@@ -401,12 +401,15 @@ TEST_F(NativeReception, RetentionLossDoesNotHideMatchedSampleContradictionOrPois
   EXPECT_EQ(unchanged->report.sequence,3u);EXPECT_EQ(unchanged->host_report_age_ms,100u);
 }
 TEST_F(NativeReception, ParityEvictionCannotExcuseAProvedCompleteDataClassContradiction) {
-  // Sequential RTP: frame84 has two data/five parity packets, subsequent frames ten data.
-  // Only parity84/834 is evicted by data94/936. All102 data records remain, so103 is impossible.
+  // Frame84 has two data/five parity packets, subsequent frames ten data.
+  // Only parity84/834 is evicted by data94/(834+16384). All102 data remain, so103 is impossible.
   std::uint16_t sequence=830;
   for(unsigned f=84;f<=94;++f) {
     frame(f);
-    for(unsigned n=0;n<(f==84 ? 7u : 10u);++n) packet(f,sequence++,f==84 && n>=2);
+    for(unsigned n=0;n<(f==84 ? 7u : 10u);++n) {
+      packet(f,sequence==936 ? static_cast<std::uint16_t>(834+nr::ledger_capacity) : sequence,f==84 && n>=2);
+      ++sequence;
+    }
   }
   auto report=reading();report.first_frame=84;report.last_frame=94;
   report.samples[0]={84,830,50000};report.data_packets=103;report.data_bytes=103000;
@@ -417,13 +420,13 @@ TEST_F(NativeReception, ParityEvictionCannotExcuseAProvedCompleteDataClassContra
 TEST_F(NativeReception, EvictionCompletenessMetadataIsSerializedBetweenSenderAndControl) {
   for(unsigned f=84;f<=94;++f) {
     frame(f);
-    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>((f-1)*10+n));
+    for(unsigned n=0;n<10;++n) packet(f,static_cast<std::uint16_t>(f==94 && n==6 ? 834+nr::ledger_capacity : (f-1)*10+n));
   }
   std::atomic_bool start {false};
   std::thread sender([&] {
     while(!start.load()) std::this_thread::yield();
     for(unsigned n=0;n<128;++n) {
-      packet(84,834);packet(94,936); // alternate the same known different-key collision.
+      packet(84,834);packet(94,static_cast<std::uint16_t>(834+nr::ledger_capacity)); // alternate a genuine capacity alias.
       std::this_thread::yield();
     }
   });
@@ -1002,4 +1005,77 @@ TEST(NativeDownwardEpisode, ExpiredReferenceAndDelayedConsumptionCannotExtendEit
   old.setting->application_sequence = 2; old.setting->origin_revision = 41;
   old.setting->configured_encoder_kbps = 17000; old.setting->receipt_origin = bp::receipt_origin_e::backend_reconfiguration;
   EXPECT_FALSE(pending.observe(old)); EXPECT_EQ(pending.phase(), live_tuning_native::phase_e::unassessed);
+}
+
+TEST_F(NativeReception, RecentDifferentFramesKeepBothActualReport35CollisionKeys) {
+  // These genuine sender keys collided before the actual trace had sent 6333 datagrams.
+  frame(297);frame(298);frame(299);
+  packet(297,6134);packet(298,6150);packet(299,6164);
+  auto report=reading(2);report.first_frame=297;report.last_frame=299;
+  report.data_packets=3;report.data_bytes=3000;
+  report.samples[0]={297,6134,50000};report.samples[1]={299,6164,40000};
+  auto current=accept(report);ASSERT_TRUE(current.available);ASSERT_TRUE(current.setting);
+  EXPECT_EQ(*current.setting,setting);
+  EXPECT_TRUE(current.samples[0].matched);EXPECT_TRUE(current.samples[1].matched);
+  EXPECT_EQ(current.samples[0].udp_bytes,1000u);EXPECT_EQ(current.samples[1].udp_bytes,1000u);
+}
+
+TEST_F(NativeReception, RecentReport35RangeRetainsUnsampledDataAndAuthenticClassBounds) {
+  // Retained sender ranges: frames297-306, 191 DATA/20 parity, full sequences6122-6332.
+  // The client claimed191 DATA/10 parity; the two selected keys here were retained by both indices.
+  std::uint16_t sequence=6122;
+  for(unsigned f=297;f<=306;++f) {
+    frame(f);const auto data=f==299 ? 20u : 19u;
+    for(unsigned n=0;n<data+2;++n) {
+      observer->record(f,sequence++,1408,n>=data,now-100ms,now-99ms,true);
+    }
+  }
+  ASSERT_EQ(sequence,6333u);
+  auto report=reading(2);report.first_frame=297;report.last_frame=306;
+  report.data_packets=191;report.data_bytes=268928;report.parity_packets=10;report.parity_bytes=14080;
+  report.samples[0]={297,6122,50000};report.samples[1]={306,6312,40000};
+  auto current=accept(report);ASSERT_TRUE(current.available);ASSERT_TRUE(current.setting);
+  EXPECT_EQ(*current.setting,setting);
+  report.sequence=2;report.end_us+=100000;report.data_packets=192;report.data_bytes=192*1408;
+  EXPECT_EQ(observer->accept(wire(report),true,now),nr::reason_e::sample_counts);
+  current=*observer->readback(now);EXPECT_EQ(current.report.sequence,1u);
+}
+
+TEST_F(NativeReception, ConsecutiveDataAndParityAcrossFramesKeepRealSixteenBitRtpWrap) {
+  frame(297);frame(298);
+  packet(297,65534);packet(297,65535);packet(298,0,true);packet(298,1,true);
+  auto report=reading(4);report.first_frame=297;report.last_frame=298;
+  report.data_packets=report.parity_packets=2;report.data_bytes=report.parity_bytes=2000;
+  report.samples[0]={297,65534,50000};report.samples[1]={297,65535,40000};
+  report.samples[2]={298,0,30000};report.samples[3]={298,1,20000};
+  auto current=accept(report);ASSERT_TRUE(current.available);
+  EXPECT_FALSE(current.samples[0].parity);EXPECT_FALSE(current.samples[1].parity);
+  EXPECT_TRUE(current.samples[2].parity);EXPECT_TRUE(current.samples[3].parity);
+  for(unsigned i=0;i<4;++i) EXPECT_TRUE(current.samples[i].matched);
+}
+
+TEST_F(NativeReception, CapacityAliasAndReusedRangeCannotBorrowAnotherFramesKeyOrHideDuplicate) {
+  // Cursor reuse after cancellation/exception is not assumed to be monotonic.
+  for(auto replacement:{std::uint16_t(6134+nr::ledger_capacity),std::uint16_t(6134)}) {
+    frames=std::make_shared<ff::sender_ledger_t>(615);observer=std::make_unique<nr::scope_t>(615,frames,true);
+    frame(297);frame(298);frame(299);packet(297,6134);packet(299,replacement);
+    auto old=reading();old.first_frame=old.last_frame=297;old.samples[0]={297,6134,50000};
+    EXPECT_EQ(accept(old).reason,nr::reason_e::packet_missing);
+    auto fresh=reading();fresh.sequence=2;fresh.end_us=200000;
+    fresh.first_frame=fresh.last_frame=299;fresh.samples[0]={299,replacement,50000};
+    ASSERT_TRUE(accept(fresh).available);
+    packet(299,replacement);fresh.sequence=3;fresh.end_us=300000;
+    EXPECT_EQ(accept(fresh).reason,nr::reason_e::packet_ambiguous);
+  }
+}
+
+TEST_F(NativeReception, SameWireKeyInNewGenerationCannotInheritRetiredAmbiguity) {
+  frame(297);packet(297,6134);packet(297,6134);
+  auto report=reading();report.first_frame=report.last_frame=297;report.samples[0]={297,6134,50000};
+  EXPECT_EQ(accept(report).reason,nr::reason_e::packet_ambiguous);
+  observer->retire();EXPECT_FALSE(observer->readback(now));
+  frames=std::make_shared<ff::sender_ledger_t>(616);observer=std::make_unique<nr::scope_t>(616,frames,true);
+  setting=actual_setting(616);frame(297);packet(297,6134);
+  auto fresh=accept(report);ASSERT_TRUE(fresh.available);ASSERT_TRUE(fresh.setting);
+  EXPECT_EQ(fresh.setting->stream_generation,616u);EXPECT_EQ(*fresh.setting,setting);
 }

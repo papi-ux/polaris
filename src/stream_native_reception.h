@@ -309,8 +309,12 @@ namespace stream_native_reception {
     };
     static_assert(sizeof(packet_t) == 32);
     static_assert(ledger_capacity * sizeof(packet_t) == 524288);
-    static std::size_t index(std::uint32_t frame, std::uint16_t sequence) noexcept {
-      return (static_cast<std::uint32_t>(frame * 2654435761u) ^ sequence) & (ledger_capacity - 1);
+    static std::size_t index(std::uint32_t, std::uint16_t sequence) noexcept {
+      // Normal DATA/parity sends share one RTP cursor: retain consecutive keys until slot wrap.
+      // Mixing frame into the index can evict packets only a few sends old. Reused ranges and
+      // real capacity aliases still lose retention; full frame/sequence checks, same-key ambiguity
+      // and per-class eviction watermarks remain mandatory and do not assume monotonic sends.
+      return sequence & (ledger_capacity - 1);
     }
     static std::int64_t ns(clock::time_point time) noexcept {
       return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
