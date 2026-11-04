@@ -388,15 +388,16 @@ TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) 
 
 TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   const auto stream = source("src/stream.cpp");
+  // Each registration ends at its own callback close, before any neighboring callback.
   const auto periodic_ping = between(
     stream,
     "server->map(packetTypes[IDX_PERIODIC_PING]",
-    "server->map(packetTypes[IDX_START_A]"
+    "\n    });"
   );
   const auto loss_stats = between(
     stream,
     "server->map(packetTypes[IDX_LOSS_STATS]",
-    "server->map(packetTypes[IDX_REQUEST_IDR_FRAME]"
+    "\n    });"
   );
   for (const auto *handler : {&periodic_ping, &loss_stats}) {
     const auto evidence = handler->find("record_network_stats(");
@@ -432,12 +433,12 @@ TEST(DoctorResetContract, ControlPingsBringLiveTuningOnlyTheRtt) {
   const auto periodic_ping = between(
     stream,
     "server->map(packetTypes[IDX_PERIODIC_PING]",
-    "server->map(packetTypes[IDX_START_A]"
+    "\n    });"
   );
   const auto loss_stats = between(
     stream,
     "server->map(packetTypes[IDX_LOSS_STATS]",
-    "server->map(packetTypes[IDX_REQUEST_IDR_FRAME]"
+    "\n    });"
   );
   for (const auto *handler : {&periodic_ping, &loss_stats}) {
     EXPECT_NE(handler->find("adaptive_bitrate::update_rtt(rtt_ms)"), std::string::npos);
