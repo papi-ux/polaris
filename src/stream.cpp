@@ -1606,6 +1606,17 @@ namespace stream {
         signal.inspection_ready = false;
         signal.reason = publication_reason;
       }
+      if (dispatch) {
+        const auto owner = session->native_reception;
+        adaptive_bitrate::update_native_signal(owner, session->session_token,
+          session->frame_submission_launch_nonce, signal, published, [&] {
+            return session->state.load() == session::state_e::RUNNING && session->control.peer &&
+              session->native_reception == owner && session->session_generation == signal.generation &&
+              !session->watch_only && !session->vrr.watch_or_input_only &&
+              stream_native_reception::negotiated(true, session->config.native_reception_enabled, "1", 1,
+                session->config.mlFeatureFlags, session->config.controlProtocolType, session->config.encryptionFlagsEnabled);
+          });
+      }
       if (!vrr_trace::enabled()) return; // Internal typed readback is already available with trace off.
       stream_native_reception::trace::callback_t facts;
       facts.dispatched = dispatch;

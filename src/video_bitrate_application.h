@@ -117,7 +117,10 @@ namespace video::bitrate_application {
       ~update_observation_t() noexcept {
         if (!finished_) if (auto state = state_.lock()) state->ledger.setting_unavailable();
       }
-      void unchanged() noexcept { finished_ = true; }
+      void unchanged() noexcept {
+        if (std::exchange(finished_, true)) return;
+        if (auto state = state_.lock()) state->ledger.unchanged_setting();
+      }
       bool nvenc_reconfigure_success(std::uint64_t accepted_average_bps) noexcept {
         if (std::exchange(finished_, true)) return false;
         auto state = state_.lock();
@@ -193,8 +196,16 @@ namespace video::bitrate_application {
       // Any update attempt supersedes a staged, unpublished open, including an
       // unfinished (SDK error) or same-rate no-op one. A published setting is
       // the ledger's, which an explicit no-op still preserves.
-      if (state_) state_->native_opening.reset();
+      if (state_) {
+        state_->native_opening.reset();
+        state_->ledger.begin_setting_update();
+      }
       return update_observation_t {state_, origin};
+    }
+
+    std::weak_ptr<const bitrate_provenance::current_setting_t> current_setting_view() const noexcept {
+      return state_ ? state_->ledger.current_setting_view() :
+        std::weak_ptr<const bitrate_provenance::current_setting_t> {};
     }
 
     // Unattributed native opens stay unknown. Never borrow a later poll.

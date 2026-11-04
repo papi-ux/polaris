@@ -273,6 +273,30 @@ namespace stream_native_reception {
       signal_ = signal;
       return true;
     }
+    // Only the immediate controller consumer uses this boundary. Lock order is controller,
+    // producer receipt, native scope, sender ledger. No encoder/SDK call is made here.
+    template<class Consume>
+    bool with_current_signal(const native_video_signal::signal_t &signal, Consume &&consume,
+                             bool require_measurement = true) const {
+      std::unique_lock lock {mutex_, std::try_to_lock};
+      if (!lock.owns_lock() || retired_ || !enabled_ || !signal_ || !signal.admitted ||
+          signal.generation != generation_ || signal.sequence != latest_.report.sequence ||
+          signal.received_steady_ns != ns(received_at_)) return false;
+      const auto now = clock::now();
+      if (now < received_at_ || now - received_at_ > retention) return false;
+      if (!require_measurement) { consume(); return true; } // No sample/proof/target action in this mode.
+      if (!latest_.available || !signal.measurement_available || !signal.setting || !latest_.setting ||
+          *signal.setting != *latest_.setting ||
+          now < oldest_send_ || now - oldest_send_ > retention) return false;
+      bool consumed = false;
+      frames_->with_join_inclusive(latest_.report.first_frame, latest_.report.last_frame, now, retention,
+        [&](const auto &frames) {
+          if (frames.setting != *signal.setting) return;
+          consume();
+          consumed = true;
+        });
+      return consumed;
+    }
     void retire() noexcept { std::lock_guard lock {mutex_}; retired_ = true; latest_ = {}; signal_.reset(); }
 
   private:

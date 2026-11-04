@@ -2493,3 +2493,137 @@ TEST(AdaptiveBitrateHistory, H2RealApplyRecreationAndSupersedeKeepObservedValues
   for (std::size_t i=1;i<rows.size();++i) EXPECT_LT(rows[i-1]["order"],rows[i]["order"]);
 }
 #endif
+
+#include "src/stream_native_reception.h"
+#include "src/video_bitrate_application.h"
+namespace {
+  struct NativeDownwardHandoff : ::testing::Test {
+    decltype(config::video.adaptive_bitrate) saved = config::video.adaptive_bitrate;
+    video::bitrate_application::adapter_t producer {620, video::bitrate_application::backend_e::native_nvenc};
+    std::shared_ptr<stream_frame_feedback::sender_ledger_t> frames =
+      std::make_shared<stream_frame_feedback::sender_ledger_t>(620);
+    std::shared_ptr<stream_native_reception::scope_t> native =
+      std::make_shared<stream_native_reception::scope_t>(620, frames, true);
+    stream_frame_feedback::encoder_setting_t setting;
+    std::uint32_t next = 0;
+    static constexpr std::string_view nonce = "1234567890abcdef1234567890abcdef";
+    void SetUp() override {
+      config::video.adaptive_bitrate.enabled = true;
+      config::video.adaptive_bitrate.native_downward = true;
+      config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+      config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+      adaptive_bitrate::load_config(); adaptive_bitrate::reset();
+      adaptive_bitrate::set_base_bitrate(20000);
+      adaptive_bitrate::set_session_scope(620, "native-controller-test", true);
+      const auto opening = adaptive_bitrate::get_encoder_open_request(620, 20000); ASSERT_TRUE(opening);
+      producer.nvenc_initialize_success(video::bitrate_application::origin_t {opening->revision, 20000}, 20'000'000, true);
+      ASSERT_TRUE(producer.publish_usable_nvenc_open());
+      {
+        auto input = producer.capture_before_submit(1);
+        ASSERT_TRUE(input.accepted(video::bitrate_application::submit_stage_e::nvenc_encode_picture_success));
+      }
+      auto record = producer.take_output(video::bitrate_application::output_stage_e::nvenc_output_timestamp, 1);
+      ASSERT_TRUE(record);
+      setting = *stream_frame_feedback::encoder_setting_of(std::optional<const video::bitrate_provenance::record_t> {*record});
+      adaptive_bitrate::set_runtime_update_supported(true, {}, 20000, true, 1, producer.current_setting_view());
+    }
+    void TearDown() override {
+      native->retire(); producer.retire(); adaptive_bitrate::reset();
+      adaptive_bitrate::set_session_scope(0, {}, false);
+      config::video.adaptive_bitrate = saved; adaptive_bitrate::load_config();
+    }
+    native_video_signal::signal_t fresh() {
+      const auto now = std::chrono::steady_clock::now(); const auto id = ++next;
+      const auto ticket = frames->begin(id, setting, now - 6ms); EXPECT_TRUE(ticket);
+      if (ticket) frames->complete(*ticket, stream_frame_feedback::send_disposition_e::sent, now - 4ms);
+      native->record(id, static_cast<std::uint16_t>(id), 1000, false, now - 5ms, now - 4ms, true);
+      std::string bytes(62, '\0'); bytes[0] = 1; bytes[1] = 1; bytes[2] = 1;
+      const auto be = [&](int at, std::uint64_t value, int count) {
+        for (int i = 0; i < count; ++i) bytes[at + count - i - 1] = static_cast<char>(value >> (i * 8));
+      };
+      be(4, id, 4); be(8, 100000, 4); be(12, id * 100000, 8); be(20, id * 10, 4);
+      be(24, 1, 4); be(32, 1000, 4); be(40, 1000, 4); be(44, id, 4); be(48, id, 4);
+      be(52, id, 4); be(56, id, 2); be(58, 1000, 4);
+      stream_native_reception::admission_trace_t admission;
+      native->accept(bytes, true, now, &admission);
+      EXPECT_TRUE(admission.admitted);
+      EXPECT_EQ(admission.availability, stream_native_reception::reason_e::joined);
+      const native_video_signal::caller_t caller {620, true, false, true, true, false};
+      auto signal = native_video_signal::project(admission, caller,
+        adaptive_bitrate::inspect_native_context(620, "native-controller-test"));
+      EXPECT_TRUE(native->publish_signal(signal));
+      return signal;
+    }
+    bool consume(const native_video_signal::signal_t &signal, std::string_view app = "native-controller-test",
+                 std::string_view supplied_nonce = nonce, bool current = true) {
+      return adaptive_bitrate::update_native_signal(native, app, supplied_nonce, signal, true, [=] { return current; });
+    }
+  };
+}
+
+TEST_F(NativeDownwardHandoff, DefaultOffWithLiveTuningOnRefusesWhereExplicitOptInConsumesCurrentObservation) {
+  const adaptive_bitrate::config_t positional {true, 2000, 100000, 0.2, 0.3, 1000};
+  EXPECT_FALSE(positional.native_downward); EXPECT_EQ(positional.min_bitrate_kbps, 2000);
+  config::video.adaptive_bitrate.native_downward = false; adaptive_bitrate::load_config();
+  EXPECT_FALSE(consume(fresh()));
+  EXPECT_TRUE(adaptive_bitrate::get_state().enabled);
+  config::video.adaptive_bitrate.native_downward = true; adaptive_bitrate::load_config();
+  EXPECT_TRUE(consume(fresh()));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+}
+
+TEST_F(NativeDownwardHandoff, CurrentObservationPairedWithStaleRevisionWrongAppNonceCallerAndRetiredScope) {
+  EXPECT_TRUE(consume(fresh())); // Positive control enters the reference, never a claimed armed trigger.
+  auto stale = fresh(); adaptive_bitrate::note_network_evidence_arrival(false);
+  EXPECT_FALSE(consume(stale));
+  EXPECT_TRUE(consume(fresh())); // Historical encoder origin is still valid after controller reaffirmation.
+  EXPECT_FALSE(consume(fresh(), "foreign-app"));
+  EXPECT_FALSE(consume(fresh(), "native-controller-test", "invalid"));
+  EXPECT_FALSE(consume(fresh(), "native-controller-test", nonce, false));
+  const auto retired = fresh(); native->retire(); EXPECT_FALSE(consume(retired));
+}
+
+TEST_F(NativeDownwardHandoff, CurrentWriterAndCurrentProducerFailureRetireObservationImmediately) {
+  EXPECT_TRUE(consume(fresh()));
+  const auto before_manual = fresh(); adaptive_bitrate::set_live_bitrate_for_stream(18000);
+  EXPECT_FALSE(consume(before_manual));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 18000);
+}
+
+TEST_F(NativeDownwardHandoff, EqualKbpsCannotReuseFailedProducerReceiptOrRecreatedLifetime) {
+  EXPECT_TRUE(consume(fresh()));
+  const auto historical = fresh();
+  { auto failed = producer.begin_native_update(video::bitrate_application::origin_t {999, 17000}); }
+  EXPECT_FALSE(consume(historical));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000, true); // No producer witness after reopen.
+  EXPECT_FALSE(consume(fresh()));
+}
+
+TEST_F(NativeDownwardHandoff, DoctorAndSharedScopeRefuseAgainstAConsumedReferenceControl) {
+  EXPECT_TRUE(consume(fresh()));
+  const auto before_doctor = fresh();
+  const auto doctor = adaptive_bitrate::get_doctor_state();
+  ASSERT_TRUE(adaptive_bitrate::set_doctor_bitrate_if_revision(doctor.revision, 18000));
+  EXPECT_FALSE(consume(before_doctor));
+  adaptive_bitrate::set_session_scope(620, "native-controller-test", false);
+  EXPECT_FALSE(consume(fresh()));
+}
+
+TEST_F(NativeDownwardHandoff, BusyEncoderHandoffReturnsWithoutWaiting) {
+  const auto signal = fresh(); EXPECT_TRUE(consume(signal));
+  const auto request = adaptive_bitrate::get_live_bitrate_request(); ASSERT_TRUE(request);
+  std::promise<void> entered, release; auto go = release.get_future(); auto started = entered.get_future();
+  auto applying = std::async(std::launch::async, [&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+      entered.set_value(); go.wait(); return true;
+    });
+  });
+  const auto entered_status = started.wait_for(2s);
+  if (entered_status != std::future_status::ready) { release.set_value(); applying.wait(); }
+  ASSERT_EQ(entered_status, std::future_status::ready);
+  auto observing = std::async(std::launch::async, [&] { return consume(signal); });
+  const auto ready = observing.wait_for(2s);
+  release.set_value();
+  EXPECT_EQ(ready, std::future_status::ready); EXPECT_FALSE(observing.get()); EXPECT_TRUE(applying.get());
+}

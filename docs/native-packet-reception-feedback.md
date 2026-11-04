@@ -4,14 +4,32 @@ Polaris #615 and Nova #442 use a private, explicitly negotiated client-to-host c
 extension, `0x7F10`. This is a matched allocation, not an upstream registry reservation or
 feature bit. It observes original RTP packets accepted by the native queue. It does not
 provide a packet census, loss denominator, clean/recovery signal or capacity estimate.
-No bitrate, FEC, Doctor, action, permission or policy writer consumes it.
+By default no bitrate, FEC, Doctor, action, permission or policy writer consumes it.
+
+## Experimental downward-only trial (default off)
+
+`adaptive_bitrate_native_downward=false` is a separate host setting. Live Tuning On alone preserves
+the existing controller. Explicitly enabling this experimental option permits one 15% downward
+request after a frozen, rate-local four-second native reference and eight standing seconds. Data
+sample elapsed bounds stay separate from ENet RTT; they are not one-way delay, loss or capacity.
+The current exclusive stream, caller, nonce, writers, revisions, actual encoder receipt and accepted
+frame tuple are rechecked before the existing encoder request path can act. Unsupported or busy
+contexts refuse the trial. No FEC percentage changes or upward authority are added.
+
+The policy owns the lower target in a distinct native hold and freezes legacy loss/RTT judgments.
+Missing reports, flat ENet, ineffective cuts and sampled native relief cannot restore the prior rate
+or start another cut. Actual backend application must be proved within six seconds of dispatch;
+response observation has its own six-second bound. An explicit writer with a different target or
+request/floor, or a new stream, is needed to resume adaptation. A same-value writer retains the
+conservative hold. This option is a source candidate, not automatic-device or physical qualification.
 
 ## Passive native signal and controller inspection (private trace 2.5)
 
 Each native control callback now projects the newly admitted value copy into a stateless typed
 `native_video_signal::signal_t`, with tracing either on or off. The existing native scope's internal
 readback retains at most its current report's diagnostic value; public JSON and the wire payload do
-not change. No policy, bitrate/FEC writer, Doctor action or AI consumes this projection.
+not change. The projection itself grants no permission; only the separate experimental consumer above
+can make a downward request after serializing and rechecking current authority. Doctor and AI do not consume it.
 
 For matched sender API bounds `[B,E]`, admission host steady receive time `R`, and client socket-read
 age `a` in microseconds, each sample carries signed elapsed bounds `[R-E-1000*a, R-B-1000*a]`.

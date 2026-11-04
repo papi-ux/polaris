@@ -771,6 +771,11 @@ namespace nvenc {
       video::bitrate_application::checked_timestamp(output_timestamp)) : std::nullopt;
   }
 
+  std::weak_ptr<const video::bitrate_provenance::current_setting_t> nvenc_base::current_bitrate_setting() const noexcept {
+    return bitrate_observations ? bitrate_observations->current_setting_view() :
+      std::weak_ptr<const video::bitrate_provenance::current_setting_t> {};
+  }
+
   bool nvenc_base::publish_usable_bitrate_open() noexcept {
     return bitrate_observations && bitrate_observations->publish_usable_nvenc_open();
   }

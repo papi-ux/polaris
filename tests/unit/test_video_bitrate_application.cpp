@@ -383,3 +383,28 @@ TEST(VideoBitrateApplication, InvalidFullDuplicateAndExhaustedMetadataRefusesOnl
     EXPECT_FALSE(instance->take_output(nv_output, 1));
   }
 }
+
+TEST(VideoBitrateApplication, CurrentWitnessRejectsInFlightAndFailedAttemptsButKeepsLiteralNoop) {
+  adapter_t instance {7, native};
+  instance.nvenc_initialize_success(app::origin_t {40, 20000}, 20'000'000, true);
+  ASSERT_TRUE(instance.publish_usable_nvenc_open());
+  const auto view = instance.current_setting_view().lock(); ASSERT_TRUE(view);
+  ASSERT_TRUE(view->with_current([](const auto &) {}));
+  {
+    auto noop = instance.begin_native_update(app::origin_t {41, 20000});
+    EXPECT_FALSE(view->with_current([](const auto &) {}));
+    noop.unchanged();
+  }
+  EXPECT_TRUE(view->with_current([](const auto &r) { EXPECT_EQ(r.authority_revision, 40u); }));
+  { auto failed = instance.begin_native_update(app::origin_t {42, 17000}); }
+  EXPECT_FALSE(view->with_current([](const auto &) {}));
+  {
+    auto applied = instance.begin_native_update(app::origin_t {43, 17000});
+    ASSERT_TRUE(applied.nvenc_reconfigure_success(17'000'000));
+  }
+  EXPECT_TRUE(view->with_current([](const auto &r) {
+    EXPECT_EQ(r.authority_revision, 43u); EXPECT_EQ(r.configured_encoder_kbps, 17000);
+  }));
+  instance.retire();
+  EXPECT_FALSE(view->with_current([](const auto &) {}));
+}

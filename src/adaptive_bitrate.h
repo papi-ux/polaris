@@ -22,6 +22,9 @@
 #include "live_tuning_fec.h"
 #include "vrr_trace.h"
 #include "native_video_signal.h"
+#include "live_tuning_native.h"
+
+namespace stream_native_reception { class scope_t; }
 
 namespace adaptive_bitrate {
 
@@ -34,6 +37,7 @@ namespace adaptive_bitrate {
     double max_change_rate = 0.20;     // Max 20% change per adjustment
     double ewma_alpha = 0.3;           // EWMA smoothing factor (0-1, higher = more responsive)
     int adjustment_interval_ms = 1000; // How often to adjust
+    bool native_downward = false;     // Separate experimental opt-in; preserve aggregate field order.
   };
 
   /// Live Tuning history keeps at most this many entries per stream scope.
@@ -110,6 +114,8 @@ namespace adaptive_bitrate {
     double input_packet_loss_percent = 0.0;
     double input_rtt_ms = 0.0;
     std::optional<fec_transition_t> fec_transition;
+    /// Experimental native evidence; separate from RTT/loss and never a restore capability.
+    std::optional<live_tuning_native::evidence_t> native_transition;
   };
 
   /** A bounded, oldest-first copy of one stream scope's history. */
@@ -364,6 +370,13 @@ namespace adaptive_bitrate {
   native_video_signal::context_t inspect_native_context(std::uint64_t expected_generation,
                                                        std::string_view expected_app_session) noexcept;
 
+  /// Immediate callback only. No queued observation or read-only context is action authority.
+  /// True means a current observation was consumed, not that a write occurred or is permitted later.
+  bool update_native_signal(const std::shared_ptr<stream_native_reception::scope_t> &owner,
+                            std::string_view app_session, std::string_view launch_nonce,
+                            const native_video_signal::signal_t &signal, bool published,
+                            const std::function<bool()> &current_caller);
+
   // Historical origin for an encoder about to open at this exact rate. Unlike
   // a live update, initialization precedes runtime-support publication. This
   // snapshot neither authorizes an SDK operation nor acknowledges application.
@@ -525,7 +538,8 @@ namespace adaptive_bitrate {
     const std::string &reason = {},
     int initial_encoder_bitrate_kbps = 0,
     bool in_place = false,
-    int in_place_floor_kbps = 1
+    int in_place_floor_kbps = 1,
+    std::weak_ptr<const video::bitrate_provenance::current_setting_t> current_setting = {}
   );
 
   /**

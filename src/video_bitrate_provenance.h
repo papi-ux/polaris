@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
 
@@ -43,6 +44,24 @@ namespace video::bitrate_provenance {
 
   class ledger_t;
 
+  // The ledger's actual current receipt, not a mirror of historical output metadata.
+  // A weak view expires with its producer. Visiting it grants no backend/write authority.
+  class current_setting_t {
+  public:
+    template<class Visit>
+    bool with_current(Visit &&visit) const {
+      std::unique_lock lock {mutex_, std::try_to_lock};
+      if (!lock.owns_lock() || updating_ || !receipt_) return false;
+      visit(*receipt_);
+      return true;
+    }
+  private:
+    friend class ledger_t;
+    mutable std::mutex mutex_;
+    mutable std::optional<setting_receipt_t> receipt_;
+    mutable bool updating_ = false;
+  };
+
   // Copyable identifier only. It grants neither backend nor frame admission.
   class submission_t {
   public:
@@ -53,7 +72,7 @@ namespace video::bitrate_provenance {
   private:
     friend class ledger_t;
     // Bookkeeping identity only: never a backend receipt or encoder lifetime.
-    struct cookie_t {};
+    struct cookie_t : current_setting_t {};
     submission_t(scope_t scope, std::uint64_t sequence, std::int64_t pts,
                  const std::shared_ptr<const cookie_t> &owner) noexcept:
         scope_ {scope}, sequence_ {sequence}, pts_ {pts}, owner_ {owner} {}
@@ -130,15 +149,34 @@ namespace video::bitrate_provenance {
       last_application_ = receipt.application_sequence;
       last_authority_ = receipt.authority_revision;
       last_kbps_ = receipt.configured_encoder_kbps;
-      current_ = receipt;
+      if (!owner_) return false;
+      {
+        std::lock_guard lock {owner_->mutex_};
+        owner_->receipt_ = receipt;
+      }
       return true;
+    }
+
+    std::weak_ptr<const current_setting_t> current_setting_view() const noexcept { return owner_; }
+
+    // An in-progress SDK attempt cannot be used by an observer. A literal no-op may
+    // reveal the unchanged receipt again; failures invalidate it instead.
+    void begin_setting_update() noexcept {
+      if (owner_) { std::lock_guard lock {owner_->mutex_}; owner_->updating_ = true; }
+    }
+    void unchanged_setting() noexcept {
+      if (owner_) { std::lock_guard lock {owner_->mutex_}; owner_->updating_ = false; }
     }
 
     // Call when backend state or its authority binding cannot be established.
     // Never substitute config/request/ACK as a fallback. Old committed outputs
     // remain observable; uncommitted work no longer has a provable interval.
     void setting_unavailable() noexcept {
-      current_.reset();
+      if (owner_) {
+        std::lock_guard lock {owner_->mutex_};
+        owner_->receipt_.reset();
+        owner_->updating_ = false;
+      }
       for (auto &entry : entries_) {
         if (!entry.committed) entry.value.reset();
       }
@@ -157,7 +195,9 @@ namespace video::bitrate_provenance {
         return std::nullopt;
       }
       last_pts_ = *pts;  // Also reserve unavailable/overflow PTS against reuse.
-      if (!current_) return std::nullopt;
+      std::optional<setting_receipt_t> current;
+      if (owner_) owner_->with_current([&](const auto &receipt) { current = receipt; });
+      if (!current) return std::nullopt;
       for (auto &entry : entries_) {
         if (entry.value) continue;
         if (last_submission_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -165,7 +205,7 @@ namespace video::bitrate_provenance {
           return std::nullopt;
         }
         ++last_submission_;
-        entry.value = record_t {*current_, last_submission_, *pts};
+        entry.value = record_t {*current, last_submission_, *pts};
         entry.committed = false;
         return submission_t {scope_, last_submission_, *pts, owner_};
       }
@@ -210,8 +250,8 @@ namespace video::bitrate_provenance {
     // owned, never-reused scope; no reset/rebind or authority-cloning operation.
     void retire() noexcept {
       retired_ = true;
+      setting_unavailable();
       owner_.reset();  // Detached handles expire even if this address is reused.
-      current_.reset();
       for (auto &entry : entries_) entry.value.reset();
     }
 
@@ -231,7 +271,6 @@ namespace video::bitrate_provenance {
     int last_kbps_ = 0;
     std::uint64_t last_submission_ = 0;
     std::optional<std::int64_t> last_pts_;
-    std::optional<setting_receipt_t> current_;
     std::array<entry_t, capacity> entries_ {};
   };
 }  // namespace video::bitrate_provenance

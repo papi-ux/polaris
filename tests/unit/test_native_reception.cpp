@@ -827,3 +827,164 @@ TEST_F(NativeReception, SignalCompanionRowsKeepFortyFieldBoundAndCannotRelabelAR
   EXPECT_EQ(u(refused.rows[0],"operator_revision"),0u);EXPECT_EQ(u(refused.rows[0],"sample_count"),0u);
   EXPECT_LT(sizeof(nr::scope_t),540000u);EXPECT_EQ(nr::ledger_capacity,16384u);EXPECT_EQ(nvs::max_samples,16u);
 }
+
+#include "src/live_tuning_native.h"
+namespace {
+  native_video_signal::signal_t native_trial_signal(int ms, int lower_us, int upper_us,
+                                                   std::uint32_t sequence = 0) {
+    native_video_signal::signal_t s;
+    s.admitted = s.measurement_available = s.inspection_ready = true;
+    s.sequence = sequence ? sequence : static_cast<std::uint32_t>(ms + 1);
+    s.received_steady_ns = static_cast<std::int64_t>(ms) * 1'000'000;
+    s.setting = ff::encoder_setting_t {9, 615, 1, 8, 20000, bp::receipt_origin_e::successful_open};
+    s.context.action_revision = 10; s.context.floor_kbps = 2000;
+    s.sample_count = 1;
+    s.samples[0].reason = native_video_signal::reason_e::ready;
+    s.samples[0].elapsed_lower_ns = static_cast<std::int64_t>(lower_us) * 1000;
+    s.samples[0].elapsed_upper_ns = static_cast<std::int64_t>(upper_us) * 1000;
+    return s;
+  }
+  template<class Metric>
+  std::vector<int> native_trial_feed(live_tuning_native::episode_t &episode, int seconds, Metric metric) {
+    std::vector<int> requests;
+    for (int ms = 0; ms <= seconds * 1000; ms += 100) {
+      const auto lower = metric(ms / 1000);
+      if (const auto next = episode.observe(native_trial_signal(ms, lower, lower + 100))) requests.push_back(*next);
+    }
+    return requests;
+  }
+}
+
+TEST(NativeDownwardEpisode, NoisyStandingPlateauPermitsExactlyOneFifteenPercentTrial) {
+  live_tuning_native::episode_t episode;
+  const auto requests = native_trial_feed(episode, 30, [](int second) {
+    return second < 4 ? 3000 : 30000 + (second % 3 - 1) * 150;
+  });
+  ASSERT_EQ(requests.size(), 1u); EXPECT_EQ(requests.front(), 17000);
+  EXPECT_EQ(episode.evidence().source.origin_revision, 8u);
+  EXPECT_EQ(episode.evidence().reference_upper_ns, 3'100'000);
+}
+
+TEST(NativeDownwardEpisode, GenuineFallSpikeAndUnderpopulatedBucketsHaveNoAuthority) {
+  for (const int mode : {0, 1, 2}) {
+    live_tuning_native::episode_t episode;
+    std::vector<int> requests;
+    for (int ms = 0; ms < 24000; ms += mode == 2 ? 400 : 100) {
+      const int second = ms / 1000;
+      const int lower = second < 4 ? 3000 : mode == 0 ? std::max(14000, 60000 - 3000 * second) :
+        mode == 1 && second > 8 ? 3000 : 30000;
+      if (const auto next = episode.observe(native_trial_signal(ms, lower, lower + 100))) requests.push_back(*next);
+    }
+    EXPECT_TRUE(requests.empty());
+  }
+}
+
+TEST(NativeDownwardEpisode, MixedTupleChangedAuthorityGapParityAndInvalidEndpointsResetReference) {
+  for (const int refusal : {0, 1, 2, 3, 4}) {
+    live_tuning_native::episode_t episode;
+    for (int ms = 0; ms < 12000; ms += 100) {
+      auto s = native_trial_signal(ms, ms < 4000 ? 3000 : 30000, ms < 4000 ? 3100 : 30100);
+      if (ms == 10000) {
+        if (refusal == 0) ++s.setting->application_sequence;
+        if (refusal == 1) ++s.context.action_revision;
+        if (refusal == 2) s.received_steady_ns += 600'000'000;
+        if (refusal == 3) s.samples[0].parity = true;
+        if (refusal == 4) s.samples[0].elapsed_lower_ns = -1;
+      }
+      EXPECT_FALSE(episode.observe(s));
+    }
+  }
+}
+
+TEST(NativeDownwardEpisode, SeparateBackendProofAndResponseWindowsCannotRestoreOrRecut) {
+  live_tuning_native::episode_t episode;
+  const auto requests = native_trial_feed(episode, 12, [](int s) { return s < 4 ? 3000 : 30000; });
+  ASSERT_EQ(requests, std::vector<int> {17000});
+  episode.accepted_application(41);
+  for (int ms = 12100; ms <= 16200; ms += 100) {
+    auto s = native_trial_signal(ms, 3500, 3600);
+    s.setting->application_sequence = 2; s.setting->origin_revision = 41;
+    s.setting->configured_encoder_kbps = 17000; s.setting->receipt_origin = bp::receipt_origin_e::backend_reconfiguration;
+    EXPECT_FALSE(episode.observe(s));
+  }
+  EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::responded);
+  episode.unavailable();
+  EXPECT_TRUE(episode.spent()); EXPECT_EQ(episode.evidence().requested_kbps, 17000);
+}
+
+TEST(NativeDownwardEpisode, WrongBackendEpochHistoricalRevisionAndMissingProofAreNotSuccess) {
+  for (const int refusal : {0, 1, 2, 3}) {
+    live_tuning_native::episode_t episode;
+    ASSERT_EQ(native_trial_feed(episode, 12, [](int s) { return s < 4 ? 3000 : 30000; }),
+              std::vector<int> {17000});
+    if (refusal != 3) episode.accepted_application(41);
+    auto s = native_trial_signal(refusal == 2 ? 18101 : 12100, 3500, 3600);
+    s.setting->application_sequence = 2; s.setting->origin_revision = refusal == 1 ? 8 : 41;
+    s.setting->encoder_lifetime = refusal == 0 ? 10 : 9;
+    s.setting->configured_encoder_kbps = 17000; s.setting->receipt_origin = bp::receipt_origin_e::backend_reconfiguration;
+    EXPECT_FALSE(episode.observe(s));
+    EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::unassessed);
+  }
+}
+
+TEST(NativeDownwardEpisode, RealMixedAdmissionCanWaitForCurrentDWithoutExtendingProofDeadline) {
+  live_tuning_native::episode_t episode;
+  ASSERT_EQ(native_trial_feed(episode, 12, [](int s) { return s < 4 ? 3000 : 30000; }),
+            std::vector<int> {17000});
+  const auto now = test_clock::now();
+  const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+  episode.dispatched_at(now_ns - 1'000'000); episode.accepted_application(41);
+  auto frames = std::make_shared<ff::sender_ledger_t>(615);
+  nr::scope_t native {615, frames, true};
+  auto c = actual_setting(); c.configured_encoder_kbps = 20000;
+  auto d = c; d.application_sequence = 2; d.origin_revision = 41;
+  d.configured_encoder_kbps = 17000; d.receipt_origin = bp::receipt_origin_e::backend_reconfiguration;
+  for (const auto &[id, setting] : std::vector<std::pair<unsigned, ff::encoder_setting_t>> {{1, c}, {2, d}}) {
+    const auto ticket = frames->begin(id, setting, now - 6ms); ASSERT_TRUE(ticket);
+    frames->complete(*ticket, ff::send_disposition_e::sent, now - 4ms);
+    native.record(id, static_cast<std::uint16_t>(id), 1000, false, now - 5ms, now - 4ms, true);
+  }
+  auto r = reading(2); r.sequence = 20001; r.first_frame = 1; r.last_frame = 2;
+  r.samples[0] = {1, 1, 1000}; r.samples[1] = {2, 2, 1000};
+  nr::admission_trace_t mixed;
+  native.accept(wire(r), true, now, &mixed);
+  ASSERT_TRUE(mixed.admitted); EXPECT_EQ(mixed.availability, nr::reason_e::frame_unavailable);
+  native_video_signal::caller_t caller {615, true, false, true, true, false};
+  native_video_signal::context_t context;
+  context.observed = true; context.reason = native_video_signal::context_reason_e::ready;
+  context.applied_kbps = 17000; context.inspected_steady_ns = now_ns;
+  auto transition = native_video_signal::project(mixed, caller, context);
+  ASSERT_FALSE(transition.measurement_available);
+  ASSERT_TRUE(native.publish_signal(transition));
+  EXPECT_FALSE(native.with_current_signal(transition, [] {}));
+  ASSERT_TRUE(native.with_current_signal(transition, [&] { episode.wait_for_application(now_ns); }, false));
+  EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::awaiting_application);
+  EXPECT_EQ(episode.evidence().dispatched_ns, now_ns - 1'000'000);
+  r.count = 1; r.sequence = 20002; r.end_us = 200000; r.loop_tick = 20;
+  r.data_packets = 1; r.data_bytes = 1000;
+  r.first_frame = r.last_frame = 2; r.samples[0] = {2, 2, 1000};
+  nr::admission_trace_t proven;
+  native.accept(wire(r), true, now, &proven);
+  ASSERT_EQ(proven.availability, nr::reason_e::joined);
+  auto signal = native_video_signal::project(proven, caller, context);
+  ASSERT_TRUE(signal.measurement_available); ASSERT_TRUE(native.publish_signal(signal));
+  ASSERT_TRUE(native.with_current_signal(signal, [&] { EXPECT_FALSE(episode.observe(signal)); }));
+  EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::response);
+  native.retire();
+  EXPECT_FALSE(native.with_current_signal(signal, [] {}, false));
+}
+
+TEST(NativeDownwardEpisode, ExpiredReferenceAndDelayedConsumptionCannotExtendEitherWindow) {
+  live_tuning_native::episode_t reference;
+  EXPECT_TRUE(native_trial_feed(reference, 72, [](int s) { return s < 57 ? 3000 : 30000; }).empty());
+  live_tuning_native::episode_t pending;
+  ASSERT_EQ(native_trial_feed(pending, 12, [](int s) { return s < 4 ? 3000 : 30000; }),
+            std::vector<int> {17000});
+  pending.accepted_application(41);
+  pending.check_deadline(18'000'000'001);
+  EXPECT_EQ(pending.phase(), live_tuning_native::phase_e::unassessed);
+  auto old = native_trial_signal(12100, 3500, 3600);
+  old.setting->application_sequence = 2; old.setting->origin_revision = 41;
+  old.setting->configured_encoder_kbps = 17000; old.setting->receipt_origin = bp::receipt_origin_e::backend_reconfiguration;
+  EXPECT_FALSE(pending.observe(old)); EXPECT_EQ(pending.phase(), live_tuning_native::phase_e::unassessed);
+}

@@ -1558,3 +1558,40 @@ TEST(LiveTuningPolicyFec, ParityStateNeverChangesTheRateDecisions) {
     EXPECT_EQ(fec.highest_fec, mode == 2 ? 15 : 10);
   }
 }
+
+TEST(LiveTuningPolicyNative, DedicatedLowerTargetFreezesEnetLossTimersAndFecWithoutLearning) {
+  live_tuning_policy::policy_t policy {20000, 2000};
+  policy.configure_fec(10);
+  for (int i = 0; i < 40; ++i) { policy.rtt(i * 1000, 3); policy.report(i * 1000, 120, 0); }
+  const double background = policy.background_loss();
+  const auto ceiling = policy.ceiling_kbps();
+  ASSERT_TRUE(policy.native_downward(40000, 20000, 17000));
+  ASSERT_EQ(policy.state(), live_tuning_policy::state_e::native_hold);
+  EXPECT_EQ(policy.target_kbps(), 17000);
+  const auto changes = policy.changes();
+  for (int i = 41; i < 2000; ++i) {
+    policy.rtt(i * 1000, i % 2 ? 3 : 300);
+    policy.report(i * 1000, 120, i % 2 ? 0 : 60);
+    policy.tick(i * 1000 + 900);
+  }
+  EXPECT_EQ(policy.target_kbps(), 17000); EXPECT_EQ(policy.changes(), changes);
+  EXPECT_EQ(policy.background_loss(), background); EXPECT_EQ(policy.ceiling_kbps(), ceiling);
+  EXPECT_FALSE(policy.fec_request()); EXPECT_EQ(policy.fec_percentage(), 10);
+  EXPECT_FALSE(policy.native_downward(2000000, 17000, 14450));
+  policy.adopt(2000000, 17000);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::native_hold);
+  policy.adopt(2000001, 16000); // A different outside writer retains its existing authority.
+  EXPECT_EQ(policy.target_kbps(), 16000); EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+}
+
+TEST(LiveTuningPolicyNative, RefusesWrongCurrentFloorUpwardAndExistingLossFamily) {
+  live_tuning_policy::policy_t policy {20000, 2000};
+  EXPECT_FALSE(policy.native_downward(0, 19000, 17000));
+  EXPECT_FALSE(policy.native_downward(0, 20000, 20000));
+  EXPECT_FALSE(policy.native_downward(0, 20000, 25000));
+  EXPECT_FALSE(policy.native_downward(0, 20000, 1999));
+  policy.adopt(1, 18000);
+  const auto ceiling = policy.ceiling_kbps();
+  EXPECT_FALSE(policy.native_downward(2, 18000, 15300));
+  EXPECT_EQ(policy.target_kbps(), 18000); EXPECT_EQ(policy.ceiling_kbps(), ceiling);
+}

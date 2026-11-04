@@ -229,8 +229,30 @@ namespace stream_frame_feedback {
     /// Const inclusive access for native packet correlation, including frame zero. The historical
     /// exclusive join above and its callers keep their original behavior and locking.
     join_t join_inclusive(std::uint32_t first_inclusive, std::uint32_t to_inclusive,
-                clock::time_point now, clock::duration bound) const noexcept {
-      std::lock_guard lock {mutex_};
+                clock::time_point now, clock::duration bound, bool try_only = false) const noexcept {
+      std::unique_lock lock {mutex_, std::defer_lock};
+      if (try_only) {
+        if (!lock.try_lock()) { join_t busy; busy.reason = "ledger_busy"; return busy; }
+      } else lock.lock();
+      return join_inclusive_locked(first_inclusive, to_inclusive, now, bound);
+    }
+
+    // Immediate downward publication only; retain sender retirement/setting exclusion through
+    // the consumer. The consumer must not call this ledger or invoke an encoder/SDK operation.
+    template<class Consume>
+    bool with_join_inclusive(std::uint32_t first, std::uint32_t last, clock::time_point now,
+                             clock::duration bound, Consume &&consume) const {
+      std::unique_lock lock {mutex_, std::try_to_lock};
+      if (!lock.owns_lock()) return false;
+      const auto joined = join_inclusive_locked(first, last, now, bound);
+      if (!joined.available) return false;
+      consume(joined);
+      return true;
+    }
+
+  private:
+    join_t join_inclusive_locked(std::uint32_t first_inclusive, std::uint32_t to_inclusive,
+                                clock::time_point now, clock::duration bound) const noexcept {
       join_t out;
       const auto fail = [&out](const char *reason, std::optional<std::uint32_t> frame = std::nullopt) {
         out.reason = reason;

@@ -320,3 +320,30 @@ TEST(VideoBitrateProvenance, MissingUnmatchedAndRepeatedOutputNeverBorrowOrConsu
   EXPECT_EQ(first->input_pts(), 100);
   EXPECT_FALSE(ledger.take(scope, 100));
 }
+
+TEST(VideoBitrateProvenance, CurrentWitnessIsNotHistoricalAndExpiresOnRetirement) {
+  ledger_t ledger {scope};
+  const auto view = ledger.current_setting_view().lock();
+  ASSERT_TRUE(view);
+  bool called = false;
+  EXPECT_FALSE(view->with_current([&](const auto &) { called = true; }));
+  ASSERT_TRUE(ledger.observe_receipt(receipt(scope, 1, 10, 20000, receipt_origin_e::successful_open)));
+  const auto old = ledger.capture(1); ASSERT_TRUE(old);
+  ASSERT_TRUE(ledger.complete(*old, submitted));
+  ASSERT_TRUE(ledger.observe_receipt(receipt(scope, 2, 11, 8000)));
+  EXPECT_TRUE(view->with_current([&](const auto &current) {
+    called = true; EXPECT_EQ(current.application_sequence, 2u); EXPECT_EQ(current.authority_revision, 11u);
+    EXPECT_EQ(current.configured_encoder_kbps, 8000);
+  }));
+  EXPECT_TRUE(called);
+  const auto historical = ledger.take(scope, 1); ASSERT_TRUE(historical);
+  EXPECT_EQ(historical->configured_encoder_kbps(), 20000);
+  // Same-rate reapplication is unknown, never the last accepted historical tuple.
+  EXPECT_FALSE(ledger.observe_receipt(receipt(scope, 3, 12, 8000)));
+  EXPECT_FALSE(view->with_current([](const auto &) {}));
+  ASSERT_TRUE(ledger.observe_receipt(receipt(scope, 4, 13, 6000)));
+  const auto weak = ledger.current_setting_view();
+  ledger.retire();
+  EXPECT_FALSE(view->with_current([](const auto &) {}));
+  EXPECT_FALSE(weak.expired()); // A reader can retain storage, never a live receipt.
+}

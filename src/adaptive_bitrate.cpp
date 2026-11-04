@@ -17,6 +17,7 @@
 #include "config.h"
 #include "live_tuning_policy.h"
 #include "live_tuning_fec.h"
+#include "stream_native_reception.h"
 #include "logging.h"
 
 using namespace std::literals;
@@ -94,6 +95,15 @@ namespace adaptive_bitrate {
   // This stream's loss and queue policy. Protected by state_mutex. Created when feedback first arrives
   // with a base bitrate, and dropped by reset().
   static std::optional<live_tuning_policy::policy_t> stream_policy;
+  static live_tuning_native::episode_t native_episode;
+  static std::weak_ptr<stream_native_reception::scope_t> native_owner;
+  static std::string native_launch_nonce;
+  static std::weak_ptr<const video::bitrate_provenance::current_setting_t> native_current_setting;
+  static void retire_native_for_writer_locked() {
+    native_episode = {};
+    native_owner.reset();
+    native_launch_nonce.clear();
+  }
   static live_tuning_fec::actuator_t fec_actuator;
   static bool runtime_bitrate_in_place = false;
   static int runtime_bitrate_floor_kbps = 1;
@@ -190,7 +200,7 @@ namespace adaptive_bitrate {
   }
 
   static bool folds_into(const history_entry_t &last, const history_entry_t &next) {
-    if (last.fec_transition || next.fec_transition ||
+    if (last.fec_transition || next.fec_transition || last.native_transition || next.native_transition ||
         last.kind != next.kind || next.kind == "decision" || next.kind == "scope_started") {
       return false;
     }
@@ -458,6 +468,7 @@ namespace adaptive_bitrate {
   // A policy or outside writer owns a new F0-unit target. Publish the baseline before
   // it can raise the encoder rate, and invalidate even a same-value/ABA trial.
   static void retire_fec_for_writer_locked(const char *cause) {
+    retire_native_for_writer_locked();
     if (fec_actuator.configured()) {
       const auto before = fec_snapshot_locked();
       fec_actuator.restore();
@@ -477,6 +488,7 @@ namespace adaptive_bitrate {
   }
 
   static void apply_fec_policy_locked(live_tuning_policy::policy_t &policy, bool media_report = false) {
+    if (policy.state() == live_tuning_policy::state_e::native_hold) return;
     if (!fec_actuator.configured() || fec_actuator.pending()) {
       return;
     }
@@ -652,6 +664,9 @@ namespace adaptive_bitrate {
         return;
       case state_e::rtt_cut:
         set_controller_status("network_pressure", "standing_queue");
+        return;
+      case state_e::native_hold:
+        set_controller_status("network_pressure", "native_downward_hold");
         return;
       case state_e::bisect:
         set_controller_status("network_pressure", "finding_the_link");
@@ -1187,6 +1202,106 @@ namespace adaptive_bitrate {
     return out;
   }
 
+  bool update_native_signal(const std::shared_ptr<stream_native_reception::scope_t> &owner,
+                            std::string_view app_session, std::string_view launch_nonce,
+                            const native_video_signal::signal_t &signal, bool published,
+                            const std::function<bool()> &current_caller) {
+    std::unique_lock lock {state_mutex, std::try_to_lock};
+    if (!lock.owns_lock() || !current_config.native_downward) return false;
+    // Reconstruct permission from current state. The earlier context only supplies compare values.
+    const auto &c = signal.context;
+    const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
+    const int floor = std::max(current_config.min_bitrate_kbps, runtime_bitrate_floor_kbps);
+    const bool pending_native = native_episode.phase() == live_tuning_native::phase_e::awaiting_application;
+    const bool permission = owner && signal.generation && signal.generation == scope_generation &&
+      owner->generation() == scope_generation && scope_exclusive && !app_session.empty() &&
+      app_session == scope_app_session_id && stream_frame_feedback::valid_nonce(launch_nonce) &&
+      current_config.enabled && enabled.load(std::memory_order_relaxed) && !paused_for_stream &&
+      runtime_update_supported.load(std::memory_order_relaxed) && runtime_bitrate_in_place &&
+      !doctor_override_active.load(std::memory_order_relaxed) &&
+      !explicit_live_override_active.load(std::memory_order_relaxed) &&
+      !pending_live_update_active.load(std::memory_order_relaxed) &&
+      c.observed && c.operator_revision == operator_revision && c.action_revision == action_authority_revision &&
+      c.applied_revision == encoder_applied_revision && c.requested_kbps == target && c.floor_kbps == floor &&
+      c.applied_kbps == encoder_applied_bitrate_kbps && encoder_applied_bitrate_kbps > 0 &&
+      encoder_applied_revision && floor > 0 && target >= floor &&
+      target <= base_bitrate_kbps.load(std::memory_order_relaxed) &&
+      signal.caller.running && !signal.caller.watch_or_input_only && signal.caller.negotiated &&
+      signal.caller.control_authenticated && current_caller && current_caller() &&
+      (!fec_actuator.configured() || (!fec_actuator.pending() &&
+        fec_actuator.percentage() == fec_actuator.configured_percentage())) &&
+      (pending_native || (target == encoder_applied_bitrate_kbps &&
+        (signal.inspection_ready || (native_episode.spent() && c.reason == native_video_signal::context_reason_e::at_floor))));
+    if (!permission) {
+      native_episode.unavailable(); return false;
+    }
+    if (native_owner.lock() != owner || native_launch_nonce != launch_nonce) {
+      retire_native_for_writer_locked();
+      native_owner = owner; native_launch_nonce = launch_nonce;
+    }
+    const auto receipt_owner = native_current_setting.lock();
+    bool consumed = false;
+    if (receipt_owner) receipt_owner->with_current([&](const auto &receipt) {
+      const stream_frame_feedback::encoder_setting_t actual {
+        receipt.scope.encoder_lifetime, receipt.scope.stream_generation, receipt.application_sequence,
+        receipt.authority_revision, receipt.configured_encoder_kbps, receipt.origin};
+      if (pending_native && native_episode.pending_setting_matches(actual) &&
+          actual.configured_encoder_kbps == encoder_applied_bitrate_kbps &&
+          (!published || !signal.measurement_available || !signal.setting || actual != *signal.setting)) {
+        // A normal mixed C/D report earns nothing, but cannot shorten/extend the fixed proof window.
+        owner->with_current_signal(signal, [&] {
+          if (!current_caller()) return;
+          consumed = true;
+          native_episode.wait_for_application(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        }, false);
+        return;
+      }
+      if (!published || !signal.measurement_available) return;
+      if (!signal.setting || actual != *signal.setting ||
+          actual.configured_encoder_kbps != encoder_applied_bitrate_kbps) return;
+      owner->with_current_signal(signal, [&] {
+        // Recheck the live session at the last boundary; no SDK call is made under these locks.
+        if (!current_caller()) return;
+        auto &policy = policy_locked(policy_now_ms());
+        if (!native_episode.spent() && policy.state() != live_tuning_policy::state_e::normal) return;
+        consumed = true;
+        const auto before = native_episode.phase();
+        native_episode.check_deadline(std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+        const auto next = native_episode.observe(signal);
+        if (next) {
+          if (!policy.native_downward(policy_now_ms(), target, *next)) {
+            native_episode.unavailable(); return;
+          }
+          policy_target_kbps = *next; // Exact D in both domains; no hidden encoder-only clamp.
+          target_bitrate_kbps.store(*next, std::memory_order_relaxed);
+          ++operator_revision; ++action_authority_revision;
+          native_episode.dispatched_at(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+          set_policy_status_locked(policy);
+          history_entry_t entry;
+          entry.kind = "native_downward_requested"; entry.cause = "native_elapsed_standing";
+          entry.native_transition = native_episode.evidence();
+          append_history_locked(std::move(entry));
+          note_decision_locked("native_elapsed_standing");
+          state_changed.notify_all();
+        } else if (before != native_episode.phase()) {
+          history_entry_t entry;
+          entry.kind = "native_downward_observed";
+          const auto phase = native_episode.phase();
+          entry.cause = phase == live_tuning_native::phase_e::response ? "native_backend_tuple_confirmed" :
+            phase == live_tuning_native::phase_e::responded ? "native_sampled_response" :
+            phase == live_tuning_native::phase_e::ineffective ? "native_trial_ineffective" : "native_trial_unassessed";
+          entry.native_transition = native_episode.evidence();
+          append_history_locked(std::move(entry));
+        }
+      });
+    });
+    if (!consumed) native_episode.unavailable();
+    return consumed;
+  }
+
   std::optional<live_pacing_cap_t> get_live_pacing_cap(std::uint64_t generation) {
     // The shared sender must not wait behind an encoder/SDK reconfiguration.
     // No field is read until this coherent, non-blocking snapshot is owned.
@@ -1225,6 +1340,10 @@ namespace adaptive_bitrate {
       return false;
     }
     if (apply()) {
+      if (native_episode.phase() == live_tuning_native::phase_e::awaiting_application &&
+          request.target_bitrate_kbps == native_episode.evidence().requested_kbps) {
+        native_episode.accepted_application(request.revision);
+      }
       encoder_applied_bitrate_kbps = request.target_bitrate_kbps;
       last_confirmed_bitrate_kbps = request.target_bitrate_kbps;
       encoder_applied_revision = request.revision;
@@ -1317,6 +1436,8 @@ namespace adaptive_bitrate {
     // rollback to the value it used before Doctor acted. Keep runtime support
     // available so an in-flight rollback can wait for the replacement session
     // instead of failing immediately as unsupported.
+    retire_native_for_writer_locked();
+    native_current_setting.reset();
     encoder_applied_bitrate_kbps = 0;
     encoder_applied_revision = 0;
     encoder_applied_at = {};
@@ -1554,9 +1675,12 @@ namespace adaptive_bitrate {
                                     const std::string &reason,
                                     int initial_encoder_bitrate_kbps,
                                     bool in_place,
-                                    int in_place_floor_kbps) {
+                                    int in_place_floor_kbps,
+                                    std::weak_ptr<const video::bitrate_provenance::current_setting_t> current_setting) {
     std::lock_guard<std::mutex> lock(state_mutex);
     decision_note_t note {"runtime_support"};
+    retire_native_for_writer_locked();
+    native_current_setting = std::move(current_setting);
     runtime_bitrate_in_place = supported && in_place;
     runtime_bitrate_floor_kbps = std::max(in_place_floor_kbps, 1);
     if (initial_encoder_bitrate_kbps > 0 && fec_actuator.configured() &&
@@ -1620,6 +1744,7 @@ namespace adaptive_bitrate {
     pending_live_update_active.store(false, std::memory_order_relaxed);
 
     current_config.enabled = config::video.adaptive_bitrate.enabled;
+    current_config.native_downward = config::video.adaptive_bitrate.native_downward;
     current_config.min_bitrate_kbps = config::video.adaptive_bitrate.min_bitrate_kbps;
     floor_source = "adaptive_bitrate_min";
     paused_for_stream = false;
@@ -1640,6 +1765,8 @@ namespace adaptive_bitrate {
 
   void reset() {
     std::lock_guard<std::mutex> lock(state_mutex);
+    retire_native_for_writer_locked();
+    native_current_setting.reset();
     fec_actuator.reset();
     runtime_bitrate_in_place = false;
     runtime_bitrate_floor_kbps = 1;

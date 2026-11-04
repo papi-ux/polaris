@@ -89,6 +89,7 @@ namespace live_tuning_policy {
     hold,  ///< At a selected rate, retrying the one above it now and then.
     climb,  ///< Raising toward the request on clean reports.
     rtt_cut,  ///< Cutting until a standing queue drains.
+    native_hold,  ///< Experimental native downward request; no automatic exit or legacy judgments.
   };
 
   std::string_view name(state_e state);
@@ -143,6 +144,11 @@ namespace live_tuning_policy {
 
     /// Host time passed with no reading: a raise no report can judge is taken back.
     void tick(std::int64_t now_ms);
+
+    /// Dedicated downward-only entry. No legacy sample, failed hold or learned baseline is cleared.
+    /// Missing/flat native or ENet input cannot resume adaptation. An outside writer retains its
+    /// existing adopt/rebase authority; a same-target writer leaves this conservative hold intact.
+    bool native_downward(std::int64_t now_ms, int expected_kbps, int next_kbps);
 
     /// An outside writer (encoder load, Doctor, a manual bitrate) set the rate: carry on from it.
     void adopt(std::int64_t now_ms, int kbps);

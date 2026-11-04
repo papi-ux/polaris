@@ -89,6 +89,7 @@ namespace nvenc {
     std::optional<video::bitrate_provenance::record_t> take_bitrate_observation(uint64_t output_timestamp) noexcept;
     bool publish_usable_bitrate_open() noexcept;
     void retire_bitrate_observations() noexcept;
+    std::weak_ptr<const video::bitrate_provenance::current_setting_t> current_bitrate_setting() const noexcept;
 
   protected:
     /**

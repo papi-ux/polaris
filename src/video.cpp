@@ -2338,6 +2338,12 @@ namespace video {
       }
     }
 
+    std::weak_ptr<const bitrate_provenance::current_setting_t> current_bitrate_setting() const noexcept {
+      auto *encode_device = device();
+      return encode_device && encode_device->nvenc ? encode_device->nvenc->current_bitrate_setting() :
+        std::weak_ptr<const bitrate_provenance::current_setting_t> {};
+    }
+
     std::optional<bitrate_provenance::record_t> take_bitrate_observation(uint64_t output_timestamp) noexcept {
       auto *encode_device = device();
       return encode_device && encode_device->nvenc ?
@@ -5615,12 +5621,17 @@ namespace video {
     }
 
     bool bitrate_session_recreation_pending = false;
+    std::weak_ptr<const bitrate_provenance::current_setting_t> current_bitrate_setting;
+    if (const auto *native = dynamic_cast<const nvenc_encode_session_t *>(session.get())) {
+      current_bitrate_setting = native->current_bitrate_setting();
+    }
     adaptive_bitrate::set_runtime_update_supported(
       session->supports_runtime_bitrate_update(),
       {},
       config.bitrate,
       session->supports_in_place_bitrate_update(),
-      session->minimum_in_place_bitrate_kbps()
+      session->minimum_in_place_bitrate_kbps(),
+      current_bitrate_setting
     );
     auto runtime_bitrate_guard = util::fail_guard([&bitrate_session_recreation_pending] {
       if (!bitrate_session_recreation_pending) {

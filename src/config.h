@@ -157,6 +157,7 @@ namespace config {
       bool enabled;
       int min_bitrate_kbps;
       int max_bitrate_kbps;  ///< adaptive_bitrate_max: read so old files load, and warned about; never cuts a client's bitrate.
+      bool native_downward = false;  ///< Separate experimental host opt-in; Live Tuning On does not enable it.
     } adaptive_bitrate;
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
