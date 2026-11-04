@@ -2865,14 +2865,29 @@ namespace stream_stats {
           next_step = "Recheck Live Tuning";
           expected = "If the loss grows, Live Tuning lowers the bitrate. Light loss that stays usually comes from the Wi-Fi itself: moving closer to the access point, using its 5 or 6 GHz band, or a wired connection should lower it.";
         } else if (live_tuning.acts) {
-          // Sustained video frame loss is Live Tuning's to act on while it can change the rate live.
-          const bool found = live_tuning.ceiling_kbps > 0;
-          body = "Sustained video frame loss is affecting this stream. Live Tuning is lowering the bitrate to what the link carries" +
-                 (found ? std::string {", and holds under about "} + whole_mbps(live_tuning.ceiling_kbps) + ", where it found " +
-                            (live_tuning.ceiling_is_queue ? "a queue" : "loss") : std::string {}) +
-                 ". Doctor measures again instead of changing the bitrate as well.";
+          // Ownership does not establish a cut. Explain only the reported policy state and reason;
+          // a held ceiling is not an ongoing reduction, and a trial does not prove an encoder change.
+          body = "Sustained video frame loss is affecting this stream. ";
+          if (live_tuning.state == "network_pressure" &&
+              (live_tuning.reason == "holding_under_the_link" || live_tuning.reason == "holding_under_a_queue")) {
+            body += "Live Tuning is holding the bitrate";
+            if (live_tuning.ceiling_kbps > 0) {
+              body += " under about " + whole_mbps(live_tuning.ceiling_kbps) + ", where it found " +
+                      (live_tuning.ceiling_is_queue ? "a queue" : "loss");
+            }
+          } else if (live_tuning.state == "network_pressure" &&
+                     (live_tuning.reason == "packet_loss" || live_tuning.reason == "standing_queue")) {
+            body += "Live Tuning is checking whether a lower bitrate helps";
+          } else if (live_tuning.state == "network_pressure" && live_tuning.reason == "finding_the_link") {
+            body += "Live Tuning is checking what bitrate the link carries";
+          } else if (live_tuning.state == "frame_pacing_observed" && live_tuning.reason == "frame_pacing") {
+            body += "Live Tuning observed frame timing variation";
+          } else {
+            body += "Live Tuning controls the live bitrate";
+          }
+          body += ". Doctor measures again instead of changing the bitrate as well.";
           next_step = "Recheck Live Tuning";
-          expected = "The loss should clear at the bitrate Live Tuning settles on. It tries a higher bitrate again about every 20 seconds and climbs back toward your request when the link allows.";
+          expected = "Doctor will measure video frame loss and round trip time again while Live Tuning controls the bitrate.";
         } else if (live_bitrate_tunable) {
           body = "Video is being lost or delayed on the network. Doctor can lower the bitrate one step and check whether that clears it.";
           next_step = "Fix and verify";
