@@ -933,18 +933,32 @@ TEST(NativeDownwardEpisode, RealMixedAdmissionCanWaitForCurrentDWithoutExtending
             std::vector<int> {17000});
   const auto now = test_clock::now();
   const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-  episode.dispatched_at(now_ns - 1'000'000); episode.accepted_application(41);
+  // The two client reports end 100ms apart but arrive together: the mixed report was delayed.
+  // Dispatch precedes both D sends. These fixture timestamps do not change either 6s deadline.
+  const auto dispatched_ns = now_ns - 110'000'000;
+  episode.dispatched_at(dispatched_ns); episode.accepted_application(41);
   auto frames = std::make_shared<ff::sender_ledger_t>(615);
   nr::scope_t native {615, frames, true};
-  auto c = actual_setting(); c.configured_encoder_kbps = 20000;
-  auto d = c; d.application_sequence = 2; d.origin_revision = 41;
-  d.configured_encoder_kbps = 17000; d.receipt_origin = bp::receipt_origin_e::backend_reconfiguration;
-  for (const auto &[id, setting] : std::vector<std::pair<unsigned, ff::encoder_setting_t>> {{1, c}, {2, d}}) {
-    const auto ticket = frames->begin(id, setting, now - 6ms); ASSERT_TRUE(ticket);
-    frames->complete(*ticket, ff::send_disposition_e::sent, now - 4ms);
-    native.record(id, static_cast<std::uint16_t>(id), 1000, false, now - 5ms, now - 4ms, true);
+  bp::ledger_t producer {{9, 615}};
+  ASSERT_TRUE(producer.observe_receipt({{9, 615}, 1, 8, 20000, bp::receipt_origin_e::successful_open}));
+  const auto c_input = producer.capture(1); ASSERT_TRUE(c_input);
+  ASSERT_TRUE(producer.complete(*c_input, bp::submission_result_e::submitted_under_captured_setting));
+  const auto c_output = producer.take({9, 615}, 1); ASSERT_TRUE(c_output);
+  const auto c = *ff::encoder_setting_of(std::optional<const bp::record_t> {*c_output});
+  ASSERT_EQ(episode.evidence().source, c);
+  ASSERT_TRUE(producer.observe_receipt({{9, 615}, 2, 41, 17000, bp::receipt_origin_e::backend_reconfiguration}));
+  const auto d_input = producer.capture(2); ASSERT_TRUE(d_input);
+  ASSERT_TRUE(producer.complete(*d_input, bp::submission_result_e::submitted_under_captured_setting));
+  const auto d_output = producer.take({9, 615}, 2); ASSERT_TRUE(d_output);
+  const auto d = *ff::encoder_setting_of(std::optional<const bp::record_t> {*d_output});
+  for (const auto &[id, setting] : std::vector<std::pair<unsigned, ff::encoder_setting_t>> {{1, c}, {2, d}, {3, d}}) {
+    const auto sent = id < 3 ? now - 105ms : now - 5ms;
+    const auto ticket = frames->begin(id, setting, sent - 1ms); ASSERT_TRUE(ticket);
+    frames->complete(*ticket, ff::send_disposition_e::sent, sent + 1ms);
+    native.record(id, static_cast<std::uint16_t>(id), 1000, false, sent, sent + 1ms, true);
   }
   auto r = reading(2); r.sequence = 20001; r.first_frame = 1; r.last_frame = 2;
+  r.last_accepted_age_us = 1000;
   r.samples[0] = {1, 1, 1000}; r.samples[1] = {2, 2, 1000};
   nr::admission_trace_t mixed;
   native.accept(wire(r), true, now, &mixed);
@@ -959,15 +973,16 @@ TEST(NativeDownwardEpisode, RealMixedAdmissionCanWaitForCurrentDWithoutExtending
   EXPECT_FALSE(native.with_current_signal(transition, [] {}));
   ASSERT_TRUE(native.with_current_signal(transition, [&] { episode.wait_for_application(now_ns); }, false));
   EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::awaiting_application);
-  EXPECT_EQ(episode.evidence().dispatched_ns, now_ns - 1'000'000);
+  EXPECT_EQ(episode.evidence().dispatched_ns, dispatched_ns);
   r.count = 1; r.sequence = 20002; r.end_us = 200000; r.loop_tick = 20;
   r.data_packets = 1; r.data_bytes = 1000;
-  r.first_frame = r.last_frame = 2; r.samples[0] = {2, 2, 1000};
+  r.first_frame = r.last_frame = 3; r.samples[0] = {3, 3, 1000};
   nr::admission_trace_t proven;
   native.accept(wire(r), true, now, &proven);
   ASSERT_EQ(proven.availability, nr::reason_e::joined);
   auto signal = native_video_signal::project(proven, caller, context);
   ASSERT_TRUE(signal.measurement_available); ASSERT_TRUE(native.publish_signal(signal));
+  ASSERT_TRUE(signal.setting); EXPECT_EQ(*signal.setting, d);
   ASSERT_TRUE(native.with_current_signal(signal, [&] { EXPECT_FALSE(episode.observe(signal)); }));
   EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::response);
   native.retire();
