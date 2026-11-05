@@ -206,6 +206,18 @@ describe('session snapshot rows', () => {
       .toBe('7.9 ms round trip / 1.87% of video frames lost over 20 s')
   })
 
+  // Troubleshooting's Frame timing row read "target interval error" for every stream, as the
+  // Mission Control pill did. It names a source-paced stream's encode handoff basis instead.
+  it('names what the frame interval error is measured against', () => {
+    const timing = (stats) => buildSessionSnapshotRows(stats, english).details.find(row => row.label === 'Frame timing').value
+    const live = { ...streaming, avg_frame_age_ms: 4.5, frame_interval_error_ms: 0.8 }
+    const measured = { basis: 'source_relative_encode_handoff', available: true, receiver_presentation_verified: false }
+    expect(timing(live)).toBe('4.50 ms age / 0.80 ms target interval error')
+    expect(timing({ ...live, frame_pacing_measurement: measured })).toBe('4.50 ms age / 0.80 ms encode handoff error (Source-paced)')
+    expect(timing({ ...live, frame_pacing_measurement: { ...measured, available: false } })).toBe('4.50 ms age / Source-paced · Waiting for timing evidence')
+    expect(timing({ ...live, frame_pacing_measurement: { basis: 'future_basis' } })).toBe('4.50 ms age / 0.80 ms interval error (Not verified)')
+  })
+
   it('summarises stream stats for the advanced diagnostics tile', () => {
     expect(summarizeStreamStats({}, t)).toBe('snapshot_no_active_stream')
     expect(summarizeStreamStats({

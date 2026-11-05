@@ -12,6 +12,20 @@ describe('canonical Live Tuning', () => {
     expect(liveTuningLabel(off)).toBe('Live Tuning Off')
     expect(liveTuningLabel(fixtures[6].live_tuning)).toContain('On')
   })
+  // The controller's frame_pacing_observed status arrives as reason frame_pacing under stable or
+  // adjusting. It cuts nothing, so it must not read as plain "stable", nor as a bitrate change.
+  it('names an observed frame-pacing variation instead of calling the stream stable', () => {
+    const stable = { ...fixtures.find(row => row.live_tuning.state === 'stable').live_tuning, reason: 'frame_pacing' }
+    expect(parseLiveTuning(stable)).toEqual(stable)
+    expect(liveTuningLabel(stable)).toBe('On — frame timing variation observed')
+    expect(liveTuningLabel({ ...stable, state: 'adjusting' })).toBe('On — adjusting; frame timing variation observed')
+    expect(liveTuningLabel({ ...stable, state: 'applying' })).toBe('On — applying bitrate')
+    expect(liveTuningLabel({ ...stable, reason: 'healthy' })).toBe('Live Tuning On — stable')
+    expect(liveTuningLabel({ ...stable, enabled: false })).toBe('Live Tuning Off')
+    for (const state of ['stable', 'adjusting']) expect(liveTuningLabel({ ...stable, state })).not.toMatch(/VRR|Hz|lower/i)
+    // A state the v1 contract does not carry stays rejected rather than guessed at.
+    expect(parseLiveTuning({ ...stable, state: 'frame_pacing_observed' })).toBeNull()
+  })
   it('rejects invalid state and distinguishes connection loss from Off', () => {
     expect(parseLiveTuning({ ...fixtures[0].live_tuning, enabled: 'false' })).toBeNull()
     expect(liveTuningLabel(fixtures[0].live_tuning, false)).toBe('Live Tuning: Unknown')

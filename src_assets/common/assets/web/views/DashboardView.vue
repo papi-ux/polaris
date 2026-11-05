@@ -333,7 +333,7 @@
                 <div class="flex flex-wrap gap-1.5" data-dashboard-frame-health>
                   <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
                   <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
-                  <span class="data-pill" :class="frameHealth.intervalErrorTone">{{ frameHealth.intervalError }} target interval error</span>
+                  <span class="data-pill" :class="frameHealth.intervalErrorTone" :title="frameHealth.intervalErrorTitle" :data-frame-interval-basis="frameHealth.intervalBasis">{{ frameHealth.intervalErrorLabel }}</span>
                 </div>
                 <p v-if="prefersReducedMotion" class="mt-2 text-sm text-support">Live charts are paused while reduced motion is enabled.</p>
               </section>
@@ -507,6 +507,7 @@ import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync, resolveStreamDisplayMode } from '../client-settings-sync'
 import { captureStatusTone } from '../capture-status-tone.js'
 import StreamPacingReadout from '../components/StreamPacingReadout.vue'
+import { frameIntervalReadout } from '../stream-pacing-readout.js'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { doctorIsWaitingForStream } from '../doctor-observation.js'
@@ -1233,21 +1234,25 @@ const previewStatusText = computed(() => {
 
 
 
-// Frame health: dropped/duplicate ratios and mean target-interval error arrive
-// on every SSE tick. The interval metric is not statistical network jitter.
+// Frame health: dropped/duplicate ratios and the frame interval error arrive
+// on every SSE tick. The interval metric is not statistical network jitter, and
+// its basis (requested interval or source-relative encode handoff) is named.
 const frameHealth = computed(() => {
   const s = stats.value || {}
   const dropped = Number(s.dropped_frame_ratio)
   const duplicate = Number(s.duplicate_frame_ratio)
-  const intervalError = Number(s.frame_interval_error_ms ?? s.frame_jitter_ms)
+  const interval = frameIntervalReadout(s, t)
   const pct = (v) => (Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : '--')
   return {
     dropped: pct(dropped),
     droppedTone: Number.isFinite(dropped) && dropped > 0.02 ? 'text-danger' : Number.isFinite(dropped) && dropped > 0.005 ? 'text-warning' : '',
     duplicate: pct(duplicate),
     duplicateTone: Number.isFinite(duplicate) && duplicate > 0.05 ? 'text-warning' : '',
-    intervalError: Number.isFinite(intervalError) ? `${intervalError.toFixed(1)} ms` : '--',
-    intervalErrorTone: Number.isFinite(intervalError) && intervalError > 4 ? 'text-warning' : '',
+    intervalBasis: interval.basis,
+    intervalError: interval.value,
+    intervalErrorLabel: interval.label,
+    intervalErrorTitle: interval.title,
+    intervalErrorTone: interval.tone,
   }
 })
 

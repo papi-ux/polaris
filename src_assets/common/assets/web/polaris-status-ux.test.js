@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { buildReadyCheckDisplay, isIdleVirtualDisplayCheck } from './dashboard-ready-checks.js'
 import { captureStatusTone } from './capture-status-tone.js'
 import { launchModeReadout } from './launch-mode-readout.js'
-import { streamPacingReadouts } from './stream-pacing-readout.js'
+import { frameIntervalBasis, frameIntervalReadout, streamPacingReadouts } from './stream-pacing-readout.js'
 
 describe('Polaris status evidence', () => {
   const idleDisplayCheck = {
@@ -104,6 +104,54 @@ describe('per-client source pacing receipts', () => {
   it('distinguishes pending evidence and preserves unfamiliar fallback codes without guessing', () => {
     expect(read({ ...client, vrr: { ...receipt, effective: false, pacing_mode: 'source_time_pending', fallback_reason: 'source_time_unproven' } })).toMatchObject({ effective: 'pending', reasonLabel: 'reason_source_time_unproven' })
     expect(read({ ...client, vrr: { ...receipt, effective: false, pacing_mode: 'unverified', fallback_reason: 'future_reason' } })).toMatchObject({ effective: 'unknown', reason: 'future_reason', reasonLabel: 'fallback_used' })
+  })
+})
+
+// Mission Control's frame-health pill once read "target interval error" for every stream. A source-paced
+// stream's figure is encode handoff against the source's own intervals, so the pill and its tooltip name
+// that basis with the stream pacing labels, and neither claims anything about the client display or VRR.
+describe('frame interval error basis', () => {
+  const en = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
+  const t = (key, params = {}) => {
+    const message = key.split('.').reduce((node, part) => node?.[part], en)
+    if (typeof message !== 'string') throw new Error(`missing ${key}`)
+    return message.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
+  }
+  const source = { streaming: true, frame_interval_error_ms: 1.234, frame_jitter_ms: 9,
+    frame_pacing_measurement: { basis: 'source_relative_encode_handoff', available: true, receiver_presentation_verified: false } }
+  const fixed = { streaming: true, frame_interval_error_ms: 5.06, frame_jitter_ms: 5.06 }
+
+  it('reads the basis from the host measurement, never from a client request alone', () => {
+    expect(frameIntervalBasis(fixed)).toBe('fixed_grid')
+    expect(frameIntervalBasis(source)).toBe('source_time')
+    expect(frameIntervalBasis({ ...source, frame_pacing_measurement: { ...source.frame_pacing_measurement, available: false } })).toBe('pending')
+    expect(frameIntervalBasis({ ...source, frame_pacing_measurement: { basis: 'future_basis', available: true } })).toBe('unknown')
+    expect(frameIntervalBasis({ ...fixed, clients: [{ stream_instance_id: 'a', vrr: { schema: 1, requested: 'true', effective: true } }] })).toBe('fixed_grid')
+  })
+  it('names the fixed-rate target interval in the pill and tooltip', () => {
+    const pill = frameIntervalReadout(fixed, t)
+    expect(pill).toMatchObject({ basis: 'fixed_grid', value: '5.1 ms', tone: 'text-warning', label: 'Fixed-rate · 5.1 ms target interval error' })
+    expect(pill.title).toMatch(/^Fixed-rate: .*requested frame interval/)
+    // An older payload with only the compatibility name still reads.
+    expect(frameIntervalReadout({ streaming: true, frame_jitter_ms: 2 }, t).label).toBe('Fixed-rate · 2.0 ms target interval error')
+  })
+  it('names the source-relative encode handoff instead of a target interval when source-paced', () => {
+    const pill = frameIntervalReadout(source, t)
+    expect(pill).toMatchObject({ basis: 'source_time', value: '1.2 ms', tone: '', label: 'Source-paced · 1.2 ms handoff error' })
+    expect(pill.title).toMatch(/^Source-paced: .*encoder handoff intervals.*not verified/)
+    expect(`${pill.label} ${pill.title}`).not.toContain('target interval')
+  })
+  it('shows no figure while source timing evidence is not current, and never claims VRR is active', () => {
+    const pending = frameIntervalReadout({ ...source, frame_pacing_measurement: { ...source.frame_pacing_measurement, available: false } }, t)
+    expect(pending).toMatchObject({ basis: 'pending', value: '--', tone: '', label: 'Source-paced · Waiting for timing evidence' })
+    expect(pending.title).toMatch(/no handoff error is shown/)
+    const unknown = frameIntervalReadout({ ...source, frame_pacing_measurement: { basis: 'future_basis' } }, t)
+    expect(unknown).toMatchObject({ basis: 'unknown', label: '1.2 ms interval error' })
+    expect(unknown.title).toMatch(/^Not verified: /)
+    for (const stats of [fixed, source, { ...source, frame_pacing_measurement: { available: false, basis: 'source_relative_encode_handoff' } }]) {
+      const { label, title } = frameIntervalReadout(stats, t)
+      expect(`${label} ${title}`).not.toMatch(/VRR|active|Hz/)
+    }
   })
 })
 

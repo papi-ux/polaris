@@ -107,5 +107,18 @@ describe('Live Tuning switch', () => {
     expect(announced).not.toHaveBeenCalled()
     window.removeEventListener('polaris:live-tuning-saved', announced)
   })
+  it('shows an observed frame-pacing variation without claiming a bitrate change', async () => {
+    const sources = []
+    vi.stubGlobal('EventSource', class { constructor() { sources.push(this) } close() {} })
+    const a = mount(LiveTuningControl, { props: { compact: true } }); wrappers.push(a)
+    const stable = { ...fixtures[6].live_tuning, host_instance: 'frame-pacing-host', sequence: 1 }
+    const emit = async live_tuning => { sources[0].onmessage({ data: JSON.stringify({ live_tuning }) }); await flushPromises() }
+    await emit(stable)
+    expect(a.get('[aria-live=polite]').text()).toBe('Live Tuning On — stable')
+    await emit({ ...stable, reason: 'frame_pacing', sequence: 2 })
+    expect(a.get('[aria-live=polite]').text()).toBe('On — frame timing variation observed')
+    expect(a.text()).not.toContain('Applying requested bitrate')
+    expect(a.get('[role=switch]').attributes('aria-checked')).toBe('true')
+  })
 
 })

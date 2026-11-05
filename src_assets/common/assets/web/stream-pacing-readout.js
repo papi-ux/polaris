@@ -3,6 +3,30 @@ const REASONS = new Set(['watch_or_input_only', 'request_malformed', 'not_reques
   'route_fixed_interval', 'clock_domain_unverified', 'source_time_unproven', 'stream_ended',
   'authority_lost', 'pacing_evidence_stale', 'host_permission_off', 'unsupported_codec', 'unsupported_route', 'unsupported_loop'])
 
+// What the stream's frame interval error (frame_interval_error_ms) is measured against. The host
+// serves frame_pacing_measurement only while it source-paces an opted-in client: the error is then
+// encode handoff against the source's own intervals, and stale timing reads as pending. Without it the
+// error is against the requested, fixed interval. Neither verifies the client display's refresh or VRR.
+// The values name config.stream_pacing_* labels, as streamPacingReadouts' effective pacing does.
+export function frameIntervalBasis(stats = {}) {
+  const measurement = stats?.frame_pacing_measurement
+  if (measurement === undefined || measurement === null) return 'fixed_grid'
+  if (measurement?.basis !== 'source_relative_encode_handoff') return 'unknown'
+  return measurement.available === true ? 'source_time' : 'pending'
+}
+
+// The Mission Control frame-health pill for that error: its text and tooltip name the basis, and a
+// source-paced error without current timing evidence shows no figure.
+export function frameIntervalReadout(stats = {}, t) {
+  const basis = frameIntervalBasis(stats)
+  const error = basis === 'pending' ? NaN : Number(stats?.frame_interval_error_ms ?? stats?.frame_jitter_ms)
+  const value = Number.isFinite(error) ? `${error.toFixed(1)} ms` : '--'
+  const params = { basis: t(`config.stream_pacing_${basis}`), source: t('config.stream_pacing_source_time'), value }
+  return { basis, value, label: t(`mission_control.diag_interval_error_${basis}`, params),
+    title: t(`mission_control.diag_interval_basis_${basis}`, params),
+    tone: Number.isFinite(error) && error > 4 ? 'text-warning' : '' }
+}
+
 // Each receipt belongs to its client's opaque stream identity. A global label
 // cannot stand in for another client's timing or a previous generation.
 export function streamPacingReadouts(stats = {}, confirmed = true) {
