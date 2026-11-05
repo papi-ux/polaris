@@ -1367,6 +1367,11 @@ namespace proc {
     std::pair<const void *, const void *> session_lifecycle_identity_for_tests() const;
     const void *capture_preparation_owner_for_tests() const;
     void with_session_lifecycle_lock_for_tests(const std::function<void()> &callback);
+#ifdef __linux__
+    void set_epic_setup_metadata_for_tests(
+      std::function<epic_library::snapshot_t(const std::vector<std::filesystem::path> &)> reader,
+      std::function<void()> observer);
+#endif
     bool begin_session_stop_for_tests();
     void finish_session_stop_for_tests(bool committed);
     /**
@@ -1403,6 +1408,11 @@ namespace proc {
       // Exact accepted native-End ticket identity; not a cleanup-completion flag.
       std::atomic<const void *> native_end_ticket {nullptr};
     };
+
+    epic_library::snapshot_t epic_setup_metadata(const std::vector<std::filesystem::path> &homes);
+#if defined(POLARIS_TESTS) && defined(__linux__)
+    std::function<epic_library::snapshot_t(const std::vector<std::filesystem::path> &)> _epic_setup_metadata_reader;
+#endif
 
     void launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
     int execute_impl(

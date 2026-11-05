@@ -11917,11 +11917,16 @@ namespace proc {
     auto proof = platf::epic::prove_launcher(reason);
     // Best effort; failure does not erase an otherwise valid retained proof or grant authority.
     if (!proof) return {platf::epic::capture_state_t::unavailable, generation, reason};
-    std::lock_guard<std::recursive_mutex> lock(sync.mutex);
-    if (generation != _epic_setup.generation())
-      return {platf::epic::capture_state_t::superseded, _epic_setup.generation(), "setup_generation_changed"};
-    const auto result = _epic_setup.capture(*proof, origin);
-    _epic_launcher_proof = std::move(proof);
+    platf::epic::setup_history_t retained;
+    platf::epic::capture_result_t result;
+    {
+      std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+      if (generation != _epic_setup.generation())
+        return {platf::epic::capture_state_t::superseded, _epic_setup.generation(), "setup_generation_changed"};
+      retained = _epic_setup; // Keep displaced metadata alive until the lock is released.
+      result = _epic_setup.capture(*proof, origin);
+      _epic_launcher_proof = std::move(proof);
+    }
     return result;
 #else
     (void) origin;
@@ -11929,11 +11934,19 @@ namespace proc {
 #endif
   }
 
+  epic_library::snapshot_t proc_t::epic_setup_metadata(const std::vector<std::filesystem::path> &homes) {
+#if defined(POLARIS_TESTS) && defined(__linux__)
+    if (_epic_setup_metadata_reader) return _epic_setup_metadata_reader(homes);
+#endif
+    return epic_library::scan(homes);
+  }
+
   epic_scan_result_t proc_t::scan_epic_library(const std::vector<std::filesystem::path> &homes) {
     epic_scan_result_t out;
 #ifdef __linux__
     auto &sync = session_lifecycle_sync();
     platf::epic::setup_history_t::scan_ticket_t ticket;
+    platf::epic::setup_history_t retained;
     std::shared_ptr<const char> owner;
     const auto idle_generation = _session_lifecycle_gate->try_idle_generation();
     bool idle = false;
@@ -11942,6 +11955,7 @@ namespace proc {
       std::lock_guard<std::recursive_mutex> lock(sync.mutex);
       idle = idle_generation.has_value() && _app_id <= 0 && !_launch_session && sessions.active_sessions == 0 && sessions.pending_sessions == 0;
       owner = sync.capture_owner.load();
+      retained = _epic_setup; // A changed scan proof may retire a large old snapshot.
       ticket = _epic_setup.begin_scan();
     }
     std::string reason;
@@ -11955,15 +11969,32 @@ namespace proc {
       }
     }
     // Only the official metadata slice sits between these observations; no other library scan.
-    out.snapshot = epic_library::scan(homes);
+    out.snapshot = epic_setup_metadata(homes);
     const auto after = platf::epic::prove_launcher(reason);
+    platf::epic::setup_history_t prepared;
+    {
+      std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+      prepared = _epic_setup; // Shared immutable metadata only; no library-sized copy.
+    }
+    const auto history_generation = prepared.generation(), history_revision = prepared.revision();
+    // finish_scan deep-copies metadata. Prepare off-lock, retaining any displaced snapshot
+    // until after publication releases the lifecycle mutex.
+    auto busy_history = prepared;
+    busy_history.finish_scan(ticket, {}, nullptr, false);
+    out.state = prepared.finish_scan(ticket, out.snapshot, after ? &*after : nullptr, true);
     {
       const auto current_generation = _session_lifecycle_gate->try_idle_generation();
       const auto sessions = rtsp_stream::session_snapshot({});
       std::lock_guard<std::recursive_mutex> lock(sync.mutex);
       idle = idle && current_generation == idle_generation && owner == sync.capture_owner.load() && _app_id <= 0 && !_launch_session &&
         sessions.active_sessions == 0 && sessions.pending_sessions == 0;
-      out.state = _epic_setup.finish_scan(ticket, out.snapshot, after ? &*after : nullptr, idle);
+      if (history_generation != _epic_setup.generation() || history_revision != _epic_setup.revision() ||
+          out.state == platf::epic::scan_state_t::superseded) {
+        out.state = platf::epic::scan_state_t::superseded;
+      } else {
+        if (!idle) out.state = platf::epic::scan_state_t::session_busy;
+        std::swap(_epic_setup, idle ? prepared : busy_history);
+      }
       out.receipt_revision = _epic_setup.receipt_revision();
     }
 #else
@@ -12001,7 +12032,7 @@ namespace proc {
       owner = sync.capture_owner.load();
     }
     // No lifecycle mutex or admission gate is held across filesystem/process inspection.
-    const auto metadata = epic_library::scan(game_library::library_home_roots());
+    const auto metadata = epic_setup_metadata(game_library::library_home_roots());
     const auto title = identity ? epic_library::find(metadata, *identity) : std::nullopt;
     const auto target = title ? std::make_optional(epic_process_title(*title)) : std::nullopt;
     out.facts = platf::epic::evaluate_setup(proof ? &*proof : nullptr, target ? &*target : nullptr, true, prerequisites);
@@ -12010,30 +12041,33 @@ namespace proc {
       out.facts.runtime = platf::epic::runtime_state_t::unknown;
       out.facts.reason = "epic_installation_unavailable";
     }
-    const auto final_metadata = epic_library::scan(game_library::library_home_roots());
+    const auto final_metadata = epic_setup_metadata(game_library::library_home_roots());
     if (identity && !epic_library::same_snapshot(metadata, final_metadata)) {
       out.facts.state = platf::epic::readiness_state_t::unknown;
       out.facts.runtime = platf::epic::runtime_state_t::unknown;
       out.facts.reason = "epic_installation_changed";
     }
+    const auto history_generation = history.generation(), history_revision = history.revision();
+    if (out.facts.proof == platf::epic::proof_state_t::changed) history.invalidate_receipt();
+    // receipt compares/copies/sorts metadata; only the local immutable history is used here.
+    out.metadata_available = final_metadata.available;
+    out.receipt = history.receipt(final_metadata, out.facts.proof == platf::epic::proof_state_t::valid);
+    out.last_scan = history.last_scan();
+    out.revision = history.revision();
+    out.receipt_revision = history.receipt_revision();
     {
       const auto current_generation = _session_lifecycle_gate->try_idle_generation();
       const auto sessions = rtsp_stream::session_snapshot({});
       std::unique_lock<std::recursive_mutex> lock(sync.mutex, std::try_to_lock);
       if (!current_generation || current_generation != idle_generation || !lock.owns_lock() || owner != sync.capture_owner.load() ||
-          history.generation() != _epic_setup.generation() || history.revision() != _epic_setup.revision() ||
+          history_generation != _epic_setup.generation() || history_revision != _epic_setup.revision() ||
           _app_id > 0 || _launch_session || sessions.active_sessions || sessions.pending_sessions) {
         out.facts = {};
         out.facts.reason = "setup_generation_changed";
         out.receipt = platf::epic::receipt_state_t::unknown;
         return out;
       }
-      if (out.facts.proof == platf::epic::proof_state_t::changed) _epic_setup.invalidate_receipt();
-      out.metadata_available = final_metadata.available;
-      out.receipt = _epic_setup.receipt(final_metadata, out.facts.proof == platf::epic::proof_state_t::valid);
-      out.last_scan = _epic_setup.last_scan();
-      out.revision = _epic_setup.revision();
-      out.receipt_revision = _epic_setup.receipt_revision();
+      if (out.facts.proof == platf::epic::proof_state_t::changed) std::swap(_epic_setup, history);
     }
 #else
     (void) identity;
@@ -13971,6 +14005,15 @@ namespace proc {
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     callback();
   }
+
+#ifdef __linux__
+  void proc_t::set_epic_setup_metadata_for_tests(
+      std::function<epic_library::snapshot_t(const std::vector<std::filesystem::path> &)> reader,
+      std::function<void()> observer) {
+    _epic_setup_metadata_reader = std::move(reader);
+    _epic_setup.set_metadata_observer_for_tests(std::move(observer));
+  }
+#endif
 
   bool proc_t::begin_session_stop_for_tests() {
     return _session_lifecycle_gate->begin_stop();

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -143,8 +144,14 @@ namespace platf::epic {
     scan_state_t last_scan() const { return last_scan_; }
     capture_origin_t origin() const { return origin_; }
     void invalidate_receipt();
+#ifdef POLARIS_TESTS
+    void set_metadata_observer_for_tests(std::function<void()> observer) { metadata_observer_ = std::move(observer); }
+#endif
 
   private:
+#ifdef POLARIS_TESTS
+    std::function<void()> metadata_observer_;
+#endif
     bool current(const scan_ticket_t &) const;
     std::optional<launcher_proof_t> proof_;
     std::shared_ptr<const epic_library::snapshot_t> snapshot_;

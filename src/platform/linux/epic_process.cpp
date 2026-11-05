@@ -2643,6 +2643,9 @@ namespace platf::epic {
     if (!current(ticket)) return scan_state_t::superseded; // A late result never writes over a newer scan.
     ++revision_;
     if (!idle_same_session) return last_scan_ = scan_state_t::session_busy;
+#ifdef POLARIS_TESTS
+    if (metadata_observer_) metadata_observer_();
+#endif
     if (!metadata.available) return last_scan_ = scan_state_t::metadata_unavailable;
     if (!ticket.before) return last_scan_ = scan_state_t::launcher_unobserved;
     if (!after || !same_launcher_observation(*ticket.before, *after)) return last_scan_ = scan_state_t::launcher_changed;
@@ -2652,6 +2655,9 @@ namespace platf::epic {
   }
 
   receipt_state_t setup_history_t::receipt(const epic_library::snapshot_t &metadata, bool proof_valid) const {
+#ifdef POLARIS_TESTS
+    if (metadata_observer_) metadata_observer_();
+#endif
     if (!snapshot_) return receipt_state_t::required;
     if (!proof_valid || !metadata.available) return receipt_state_t::unknown;
     return last_scan_ == scan_state_t::complete && epic_library::same_snapshot(*snapshot_, metadata) ?
