@@ -141,7 +141,7 @@ TEST_F(EpicSetupHttp, ValidatedExactTitleIsPassedWithoutPathsOrClientAuthority) 
   };
   run([&](auto &client, const auto &) {
     EXPECT_EQ(get(client, "?namespace=ns&item_id=item&artifact_id=game", 200, bearer).at("selected"),
-      (json {{"namespace", "ns"}, {"item_id", "item"}, {"artifact_id", "game"}}));
+      (json {{"namespace_id", "ns"}, {"item_id", "item"}, {"artifact_id", "game"}}));
     EXPECT_EQ(calls, 1);
   });
 }

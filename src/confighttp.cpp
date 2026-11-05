@@ -1305,7 +1305,7 @@ namespace confighttp {
 
   // Also used by authenticate's opt-in private read policy; never includes store paths.
   void write_epic_setup_error(resp_https_t response, SimpleWeb::StatusCode code, const char *error) {
-    const nlohmann::json output {{"status", false}, {"error", error}};
+    const nlohmann::json output {{v1::epic_setup_error::status, false}, {v1::epic_setup_error::error, error}};
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
     headers.emplace("Cache-Control", "private, no-store");
@@ -4021,14 +4021,14 @@ namespace confighttp {
     }
 
     nlohmann::json epic_setup_identity_json(const epic_library::identity_t &title) {
-      return {{"namespace", title.namespace_id}, {"item_id", title.item_id}, {"artifact_id", title.artifact_id}};
+      return {{v1::epic_setup_title::namespace_id, title.namespace_id}, {v1::epic_setup_title::item_id, title.item_id}, {v1::epic_setup_title::artifact_id, title.artifact_id}};
     }
 
     nlohmann::json epic_setup_scan_json(const proc::epic_scan_result_t &scan) {
       static constexpr const char *capture[] {"captured", "unchanged", "unavailable", "superseded", "unsupported"};
-      return {{"version", 1}, {"metadata_available", scan.snapshot.available},
-        {"capture", epic_setup_enum(scan.capture.state, capture)}, {"scan", epic_setup_scan_state(scan.state)},
-        {"receipt_revision", std::to_string(scan.receipt_revision)}};
+      return {{v1::epic_setup_scan::version, 1}, {v1::epic_setup_scan::metadata_available, scan.snapshot.available},
+        {v1::epic_setup_scan::capture, epic_setup_enum(scan.capture.state, capture)}, {v1::epic_setup_scan::scan, epic_setup_scan_state(scan.state)},
+        {v1::epic_setup_scan::receipt_revision, std::to_string(scan.receipt_revision)}};
     }
 
     nlohmann::json epic_setup_json(const proc::epic_setup_read_t &sample,
@@ -4048,14 +4048,18 @@ namespace confighttp {
       if (raw == "title_prefix_unavailable" || raw == "redirected_title_prefix" || raw == "unsafe_title_prefix") reason = "windows_setup_unknown";
       if (sample.facts.proof == platf::epic::proof_state_t::changed) reason = "launcher_changed";
       if (!sample.supported) reason = "unsupported";
-      return {{"version", 1}, {"supported", sample.supported}, {"epoch", sample.epoch},
-        {"revision", std::to_string(sample.revision)}, {"sample_age_ms", age},
-        {"desktop", epic_setup_enum(sample.facts.desktop, desktop)}, {"proof", epic_setup_enum(sample.facts.proof, proof)},
-        {"receipt", epic_setup_enum(sample.receipt, receipt)}, {"receipt_revision", std::to_string(sample.receipt_revision)},
-        {"last_scan", epic_setup_scan_state(sample.last_scan)}, {"metadata_available", sample.metadata_available},
-        {"runtime", epic_setup_enum(sample.facts.runtime, runtime)}, {"prerequisites", "unknown"},
-        {"state", epic_setup_enum(sample.facts.state, state)}, {"reason", reason},
-        {"selected", title ? epic_setup_identity_json(*title) : nlohmann::json(nullptr)}};
+      return {{v1::epic_setup_status::version, 1}, {v1::epic_setup_status::supported, sample.supported}, {v1::epic_setup_status::epoch, sample.epoch},
+        {v1::epic_setup_status::revision, std::to_string(sample.revision)}, {v1::epic_setup_status::sample_age_ms, age},
+        {v1::epic_setup_status::desktop, epic_setup_enum(sample.facts.desktop, desktop)}, {v1::epic_setup_status::proof, epic_setup_enum(sample.facts.proof, proof)},
+        {v1::epic_setup_status::receipt, epic_setup_enum(sample.receipt, receipt)}, {v1::epic_setup_status::receipt_revision, std::to_string(sample.receipt_revision)},
+        {v1::epic_setup_status::last_scan, epic_setup_scan_state(sample.last_scan)}, {v1::epic_setup_status::metadata_available, sample.metadata_available},
+        {v1::epic_setup_status::runtime, epic_setup_enum(sample.facts.runtime, runtime)}, {v1::epic_setup_status::prerequisites, "unknown"},
+        {v1::epic_setup_status::state, epic_setup_enum(sample.facts.state, state)}, {v1::epic_setup_status::reason, reason},
+        {v1::epic_setup_status::selected, title ? epic_setup_identity_json(*title) : nlohmann::json(nullptr)}};
+    }
+
+    void append_epic_setup_scan(nlohmann::json &output, const proc::epic_scan_result_t &scan) {
+      output[v1::epic_setup_scan_envelope::epic_setup] = epic_setup_scan_json(scan);
     }
 
     using epic_setup_reader_t = std::function<proc::epic_setup_read_t(const std::optional<epic_library::identity_t> &)>;
@@ -4488,7 +4492,7 @@ namespace confighttp {
     auto epic_games = nlohmann::json::array();
     const auto epic_scan = proc::proc.scan_epic_library(game_library::library_home_roots());
     const auto &epic_snapshot = epic_scan.snapshot;
-    output["epic_setup"] = epic_setup_scan_json(epic_scan);
+    append_epic_setup_scan(output, epic_scan);
     for (const auto &title : epic_snapshot.games) {
       const auto &i = title.identity;
       nlohmann::json row {{"name", title.name}, {"source", "epic_launcher"},

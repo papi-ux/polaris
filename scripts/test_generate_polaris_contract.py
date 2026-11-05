@@ -84,19 +84,20 @@ class ContractGeneratorTests(unittest.TestCase):
     def test_real_schema_retains_all_objects_and_generates_only_used_s1_names(self):
         raw = (ROOT / generator.SCHEMA).read_bytes()
         schema = generator.load_schema(raw)
-        self.assertEqual(len(schema['objects']), 34)
-        self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 357)
+        self.assertEqual(len(schema['objects']), 39)
+        self.assertEqual(sum(len(o['fields']) for o in schema['objects'].values()), 384)
         migrated = {name for name, obj in schema['objects'].items() if obj.get('generated')}
         self.assertEqual(migrated, set(schema['objects']))
         outputs = generator.render(schema, raw, Path(generator.__file__).read_bytes())
         definitions = generator.generated_values(outputs[generator.CPP].decode())
-        self.assertEqual(len(definitions), 320)
+        self.assertEqual(len(definitions), 347)
         generator.audit_emitters(ROOT, schema, definitions)
         self.assertNotIn(b'::space_launch_mode {', outputs[generator.CPP])
         self.assertNotIn(b'LIVE_TUNING', outputs[generator.JS])
         self.assertEqual(set(re.findall(rb'export const (\w+)', outputs[generator.JS])),
                          {b'SPACES_CAPACITY', b'HOST_POWER', b'SESSION_ENCODER_SELECTION', b'LINUX_GPU_PROFILE',
-                          b'PYROWAVE_BITRATE'})
+                          b'PYROWAVE_BITRATE', b'EPIC_SETUP_STATUS', b'EPIC_SETUP_TITLE', b'EPIC_SETUP_SCAN',
+                          b'EPIC_SETUP_SCAN_ENVELOPE', b'EPIC_SETUP_ERROR'})
         for reader in schema['objects']['spaces_capacity']['consumers']['polaris_web']:
             source = (ROOT / reader['file']).read_text()
             self.assertIn('import { SPACES_CAPACITY }', source)
