@@ -194,6 +194,38 @@ describe('v1.5.0 release contract', () => {
     expect(visible).toContain("this update does not switch an existing host's chosen mode")
   })
 
+  it('describes the live Epic checklist and the observed NVENC fallback', () => {
+    const notes = currentNotes()
+    expect(notes).toContain('**Epic Private Stream setup** checklist')
+    expect(notes).toContain('Prerequisite support is unknown, so a selected title is never labelled ready.')
+    expect(notes).toContain('Polaris checks again when you launch.')
+    expect(notes).toContain('NVENC is unavailable on this GPU with this build, so video is encoded on the CPU')
+    expect(notes).toContain('only for a confirmed NVENC-to-CPU fallback')
+  })
+
+  it('keeps pending native tuning and client VRR requests out of the shipped scope', () => {
+    const notes = currentNotes()
+    const unreleased = read('docs/changelog.md').split('## Unreleased')[1].split('\n## ')[0]
+    for (const text of [notes, unreleased, read('docs/live-tuning.md')]) {
+      expect(text).not.toContain('adaptive_bitrate_native_downward')
+      expect(text).not.toContain("Live Tuning's native step-down")
+    }
+    expect(notes).toContain('Current Nova builds do not request VRR.')
+    expect(notes).toContain("The host's separate **Allow source-paced VRR (experimental)** opt-in")
+    expect(notes).toContain('does not request source-paced VRR from Polaris')
+    expect(notes).not.toContain('The host tells a Nova stream what it did with that request')
+    expect(unreleased).toContain('Current Nova builds send no VRR request')
+    expect(read('README.md')).toContain('current Nova builds send no VRR request')
+  })
+
+  it('names the one-time default migration consistently', () => {
+    for (const text of [currentNotes(), read('docs/changelog.md'), read('docs/live-tuning.md')]) {
+      expect(text).toContain('`live_tuning_on_by_default`')
+      expect(text).toContain('`settings_migrations.json`')
+    }
+    expect(read('docs/live-tuning.md')).toContain('chose Off deliberately before 1.5.0')
+  })
+
   // Every figure is quoted with what it assumes. The PyroWave advice figures are the rows the
   // reference page computes from the model, so the two cannot drift apart unseen.
   it('quotes each number with the conditions it holds under', () => {
