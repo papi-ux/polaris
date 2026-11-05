@@ -378,6 +378,36 @@ namespace live_tuning_policy {
       }
     }
     if (state_ == state_e::hold) {
+      // R5-D2: a hold that had been clean here now loses significantly more at the same rate: the link changed.
+      // What the episode measured before is another link's, except a higher rate that lost significantly more than
+      // this rate loses now, which a worse link cannot have made better. Restart the ledger from this run and judge
+      // from this rate.
+      if (const auto held = measured_.find(target_); held != measured_.end()) {
+        double run_frames = 0.0;
+        double run_lost = 0.0;
+        for (const auto &[expected, lost] : run_) {
+          run_frames += expected;
+          run_lost += lost;
+        }
+        const double prior_frames = held->second.first - run_frames;
+        const double prior_lost = held->second.second - run_lost;
+        const double dispersion = std::max(2.0, disp());
+        if (prior_frames >= HOLD_CHECK_REPORTS * (run_frames / std::max<std::size_t>(run_.size(), 1)) &&
+            prior_lost / prior_frames <= background_ + LOSSY_MIN &&
+            z_lower(prior_lost, prior_frames, run_lost, run_frames, dispersion) >= 2.0) {
+          std::map<int, std::pair<double, double>> kept;
+          for (auto it = measured_.upper_bound(target_); it != measured_.end(); ++it) {
+            if (z_lower(run_lost, run_frames, it->second.second, it->second.first, dispersion) >= 2.0) {
+              kept.insert(*it);
+            }
+          }
+          measured_ = std::move(kept);
+          for (const auto &[expected, lost] : run_) {
+            note_measured(target_, expected, lost);
+          }
+          episode_start_ = target_;
+        }
+      }
       hold_failed_kbps_ = target_;
       if (hi_is_queue_ && queue_hold_below_ && *queue_hold_below_ < target_) {
         const int losses = failed_queue_hold_ && failed_queue_hold_->failed == target_ ?
