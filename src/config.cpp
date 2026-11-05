@@ -1642,6 +1642,7 @@ namespace config {
     }
 
     bool_f(vars, "adaptive_bitrate_enabled", video.adaptive_bitrate.enabled);
+    bool_f(vars, "adaptive_bitrate_native_downward", video.adaptive_bitrate.native_downward);
     int_between_f(vars, "adaptive_bitrate_min", video.adaptive_bitrate.min_bitrate_kbps, {500, 1000000});
     // Still read so existing files load. A session lifts this ceiling to the
     // client's own request, so it no longer limits any stream's bitrate. A host

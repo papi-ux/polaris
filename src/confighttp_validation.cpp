@@ -420,12 +420,12 @@ namespace confighttp::validation {
   }  // namespace
 
   bool is_local_config_key(std::string_view key) {
-    return key == "multiseat_enabled" || key == "multiseat_config";
+    return key == "multiseat_enabled" || key == "multiseat_config" || key == "adaptive_bitrate_native_downward";
   }
 
   void preserve_local_config(const std::unordered_map<std::string, std::string> &existing,
     nlohmann::json &payload) {
-    for (const auto *key : {"multiseat_enabled", "multiseat_config"}) {
+    for (const auto *key : {"multiseat_enabled", "multiseat_config", "adaptive_bitrate_native_downward"}) {
       payload.erase(key);
       const auto found = existing.find(key);
       if (found != existing.end() && !found->second.empty()) payload[key] = found->second;

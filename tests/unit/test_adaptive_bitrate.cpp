@@ -7,15 +7,19 @@
 #include "src/config.h"
 #include "src/live_tuning_fec.h"
 #include "src/video_bitrate.h"
+#include "../tests_log_capture.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <initializer_list>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -177,6 +181,263 @@ TEST(LiveTuningFecActuator, PacketizerReadsOneCoherentGenerationAndPercentage) {
   EXPECT_FALSE(invalid.load());
 }
 
+TEST(LiveTuningFecActuator, SelectionRetainsTheCheckedRevisionOnlyAtItsConfirmedFrameBoundary) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  const auto pending = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(pending.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(pending.basis, basis_e::configured_baseline);
+  EXPECT_EQ(pending.generation, 1u);
+  EXPECT_FALSE(pending.authority_revision);
+  EXPECT_FALSE(pending.from_frame);
+  EXPECT_EQ(actuator.confirm(1, 7, *encoder + 1, 100, true, true), result_e::none);
+  EXPECT_FALSE(actuator.selection_for_frame(1, 100, 77).authority_revision);
+  ASSERT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  const auto old_frame = actuator.selection_for_frame(1, 99, 77);
+  EXPECT_EQ(old_frame.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(old_frame.basis, basis_e::configured_baseline);
+  EXPECT_EQ(old_frame.generation, 1u);
+  EXPECT_FALSE(old_frame.authority_revision);
+  EXPECT_FALSE(old_frame.from_frame);
+  const auto selected = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(selected.basis, basis_e::encoder_confirmed_trial);
+  EXPECT_EQ(selected.generation, 1u);
+  EXPECT_EQ(selected.authority_revision, 7u);
+  EXPECT_EQ(selected.from_frame, 100);
+  // A later callback cannot relabel the immutable, already confirmed publication.
+  EXPECT_EQ(actuator.confirm(1, 8, *encoder, 101, false, false), result_e::none);
+  const auto later = actuator.selection_for_frame(1, 101, 77);
+  EXPECT_EQ(later.authority_revision, 7u);
+  EXPECT_EQ(later.from_frame, 100);
+}
+
+TEST(LiveTuningFecActuator, RefusedOrStaleConfirmationNeverAddsTrialIdentity) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  const auto budget = fec_budget();
+  for (const int refusal : {0, 1, 2, 3, 4}) {
+    SCOPED_TRACE(refusal);
+    live_tuning_fec::actuator_t actuator;
+    ASSERT_TRUE(actuator.configure(1, budget));
+    const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+    ASSERT_TRUE(encoder);
+    EXPECT_EQ(actuator.confirm(refusal == 3 ? 2 : 1, refusal == 4 ? 8 : 7,
+      *encoder, refusal == 0 ? 0 : 100, refusal != 1, refusal != 2),
+      refusal >= 3 ? result_e::stale : result_e::refused);
+    EXPECT_FALSE(actuator.pending());
+    const auto selected = actuator.selection_for_frame(1, 100, 77);
+    EXPECT_EQ(selected.allocation, (std::pair {10, 10}));
+    EXPECT_EQ(selected.basis, basis_e::configured_baseline);
+    EXPECT_EQ(selected.generation, 1u);
+    EXPECT_FALSE(selected.authority_revision);
+    EXPECT_FALSE(selected.from_frame);
+    // Refusal is not sticky identity: only a fresh, exactly confirmed request can supply it.
+    ASSERT_TRUE(actuator.request(budget.encoder_kbps, 15, 2000, true, 9));
+    ASSERT_EQ(actuator.confirm(1, 9, *encoder, 101, true, true), result_e::published);
+    const auto admitted = actuator.selection_for_frame(1, 101, 77);
+    EXPECT_EQ(admitted.basis, basis_e::encoder_confirmed_trial);
+    EXPECT_EQ(admitted.authority_revision, 9u);
+    EXPECT_EQ(admitted.from_frame, 101);
+  }
+}
+
+TEST(LiveTuningFecActuator, SamePercentageAbaCannotBorrowEitherRequestsTrialIdentity) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto first = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(first);
+  actuator.restore();
+  const auto second = actuator.request(budget.encoder_kbps, 15, 2000, true, 9);
+  ASSERT_EQ(first, second);  // Same percentage and bitrate, distinct checked authority.
+  EXPECT_EQ(actuator.confirm(1, 7, *first, 100, true, true), result_e::stale);
+  const auto stale = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(stale.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(stale.basis, basis_e::configured_baseline);
+  EXPECT_FALSE(stale.authority_revision);
+  EXPECT_FALSE(stale.from_frame);
+  EXPECT_EQ(actuator.confirm(1, 9, *second, 101, true, true), result_e::none);
+  EXPECT_FALSE(actuator.selection_for_frame(1, 101, 77).authority_revision);
+  ASSERT_TRUE(actuator.request(budget.encoder_kbps, 15, 2000, true, 11));
+  ASSERT_EQ(actuator.confirm(1, 11, *first, 102, true, true), result_e::published);
+  const auto selected = actuator.selection_for_frame(1, 102, 77);
+  EXPECT_EQ(selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(selected.authority_revision, 11u);
+  EXPECT_EQ(selected.from_frame, 102);
+}
+
+TEST(LiveTuningFecActuator, RestoreAndReconfigureExposeOnlyConfiguredBaselineScope) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  ASSERT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  const auto selected = actuator.selection_for_frame(1, 100, 77);
+  const auto restored_rate = actuator.request(budget.encoder_kbps, 10, 2000, false, 8);
+  ASSERT_TRUE(restored_rate);
+  for (const bool confirmed : {false, true}) {
+    if (confirmed) {
+      ASSERT_EQ(actuator.confirm(1, 8, *restored_rate, 101, true, true), result_e::restored);
+    }
+    const auto baseline = actuator.selection_for_frame(1, 100, 77);
+    EXPECT_EQ(baseline.allocation, (std::pair {10, 10}));
+    EXPECT_EQ(baseline.basis, basis_e::configured_baseline);
+    EXPECT_EQ(baseline.generation, 1u);
+    EXPECT_FALSE(baseline.authority_revision);
+    EXPECT_FALSE(baseline.from_frame);
+  }
+  // The previously selected frame keeps the tuple it obtained before restore.
+  EXPECT_EQ(selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(selected.basis, basis_e::encoder_confirmed_trial);
+  EXPECT_EQ(selected.authority_revision, 7u);
+  EXPECT_EQ(selected.from_frame, 100);
+  // Reusing a configured scope does not manufacture a baseline publication epoch.
+  ASSERT_TRUE(actuator.configure(1, fec_budget(0)));
+  const auto zero_baseline = actuator.selection_for_frame(1, 102, 77);
+  EXPECT_EQ(zero_baseline.allocation, (std::pair {0, 0}));
+  EXPECT_EQ(zero_baseline.basis, basis_e::configured_baseline);
+  EXPECT_EQ(zero_baseline.generation, 1u);
+  EXPECT_FALSE(zero_baseline.authority_revision);
+  EXPECT_FALSE(zero_baseline.from_frame);
+}
+
+TEST(LiveTuningFecActuator, InvalidFramesAndForeignGenerationsKeepLegacyValuesWithoutIdentity) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 7);
+  ASSERT_TRUE(encoder);
+  ASSERT_EQ(actuator.confirm(1, 7, *encoder, 100, true, true), result_e::published);
+  for (const std::int64_t frame : {std::numeric_limits<std::int64_t>::min(),
+       std::int64_t {-1}, std::int64_t {0}, std::int64_t {99}, std::int64_t {100},
+       std::numeric_limits<std::int64_t>::max()}) {
+    for (const std::uint64_t generation : {0u, 1u, 2u}) {
+      SCOPED_TRACE(frame);
+      SCOPED_TRACE(generation);
+      const auto expected = generation == 1 ? std::pair {10, frame >= 100 ? 15 : 10} : std::pair {77, 77};
+      const auto selected = actuator.selection_for_frame(generation, frame, 77);
+      EXPECT_EQ(selected.allocation, expected);
+      EXPECT_EQ(actuator.allocation_for_frame(generation, frame, 77), expected);
+      EXPECT_EQ(actuator.percentage_for_frame(generation, frame, 77), expected.second);
+      if (generation != 1 || frame <= 0) {
+        EXPECT_EQ(selected.basis, basis_e::unavailable);
+        EXPECT_FALSE(selected.generation);
+        EXPECT_FALSE(selected.authority_revision);
+        EXPECT_FALSE(selected.from_frame);
+      } else {
+        EXPECT_EQ(selected.generation, 1u);
+        EXPECT_EQ(selected.basis, frame < 100 ? basis_e::configured_baseline : basis_e::encoder_confirmed_trial);
+      }
+    }
+  }
+  ASSERT_TRUE(actuator.configure(2, fec_budget(20)));
+  const auto foreign = actuator.selection_for_frame(1, 100, 77);
+  EXPECT_EQ(foreign.allocation, (std::pair {77, 77}));
+  EXPECT_EQ(foreign.basis, basis_e::unavailable);
+  EXPECT_FALSE(foreign.generation);
+  EXPECT_FALSE(foreign.authority_revision);
+  actuator.reset();
+  const auto absent = actuator.selection_for_frame(2, 100, 77);
+  EXPECT_EQ(absent.allocation, (std::pair {77, 77}));
+  EXPECT_EQ(absent.basis, basis_e::unavailable);
+  EXPECT_FALSE(absent.generation);
+  EXPECT_FALSE(absent.authority_revision);
+  EXPECT_FALSE(absent.from_frame);
+}
+
+TEST(LiveTuningFecActuator, ConcurrentSelectionKeepsAllocationRevisionAndBoundaryInOneTuple) {
+  using result_e = live_tuning_fec::actuator_t::confirmation_e;
+  using basis_e = live_tuning_fec::selection_basis_e;
+  live_tuning_fec::actuator_t actuator;
+  const auto budget = fec_budget();
+  ASSERT_TRUE(actuator.configure(1, budget));
+  const auto initial_encoder = actuator.request(budget.encoder_kbps, 15, 2000, true, 1);
+  ASSERT_TRUE(initial_encoder);
+  ASSERT_EQ(actuator.confirm(1, 1, *initial_encoder, 101, true, true), result_e::published);
+  std::atomic<bool> done {false};
+  std::atomic<bool> invalid {false};
+  live_tuning_fec::selection_t first_selected {};
+  live_tuning_fec::selection_t last_selected {};
+  std::promise<void> first_read;
+  auto started = first_read.get_future();
+  std::thread reader([&] {
+    const auto valid = [](const live_tuning_fec::selection_t &selected) {
+      if (selected.basis == basis_e::unavailable) {
+        return selected.allocation == std::pair {77, 77} && !selected.generation &&
+          !selected.authority_revision && !selected.from_frame;
+      }
+      if (selected.generation != 1u || selected.allocation.first != 10) return false;
+      if (selected.basis == basis_e::configured_baseline) {
+        return selected.allocation.second == 10 && !selected.authority_revision && !selected.from_frame;
+      }
+      if (!selected.authority_revision || *selected.authority_revision < 1 ||
+          *selected.authority_revision > 1000 || !selected.from_frame) return false;
+      const auto revision = *selected.authority_revision;
+      return selected.basis == basis_e::encoder_confirmed_trial &&
+        selected.allocation.second == (revision % 2 ? 15 : 20) &&
+        *selected.from_frame == 100 + static_cast<std::int64_t>(revision);
+    };
+    first_selected = actuator.selection_for_frame(1, 5000, 77);
+    if (!valid(first_selected)) invalid.store(true);
+    first_read.set_value();
+    while (!done.load(std::memory_order_acquire)) {
+      if (!valid(actuator.selection_for_frame(1, 5000, 77))) {
+        invalid.store(true, std::memory_order_relaxed);
+      }
+    }
+    last_selected = actuator.selection_for_frame(1, 5000, 77);
+    if (!valid(last_selected)) invalid.store(true);
+  });
+  // Bound test-thread startup only; this is not an actuator or product deadline.
+  const auto ready = started.wait_for(10s);
+  bool writer_ok = ready == std::future_status::ready;
+  actuator.restore();
+  for (std::uint64_t revision = 2; writer_ok && revision <= 1000; ++revision) {
+    const auto encoder = actuator.request(budget.encoder_kbps, revision % 2 ? 15 : 20, 2000, true, revision);
+    if (!encoder || actuator.confirm(1, revision, *encoder, 100 + static_cast<std::int64_t>(revision), true, true) !=
+        result_e::published) {
+      writer_ok = false;
+      break;
+    }
+    actuator.restore();
+    if (!actuator.configure(2, fec_budget(20)) || !actuator.configure(1, budget)) {
+      writer_ok = false;
+      break;
+    }
+  }
+  actuator.restore();
+  done.store(true, std::memory_order_release);
+  reader.join();
+  EXPECT_EQ(ready, std::future_status::ready);
+  EXPECT_TRUE(writer_ok);
+  EXPECT_FALSE(invalid.load());
+  // The reader must witness an actual trial and then the restored baseline;
+  // a baseline/fallback-only schedule cannot satisfy this concurrent guard.
+  EXPECT_EQ(first_selected.allocation, (std::pair {10, 15}));
+  EXPECT_EQ(first_selected.basis, basis_e::encoder_confirmed_trial);
+  EXPECT_EQ(first_selected.generation, 1u);
+  EXPECT_EQ(first_selected.authority_revision, 1u);
+  EXPECT_EQ(first_selected.from_frame, 101);
+  EXPECT_EQ(last_selected.allocation, (std::pair {10, 10}));
+  EXPECT_EQ(last_selected.basis, basis_e::configured_baseline);
+  EXPECT_EQ(last_selected.generation, 1u);
+  EXPECT_FALSE(last_selected.authority_revision);
+  EXPECT_FALSE(last_selected.from_frame);
+}
+
 namespace {
   void enable_controller(int base_bitrate_kbps = 20000) {
     config::video.adaptive_bitrate.enabled = true;
@@ -232,6 +493,74 @@ TEST(AdaptiveBitrateFecScope, RequiresTheTrustedSoleScopeAndKeepsRecreatingEncod
   adaptive_bitrate::set_session_scope(0, {}, false);
 }
 
+namespace {
+  struct encoder_open_scope_t {
+    encoder_open_scope_t() {
+      enable_controller();
+      adaptive_bitrate::set_runtime_update_supported(false, "not_open_yet");
+      adaptive_bitrate::set_session_scope(605, "opening", true);
+    }
+    ~encoder_open_scope_t() {
+      adaptive_bitrate::reset();
+      adaptive_bitrate::set_session_scope(0, {}, false);
+    }
+  };
+}
+
+TEST(AdaptiveBitrateController, SnapshotsTheFirstOpenWithoutAcknowledgingApplication) {
+  encoder_open_scope_t scope;
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
+  const auto before = adaptive_bitrate::get_doctor_state();
+  const auto history = adaptive_bitrate::get_state_with_history().history.entries;
+  for (int i = 0; i < 3; ++i) {
+    const auto origin = adaptive_bitrate::get_encoder_open_request(605, 20000);
+    ASSERT_TRUE(origin);
+    EXPECT_EQ(origin->target_bitrate_kbps, 20000);
+    EXPECT_EQ(origin->revision, before.revision);
+  }
+  const auto after = adaptive_bitrate::get_doctor_state();
+  EXPECT_FALSE(after.runtime_update_supported);
+  EXPECT_EQ(after.revision, before.revision);
+  EXPECT_EQ(after.action_authority_revision, before.action_authority_revision);
+  EXPECT_EQ(after.live_bitrate_kbps, before.live_bitrate_kbps);
+  EXPECT_EQ(adaptive_bitrate::get_state_with_history().history.entries.size(), history.size());
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 0);
+  EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
+}
+
+TEST(AdaptiveBitrateController, RefusesAnUnownedOrMismatchedOpenWithoutBorrowingSupport) {
+  encoder_open_scope_t scope;
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(0, 20000));
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(606, 20000));
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 0));
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 10000));
+  adaptive_bitrate::set_session_scope(605, "shared", false);
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  adaptive_bitrate::set_session_scope(605, "opening", true);
+  ASSERT_TRUE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  adaptive_bitrate::set_enabled(false);
+  // Historical open attribution is separate from permission to pace a frame.
+  EXPECT_TRUE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  EXPECT_FALSE(adaptive_bitrate::get_live_pacing_cap(605));
+}
+
+TEST(AdaptiveBitrateController, PendingRecreationCanObserveItsExactLowerOpenTarget) {
+  encoder_open_scope_t scope;
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  adaptive_bitrate::set_live_bitrate(10000);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request);
+  ASSERT_EQ(request->target_bitrate_kbps, 10000);
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision, 10000));
+  EXPECT_FALSE(adaptive_bitrate::get_live_pacing_cap(605));
+  const auto origin = adaptive_bitrate::get_encoder_open_request(605, 10000);
+  ASSERT_TRUE(origin);
+  EXPECT_EQ(origin->revision, request->revision);
+  EXPECT_EQ(origin->target_bitrate_kbps, 10000);
+  EXPECT_FALSE(adaptive_bitrate::get_encoder_open_request(605, 20000));
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 0);
+}
+
 TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   enable_controller();
 
@@ -243,6 +572,123 @@ TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   EXPECT_EQ(state.target_bitrate_kbps, 12000);
   EXPECT_EQ("network_pressure", state.state);
   EXPECT_EQ("packet_loss", state.reason);
+}
+
+namespace {
+  struct NativeContextInspection : ::testing::Test {
+    void SetUp() override {
+      enable_controller();
+      adaptive_bitrate::set_session_scope(615,"native-inspection-private-token",true);
+      adaptive_bitrate::set_runtime_update_supported(true,{},20000,true);
+    }
+    void TearDown() override {
+      adaptive_bitrate::reset();adaptive_bitrate::set_session_scope(0,{},false);
+    }
+    static native_video_signal::context_t inspect() {
+      return adaptive_bitrate::inspect_native_context(615,"native-inspection-private-token");
+    }
+  };
+}
+
+TEST_F(NativeContextInspection, OneCoherentSnapshotIsPassiveAndKeepsEncoderAndEvidenceRevisionsSeparate) {
+  const auto before=adaptive_bitrate::get_state_with_history();
+  const auto authority=adaptive_bitrate::get_doctor_state();
+  const auto first=inspect();ASSERT_EQ(first.reason,native_video_signal::context_reason_e::ready);
+  EXPECT_TRUE(first.observed && first.generation_matches && first.app_matches && first.exclusive);
+  EXPECT_TRUE(first.enabled && first.runtime_supported && first.in_place && first.applied_known);
+  EXPECT_FALSE(first.doctor_override || first.explicit_writer || first.pending_update || first.paused);
+  EXPECT_EQ(first.base_kbps,20000);EXPECT_EQ(first.requested_kbps,20000);EXPECT_EQ(first.applied_kbps,20000);
+  EXPECT_EQ(first.floor_kbps,2000);EXPECT_EQ(first.operator_revision,authority.revision);
+  EXPECT_EQ(first.action_revision,authority.action_authority_revision);ASSERT_TRUE(first.applied_age_ns);
+  EXPECT_GE(*first.applied_age_ns,0);EXPECT_GE(first.inspected_steady_ns,0);
+  for(unsigned i=0;i<64;++i) EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::ready);
+  const auto after=adaptive_bitrate::get_state_with_history();const auto same=adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(same.revision,authority.revision);EXPECT_EQ(same.action_authority_revision,authority.action_authority_revision);
+  EXPECT_EQ(same.live_bitrate_kbps,authority.live_bitrate_kbps);EXPECT_EQ(after.target_bitrate_kbps,before.target_bitrate_kbps);
+  EXPECT_EQ(after.applied_bitrate_kbps,before.applied_bitrate_kbps);EXPECT_EQ(after.state,before.state);EXPECT_EQ(after.reason,before.reason);
+  EXPECT_EQ(after.ceiling_bitrate_kbps,before.ceiling_bitrate_kbps);EXPECT_EQ(after.current_fec_percentage,before.current_fec_percentage);
+  EXPECT_EQ(after.fec_phase,before.fec_phase);ASSERT_EQ(after.history.entries.size(),before.history.entries.size());
+  for(unsigned i=0;i<after.history.entries.size();++i) {
+    EXPECT_EQ(after.history.entries[i].sequence,before.history.entries[i].sequence);
+    EXPECT_EQ(after.history.entries[i].repeat_count,before.history.entries[i].repeat_count);
+    EXPECT_EQ(after.history.entries[i].operator_revision,before.history.entries[i].operator_revision);
+  }
+  adaptive_bitrate::note_network_evidence_arrival(false);
+  const auto rotated=inspect();EXPECT_GT(rotated.operator_revision,first.operator_revision);
+  EXPECT_EQ(rotated.applied_revision,first.applied_revision);EXPECT_EQ(rotated.reason,native_video_signal::context_reason_e::ready);
+}
+
+TEST_F(NativeContextInspection, ScopeMismatchExportsOnlyMatchFactsWithoutBorrowingRatesOrRevisions) {
+  for(const auto &[generation,token]:std::vector<std::pair<std::uint64_t,std::string>>{
+      {0,"native-inspection-private-token"},{616,"native-inspection-private-token"},{615,""},{615,"foreign-private-token"}}) {
+    const auto c=adaptive_bitrate::inspect_native_context(generation,token);
+    EXPECT_TRUE(c.observed);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::scope_mismatch);
+    EXPECT_EQ(c.base_kbps,0);EXPECT_EQ(c.requested_kbps,0);EXPECT_EQ(c.operator_revision,0u);EXPECT_FALSE(c.applied_age_ns);
+  }
+  adaptive_bitrate::set_session_scope(615,"native-inspection-private-token",false);
+  const auto shared=inspect();EXPECT_FALSE(shared.exclusive);EXPECT_EQ(shared.reason,native_video_signal::context_reason_e::shared_scope);
+}
+
+TEST_F(NativeContextInspection, DisabledPausedRuntimeAndInPlaceExclusionsRemainExplicit) {
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,false);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::not_in_place);
+  adaptive_bitrate::set_runtime_update_supported(false,"unsupported");
+  EXPECT_FALSE(inspect().runtime_supported);EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::runtime_unavailable);
+  adaptive_bitrate::set_runtime_update_supported(true,{},0,true);
+  EXPECT_FALSE(inspect().applied_known);EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::applied_unknown);
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true);
+  adaptive_bitrate::set_runtime_enabled(false);EXPECT_FALSE(inspect().enabled);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::disabled);
+  adaptive_bitrate::set_runtime_enabled(true);adaptive_bitrate::set_live_bitrate_for_stream(18000);
+  const auto paused=inspect();EXPECT_TRUE(paused.paused);EXPECT_TRUE(paused.explicit_writer);EXPECT_FALSE(paused.enabled);
+  EXPECT_EQ(paused.reason,native_video_signal::context_reason_e::disabled);
+}
+
+TEST_F(NativeContextInspection, DoctorPendingAppliedMismatchAndFloorAreNotReady) {
+  const auto state=adaptive_bitrate::get_doctor_state();
+  ASSERT_TRUE(adaptive_bitrate::set_doctor_bitrate_if_revision(state.revision,18000));
+  EXPECT_TRUE(inspect().doctor_override);EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::doctor_override);
+  adaptive_bitrate::set_runtime_enabled(true);adaptive_bitrate::set_live_bitrate(17000);
+  const auto request=adaptive_bitrate::get_live_bitrate_request();ASSERT_TRUE(request);
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision,17000));
+  EXPECT_TRUE(inspect().pending_update);EXPECT_FALSE(inspect().applied_known);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::pending_update);
+  adaptive_bitrate::set_runtime_update_supported(true,{},17000,true);
+  adaptive_bitrate::acknowledge_live_bitrate_applied(adaptive_bitrate::get_doctor_state().revision,17000);
+  adaptive_bitrate::set_runtime_update_supported(true,{},16000,true);
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::rate_mismatch);
+  adaptive_bitrate::set_runtime_update_supported(true,{},17000,true);adaptive_bitrate::set_session_floor(17000,"test-floor");
+  EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::at_floor);
+}
+
+TEST_F(NativeContextInspection, BusyEncoderBoundaryReturnsImmediatelyWithoutWaitingOrMutation) {
+  adaptive_bitrate::set_live_bitrate(18000);const auto request=adaptive_bitrate::get_live_bitrate_request();ASSERT_TRUE(request);
+  std::promise<void> entered,release;auto entered_future=entered.get_future();auto release_future=release.get_future();
+  auto applying=std::async(std::launch::async,[&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request,[&] {
+      entered.set_value();release_future.wait();return true;
+    });
+  });
+  const auto entered_status=entered_future.wait_for(2s);
+  if(entered_status!=std::future_status::ready) { release.set_value();applying.wait(); }
+  ASSERT_EQ(entered_status,std::future_status::ready);
+  auto inspection=std::async(std::launch::async,[] { return inspect(); });
+  const auto status=inspection.wait_for(2s);
+  release.set_value();EXPECT_EQ(status,std::future_status::ready);
+  const auto busy=inspection.get();EXPECT_FALSE(busy.observed);EXPECT_EQ(busy.reason,native_video_signal::context_reason_e::busy);
+  EXPECT_EQ(busy.inspected_steady_ns,-1);EXPECT_EQ(busy.operator_revision,0u);EXPECT_FALSE(busy.applied_age_ns);
+  EXPECT_TRUE(applying.get());EXPECT_EQ(inspect().reason,native_video_signal::context_reason_e::ready);
+}
+
+TEST_F(NativeContextInspection, EffectiveDiagnosticFloorIncludesExistingBackendRuntimeBound) {
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true,15000);
+  auto c=inspect();EXPECT_EQ(c.floor_kbps,15000);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::ready);
+  EXPECT_EQ(adaptive_bitrate::get_state().min_bitrate_kbps,2000) << "inspection does not change the policy floor";
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true,20000);
+  c=inspect();EXPECT_EQ(c.floor_kbps,20000);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::at_floor);
+  adaptive_bitrate::set_runtime_update_supported(true,{},20000,true,21000);
+  c=inspect();EXPECT_EQ(c.floor_kbps,21000);EXPECT_EQ(c.reason,native_video_signal::context_reason_e::rate_mismatch);
+  EXPECT_EQ(adaptive_bitrate::get_state().min_bitrate_kbps,2000);EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps,20000);
 }
 
 TEST(AdaptiveBitrateFecScope, ARealPolicyEpisodePublishesAfterAckAndRetiresBeforeAnOutsideWriter) {
@@ -2051,3 +2497,316 @@ TEST(AdaptiveBitrateHistory, H2RealApplyRecreationAndSupersedeKeepObservedValues
   for (std::size_t i=1;i<rows.size();++i) EXPECT_LT(rows[i-1]["order"],rows[i]["order"]);
 }
 #endif
+
+#include "src/stream_native_reception.h"
+#include "src/video_bitrate_application.h"
+namespace {
+  struct NativeDownwardHandoff : ::testing::Test {
+    decltype(config::video.adaptive_bitrate) saved = config::video.adaptive_bitrate;
+    video::bitrate_application::adapter_t producer {620, video::bitrate_application::backend_e::native_nvenc};
+    std::shared_ptr<stream_frame_feedback::sender_ledger_t> frames =
+      std::make_shared<stream_frame_feedback::sender_ledger_t>(620);
+    std::shared_ptr<stream_native_reception::scope_t> native =
+      std::make_shared<stream_native_reception::scope_t>(620, frames, true);
+    stream_frame_feedback::encoder_setting_t setting;
+    std::uint32_t next = 0;
+    static constexpr std::string_view nonce = "1234567890abcdef1234567890abcdef";
+    void SetUp() override {
+      config::video.adaptive_bitrate.enabled = true;
+      config::video.adaptive_bitrate.native_downward = true;
+      config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+      config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+      adaptive_bitrate::load_config(); adaptive_bitrate::reset();
+      adaptive_bitrate::set_base_bitrate(20000);
+      adaptive_bitrate::set_session_scope(620, "native-controller-test", true);
+      const auto opening = adaptive_bitrate::get_encoder_open_request(620, 20000); ASSERT_TRUE(opening);
+      producer.nvenc_initialize_success(video::bitrate_application::origin_t {opening->revision, 20000}, 20'000'000, true);
+      ASSERT_TRUE(producer.publish_usable_nvenc_open());
+      {
+        auto input = producer.capture_before_submit(1);
+        ASSERT_TRUE(input.accepted(video::bitrate_application::submit_stage_e::nvenc_encode_picture_success));
+      }
+      auto record = producer.take_output(video::bitrate_application::output_stage_e::nvenc_output_timestamp, 1);
+      ASSERT_TRUE(record);
+      setting = *stream_frame_feedback::encoder_setting_of(std::optional<const video::bitrate_provenance::record_t> {*record});
+      adaptive_bitrate::set_runtime_update_supported(true, {}, 20000, true, 1, producer.current_setting_view());
+    }
+    void TearDown() override {
+      native->retire(); producer.retire(); adaptive_bitrate::reset();
+      adaptive_bitrate::set_session_scope(0, {}, false);
+      config::video.adaptive_bitrate = saved; adaptive_bitrate::load_config();
+    }
+    native_video_signal::signal_t fresh() {
+      const auto now = std::chrono::steady_clock::now(); const auto id = ++next;
+      const auto ticket = frames->begin(id, setting, now - 6ms); EXPECT_TRUE(ticket);
+      if (ticket) frames->complete(*ticket, stream_frame_feedback::send_disposition_e::sent, now - 4ms);
+      native->record(id, static_cast<std::uint16_t>(id), 1000, false, now - 5ms, now - 4ms, true);
+      std::string bytes(62, '\0'); bytes[0] = 1; bytes[1] = 1; bytes[2] = 1;
+      const auto be = [&](int at, std::uint64_t value, int count) {
+        for (int i = 0; i < count; ++i) bytes[at + count - i - 1] = static_cast<char>(value >> (i * 8));
+      };
+      be(4, id, 4); be(8, 100000, 4); be(12, id * 100000, 8); be(20, id * 10, 4);
+      be(24, 1, 4); be(32, 1000, 4); be(40, 1000, 4); be(44, id, 4); be(48, id, 4);
+      be(52, id, 4); be(56, id, 2); be(58, 1000, 4);
+      stream_native_reception::admission_trace_t admission;
+      native->accept(bytes, true, now, &admission);
+      EXPECT_TRUE(admission.admitted);
+      EXPECT_EQ(admission.availability, stream_native_reception::reason_e::joined);
+      const native_video_signal::caller_t caller {620, true, false, true, true, false};
+      auto signal = native_video_signal::project(admission, caller,
+        adaptive_bitrate::inspect_native_context(620, "native-controller-test"));
+      EXPECT_TRUE(native->publish_signal(signal));
+      return signal;
+    }
+    bool consume(const native_video_signal::signal_t &signal, std::string_view app = "native-controller-test",
+                 std::string_view supplied_nonce = nonce, bool current = true) {
+      return adaptive_bitrate::update_native_signal(native, app, supplied_nonce, signal, true, [=] { return current; });
+    }
+  };
+}
+
+TEST_F(NativeDownwardHandoff, DefaultOffWithLiveTuningOnRefusesWhereExplicitOptInConsumesCurrentObservation) {
+  const adaptive_bitrate::config_t positional {true, 2000, 100000, 0.2, 0.3, 1000};
+  EXPECT_FALSE(positional.native_downward); EXPECT_EQ(positional.min_bitrate_kbps, 2000);
+  config::video.adaptive_bitrate.native_downward = false; adaptive_bitrate::load_config();
+  EXPECT_FALSE(consume(fresh()));
+  EXPECT_TRUE(adaptive_bitrate::get_state().enabled);
+  config::video.adaptive_bitrate.native_downward = true; adaptive_bitrate::load_config();
+  EXPECT_TRUE(consume(fresh()));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+}
+
+TEST_F(NativeDownwardHandoff, CurrentObservationPairedWithStaleRevisionWrongAppNonceCallerAndRetiredScope) {
+  EXPECT_TRUE(consume(fresh())); // Positive control enters the reference, never a claimed armed trigger.
+  auto stale = fresh(); adaptive_bitrate::note_network_evidence_arrival(false);
+  EXPECT_FALSE(consume(stale));
+  EXPECT_TRUE(consume(fresh())); // Historical encoder origin is still valid after controller reaffirmation.
+  EXPECT_FALSE(consume(fresh(), "foreign-app"));
+  EXPECT_FALSE(consume(fresh(), "native-controller-test", "invalid"));
+  EXPECT_FALSE(consume(fresh(), "native-controller-test", nonce, false));
+  const auto retired = fresh(); native->retire(); EXPECT_FALSE(consume(retired));
+}
+
+TEST_F(NativeDownwardHandoff, CurrentWriterAndCurrentProducerFailureRetireObservationImmediately) {
+  EXPECT_TRUE(consume(fresh()));
+  const auto before_manual = fresh(); adaptive_bitrate::set_live_bitrate_for_stream(18000);
+  EXPECT_FALSE(consume(before_manual));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 18000);
+}
+
+TEST_F(NativeDownwardHandoff, EqualKbpsCannotReuseFailedProducerReceiptOrRecreatedLifetime) {
+  EXPECT_TRUE(consume(fresh()));
+  const auto historical = fresh();
+  { auto failed = producer.begin_native_update(video::bitrate_application::origin_t {999, 17000}); }
+  EXPECT_FALSE(consume(historical));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000, true); // No producer witness after reopen.
+  EXPECT_FALSE(consume(fresh()));
+}
+
+TEST_F(NativeDownwardHandoff, DoctorAndSharedScopeRefuseAgainstAConsumedReferenceControl) {
+  EXPECT_TRUE(consume(fresh()));
+  const auto before_doctor = fresh();
+  const auto doctor = adaptive_bitrate::get_doctor_state();
+  ASSERT_TRUE(adaptive_bitrate::set_doctor_bitrate_if_revision(doctor.revision, 18000));
+  EXPECT_FALSE(consume(before_doctor));
+  adaptive_bitrate::set_session_scope(620, "native-controller-test", false);
+  EXPECT_FALSE(consume(fresh()));
+}
+
+TEST_F(NativeDownwardHandoff, BusyEncoderHandoffReturnsWithoutWaiting) {
+  const auto signal = fresh(); EXPECT_TRUE(consume(signal));
+  const auto request = adaptive_bitrate::get_live_bitrate_request(); ASSERT_TRUE(request);
+  std::promise<void> entered, release; auto go = release.get_future(); auto started = entered.get_future();
+  auto applying = std::async(std::launch::async, [&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+      entered.set_value(); go.wait(); return true;
+    });
+  });
+  const auto entered_status = started.wait_for(2s);
+  if (entered_status != std::future_status::ready) { release.set_value(); applying.wait(); }
+  ASSERT_EQ(entered_status, std::future_status::ready);
+  auto observing = std::async(std::launch::async, [&] { return consume(signal); });
+  const auto ready = observing.wait_for(2s);
+  release.set_value();
+  EXPECT_EQ(ready, std::future_status::ready); EXPECT_FALSE(observing.get()); EXPECT_TRUE(applying.get());
+}
+
+namespace {
+  // The native diagnostic lines a capture holds, oldest first, optionally of one kind (summary, interruption,
+  // scope_end), each starting at its fixed prefix.
+  std::vector<std::string> native_lines(const test_log_capture_t &log, std::string_view kind = {}) {
+    static constexpr std::string_view mark = "Live Tuning native diagnostic ";
+    std::vector<std::string> out;
+    std::istringstream in {log.text()};
+    for (std::string line; std::getline(in, line);) {
+      const auto at = line.find(mark);
+      if (at == std::string::npos) continue;
+      const auto rest = std::string_view {line}.substr(at + mark.size());
+      if (!kind.empty() && (rest.substr(0, kind.size()) != kind || rest.substr(kind.size(), 1) != ":")) continue;
+      out.push_back(line.substr(at));
+    }
+    return out;
+  }
+  // busy_skips at zero, or its label where a 64-bit atomic is not always lock-free and the counter is compiled out.
+  const std::string native_no_busy_skips = std::atomic<std::uint64_t>::is_always_lock_free ? "0" : "unavailable";
+  // The value of one " name=value" field of a diagnostic line.
+  std::string native_field(const std::string &line, std::string_view name) {
+    const auto key = " " + std::string {name} + "=";
+    const auto at = line.find(key);
+    if (at == std::string::npos) return "<missing>";
+    const auto from = at + key.size();
+    return line.substr(from, line.find(' ', from) - from);
+  }
+}
+
+TEST_F(NativeDownwardHandoff, SilentReferenceRefusalIsNamedInOneLogLineAndAddsNoHistoryRow) {
+  test_log_capture_t log;
+  EXPECT_TRUE(consume(fresh())); // The reference window now holds one observation.
+  const auto before = adaptive_bitrate::get_state_with_history().history;
+  auto stale = fresh(); adaptive_bitrate::note_network_evidence_arrival(false);
+  EXPECT_FALSE(consume(stale)); // Refused exactly as before; the window it discards was silent until now.
+  const auto after = adaptive_bitrate::get_state_with_history().history;
+  EXPECT_EQ(after.entries.size(), before.entries.size()); EXPECT_EQ(after.dropped, before.dropped);
+  const auto summary = native_lines(log, "summary");
+  ASSERT_EQ(summary.size(), 1u);
+  EXPECT_EQ(native_field(summary[0], "entered"), "1"); EXPECT_EQ(native_field(summary[0], "consumed"), "1");
+  EXPECT_EQ(native_field(summary[0], "reference_clears"), "0");
+  const auto lines = native_lines(log, "interruption");
+  ASSERT_EQ(lines.size(), 1u);
+  const auto &line = lines[0];
+  EXPECT_EQ(native_field(line, "generation"), "620");
+  EXPECT_EQ(native_field(line, "sequence"), std::to_string(stale.sequence));
+  EXPECT_EQ(native_field(line, "native_downward"), "on");
+  EXPECT_EQ(native_field(line, "entered"), "2"); EXPECT_EQ(native_field(line, "consumed"), "1");
+  EXPECT_EQ(native_field(line, "busy_skips"), native_no_busy_skips);
+  EXPECT_EQ(native_field(line, "refused"), "1");
+  EXPECT_EQ(native_field(line, "first_refusal"), "operator_revision");
+  EXPECT_EQ(native_field(line, "refusals"), "[operator_revision:1]");
+  EXPECT_EQ(native_field(line, "reference_clears"), "1");
+  EXPECT_EQ(native_field(line, "first_clear"), "permission"); EXPECT_EQ(native_field(line, "last_clear"), "permission");
+  EXPECT_EQ(native_field(line, "clear_counts"), "[permission:1]");
+  EXPECT_EQ(native_field(line, "last_lost_closed"), "0"); EXPECT_EQ(native_field(line, "interruptions"), "1/16");
+}
+
+TEST_F(NativeDownwardHandoff, BusySkipIsCountedWithoutEnteringAndApartFromAnyReferenceClear) {
+  test_log_capture_t log;
+  const auto signal = fresh(); EXPECT_TRUE(consume(signal));
+  const auto request = adaptive_bitrate::get_live_bitrate_request(); ASSERT_TRUE(request);
+  std::promise<void> entered, release; auto go = release.get_future(); auto started = entered.get_future();
+  auto applying = std::async(std::launch::async, [&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+      entered.set_value(); go.wait(); return true;
+    });
+  });
+  const auto entered_status = started.wait_for(2s);
+  if (entered_status != std::future_status::ready) { release.set_value(); applying.wait(); }
+  ASSERT_EQ(entered_status, std::future_status::ready);
+  const auto lines_while_busy = native_lines(log).size();
+  auto observing = std::async(std::launch::async, [&] { return consume(signal); });
+  const auto ready = observing.wait_for(2s);
+  const auto lines_after_skip = native_lines(log).size();
+  release.set_value();
+  EXPECT_EQ(ready, std::future_status::ready); EXPECT_FALSE(observing.get()); EXPECT_TRUE(applying.get());
+  EXPECT_EQ(lines_after_skip, lines_while_busy); // The skipped path logs nothing.
+  adaptive_bitrate::reset(); // Ends the scope: its one final line, after the reset discarded the live window.
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "busy_skips"),
+            std::atomic<std::uint64_t>::is_always_lock_free ? "1" : "unavailable");
+  EXPECT_EQ(native_field(end[0], "entered"), "1"); EXPECT_EQ(native_field(end[0], "refused"), "0");
+  EXPECT_EQ(native_field(end[0], "retired_window"), "1");
+  // The only clear is the reset's own retire of the one-observation window; the skip cleared nothing.
+  EXPECT_EQ(native_field(end[0], "clear_counts"), "[writer_or_scope:1]");
+  EXPECT_TRUE(native_lines(log, "interruption").empty());
+}
+
+TEST_F(NativeDownwardHandoff, DisabledOptInStillRefusesAndLeavesOnlyOneFinalLine) {
+  config::video.adaptive_bitrate.native_downward = false; adaptive_bitrate::load_config();
+  test_log_capture_t log;
+  for (int i = 0; i < 3; ++i) EXPECT_FALSE(consume(fresh()));
+  EXPECT_TRUE(native_lines(log).empty()); // No running lines while the opt-in is off.
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+  adaptive_bitrate::reset();
+  const auto lines = native_lines(log);
+  ASSERT_EQ(lines.size(), 1u);
+  ASSERT_EQ(native_lines(log, "scope_end").size(), 1u);
+  EXPECT_EQ(native_field(lines[0], "native_downward"), "off");
+  EXPECT_EQ(native_field(lines[0], "entered"), "3"); EXPECT_EQ(native_field(lines[0], "consumed"), "0");
+  EXPECT_EQ(native_field(lines[0], "refusals"), "[config_disabled:3]");
+  EXPECT_EQ(native_field(lines[0], "reference_clears"), "0");
+}
+
+TEST_F(NativeDownwardHandoff, DiagnosticsKeepEveryCallerCallbackAndRefusal) {
+  test_log_capture_t log;
+  int calls = 0;
+  const auto counted = [&](const native_video_signal::signal_t &signal, std::string_view app, bool current) {
+    return adaptive_bitrate::update_native_signal(native, app, nonce, signal, true, [&calls, current] {
+      ++calls; return current;
+    });
+  };
+  EXPECT_TRUE(counted(fresh(), "native-controller-test", true));
+  EXPECT_EQ(calls, 2); // Once in permission and once at the last boundary, as before.
+  EXPECT_FALSE(counted(fresh(), "foreign-app", true));
+  EXPECT_EQ(calls, 2); // The scope refused first; the caller is never asked.
+  EXPECT_FALSE(counted(fresh(), "native-controller-test", false));
+  EXPECT_EQ(calls, 3); // Asked once in permission, refused, never asked again for the diagnostic.
+  adaptive_bitrate::reset();
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "entered"), "3"); EXPECT_EQ(native_field(end[0], "consumed"), "1");
+  EXPECT_EQ(native_field(end[0], "first_refusal"), "scope_owner");
+  EXPECT_EQ(native_field(end[0], "last_refusal"), "current_caller");
+  EXPECT_EQ(native_field(end[0], "refusals"), "[scope_owner:1,current_caller:1]");
+  // Only the first refusal found a window to discard; the second found it already empty.
+  EXPECT_EQ(native_field(end[0], "clear_counts"), "[permission:1]");
+}
+
+TEST_F(NativeDownwardHandoff, ReceiptAndSettingRefusalsAreNamedAfterPermissionAndStayRefused) {
+  test_log_capture_t log;
+  const std::set<std::string> receipt_stage {"no_receipt", "receipt_not_current", "signal_not_current", "measurement",
+                                             "setting"};
+  EXPECT_TRUE(consume(fresh()));
+  const auto historical = fresh();
+  { auto failed = producer.begin_native_update(video::bitrate_application::origin_t {999, 17000}); }
+  EXPECT_FALSE(consume(historical));
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000, true); // No producer witness after reopen.
+  EXPECT_FALSE(consume(fresh()));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+  adaptive_bitrate::reset();
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "consumed"), "1"); EXPECT_EQ(native_field(end[0], "refused"), "2");
+  EXPECT_TRUE(receipt_stage.count(native_field(end[0], "first_refusal"))) << end[0];
+  EXPECT_TRUE(receipt_stage.count(native_field(end[0], "last_refusal"))) << end[0];
+}
+
+TEST_F(NativeDownwardHandoff, DiagnosticLinesAreBoundedPrivateAndLeaveHistoryHeadroom) {
+  test_log_capture_t log;
+  const auto before = adaptive_bitrate::get_state_with_history().history;
+  for (int i = 0; i < 40; ++i) {
+    EXPECT_TRUE(consume(fresh()));
+    auto stale = fresh(); adaptive_bitrate::note_network_evidence_arrival(false);
+    EXPECT_FALSE(consume(stale));
+  }
+  const auto after = adaptive_bitrate::get_state_with_history().history;
+  EXPECT_EQ(after.entries.size(), before.entries.size()); EXPECT_EQ(after.dropped, 0u);
+  EXPECT_EQ(after.capacity, adaptive_bitrate::HISTORY_CAPACITY);
+  EXPECT_EQ(native_lines(log, "summary").size(), 1u); // The next summary is due only after 10 s.
+  EXPECT_EQ(native_lines(log, "interruption").size(), 16u);
+  adaptive_bitrate::reset();
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "entered"), "80"); EXPECT_EQ(native_field(end[0], "consumed"), "40");
+  EXPECT_EQ(native_field(end[0], "clear_counts"), "[permission:40]");
+  EXPECT_EQ(native_field(end[0], "interruptions"), "16/16"); EXPECT_EQ(native_field(end[0], "suppressed"), "24");
+  const auto all = native_lines(log);
+  EXPECT_EQ(all.size(), 18u);
+  for (const auto &line : all) {
+    EXPECT_LT(line.size(), 2048u);
+    EXPECT_EQ(line.find(" truncated"), std::string::npos) << line;
+    EXPECT_EQ(line.find("native-controller-test"), std::string::npos) << line;
+    EXPECT_EQ(line.find(nonce), std::string::npos) << line;
+    EXPECT_EQ(line.find_first_not_of("abcdefghijklmnopqrstuvwxyzLTN0123456789_ =:,/[]"), std::string::npos) << line;
+  }
+}

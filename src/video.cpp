@@ -1745,6 +1745,7 @@ namespace video {
     avcodec_encode_session_t(avcodec_encode_session_t &&other) noexcept = default;
 
     ~avcodec_encode_session_t() {
+      retire_bitrate_observations();
       if (!avcodec_ctx) {
         converter.reset();
         return;
@@ -1856,6 +1857,14 @@ namespace video {
       return bitrate_update_e::recreate_session;
     }
 
+    void retire_bitrate_observations() noexcept override {
+      if (bitrate_observations) bitrate_observations->retire();
+    }
+
+    // Default move transfers the sole owning pointer; moved-from destruction
+    // cannot retire the moved-to codec's metadata. No per-frame allocation.
+    std::unique_ptr<bitrate_application::adapter_t> bitrate_observations;
+
     avcodec_ctx_t avcodec_ctx;
     std::unique_ptr<encode_device_frame_converter_t<platf::avcodec_encode_device_t>> converter;
     conversion_request_t conversion_request;
@@ -1947,6 +1956,10 @@ namespace video {
     }
 
     int convert(frame_t &frame) override {
+      // PYROWORK01 BEGIN
+      // Includes every early failure/unsupported path; do not touch codec flags.
+      work_observations.discard_buffer();
+      // PYROWORK01 END
       if (!session) {
         return -1;
       }
@@ -1983,7 +1996,16 @@ namespace video {
             }
             return convert_session_is_over;
           }
+          // PYROWORK01 BEGIN
+          // Shadow only for this work: the exact local value is both captured
+          // and passed by the unchanged backend expression below.
+          const auto max_frame_bytes = this->max_frame_bytes;
+          auto work = work_observations.begin_work(pyrowave_work::kind_e::imported, max_frame_bytes);
+          // PYROWORK01 END
           if (!session->encode_imported(buffer, max_frame_bytes)) {
+            // PYROWORK01 BEGIN
+            work_observations.discard_buffer();
+            // PYROWORK01 END
             if (!complained_about_import) {
               complained_about_import = true;
               BOOST_LOG(error) << "PyroWave: a captured frame on the GPU could not be encoded; the "sv
@@ -1992,6 +2014,9 @@ namespace video {
             return -1;
           }
           converted_since_last_packet = true;
+          // PYROWORK01 BEGIN
+          work_observations.complete_work(std::move(work), true, session->bitstream());
+          // PYROWORK01 END
           return session->bitstream().empty() ? -1 : 0;
         }
         if (!complained_about_import) {
@@ -2010,12 +2035,22 @@ namespace video {
         //
         // Getting this wrong is not subtle. Returning a failure tears the session down and the host
         // builds another, which it did forty thousand times in ten seconds before this existed.
+        // PYROWORK01 BEGIN
+        const auto max_frame_bytes = this->max_frame_bytes;
+        auto work = work_observations.begin_work(pyrowave_work::kind_e::blank_primer, max_frame_bytes);
+        // PYROWORK01 END
         if (!session->encode_blank(max_frame_bytes)) {
+          // PYROWORK01 BEGIN
+          work_observations.discard_buffer();
+          // PYROWORK01 END
           // A ten bit session that cannot make its own black frame cannot make any frame, and the
           // session built to replace it would fail here identically.
           return convert_session_is_over;
         }
         converted_since_last_packet = true;
+        // PYROWORK01 BEGIN
+        work_observations.complete_work(std::move(work), true, session->bitstream());
+        // PYROWORK01 END
         return session->bitstream().empty() ? -1 : 0;
       }
 
@@ -2036,10 +2071,20 @@ namespace video {
       // is black forever with nothing in any log, which is what this did for one hour today.
       if (frame.metadata.format == platf::frame_format_e::unknown &&
           range == pyrowave_encode::dynamic_range_e::hdr10) {
+        // PYROWORK01 BEGIN
+        const auto max_frame_bytes = this->max_frame_bytes;
+        auto work = work_observations.begin_work(pyrowave_work::kind_e::blank_hdr, max_frame_bytes);
+        // PYROWORK01 END
         if (!session->encode_blank(max_frame_bytes)) {
+          // PYROWORK01 BEGIN
+          work_observations.discard_buffer();
+          // PYROWORK01 END
           return -1;
         }
         converted_since_last_packet = true;
+        // PYROWORK01 BEGIN
+        work_observations.complete_work(std::move(work), true, session->bitstream());
+        // PYROWORK01 END
         return session->bitstream().empty() ? -1 : 0;
       }
 
@@ -2084,11 +2129,21 @@ namespace video {
         return convert_session_is_over;
       }
 
+      // PYROWORK01 BEGIN
+      const auto max_frame_bytes = this->max_frame_bytes;
+      auto work = work_observations.begin_work(pyrowave_work::kind_e::packed, max_frame_bytes);
+      // PYROWORK01 END
       if (!session->encode_packed(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
                                 max_frame_bytes)) {
+        // PYROWORK01 BEGIN
+        work_observations.discard_buffer();
+        // PYROWORK01 END
         return -1;
       }
       converted_since_last_packet = true;
+      // PYROWORK01 BEGIN
+      work_observations.complete_work(std::move(work), true, session->bitstream());
+      // PYROWORK01 END
       return session->bitstream().empty() ? -1 : 0;
     }
 
@@ -2108,11 +2163,33 @@ namespace video {
     bool prepare_packet() {
       if (converted_since_last_packet) {
         converted_since_last_packet = false;
+        // PYROWORK01 BEGIN
+        work_observations.prepare_cached_buffer(session->bitstream());
+        // PYROWORK01 END
         return true;
       }
+      // PYROWORK01 BEGIN
+      const auto max_frame_bytes = this->max_frame_bytes;
+      auto work = work_observations.begin_work(pyrowave_work::kind_e::retained, max_frame_bytes);
+      // The lambda retains the old return line verbatim for metadata erasure.
+      const auto run_original_work = [&] {
+      // PYROWORK01 END
       return session->encode_retained(max_frame_bytes);
+      // PYROWORK01 BEGIN
+      };
+      const bool encoded = run_original_work();
+      return work_observations.complete_retained(std::move(work), encoded, session->bitstream());
+      // PYROWORK01 END
     }
 
+    // PYROWORK01 BEGIN
+    pyrowave_work::receipt_value take_work_receipt(std::int64_t frame_index,
+        const std::vector<std::uint8_t> &encoded_buffer,
+        const std::vector<std::uint8_t> &packet_copy) noexcept {
+      return work_observations.take_for_packet(frame_index, encoded_buffer, packet_copy);
+    }
+
+    // PYROWORK01 END
     void request_idr_frame() override {
       // Every frame already is one.
     }
@@ -2162,6 +2239,10 @@ namespace video {
 
   private:
     std::unique_ptr<pyrowave_encode::session_t> session;
+    // PYROWORK01 BEGIN
+    // Neither trace identity nor global status/ACK creates this local lifetime.
+    pyrowave_work::adapter_t work_observations;
+    // PYROWORK01 END
     int framerate = 60;
     std::size_t max_frame_bytes = 0;
     bool converted_since_last_packet = false;
@@ -2184,6 +2265,10 @@ namespace video {
     ):
         converter(std::move(converter)),
         conversion_request(conversion_request) {
+    }
+
+    ~nvenc_encode_session_t() override {
+      retire_bitrate_observations();
     }
 
     int convert(frame_t &frame) override {
@@ -2235,12 +2320,39 @@ namespace video {
     }
 
     bitrate_update_e update_bitrate(int new_bitrate_kbps) override {
+      return update_bitrate_observed(new_bitrate_kbps, std::nullopt);
+    }
+
+    bitrate_update_e update_bitrate_observed(int new_bitrate_kbps, std::optional<bitrate_application::origin_t> origin) {
       auto *encode_device = device();
       if (!encode_device || !encode_device->nvenc) {
         return bitrate_update_e::rejected;
       }
-      return encode_device->nvenc->update_bitrate(new_bitrate_kbps) ?
+      return encode_device->nvenc->update_bitrate(new_bitrate_kbps, origin) ?
         bitrate_update_e::applied : bitrate_update_e::rejected;
+    }
+
+    void retire_bitrate_observations() noexcept override {
+      if (auto *encode_device = device(); encode_device && encode_device->nvenc) {
+        encode_device->nvenc->retire_bitrate_observations();
+      }
+    }
+
+    std::weak_ptr<const bitrate_provenance::current_setting_t> current_bitrate_setting() const noexcept {
+      auto *encode_device = device();
+      return encode_device && encode_device->nvenc ? encode_device->nvenc->current_bitrate_setting() :
+        std::weak_ptr<const bitrate_provenance::current_setting_t> {};
+    }
+
+    std::optional<bitrate_provenance::record_t> take_bitrate_observation(uint64_t output_timestamp) noexcept {
+      auto *encode_device = device();
+      return encode_device && encode_device->nvenc ?
+        encode_device->nvenc->take_bitrate_observation(output_timestamp) : std::nullopt;
+    }
+
+    std::optional<int> accepted_bitrate_kbps() const noexcept {
+      auto *encode_device = device();
+      return encode_device && encode_device->nvenc ? encode_device->nvenc->accepted_bitrate_kbps() : std::nullopt;
     }
 
     bool supports_runtime_bitrate_update() const override {
@@ -4351,6 +4463,8 @@ namespace video {
   }
 
   int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+    auto submission = session.bitrate_observations ? session.bitrate_observations->capture_before_submit(frame_nr) :
+      bitrate_application::adapter_t::submission_sink_t {};
     auto *encode_device = session.device();
     if (!encode_device || !encode_device->frame) {
       return -1;
@@ -4373,6 +4487,7 @@ namespace video {
     if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("codec_input_flags", session)
       .u("submission", session.trace_submission).i("pict_type", frame->pict_type).i("frame_flags", frame->flags));
     auto ret = avcodec_send_frame(ctx.get(), frame);
+    if (ret >= 0) submission.accepted(bitrate_application::submit_stage_e::avcodec_send_frame_success);
     if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("codec_submit_result", session)
       .u("submission", session.trace_submission).i("result", ret));
     if (ret < 0) {
@@ -4393,6 +4508,12 @@ namespace video {
       } else if (ret < 0) {
         if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("codec_receive_error", session).i("code", ret).i("current_call_pts", frame_nr));
         return ret;
+      }
+
+      if (session.bitrate_observations) {
+        const auto setting = session.bitrate_observations->take_output(
+          bitrate_application::output_stage_e::avcodec_packet_pts, av_packet->pts);
+        if (setting) packet->encoder_setting.emplace(*setting);
       }
 
       if (av_packet->flags & AV_PKT_FLAG_KEY) {
@@ -4522,6 +4643,10 @@ namespace video {
     trace_packet_output(session, *packet, frame_nr, false);
     packet->trace_enqueue_attempted = packet->trace_packet != 0;
     if (vrr_trace::enabled() && session.trace_encoder) vrr_trace::record(trace_encoder_event("packet_enqueue", session).u("packet", packet->trace_packet));
+    // PYROWORK01 BEGIN
+    const auto work_receipt = session.take_work_receipt(frame_nr, encoded, packet->frame_data);
+    if (work_receipt) packet->pyrowave_work_receipt.emplace(*work_receipt);
+    // PYROWORK01 END
     packets->raise(std::move(packet));
 
     return 0;
@@ -4545,6 +4670,9 @@ namespace video {
     }
 
     auto packet = std::make_unique<packet_raw_generic>(std::move(encoded_frame.data), encoded_frame.frame_index, encoded_frame.idr);
+    if (const auto setting = session.take_bitrate_observation(encoded_frame.frame_index)) {
+      packet->encoder_setting.emplace(*setting);
+    }
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     if (session.source_submissions) {
@@ -4617,7 +4745,8 @@ namespace video {
     const config_t &config,
     int width,
     int height,
-    std::unique_ptr<platf::avcodec_encode_device_t> encode_device
+    std::unique_ptr<platf::avcodec_encode_device_t> encode_device,
+    std::optional<bitrate_application::origin_t> opening_origin = std::nullopt
   ) {
     auto platform_formats = dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get());
     if (!platform_formats) {
@@ -4675,6 +4804,7 @@ namespace video {
     // fallback options, we may need to allow more retries
     // to try applying each set.
     avcodec_ctx_t ctx;
+    std::unique_ptr<bitrate_application::adapter_t> bitrate_observations;
     for (int retries = 0; retries < 2; retries++) {
       ctx.reset(avcodec_alloc_context3(codec));
       ctx->width = config.width;
@@ -4906,6 +5036,10 @@ namespace video {
       encode_device->init_codec_options(ctx.get(), &options);
       apply_nvenc_split_encode_mode(ctx.get(), encoder, video_format, &options);
 
+      const bitrate_application::avcodec_rate_t rate_before {
+        ctx->bit_rate, ctx->rc_min_rate, ctx->rc_max_rate, (encoder.flags & CBR_WITH_VBR) != 0
+      };
+
       if (auto status = avcodec_open2(ctx.get(), codec, &options)) {
         char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
 
@@ -4925,6 +5059,14 @@ namespace video {
           return nullptr;
         }
       }
+
+      // This final successful attempt owns its own incarnation. Failed retries
+      // issue no opening observation; exact pre/post representation is retained.
+      bitrate_observations.reset(new (std::nothrow) bitrate_application::adapter_t(
+        config.session_generation, bitrate_application::backend_e::avcodec));
+      if (bitrate_observations) bitrate_observations->avcodec_open_success(opening_origin, rate_before, {
+        ctx->bit_rate, ctx->rc_min_rate, ctx->rc_max_rate, (encoder.flags & CBR_WITH_VBR) != 0
+      });
 
       // Report codec read-back after FFmpeg has applied driver constraints.
 #ifdef POLARIS_BUILD_VAAPI
@@ -5075,6 +5217,9 @@ namespace video {
       runtime_bitrate_supported
     );
 
+    session->bitrate_observations = std::move(bitrate_observations);
+    if (session->bitrate_observations) session->bitrate_observations->publish_usable_avcodec_open();
+
     return session;
   }
 
@@ -5111,7 +5256,11 @@ namespace video {
       conversion_request->target_format
     );
 
-    return std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
+    auto session = std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
+    if (auto *device = session->device(); device && device->nvenc) {
+      device->nvenc->publish_usable_bitrate_open();
+    }
+    return session;
   }
 
   /**
@@ -5120,7 +5269,7 @@ namespace video {
    *        on failure has to stop instead, because every rebuild refuses identically and the client
    *        sees a stream that never starts with nothing to say why.
    */
-  std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device, bool *refused_for_good = nullptr) {
+  std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device, bool *refused_for_good = nullptr, std::optional<bitrate_application::origin_t> opening_origin = std::nullopt) {
     std::unique_ptr<encode_session_t> session;
 #ifdef POLARIS_BUILD_PYROWAVE
     if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
@@ -5188,7 +5337,7 @@ namespace video {
 #endif
     if (dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get())) {
       auto avcodec_encode_device = boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(encode_device));
-      session = make_avcodec_encode_session(disp.get(), encoder, config, width, height, std::move(avcodec_encode_device));
+      session = make_avcodec_encode_session(disp.get(), encoder, config, width, height, std::move(avcodec_encode_device), opening_origin);
       if (session) session->capture_display_owner = disp;
     } else if (dynamic_cast<platf::nvenc_encode_device_t *>(encode_device.get())) {
       auto nvenc_encode_device = boost::dynamic_pointer_cast<platf::nvenc_encode_device_t>(std::move(encode_device));
@@ -5353,6 +5502,40 @@ namespace video {
            result == r::clock_domain_unverified;
   }
 
+  // The unchanged helper invokes this view only inside its original locked
+  // callback. It forwards once and carries the one poll result already consumed
+  // for this operation, without consulting current broker/trace state again.
+  struct bitrate_application_view_t {
+    using bitrate_update_e = encode_session_t::bitrate_update_e;
+    encode_session_t &session;
+    std::optional<bitrate_application::origin_t> origin;
+    bitrate_update_e update_bitrate(int kbps) {
+      if (auto *native = dynamic_cast<nvenc_encode_session_t *>(&session)) {
+        return native->update_bitrate_observed(kbps, origin);
+      }
+      return session.update_bitrate(kbps);
+    }
+  };
+
+  static std::optional<bitrate_application::origin_t> bitrate_application_origin(
+      const std::optional<adaptive_bitrate::live_bitrate_request_t> &request) noexcept {
+    if (!request) return std::nullopt;
+    return bitrate_application::origin_t {request->revision, request->target_bitrate_kbps};
+  }
+
+  namespace bitrate {
+    // Preserve the production caller's single poll and session interface while
+    // retaining that request's origin in the real locked update callback.
+    template<class Record>
+    result_t apply_after_encode(const std::optional<adaptive_bitrate::live_bitrate_request_t> &request,
+                               encode_session_t &session, int &applied_bitrate, std::int64_t next_frame_index,
+                               bool trace, Record &&record) {
+      bitrate_application_view_t view {session, bitrate_application_origin(request)};
+      return video::bitrate::apply_after_encode<bitrate_application_view_t, Record>(
+        request, view, applied_bitrate, next_frame_index, trace, std::forward<Record>(record));
+    }
+  }  // namespace bitrate
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -5370,12 +5553,14 @@ namespace video {
   ) {
     // A disable/rollback may have superseded the target while a former
     // FFmpeg encoder was being retired. Use the latest pending request.
+    std::optional<bitrate_application::origin_t> opening_origin;
     if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
       config.bitrate = request->target_bitrate_kbps;
+      if (!encoder_probe_active() && !config.input_only) opening_origin = bitrate_application_origin(request);
     }
     bool refused_for_good = false;
     auto session = make_encode_session(disp, encoder, config, disp->width, disp->height,
-                                       std::move(encode_device), &refused_for_good);
+                                       std::move(encode_device), &refused_for_good, opening_origin);
     session_initialized = static_cast<bool>(session);
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
@@ -5388,6 +5573,14 @@ namespace video {
         end_stream_encoder_cannot_serve(mail);
       }
       return;
+    }
+
+    // Native CUDA NVENC opens while make_encode_device builds its device, before the poll above can
+    // move config.bitrate to a newer target, and is not reopened here. Start this session's trace,
+    // readiness and applied rate from what its SDK accepted; a newer target then reaches the encoder
+    // through the update after the first encode. Other sessions opened at config.bitrate.
+    if (const auto *native = dynamic_cast<const nvenc_encode_session_t *>(session.get())) {
+      config.bitrate = bitrate::opened_bitrate_kbps(native->accepted_bitrate_kbps(), config.bitrate);
     }
 
     trace_encoder_open(*session, config, pacing_state ? std::optional {pacing_state->trace_id} : std::nullopt, false);
@@ -5428,12 +5621,17 @@ namespace video {
     }
 
     bool bitrate_session_recreation_pending = false;
+    std::weak_ptr<const bitrate_provenance::current_setting_t> current_bitrate_setting;
+    if (const auto *native = dynamic_cast<const nvenc_encode_session_t *>(session.get())) {
+      current_bitrate_setting = native->current_bitrate_setting();
+    }
     adaptive_bitrate::set_runtime_update_supported(
       session->supports_runtime_bitrate_update(),
       {},
       config.bitrate,
       session->supports_in_place_bitrate_update(),
-      session->minimum_in_place_bitrate_kbps()
+      session->minimum_in_place_bitrate_kbps(),
+      current_bitrate_setting
     );
     auto runtime_bitrate_guard = util::fail_guard([&bitrate_session_recreation_pending] {
       if (!bitrate_session_recreation_pending) {
@@ -5448,6 +5646,7 @@ namespace video {
     // hang occurs, this thread may probably never exit, but it will allow
     // streaming to continue without requiring a full restart of Sunshine.
     auto fail_guard = util::fail_guard([&encoder, &session] {
+      session->retire_bitrate_observations();
       if (encoder.flags & ASYNC_TEARDOWN) {
         std::thread encoder_teardown_thread {[session = std::move(session)]() mutable {
           BOOST_LOG(info) << "Starting async encoder teardown";
@@ -6117,8 +6316,10 @@ namespace video {
   // encoder changes: native NVENC can acknowledge a bitrate update in place.
   class cuda_nvenc_encode_device_t final: public platf::nvenc_encode_device_t {
   public:
-    explicit cuda_nvenc_encode_device_t(std::unique_ptr<platf::avcodec_encode_device_t> input):
-        converter(std::move(input)) {
+    explicit cuda_nvenc_encode_device_t(std::unique_ptr<platf::avcodec_encode_device_t> input,
+                                       bool attribute_open = false):
+        converter(std::move(input)),
+        attribute_open(attribute_open) {
     }
 
     ~cuda_nvenc_encode_device_t() override {
@@ -6162,9 +6363,14 @@ namespace video {
       if (!cuda_context || !cuda_context->cuda_ctx) return false;
       auto candidate = std::make_unique<nvenc::nvenc_cuda>(
         cuda_context->cuda_ctx, frame->data[0], frame->linesize[0]);
+      // The native CUDA device opens before encode_run's runtime-support
+      // publication. Capture only an already matching sole-session target;
+      // this read does not change the rate or borrow a later encoder ACK.
+      const auto opening_origin = attribute_open ? bitrate_application_origin(
+        adaptive_bitrate::get_encoder_open_request(config.session_generation, config.bitrate)) : std::nullopt;
       if (!candidate->create_encoder(config::video.nv, config,
                                     nvenc::nvenc_colorspace_from_sunshine_colorspace(space),
-                                    NV_ENC_BUFFER_FORMAT_NV12)) return false;
+                                    NV_ENC_BUFFER_FORMAT_NV12, opening_origin)) return false;
       native = std::move(candidate);
       nvenc = native.get();
       return true;
@@ -6192,11 +6398,12 @@ namespace video {
     avcodec_buffer_t hw_frames;
     std::unique_ptr<platf::avcodec_encode_device_t> converter;
     std::unique_ptr<nvenc::nvenc_cuda> native;
+    const bool attribute_open;
   };
 
   void try_native_cuda_fec_device(std::unique_ptr<platf::encode_device_t> &result,
                                  platf::display_t &display, const encoder_t &encoder, const config_t &config,
-                                 const sunshine_colorspace_t &colorspace) {
+                                 const sunshine_colorspace_t &colorspace, bool attribute_open) {
     auto *input = dynamic_cast<platf::avcodec_encode_device_t *>(result.get());
     const auto *formats = dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get());
     if (encoder_probe_in_progress || !config.client_media_feedback_expected ||
@@ -6211,7 +6418,7 @@ namespace video {
 
     const bool prefer_8bit = input->prefer_8bit_encode;
     auto candidate = std::make_unique<cuda_nvenc_encode_device_t>(
-      boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(result)));
+      boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(result)), attribute_open);
     candidate->colorspace = colorspace;
     candidate->prefer_8bit_encode = prefer_8bit;
     if (candidate->init_encoder(config, colorspace)) {
@@ -6235,7 +6442,8 @@ namespace video {
   }
 #endif
 
-  std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
+  std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder,
+                                                         const config_t &config, bool attribute_native_open = false) {
     std::unique_ptr<platf::encode_device_t> result;
 
     const auto hdr_probe = probe_display_hdr(disp, config);
@@ -6346,7 +6554,7 @@ namespace video {
       }
     }
 #if !defined(__ANDROID__)
-    try_native_cuda_fec_device(result, disp, encoder, config, colorspace);
+    try_native_cuda_fec_device(result, disp, encoder, config, colorspace, attribute_native_open);
 #endif
 #endif
 
@@ -6832,7 +7040,7 @@ namespace video {
         config.bitrate = request->target_bitrate_kbps;
       }
 
-      auto encode_device = make_encode_device(*display, encoder, config);
+      auto encode_device = make_encode_device(*display, encoder, config, !config.input_only);
       if (!encode_device) {
         invalidate_live_probe_reuse();
         return;

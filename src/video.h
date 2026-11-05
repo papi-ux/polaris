@@ -9,6 +9,10 @@
 #include "encoder_probe_reuse.h"
 #include "launch_failure.h"
 #include "pyrowave_availability.h"
+#include "video_bitrate_provenance.h"
+// PYROWORK01 BEGIN
+#include "video_pyrowave_work.h"
+// PYROWORK01 END
 #include <functional>
 #include "input.h"
 #include "nvenc/nvenc_config.h"
@@ -625,6 +629,9 @@ namespace video {
     virtual bitrate_update_e update_bitrate(int new_bitrate_kbps) {
       return bitrate_update_e::rejected;
     }
+
+    // Metadata retirement happens on the owner thread, before detached teardown.
+    virtual void retire_bitrate_observations() noexcept {}
   };
 
   // encoders
@@ -700,7 +707,13 @@ namespace video {
     // in that record's emitted-time coordinates. A timestamp-coordinate fact only: never proof,
     // authority or receiver VRR. Sessions that never record source submissions keep it false.
     bool source_clock_timestamp = false;
+    // PYROWORK01 BEGIN
+    // Optional immutable historical work/buffer fact; no bitrate/owner authority.
+    // Only PyroWave populates this. It never enters the wire or drives a reader.
+    pyrowave_work::receipt_value pyrowave_work_receipt;
+    // PYROWORK01 END
     // Local observation metadata only. These fields never enter a network packet.
+    std::optional<const bitrate_provenance::record_t> encoder_setting;
     std::uint64_t trace_encoder = 0;
     std::uint64_t trace_submission = 0;
     std::uint64_t trace_packet = 0;

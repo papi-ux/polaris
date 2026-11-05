@@ -79,6 +79,8 @@ namespace stream {
     int videoQosType;
 
     uint32_t encryptionFlagsEnabled;
+    // Optional matched native reception observation; never an encryption-policy input.
+    bool native_reception_enabled = false;
 
     std::optional<int> gcmap;
 

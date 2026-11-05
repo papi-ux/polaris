@@ -3,6 +3,7 @@
  */
 #include <src/vrr_trace.h>
 #include <src/vrr_trace_clock.h>
+#include <src/stream_native_reception_trace.h>
 #include <src/stream_start_outcome.h>
 #include <src/video.h>
 #include <gtest/gtest.h>
@@ -469,7 +470,7 @@ TEST(VrrTraceTests, HostHistoryRunKeepsClientReportAndWriterOutcomesDistinct) {
 }
 
 TEST(VrrTraceTests, HostHistoryRunIsBoundedStaticVersionedAndOffWhenTraceIsOff) {
-  EXPECT_EQ(vrr_trace::k_schema_minor,2u);
+  EXPECT_EQ(vrr_trace::k_schema_minor,5u);
   const auto full = vrr_trace::host_history_run_event(ended_run(41,41,7));
   const auto empty = vrr_trace::host_history_run_event({});
   EXPECT_FALSE(full.overflow); EXPECT_FALSE(empty.overflow);
@@ -503,7 +504,7 @@ TEST(VrrTraceTests, HostHistoryRunIsBoundedStaticVersionedAndOffWhenTraceIsOff) 
     vrr_trace::record_host_history_run(ended_run(43,43,7));
   }
   c.stop(); const auto all = c.rows(); const auto rows = select(all,"host_history_run"); ASSERT_EQ(rows.size(),2u);
-  EXPECT_EQ(all.front()["minor"],2u);
+  EXPECT_EQ(all.front()["minor"],5u);
   EXPECT_EQ(rows[0]["codec"],"av1"); EXPECT_EQ(rows[0]["encoder_backend"],"vaapi"); EXPECT_EQ(rows[0]["start_outcome"],"no_ping");
   EXPECT_EQ(rows[0]["launch_policy_available"],1u); EXPECT_EQ(rows[0]["launch_requested_client_fps_milli"],119880);
   EXPECT_EQ(rows[0]["launch_session_target_fps_milli"],59940);
@@ -553,5 +554,40 @@ TEST(VrrTraceTests, HostPauseRowUsesTheJoinGenerationAndTheSnapshotItsWriterUsed
   for (const auto *forbidden : {"_session_instance_id","session_token","app_session_id","/proc/"}) {
     EXPECT_EQ(at(forbidden),std::string::npos) << forbidden;
   }
+}
+TEST(VrrTraceTests, NativeAdmissionRowsKeepTheirFixedKeysUnderSchemaTwoFive) {
+  collection_t c;
+  ASSERT_EQ(c.recorder->status(), vrr_trace::status_e::running);
+  stream_native_reception::admission_trace_t admitted;
+  admitted.admission = stream_native_reception::reason_e::joined; admitted.admitted = true;
+  admitted.generation = 5; admitted.received_steady_ns = 123;
+  admitted.report.sequence = 9; admitted.report.count = 1; admitted.availability = stream_native_reception::reason_e::joined;
+  admitted.setting = stream_frame_feedback::encoder_setting_t {1, 5, 2, 3, 20000, video::bitrate_provenance::receipt_origin_e::successful_open};
+  admitted.sample_count = 1; admitted.samples[0] = {7, 8, 900, 100, 200, true, 1400};
+  stream_native_reception::trace::callback_t facts;
+  facts.dispatched = true; facts.generation = 5; facts.trace_scope = 11; facts.callback = 12; facts.enet_smoothed_rtt_ms = 3;
+  stream_native_reception::admission_trace_t refused;
+  refused.admission = stream_native_reception::reason_e::report_order; refused.generation = 5; refused.received_steady_ns = 124;
+  {
+    vrr_trace::test_recorder_scope_t active(c.recorder.get());
+    const auto sink = [](const vrr_trace::event_t &row) { vrr_trace::record(row); };
+    EXPECT_EQ(stream_native_reception::trace::emit(admitted, facts, sink), 2u);
+    EXPECT_EQ(stream_native_reception::trace::emit(refused, facts, sink), 1u);
+  }
+  c.stop(); const auto all = c.rows();
+  ASSERT_FALSE(all.empty()); EXPECT_EQ(all.front()["minor"], 5u);
+  const auto headers = select(all, "native_admission"); const auto samples = select(all, "native_admission_sample");
+  ASSERT_EQ(headers.size(), 2u); ASSERT_EQ(samples.size(), 1u);
+  EXPECT_EQ(headers[0].size(), 37u); EXPECT_EQ(headers[1].size(), 37u); EXPECT_EQ(samples[0].size(), 15u);
+  EXPECT_EQ(headers[0]["report_attribution"], "admitted_payload"); EXPECT_EQ(headers[1]["report_attribution"], "none");
+  EXPECT_EQ(headers[0]["admission"], "joined"); EXPECT_EQ(headers[0]["enet_smoothed_rtt_ms"], 3u);
+  EXPECT_EQ(headers[0]["encoder_receipt_origin"], "successful_open"); EXPECT_EQ(headers[0]["sample_rows"], 1u);
+  EXPECT_EQ(headers[1]["admission"], "report_order"); EXPECT_TRUE(headers[1]["report_sequence"].is_null());
+  EXPECT_EQ(headers[1]["sample_rows"], 0u);
+  EXPECT_EQ(samples[0]["callback"], 12u); EXPECT_EQ(samples[0]["sender_api_begin_ns"], 100);
+  EXPECT_EQ(samples[0]["sender_api_end_ns"], 200); EXPECT_EQ(samples[0]["socket_read_age_us"], 900u);
+  EXPECT_EQ(samples[0]["packet_kind"], "parity"); EXPECT_EQ(samples[0]["udp_bytes"], 1400u);
+  const auto footer = select(all, "footer"); ASSERT_EQ(footer.size(), 1u);
+  EXPECT_EQ(footer[0]["invalid_event_loss"], 0u); EXPECT_EQ(footer[0]["lost_contention_or_full"], 0u);
 }
 #endif

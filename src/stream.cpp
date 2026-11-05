@@ -45,14 +45,19 @@ extern "C" {
 #include "process.h"
 #include "pyrowave_advice.h"
 #include "stream.h"
+#include "stream_applied_pacing.h"
 #include "stream_fec.h"
 #include "stream_fec_status.h"
+#include "stream_frame_feedback.h"
+#include "stream_native_reception.h"
+#include "stream_native_reception_trace.h"
 #include "stream_pacing.h"
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
 #include "stream_stats.h"
 #include "vrr_rtp_timestamp.h"
 #include "vrr_trace.h"
+#include "video_packet_trace_fields.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -632,6 +637,18 @@ namespace stream {
     // stream_stats uses this to reject a stale write/stop that arrives
     // after this uuid's slot has already been handed to a newer session.
     std::uint64_t session_generation = 0;
+
+    // This generation's frame-submission sender ledger (#611), made in alloc() before any thread can
+    // send for it and never replaced. Written only by videoBroadcastThread(), whatever the trace
+    // setting; diagnostic, never a send, pacing, FEC or bitrate input. Null when it could not be made.
+    std::shared_ptr<stream_frame_feedback::sender_ledger_t> frame_submission_ledger;
+    std::shared_ptr<stream_native_reception::scope_t> native_reception;
+    // Opaque private-trace id for that scope, set in alloc() only while POLARIS_VRR_TRACE_V2 is on; 0
+    // otherwise. Never a bearer, session token or client identity, and never read outside the trace.
+    std::uint64_t native_reception_trace_scope = 0;
+    // The exact launch/resume attempt nonce this session was admitted with (#611), copied unchanged
+    // from its launch session, or empty. Bound to this generation's timing scope only.
+    std::string frame_submission_launch_nonce;
 
     // Accessed only by videoBroadcastThread(). Keeping one tracker per
     // session prevents multi-client summaries from being combined.
@@ -1559,6 +1576,59 @@ namespace stream {
       }
     });
 
+    // Protocol13's dispatcher rejects plaintext before any callback and only reinjects after GCM.
+    // Session-ID mapping and negotiated encrypted control are required at admission.
+    server->map(stream_native_reception::packet_type, [](session_t *session, const std::string_view &payload) {
+      const bool dispatch = !(session->state.load() != session::state_e::RUNNING || !session->control.peer ||
+          !session->native_reception || !stream_native_reception::negotiated(true,
+            session->config.native_reception_enabled, "1", 1, session->config.mlFeatureFlags,
+            session->config.controlProtocolType, session->config.encryptionFlagsEnabled));
+      // One admission value copy on both paths. accept releases native/frame locks before the
+      // nonblocking controller inspection; no policy, writer or recorder can affect admission.
+      const auto now = std::chrono::steady_clock::now();
+      stream_native_reception::admission_trace_t observed;
+      if (dispatch) session->native_reception->accept(payload, true, now, &observed);
+      else observed.received_steady_ns = vrr_trace::ns(now).value_or(-1);
+      const native_video_signal::caller_t caller {session->session_generation,
+        session->state.load() == session::state_e::RUNNING,
+        session->watch_only || session->vrr.watch_or_input_only,
+        stream_native_reception::negotiated(true, session->config.native_reception_enabled, "1", 1,
+          session->config.mlFeatureFlags, session->config.controlProtocolType, session->config.encryptionFlagsEnabled),
+        dispatch, (session->config.encryptionFlagsEnabled & SS_ENC_VIDEO) != 0};
+      // Control authentication and the actual media-encryption flag remain separate from permission.
+      const auto context = dispatch ? adaptive_bitrate::inspect_native_context(
+        session->session_generation, session->session_token) : native_video_signal::context_t {};
+      auto signal = native_video_signal::project(observed, caller, context);
+      auto publication_reason = native_video_signal::reason_e::scope_changed;
+      const bool published = session->native_reception &&
+        session->native_reception->publish_signal(signal, std::nullopt, &publication_reason);
+      if (signal.admitted && !published) {
+        signal.inspection_ready = false;
+        signal.reason = publication_reason;
+      }
+      if (dispatch) {
+        const auto owner = session->native_reception;
+        adaptive_bitrate::update_native_signal(owner, session->session_token,
+          session->frame_submission_launch_nonce, signal, published, [&] {
+            return session->state.load() == session::state_e::RUNNING && session->control.peer &&
+              session->native_reception == owner && session->session_generation == signal.generation &&
+              !session->watch_only && !session->vrr.watch_or_input_only &&
+              stream_native_reception::negotiated(true, session->config.native_reception_enabled, "1", 1,
+                session->config.mlFeatureFlags, session->config.controlProtocolType, session->config.encryptionFlagsEnabled);
+          });
+      }
+      if (!vrr_trace::enabled()) return; // Internal typed readback is already available with trace off.
+      stream_native_reception::trace::callback_t facts;
+      facts.dispatched = dispatch;
+      facts.generation = session->session_generation;
+      facts.trace_scope = session->native_reception_trace_scope;
+      facts.callback = vrr_trace::next_id();
+      // The same ENet peer RTT IDX_PERIODIC_PING reads, in this control callback that owns the peer.
+      if (session->control.peer) facts.enet_smoothed_rtt_ms = session->control.peer->roundTripTime;
+      stream_native_reception::trace::emit(observed, facts, [](const vrr_trace::event_t &row) { vrr_trace::record(row); });
+      stream_native_reception::trace::emit_signal(signal, published, facts, [](const vrr_trace::event_t &row) { vrr_trace::record(row); });
+    });
+
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
@@ -2001,10 +2071,14 @@ namespace stream {
           .u("lowseq_published", trace_sequence_published).i("initial_lowseq", trace_initial_lowseq).i("published_lowseq", trace_published_lowseq)
           .u("sequence_reuse_possible", trace_send_calls && !trace_sequence_published));
       });
-      if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("packet_dequeue").u("packet", packet->trace_packet)
+      if (vrr_trace::enabled()) {
+        auto event = vrr_trace::event_t("packet_dequeue").u("packet", packet->trace_packet)
         .u("encoder", packet->trace_encoder).u("submission", packet->trace_submission).i("frame_index", packet->frame_index())
         .o("frame_timestamp_ns", vrr_trace::ns(packet->frame_timestamp)).o("encode_done_ns", vrr_trace::ns(packet->encode_done_timestamp))
-        .u("source_clock_timestamp", packet->source_clock_timestamp).u("source_time_paced", packet->source_time_paced));
+        .u("source_clock_timestamp", packet->source_clock_timestamp).u("source_time_paced", packet->source_time_paced);
+        video::packet_trace_fields::append(event, packet->encoder_setting, packet->pyrowave_work_receipt);
+        vrr_trace::record(event);
+      }
       if (shutdown_event->peek()) {
         trace_disposition = "broadcast_shutdown";
         break;
@@ -2018,17 +2092,30 @@ namespace stream {
         continue;
       }
       auto session = static_cast<session_t *>(delivery.get());
+      // Frame-submission ledger (#611): this frame's identity and immutable encoder setting, recorded at
+      // the acquired destination before any send. Its disposition comes only from the actual send API
+      // return values below and is completed when this iteration ends, however it ends.
+      stream_frame_feedback::frame_send_record_t submission_record {
+        session->frame_submission_ledger.get(), packet->frame_index(), packet->encoder_setting};
       auto lowseq = session->video.lowseq;
       trace_initial_lowseq = trace_published_lowseq = lowseq;
       if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_context").u("packet", packet->trace_packet)
         .u("session_generation", session->session_generation).i("initial_lowseq", lowseq).o("video_epoch_steady_ns", vrr_trace::ns(video_epoch)));
       std::optional<std::uint32_t> source_rtp_timestamp;
       if (packet->source_clock_timestamp) {
-        if (!packet->frame_timestamp) { trace_disposition = "source_timestamp_unavailable"; continue; }
+        if (!packet->frame_timestamp) {
+          trace_disposition = "source_timestamp_unavailable";
+          submission_record.not_sent();
+          continue;
+        }
         source_rtp_timestamp = vrr_pacing::rtp_timestamp(
           std::chrono::duration_cast<std::chrono::nanoseconds>(packet->frame_timestamp->time_since_epoch()).count(),
           std::chrono::duration_cast<std::chrono::nanoseconds>(video_epoch.time_since_epoch()).count());
-        if (!source_rtp_timestamp) { trace_disposition = "source_rtp_unrepresentable"; continue; }
+        if (!source_rtp_timestamp) {
+          trace_disposition = "source_rtp_unrepresentable";
+          submission_record.not_sent();
+          continue;
+        }
       }
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
@@ -2114,9 +2201,13 @@ namespace stream {
 
       payload = std::string_view {(char *) concat_buf.data(), concat_buf.size()};
 
-      const auto [configured_fec, adaptive_fec] = adaptive_bitrate::frame_fec_allocation(
+      const auto fec_selection = adaptive_bitrate::frame_fec_selection(
         session->session_generation, packet->frame_index(), fecPercentage);
+      const auto [configured_fec, adaptive_fec] = fec_selection.allocation;
       fecPercentage = configured_fec;
+      // Applied pacing inverts the frame's encoder allocation in this domain;
+      // the fit and oversized fallback below change only its packetization.
+      const int allocation_fec_percentage = adaptive_fec;
       if (adaptive_fec != fecPercentage) {
         // Keep the established configured-envelope warning and fallback for
         // an enormous frame. A trial may step down for this frame, never strip
@@ -2228,8 +2319,9 @@ namespace stream {
 
       try {
         // Use around 80% of 1Gbps, unless wire pacing paces this session at its own negotiated rate.
-        const auto pacing = stream_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request.split_kbps,
+        auto pacing = stream_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request.split_kbps,
           config::stream.wire_pacing_headroom, blocksize);
+        bool refresh_applied_pacing = false;
         size_t ratecontrol_packets_in_1ms = pacing.packets_in_1ms;
 
         // Send less than 64K in a single batch.
@@ -2241,11 +2333,8 @@ namespace stream {
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
+        const auto legacy_send_batch_size = send_batch_size;
         send_batch_size = stream_pacing::send_batch_limit(pacing, send_batch_size);
-        if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
-          .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
-          .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage)
-          .s("pacing", stream_pacing::rate_name(pacing)).u("packets_per_second", pacing.packets_per_second));
 
         // Don't ignore the last ratecontrol group of the previous frame
         auto ratecontrol_frame_start = pacing.enabled ?
@@ -2288,6 +2377,48 @@ namespace stream {
           generated_data_bytes += shards.data_shards * (shards.blocksize + shards.prefixsize);
           generated_parity_bytes += (shards.size() - shards.data_shards) * (shards.blocksize + shards.prefixsize);
           frame_fec_latency_logger.second_point_now_and_log();
+
+          const auto select_applied_pacing = [&] {
+            return stream_applied_pacing::select_rate(config::stream.wire_pacing, session->config.bitrate_request,
+              config::stream.wire_pacing_headroom, shards.blocksize, shards.prefixsize,
+              session->session_generation, packet->frame_index(), packet->encoder_setting ? &*packet->encoder_setting : nullptr,
+              config::stream.wire_pacing && packet->encoder_setting ?
+                adaptive_bitrate::get_live_pacing_cap(session->session_generation) : std::nullopt,
+              allocation_fec_percentage);
+          };
+          if (blockIndex == 0) {
+            const auto selected = select_applied_pacing();
+            pacing = selected.rate;
+            refresh_applied_pacing = selected.refreshable();
+          }
+          const auto refresh_pacing = [&] {
+            if (refresh_applied_pacing) stream_applied_pacing::tighten(pacing, select_applied_pacing());
+            ratecontrol_packets_in_1ms = pacing.packets_in_1ms;
+            send_batch_size = stream_pacing::send_batch_limit(pacing, legacy_send_batch_size);
+          };
+          refresh_pacing();
+          if (blockIndex == 0 && vrr_trace::enabled()) {
+            auto event = vrr_trace::event_t("send_constants").u("packet", packet->trace_packet)
+              .u("batch_size", send_batch_size).u("blocksize", blocksize).u("packets_per_1ms", ratecontrol_packets_in_1ms)
+              .u("fec_blocks", fec_blocks_needed).i("fec_percentage", fecPercentage)
+              .s("pacing", stream_pacing::rate_name(pacing)).u("packets_per_second", pacing.packets_per_second)
+              .s("fec_selection_basis", live_tuning_fec::selection_basis_name(fec_selection.basis));
+            // Selection is frozen before fitting/constructing this frame's FEC.
+            // An unavailable scope must not borrow the session or latest request.
+            if (fec_selection.generation) {
+              event.u("fec_selection_generation", *fec_selection.generation)
+                .i("fec_configured_percentage", configured_fec).i("fec_nominal_percentage", adaptive_fec);
+            } else {
+              event.n("fec_selection_generation").n("fec_configured_percentage").n("fec_nominal_percentage");
+            }
+            if (fec_selection.authority_revision) {
+              event.u("fec_selection_authority_revision", *fec_selection.authority_revision);
+            } else {
+              event.n("fec_selection_authority_revision");
+            }
+            event.o("fec_selection_from_frame", fec_selection.from_frame);
+            vrr_trace::record(event);
+          }
 
           auto peer_address = session->video.peer.address();
           auto batch_info = platf::batched_send_info_t {
@@ -2365,71 +2496,99 @@ namespace stream {
 
             if (x - next_shard_to_send + 1 >= send_batch_size ||
                 x + 1 == shards.size()) {
-              // Do pacing within the frame.
-              // Also trigger pacing before the first send_batch() of the frame
-              // to account for the last send_batch() of the previous frame.
-              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
-                  ratecontrol_frame_packets_sent == 0) {
-                auto due = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
+              // A lower cap can split the prepared range into smaller batches.
+              // Every actual shard (data, padded tail or parity) is charged once
+              // at its constructed block+prefix size, including across blocks.
+              while (next_shard_to_send <= x) {
+                refresh_pacing();
+                // Do pacing within the frame.
+                // Also trigger pacing before the first send_batch() of the frame
+                // to account for the last send_batch() of the previous frame.
+                if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
+                    ratecontrol_frame_packets_sent == 0) {
+                  auto due = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
 
-                auto now = std::chrono::steady_clock::now();
-                while (now < due) {
-                  if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
-                  // Wire pacing sleeps to an absolute deadline, and keeps the timer where it cannot.
-                  if (!pacing.enabled || !stream_pacing::sleep_until(stream_pacing::next_wake(due, now))) {
-                    timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
-                      std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
+                  auto now = std::chrono::steady_clock::now();
+                  while (now < due) {
+                    if (delivery.cancelled()) { trace_disposition = "cancelled"; return; }
+                    refresh_pacing();
+                    due = ratecontrol_frame_start + stream_pacing::send_offset(pacing, ratecontrol_frame_packets_sent);
+                    // Wire pacing sleeps to an absolute deadline, and keeps the timer where it cannot.
+                    if (!pacing.enabled || !stream_pacing::sleep_until(stream_pacing::next_wake(due, now))) {
+                      timer->sleep_for(std::min(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now),
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(10ms)));
+                    }
+                    now = std::chrono::steady_clock::now();
                   }
-                  now = std::chrono::steady_clock::now();
+
+                  ratecontrol_group_packets_sent = 0;
                 }
 
-                ratecontrol_group_packets_sent = 0;
-              }
+                size_t current_batch_size = std::min<size_t>(x - next_shard_to_send + 1, send_batch_size);
+                batch_info.block_offset = next_shard_to_send;
+                batch_info.block_count = current_batch_size;
 
-              size_t current_batch_size = x - next_shard_to_send + 1;
-              batch_info.block_offset = next_shard_to_send;
-              batch_info.block_count = current_batch_size;
-
-              frame_send_batch_latency_logger.first_point_now();
-              // Use a batched send if it's supported on this platform
-              vrr_trace::send_attempt_t trace_batch {packet->trace_packet, blockIndex,
-                static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send), current_batch_size, "send_batch"};
-              ++trace_send_calls;
-              const bool batch_result = platf::send_batch(batch_info);
-              trace_batch.finish(batch_result);
-              if (!batch_result) {
-                if (delivery.cancelled()) { trace_disposition = "cancelled_after_batch"; return; }
-                if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("whole_range_fallback").u("packet", packet->trace_packet)
-                  .u("retry_of", trace_batch.id()).i("first_lowseq", static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send))
-                  .u("count", current_batch_size).u("duplicate_possible", 1).n("batch_accepted_count"));
-                // Batched send is not available, so send each packet individually
-                BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
-                for (auto y = 0; y < current_batch_size; y++) {
-                  if (delivery.cancelled()) { trace_disposition = "cancelled_during_fallback"; return; }
-                  auto send_info = platf::send_info_t {
-                    shards.prefix(next_shard_to_send + y),
-                    shards.prefixsize,
-                    shards.data(next_shard_to_send + y),
-                    shards.blocksize,
-                    (uintptr_t) sock.native_handle(),
-                    peer_address,
-                    session->video.peer.port(),
-                    session->localAddress,
-                    delivery.cancellation(),
-                  };
-
-                  vrr_trace::send_attempt_t trace_single {packet->trace_packet, blockIndex,
-                    static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send) + y, 1, "send", trace_batch.id()};
-                  ++trace_send_calls;
-                  const bool single_result = platf::send(send_info);
-                  trace_single.finish(single_result);
+                frame_send_batch_latency_logger.first_point_now();
+                // Use a batched send if it's supported on this platform
+                vrr_trace::send_attempt_t trace_batch {packet->trace_packet, blockIndex,
+                  static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send), current_batch_size, "send_batch"};
+                ++trace_send_calls;
+                const auto reception_begin = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+                const bool batch_result = platf::send_batch(batch_info);
+                const auto reception_end = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+                if (session->native_reception) {
+                  for (size_t n = 0; n < current_batch_size; ++n) {
+                    const auto shard = next_shard_to_send + n;
+                    session->native_reception->record(packet->frame_index(), static_cast<std::uint16_t>(lowseq + shard),
+                      static_cast<std::uint32_t>(shards.blocksize + shards.prefixsize), shard >= shards.data_shards,
+                      reception_begin, reception_end, batch_result);
+                  }
                 }
-              }
-              frame_send_batch_latency_logger.second_point_now_and_log();
+                submission_record.send_returned(true, batch_result);
+                trace_batch.finish(batch_result);
+                if (!batch_result) {
+                  if (delivery.cancelled()) { trace_disposition = "cancelled_after_batch"; return; }
+                  if (vrr_trace::enabled()) vrr_trace::record(vrr_trace::event_t("whole_range_fallback").u("packet", packet->trace_packet)
+                    .u("retry_of", trace_batch.id()).i("first_lowseq", static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send))
+                    .u("count", current_batch_size).u("duplicate_possible", 1).n("batch_accepted_count"));
+                  // Batched send is not available, so send each packet individually
+                  BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
+                  for (auto y = 0; y < current_batch_size; y++) {
+                    if (delivery.cancelled()) { trace_disposition = "cancelled_during_fallback"; return; }
+                    auto send_info = platf::send_info_t {
+                      shards.prefix(next_shard_to_send + y),
+                      shards.prefixsize,
+                      shards.data(next_shard_to_send + y),
+                      shards.blocksize,
+                      (uintptr_t) sock.native_handle(),
+                      peer_address,
+                      session->video.peer.port(),
+                      session->localAddress,
+                      delivery.cancellation(),
+                    };
 
-              ratecontrol_group_packets_sent += current_batch_size;
-              ratecontrol_frame_packets_sent += current_batch_size;
-              next_shard_to_send = x + 1;
+                    vrr_trace::send_attempt_t trace_single {packet->trace_packet, blockIndex,
+                      static_cast<std::int64_t>(lowseq) + static_cast<std::int64_t>(next_shard_to_send) + y, 1, "send", trace_batch.id()};
+                    ++trace_send_calls;
+                    const auto reception_single_begin = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+                    const bool single_result = platf::send(send_info);
+                    const auto reception_single_end = session->native_reception ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+                    if (session->native_reception) {
+                      const auto shard = next_shard_to_send + y;
+                      session->native_reception->record(packet->frame_index(), static_cast<std::uint16_t>(lowseq + shard),
+                        static_cast<std::uint32_t>(shards.blocksize + shards.prefixsize), shard >= shards.data_shards,
+                        reception_single_begin, reception_single_end, single_result);
+                    }
+                    submission_record.send_returned(false, single_result);
+                    trace_single.finish(single_result);
+                  }
+                }
+                frame_send_batch_latency_logger.second_point_now_and_log();
+
+                ratecontrol_group_packets_sent += current_batch_size;
+                ratecontrol_frame_packets_sent += current_batch_size;
+                next_shard_to_send += current_batch_size;
+              }
             }
           }
 
@@ -2454,8 +2613,11 @@ namespace stream {
         session->video.lowseq = lowseq;
         trace_sequence_published = true;
         trace_published_lowseq = lowseq;
+        // Retirement is sticky, so any cancelled return above is still visible here.
+        submission_record.path_finished(delivery.cancelled());
         if (!delivery.cancelled()) trace_disposition = "send_loop_returned_lowseq_published";
       } catch (const std::exception &e) {
+        submission_record.exception();
         trace_disposition = "exception_before_lowseq_publication";
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);
@@ -3270,6 +3432,7 @@ namespace stream {
 
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
+      if (session.native_reception) session.native_reception->retire();
       session.packet_owner.close();
       auto expected = state_e::RUNNING;
       const auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
@@ -3603,7 +3766,10 @@ namespace stream {
       // Frozen in alloc(); recorded once against this generation's own entry.
       stream_stats::record_vrr_session(session.vrr);
       stream_stats::start_session_timing(
-        session.device_uuid, session.session_generation, session.session_token
+        session.device_uuid, session.session_generation, session.session_token,
+        session.frame_submission_ledger,
+        session.watch_only ? std::string {} : session.frame_submission_launch_nonce,
+        session.native_reception
       );
       stream_stats::update_session_targets(
         session.requested_fps > 0 ? static_cast<double>(session.requested_fps) / 1000.0 : 0.0,
@@ -3729,7 +3895,26 @@ namespace stream {
       session->device_uuid = launch_session.unique_id;
       session->client_family = launch_session.client_family;
       session->session_token = launch_session.session_token;
+      session->frame_submission_launch_nonce = launch_session.frame_submission_launch_nonce;
       session->session_generation = next_session_generation.fetch_add(1, std::memory_order_relaxed);
+      try {
+        session->frame_submission_ledger =
+          std::make_shared<stream_frame_feedback::sender_ledger_t>(session->session_generation);
+      } catch (const std::bad_alloc &) {
+        // Diagnostic retention must never fail a stream; its receipts then say the ledger is unavailable.
+        session->frame_submission_ledger.reset();
+      }
+      if (config.native_reception_enabled && session->frame_submission_ledger) {
+        try {
+          session->native_reception = std::make_shared<stream_native_reception::scope_t>(
+            session->session_generation, session->frame_submission_ledger, true,
+            (config.encryptionFlagsEnabled & SS_ENC_VIDEO) != 0);
+          if (vrr_trace::enabled()) session->native_reception_trace_scope = vrr_trace::next_id();
+        } catch (const std::bad_alloc &) {
+          // Optional diagnostic retention cannot fail a stream or change negotiated encryption.
+          session->native_reception.reset();
+        }
+      }
       session->requested_fps = launch_session.requested_fps;
       session->session_target_fps = launch_session.fps;
       session->pacing_policy = launch_session.pacing_policy;

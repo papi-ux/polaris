@@ -3932,6 +3932,472 @@
         }
       }
     },
+    "doctor_ai_explanation_request": {
+      "$comment": [
+        "Served at doctor.ai_explanation_request on GET /polaris/v1/session/status (#613). A pure",
+        "descriptor of whether the current Doctor reading can be explained on one explicit paired POST",
+        "/polaris/v1/doctor/explanation; it allocates, captures and starts nothing. enabled is host",
+        "opt-in with a fully configured provider, permitted is _allow_view plus sole active ownership of",
+        "exactly this app session, and available is everything else the POST checks again on its own.",
+        "finding_fingerprint and controller_revision are comparison metadata for that POST, never",
+        "authority, and stay empty and 0 without a permitted scope. features.doctor_ai_explanation_v1",
+        "says only that the protocol exists."
+      ],
+      "fields": [
+        "available",
+        "blocked_reason",
+        "controller_revision",
+        "enabled",
+        "finding_fingerprint",
+        "permitted",
+        "schema",
+        "source_result_id"
+      ],
+      "polaris_emitter": {
+        "file": "src/doctor_ai_explanation.cpp",
+        "function": "request_descriptor_json",
+        "variable": "out",
+        "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "available": "boolean",
+        "blocked_reason": "string",
+        "controller_revision": "integer",
+        "enabled": "boolean",
+        "finding_fingerprint": "string",
+        "permitted": "boolean",
+        "schema": "integer",
+        "source_result_id": "string"
+      },
+      "required_present": [
+        "available",
+        "blocked_reason",
+        "controller_revision",
+        "enabled",
+        "finding_fingerprint",
+        "permitted",
+        "schema",
+        "source_result_id"
+      ]
+    },
+    "doctor_ai_explanation_response": {
+      "$comment": [
+        "Every response of POST /polaris/v1/doctor/explanation (#613), success and fallback alike: at",
+        "most 8 KiB and Cache-Control no-store. status is true only with code explained and a non-null",
+        "explanation; otherwise fallback is true, explanation null and expires_in_ms 0, and the client",
+        "keeps its deterministic Doctor. changed is always false and authority explanation_only, because",
+        "nothing on the host moves. The request tuple is echoed only for an authorized, well-formed",
+        "request, and snapshot_id is allocated only once a POST was admitted."
+      ],
+      "fields": [
+        "app_session_id",
+        "authority",
+        "changed",
+        "code",
+        "controller_revision",
+        "expires_in_ms",
+        "explanation",
+        "fallback",
+        "finding_fingerprint",
+        "may_define_settings",
+        "request_id",
+        "retry_after_ms",
+        "schema",
+        "session_generation",
+        "snapshot_age_ms",
+        "snapshot_id",
+        "source",
+        "source_result_id",
+        "status"
+      ],
+      "polaris_emitter": {
+        "file": "src/doctor_ai_explanation.cpp",
+        "function": "explanation_response_json",
+        "variable": "out",
+        "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "app_session_id": "string",
+        "authority": "string",
+        "changed": "boolean",
+        "code": "string",
+        "controller_revision": "integer",
+        "expires_in_ms": "integer",
+        "explanation": "object",
+        "fallback": "boolean",
+        "finding_fingerprint": "string",
+        "may_define_settings": "boolean",
+        "request_id": "string",
+        "retry_after_ms": "integer",
+        "schema": "integer",
+        "session_generation": "integer",
+        "snapshot_age_ms": "integer",
+        "snapshot_id": "string",
+        "source": "object",
+        "source_result_id": "string",
+        "status": "boolean"
+      },
+      "nullable": [
+        "explanation",
+        "retry_after_ms",
+        "snapshot_age_ms"
+      ],
+      "required_present": [
+        "app_session_id",
+        "authority",
+        "changed",
+        "code",
+        "controller_revision",
+        "expires_in_ms",
+        "explanation",
+        "fallback",
+        "finding_fingerprint",
+        "may_define_settings",
+        "request_id",
+        "retry_after_ms",
+        "schema",
+        "session_generation",
+        "snapshot_age_ms",
+        "snapshot_id",
+        "source",
+        "source_result_id",
+        "status"
+      ]
+    },
+    "doctor_ai_explanation": {
+      "$comment": [
+        "The explanation of a successful doctor_ai_explanation_response (#613): the host-configured",
+        "provider's six fields after strict validation, per-field code point and UTF-8 caps, plain-text",
+        "checks and redaction. Informational prose only, never a setting, target value, action or the",
+        "Doctor's confidence grade."
+      ],
+      "fields": [
+        "advanced_detail",
+        "confidence",
+        "destructive_action_allowed",
+        "evidence",
+        "likely_cause",
+        "try_first"
+      ],
+      "polaris_emitter": {
+        "file": "src/doctor_ai_explanation.cpp",
+        "function": "bounded_explanation_json",
+        "variable": "clean",
+        "style": "subscript"
+      },
+      "generated": true,
+      "types": {
+        "advanced_detail": "string",
+        "confidence": "string",
+        "destructive_action_allowed": "boolean",
+        "evidence": "array",
+        "likely_cause": "string",
+        "try_first": "array"
+      },
+      "required_present": [
+        "advanced_detail",
+        "confidence",
+        "destructive_action_allowed",
+        "evidence",
+        "likely_cause",
+        "try_first"
+      ]
+    },
+    "native_reception": {
+      "$comment": [
+        "Optional native_reception on paired own-current controller session status only, after matching RTSP version/session-ID/encrypted control13+v2. Both existing video encryption modes supported without changing encryption policy. Absence means unavailable/unnegotiated, never clean media.",
+        "Version1 observes queue-accepted original native packets separately from frame_submission and Java/media counters. All reasons/loop/packet kinds are fixed enumerations; no controller consumes this object.",
+        "host_report_age_ms is host-local. Reports and every sampled sender boundary expire after2s; no rejected report refreshes state. Zero, incomplete, gaps, sparse samples and clock failure remain explicit. Raw host timestamps and identities are not serialized.",
+        "media_authenticated comes only from actual host session video flags; control_authenticated becomes true only after verified encrypted control dispatch. Unencrypted video has on-path integrity limitations; accepted-original facts never authorize capacity/clean/recovery or a writer.",
+        "retention_limited is a fresh unavailable observation when lost unsampled sender retention prevents proving an aggregate bound; derived fields are cleared. Complete-class or matched-sample contradictions still reject without state/freshness mutation. Per-class evicted-frame high-water metadata is fixed-size and generation-local."
+      ],
+      "fields": [
+        "version",
+        "negotiated",
+        "available",
+        "reason",
+        "host_report_age_ms",
+        "missing_reports",
+        "receive_loop",
+        "frame_reason",
+        "report",
+        "setting",
+        "samples",
+        "media_authenticated",
+        "control_authenticated",
+        "coverage"
+      ],
+      "informational_ok": [
+        "version",
+        "negotiated",
+        "available",
+        "reason",
+        "host_report_age_ms",
+        "missing_reports",
+        "receive_loop",
+        "frame_reason",
+        "report",
+        "setting",
+        "samples",
+        "media_authenticated",
+        "control_authenticated",
+        "coverage"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "readback_json",
+          "declaration": "nlohmann::json output {",
+          "style": "initializer_list",
+          "fields": [
+            "version",
+            "negotiated",
+            "available",
+            "reason",
+            "media_authenticated",
+            "control_authenticated",
+            "coverage"
+          ]
+        },
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "readback_json",
+          "style": "bracket_assignment",
+          "variable": "output",
+          "fields": [
+            "host_report_age_ms",
+            "missing_reports",
+            "receive_loop",
+            "frame_reason",
+            "report",
+            "setting",
+            "samples"
+          ]
+        }
+      ],
+      "generated": true,
+      "required_present": [
+        "version",
+        "negotiated",
+        "available",
+        "reason",
+        "media_authenticated",
+        "control_authenticated",
+        "coverage"
+      ],
+      "types": {
+        "version": "integer",
+        "negotiated": "boolean",
+        "available": "boolean",
+        "reason": "string",
+        "host_report_age_ms": "integer",
+        "missing_reports": "integer",
+        "receive_loop": "string",
+        "frame_reason": "string",
+        "report": "object",
+        "setting": "object",
+        "samples": "array",
+        "media_authenticated": "boolean",
+        "control_authenticated": "boolean",
+        "coverage": "string"
+      },
+      "optional": [
+        "host_report_age_ms",
+        "missing_reports",
+        "receive_loop",
+        "frame_reason",
+        "report",
+        "setting",
+        "samples"
+      ]
+    },
+    "native_reception_report": {
+      "$comment": [
+        "Untrusted connection-local native acceptance facts. Counters cover observer commits; they are not a packet-loss denominator, kernel ingress or capacity. interval_us and age units are microseconds; UINT32_MAX age means unavailable/saturated.",
+        "flags1 HAS_ACCEPTED,2 INCOMPLETE,4 CLOCK_UNAVAILABLE,8 TIMING_SAMPLE_LIMIT. Complete intervals <=2s. Longer incomplete reports have no samples or derived metrics; zero-time clock sentinel disables observation until a new native connection."
+      ],
+      "fields": [
+        "sequence",
+        "flags",
+        "interval_us",
+        "receive_loop_tick",
+        "accepted_data_packets",
+        "accepted_parity_packets",
+        "accepted_data_udp_bytes",
+        "accepted_parity_udp_bytes",
+        "last_accepted_age_us",
+        "first_frame",
+        "last_frame"
+      ],
+      "informational_ok": [
+        "sequence",
+        "flags",
+        "interval_us",
+        "receive_loop_tick",
+        "accepted_data_packets",
+        "accepted_parity_packets",
+        "accepted_data_udp_bytes",
+        "accepted_parity_udp_bytes",
+        "last_accepted_age_us",
+        "first_frame",
+        "last_frame"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_native_reception_json.h",
+        "function": "report_json",
+        "declaration": "nlohmann::json output {",
+        "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "sequence",
+        "flags",
+        "interval_us",
+        "receive_loop_tick",
+        "accepted_data_packets",
+        "accepted_parity_packets",
+        "accepted_data_udp_bytes",
+        "accepted_parity_udp_bytes",
+        "last_accepted_age_us",
+        "first_frame",
+        "last_frame"
+      ],
+      "types": {
+        "sequence": "integer",
+        "flags": "integer",
+        "interval_us": "integer",
+        "receive_loop_tick": "integer",
+        "accepted_data_packets": "integer",
+        "accepted_parity_packets": "integer",
+        "accepted_data_udp_bytes": "integer",
+        "accepted_parity_udp_bytes": "integer",
+        "last_accepted_age_us": "integer",
+        "first_frame": "integer",
+        "last_frame": "integer"
+      }
+    },
+    "native_reception_sample": {
+      "$comment": [
+        "At most16 native originals, never FEC reconstructions. Sample age is report-end minus userspace socket-read timestamp, can predate acceptance interval, bounded2s. Exact frame32+RTP16 matches use a fixed16384x32-byte host ledger.",
+        "Derived packet_kind(data/parity),UDP payload bytes and host API duration require every packet and the entire accepted frame range to join one exact immutable tuple. Missing/stale/ambiguous/fallback/mixed data carries no derived values.",
+        "Optional dispersion bounds use only time differences: receive_delta-(endB-beginA) through receive_delta-(beginB-endA). They include batch/kernel/receiver scheduling and clock skew, not absolute one-way delay, media RTT or pure network queue. Reordered pairs carry no dispersion."
+      ],
+      "fields": [
+        "frame_index",
+        "rtp_sequence",
+        "socket_read_age_us",
+        "packet_kind",
+        "udp_bytes",
+        "handoff_duration_ns",
+        "dispersion_lower_ns",
+        "dispersion_upper_ns"
+      ],
+      "informational_ok": [
+        "frame_index",
+        "rtp_sequence",
+        "socket_read_age_us",
+        "packet_kind",
+        "udp_bytes",
+        "handoff_duration_ns",
+        "dispersion_lower_ns",
+        "dispersion_upper_ns"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "sample_json",
+          "declaration": "nlohmann::json output {",
+          "style": "initializer_list",
+          "fields": [
+            "frame_index",
+            "rtp_sequence",
+            "socket_read_age_us"
+          ]
+        },
+        {
+          "file": "src/stream_native_reception_json.h",
+          "function": "sample_json",
+          "style": "bracket_assignment",
+          "variable": "output",
+          "fields": [
+            "packet_kind",
+            "udp_bytes",
+            "handoff_duration_ns",
+            "dispersion_lower_ns",
+            "dispersion_upper_ns"
+          ]
+        }
+      ],
+      "generated": true,
+      "required_present": [
+        "frame_index",
+        "rtp_sequence",
+        "socket_read_age_us"
+      ],
+      "types": {
+        "frame_index": "integer",
+        "rtp_sequence": "integer",
+        "socket_read_age_us": "integer",
+        "packet_kind": "string",
+        "udp_bytes": "integer",
+        "handoff_duration_ns": "integer",
+        "dispersion_lower_ns": "integer",
+        "dispersion_upper_ns": "integer"
+      },
+      "optional": [
+        "packet_kind",
+        "udp_bytes",
+        "handoff_duration_ns",
+        "dispersion_lower_ns",
+        "dispersion_upper_ns"
+      ]
+    },
+    "native_reception_setting": {
+      "$comment": [
+        "Exact immutable sender encoder tuple, diagnostic only. Every retained frame in inclusive first..last must be successful/fresh and tuple-equal; same kbps with different application sequence or origin is mixed. No control value or permission follows."
+      ],
+      "fields": [
+        "encoder_lifetime",
+        "stream_generation",
+        "application_sequence",
+        "origin_revision",
+        "configured_encoder_kbps",
+        "receipt_origin"
+      ],
+      "informational_ok": [
+        "encoder_lifetime",
+        "stream_generation",
+        "application_sequence",
+        "origin_revision",
+        "configured_encoder_kbps",
+        "receipt_origin"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_native_reception_json.h",
+        "function": "setting_json",
+        "declaration": "nlohmann::json output {",
+        "style": "initializer_list"
+      },
+      "generated": true,
+      "required_present": [
+        "encoder_lifetime",
+        "stream_generation",
+        "application_sequence",
+        "origin_revision",
+        "configured_encoder_kbps",
+        "receipt_origin"
+      ],
+      "types": {
+        "encoder_lifetime": "integer",
+        "stream_generation": "integer",
+        "application_sequence": "integer",
+        "origin_revision": "integer",
+        "configured_encoder_kbps": "integer",
+        "receipt_origin": "string"
+      }
+    },
     "epic_setup_status": {
       "$comment": [
         "Owner-console passive Epic setup v1; no launch/adoption authority or identifying native details.",

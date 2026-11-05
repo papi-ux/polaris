@@ -163,6 +163,70 @@ TEST(AdaptiveBitrateController, EncodedBoundaryRecreationInvalidatesProofUntilTh
   EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(request->revision, 14000));
 }
 
+TEST(AdaptiveBitrateController, EncodedBoundaryNativeOpenBeforeANewerTargetIsReadyAtItsAcceptedRate) {
+  struct case_t {
+    const char *name;
+    int newer_kbps;
+    backend_t::bitrate_update_e answer;
+  };
+  for (const auto &c : {case_t {"same target", 16000, backend_t::bitrate_update_e::applied},
+                        case_t {"newer target applied", 14000, backend_t::bitrate_update_e::applied},
+                        case_t {"newer target refused", 14000, backend_t::bitrate_update_e::rejected}}) {
+    SCOPED_TRACE(c.name);
+    // An FFmpeg session asks for a rebuild at 16000. Runtime support stays published across it, so
+    // the rebuild's poll and encode_run's own poll both return live requests.
+    VideoBitrateBoundary harness;
+    adaptive_bitrate::set_live_bitrate(16000);
+    harness.backend.answer = backend_t::bitrate_update_e::recreate_session;
+    harness.after_encode(1);
+    ASSERT_EQ(harness.last.result, video::bitrate::result_e::recreate_session);
+    harness.backend = {};
+
+    // The native encoder opens at the rebuild poll's target and its SDK accepts 16000...
+    const auto opened = adaptive_bitrate::get_live_bitrate_request();
+    ASSERT_TRUE(opened);
+    const std::optional<int> accepted = opened->target_bitrate_kbps;
+    ASSERT_EQ(accepted, 16000);
+    // ...then an explicit writer moves the target before encode_run's own poll.
+    adaptive_bitrate::set_live_bitrate(c.newer_kbps);
+    const auto newer = adaptive_bitrate::get_live_bitrate_request();
+    ASSERT_TRUE(newer);
+    ASSERT_EQ(newer->target_bitrate_kbps, c.newer_kbps);
+
+    // Readiness and the loop's applied rate start from the open, not the request it never received.
+    const int ready = video::bitrate::opened_bitrate_kbps(accepted, newer->target_bitrate_kbps);
+    adaptive_bitrate::set_runtime_update_supported(true, {}, ready, true, 1);
+    harness.applied = ready;
+    EXPECT_EQ(ready, 16000);
+    EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 16000);
+    EXPECT_EQ(harness.backend.calls, 0);
+
+    harness.backend.answer = c.answer;
+    harness.after_encode(2);
+    harness.after_encode(3);
+    if (c.newer_kbps == 16000) {
+      EXPECT_EQ(harness.backend.calls, 0);
+      EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(newer->revision, 16000));
+    } else if (c.answer == backend_t::bitrate_update_e::applied) {
+      // One real update, acknowledged only by its success; the next poll is a same-rate ACK.
+      EXPECT_EQ(harness.backend.calls, 1);
+      EXPECT_EQ(harness.backend.target, 14000);
+      EXPECT_EQ(harness.applied, 14000);
+      EXPECT_TRUE(adaptive_bitrate::live_bitrate_applied_at(newer->revision, 14000));
+    } else {
+      // The existing failure semantics: no ACK, and runtime updates stop for this session.
+      EXPECT_EQ(harness.backend.calls, 1);
+      EXPECT_EQ(harness.applied, 16000);
+      EXPECT_FALSE(adaptive_bitrate::live_bitrate_applied_at(newer->revision, 14000));
+      EXPECT_FALSE(adaptive_bitrate::get_state().runtime_update_supported);
+    }
+  }
+
+  // A session without its own accepted rate (FFmpeg opens after the poll) keeps the configured one.
+  EXPECT_EQ(video::bitrate::opened_bitrate_kbps(std::nullopt, 14000), 14000);
+  EXPECT_EQ(video::bitrate::opened_bitrate_kbps(0, 14000), 14000);
+}
+
 TEST(AdaptiveBitrateController, EncodedBoundaryAppliedTraceKeepsThePreUpdateEncoderAndRevision) {
   VideoBitrateBoundary harness;
   adaptive_bitrate::set_live_bitrate(14000);

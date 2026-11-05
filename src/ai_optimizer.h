@@ -14,6 +14,7 @@
 
 #include "device_db.h"
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <filesystem>
@@ -413,6 +414,63 @@ namespace ai_optimizer {
    * endpoint for this request.
    */
   std::string explain_doctor_json(const std::string &redacted_evidence_json);
+
+  /**
+   * @brief One consistent copy of the server-owned provider settings for the paired Doctor
+   * explanation route (#613), with the generation that every init/set_enabled/reconfigure moves.
+   * Reading it probes nothing and changes nothing.
+   */
+  struct paired_explanation_config_t {
+    config_t config;
+    std::uint64_t generation = 0;
+    bool enabled = false;
+    /// The selected transport has the paired output and deadline bounds on this platform.
+    bool transport_ready = false;
+  };
+
+  paired_explanation_config_t paired_explanation_config();
+
+  /** min(max(configured, 1000), 30000) ms: the paired call's provider deadline. */
+  int paired_explanation_deadline_ms(int configured_timeout_ms);
+
+  /** Whether libcurl resolves names asynchronously, so a transfer timeout also bounds DNS. */
+  bool paired_explanation_http_resolver_bounded();
+
+  /**
+   * Pure: whether the selected provider/auth mode has a bounded paired transport here. HTTP needs
+   * an asynchronous resolver; Codex CLI is unavailable for this route; Claude CLI needs >= 6 s.
+   */
+  bool paired_explanation_transport_ready(const config_t &config);
+  bool paired_explanation_transport_ready(const config_t &config, bool http_resolver_bounded);
+
+  enum class paired_explanation_status_e {
+    explained,
+    provider_failed,
+    invalid_explanation,
+    provider_timeout,
+    provider_not_ready,
+  };
+
+  struct paired_explanation_result_t {
+    paired_explanation_status_e status = paired_explanation_status_e::provider_failed;
+    /// The validated six-field explanation object (JSON text) when explained.
+    std::optional<std::string> explanation_json;
+  };
+
+  /** In-process test dependencies only; requests and configuration cannot set them. */
+  struct paired_explanation_overrides_t {
+    std::string claude_executable;
+  };
+
+  /**
+   * @brief One bounded provider attempt for the paired route. No retry, no fallback provider,
+   * no provider/model/error text or evidence in logs, and a 64 KiB cap on every transport output.
+   * `cancel` aborts an HTTP transfer promptly; CLI transports stop at their own deadline.
+   */
+  paired_explanation_result_t explain_paired_doctor(const config_t &config,
+                                                    const std::string &evidence_json,
+                                                    const std::atomic<bool> &cancel,
+                                                    const paired_explanation_overrides_t &overrides = {});
 
   /**
    * @brief Get AI status as JSON string.

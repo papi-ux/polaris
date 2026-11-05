@@ -186,6 +186,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_media_gate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_source_safety_contracts.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_fec.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_frame_feedback.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_pacing.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_reset_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_v2.cpp
@@ -193,6 +194,12 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_update_status.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_bitrate_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_bitrate_application.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_packet_trace_fields.cpp
+    # PYROWORK01 BEGIN
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_pyrowave_work.cpp
+    # PYROWORK01 END
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_session_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_clock_proof.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_compositor_identity.cpp
@@ -327,6 +334,8 @@ set(TEST_PAIRING_SOURCES
 )
 
 set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_native_reception.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_native_reception_scope.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_epic_setup_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_config_refusal_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/integration/test_nova_contract.cpp
@@ -337,6 +346,8 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_nvhttp_tls_close.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_http.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_frame_feedback_scope.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_doctor_ai_explanation_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_mode_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_space_launch_mode_contract.cpp
@@ -383,6 +394,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_acceptance.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_adaptive_bitrate.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_bitrate.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_applied_pacing.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_optimizer.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_claude_cli.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_ai_provider_http.cpp

@@ -15,9 +15,30 @@
 
 namespace live_tuning_fec {
 
+  enum class selection_basis_e { unavailable, configured_baseline, encoder_confirmed_trial };
+
+  inline const char *selection_basis_name(selection_basis_e basis) noexcept {
+    switch (basis) {
+      case selection_basis_e::configured_baseline: return "configured_baseline";
+      case selection_basis_e::encoder_confirmed_trial: return "encoder_confirmed_trial";
+      default: return "unavailable";
+    }
+  }
+
+  /** Nominal allocation and passive identity from the same publication read.
+   * Baseline has configured scope only; fallback/invalid frames have no identity.
+   * Neither selection nor confirmation proves constructed or sent packet bytes. */
+  struct selection_t {
+    std::pair<int, int> allocation;
+    selection_basis_e basis = selection_basis_e::unavailable;
+    std::optional<std::uint64_t> generation;
+    std::optional<std::uint64_t> authority_revision;
+    std::optional<std::int64_t> from_frame;
+  };
+
   /**
    * One controller-owned transaction. Writers serialize with the controller's
-   * mutex. The packetizer only calls percentage_for_frame(), which acquires
+   * mutex. The packetizer only calls selection_for_frame(), which acquires
    * one immutable publication per frame, without taking that mutex. Atomic
    * shared_ptr publication is coherent; it is not claimed to be lock-free.
    */
@@ -35,6 +56,7 @@ namespace live_tuning_fec {
       int configured;
       int percentage;
       std::int64_t from_frame;
+      std::uint64_t authority_revision;
     };
 
     struct pending_t {
@@ -57,7 +79,7 @@ namespace live_tuning_fec {
         return false;
       }
       auto baseline = std::make_shared<const publication_t>(publication_t {
-        generation, request.fec_percentage, request.fec_percentage, 0
+        generation, request.fec_percentage, request.fec_percentage, 0, 0
       });
       generation_ = generation;
       request_kbps_ = request.split_kbps;
@@ -133,7 +155,7 @@ namespace live_tuning_fec {
           return std::nullopt;
         }
         auto publication = std::make_shared<publication_t>(publication_t {
-          generation_, configured_, wanted_percentage, 0
+          generation_, configured_, wanted_percentage, 0, 0
         });
         pending_ = pending_t {generation_, next_authority_revision, *encoder,
           wanted_percentage, std::move(publication)};
@@ -173,6 +195,7 @@ namespace live_tuning_fec {
       }
       auto publication = std::move(pending_->publication);
       publication->from_frame = next_frame;
+      publication->authority_revision = pending_->authority_revision;
       percentage_ = pending_->percentage;
       pending_.reset();
       phase_ = phase_e::fixed;
@@ -190,14 +213,34 @@ namespace live_tuning_fec {
       phase_ = phase_e::fixed;
     }
 
+    selection_t selection_for_frame(std::uint64_t generation, std::int64_t frame,
+                                    int fallback) const {
+      const auto publication = std::atomic_load_explicit(&published_, std::memory_order_acquire);
+      selection_t selection {};
+      selection.allocation = {fallback, fallback};
+      if (!publication || publication->generation != generation) {
+        return selection;
+      }
+      selection.allocation = {publication->configured,
+        frame >= publication->from_frame ? publication->percentage : publication->configured};
+      // Preserve legacy allocation for every frame argument, including zero
+      // and invalid PTS. Such frames cannot acquire a publication identity.
+      if (frame <= 0) {
+        return selection;
+      }
+      selection.generation = publication->generation;
+      selection.basis = selection_basis_e::configured_baseline;
+      if (publication->from_frame > 0 && frame >= publication->from_frame) {
+        selection.basis = selection_basis_e::encoder_confirmed_trial;
+        selection.authority_revision = publication->authority_revision;
+        selection.from_frame = publication->from_frame;
+      }
+      return selection;
+    }
+
     std::pair<int, int> allocation_for_frame(std::uint64_t generation, std::int64_t frame,
                                             int fallback) const {
-      const auto publication = std::atomic_load_explicit(&published_, std::memory_order_acquire);
-      if (!publication || publication->generation != generation) {
-        return {fallback, fallback};
-      }
-      return {publication->configured,
-        frame >= publication->from_frame ? publication->percentage : publication->configured};
+      return selection_for_frame(generation, frame, fallback).allocation;
     }
 
     int percentage_for_frame(std::uint64_t generation, std::int64_t frame, int fallback) const {

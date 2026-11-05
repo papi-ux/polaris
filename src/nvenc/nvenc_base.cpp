@@ -99,7 +99,9 @@ namespace nvenc {
     // Use destroy_encoder() instead
   }
 
-  bool nvenc_base::create_encoder(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format) {
+  bool nvenc_base::create_encoder(const nvenc_config &config, const video::config_t &client_config,
+                                  const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format,
+                                  std::optional<video::bitrate_application::origin_t> opening_origin) {
     // Pick the minimum NvEncode API version required to support the specified codec
     // to maximize driver compatibility. AV1 was introduced in SDK v12.0.
     minimum_api_version = (client_config.videoFormat <= 1) ? MAKE_NVENC_VER(11U, 0U) : MAKE_NVENC_VER(12U, 0U);
@@ -128,6 +130,9 @@ namespace nvenc {
       BOOST_LOG(error) << "NvEnc: NvEncOpenEncodeSessionEx() failed: " << last_nvenc_error_string;
       return false;
     }
+
+    bitrate_observations.reset(new (std::nothrow) video::bitrate_application::adapter_t(
+      client_config.session_generation, video::bitrate_application::backend_e::native_nvenc));
 
     uint32_t encode_guid_count = 0;
     if (nvenc_failed(nvenc->nvEncGetEncodeGUIDCount(encoder, &encode_guid_count))) {
@@ -390,6 +395,17 @@ namespace nvenc {
       return false;
     }
 
+    // Preserve the origin captured before this call and the literal CBR target
+    // accepted by this SDK operation. Later polls cannot relabel the open.
+    if (bitrate_observations) {
+      if (opening_origin) {
+        bitrate_observations->nvenc_initialize_success(opening_origin,
+          enc_config.rcParams.averageBitRate, enc_config.rcParams.rateControlMode == NV_ENC_PARAMS_RC_CBR);
+      } else {
+        bitrate_observations->nvenc_initialize_success();
+      }
+    }
+
     // Save the initialization parameters for runtime reconfiguration (e.g., adaptive bitrate)
     saved_enc_config = enc_config;
     saved_init_params = init_params;
@@ -466,6 +482,8 @@ namespace nvenc {
   }
 
   void nvenc_base::destroy_encoder() {
+    retire_bitrate_observations();
+    bitrate_observations.reset();
     if (output_bitstream) {
       if (nvenc_failed(nvenc->nvEncDestroyBitstreamBuffer(encoder, output_bitstream))) {
         BOOST_LOG(error) << "NvEnc: NvEncDestroyBitstreamBuffer() failed: " << last_nvenc_error_string;
@@ -499,6 +517,9 @@ namespace nvenc {
   }
 
   nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
+    auto submission = bitrate_observations ? bitrate_observations->capture_before_submit(
+      video::bitrate_application::checked_timestamp(frame_index)) :
+      video::bitrate_application::adapter_t::submission_sink_t {};
     if (!encoder) {
       return {};
     }
@@ -539,6 +560,10 @@ namespace nvenc {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;
       return {};
     }
+
+    // Commit at actual input acceptance, before event wait/bitstream lock can
+    // fail. The sink is local, nonthrowing and cannot re-enter the controller.
+    submission.accepted(video::bitrate_application::submit_stage_e::nvenc_encode_picture_success);
 
     NV_ENC_LOCK_BITSTREAM lock_bitstream = {min_struct_version(NV_ENC_LOCK_BITSTREAM_VER, 1, 2)};
     lock_bitstream.outputBitstream = output_bitstream;
@@ -674,7 +699,9 @@ namespace nvenc {
     return false;
   }
 
-  bool nvenc_base::update_bitrate(int new_bitrate_kbps) {
+  bool nvenc_base::update_bitrate(int new_bitrate_kbps, std::optional<video::bitrate_application::origin_t> origin) {
+    auto observation = bitrate_observations ? bitrate_observations->begin_native_update(origin) :
+      video::bitrate_application::adapter_t::update_observation_t {};
     if (!encoder || !nvenc) {
       return false;
     }
@@ -686,6 +713,7 @@ namespace nvenc {
     }
     const auto new_bitrate_bps = static_cast<uint32_t>(static_cast<uint64_t>(new_bitrate_kbps) * 1000);
     if (new_bitrate_bps == saved_enc_config.rcParams.averageBitRate) {
+      observation.unchanged();
       return true;  // The encoder already confirmed this rate
     }
 
@@ -720,10 +748,40 @@ namespace nvenc {
       return false;
     }
 
+    // One invocation, one actual SDK-success observation, while the original
+    // broker callback still owns its lock and exact originating request.
+    observation.nvenc_reconfigure_success(enc_config.rcParams.averageBitRate);
+
     // saved_init_params.encodeConfig already points at saved_enc_config.
     saved_enc_config = enc_config;
     BOOST_LOG(debug) << "NvEnc: bitrate reconfigured to " << new_bitrate_kbps << " kbps";
     return true;
+  }
+
+  std::optional<int> nvenc_base::accepted_bitrate_kbps() const noexcept {
+    // A failed creation destroys its handle, so a live one has saved what it accepted.
+    const auto bps = saved_enc_config.rcParams.averageBitRate;
+    if (!encoder || !bps || bps % 1000) return std::nullopt;
+    return static_cast<int>(bps / 1000);
+  }
+
+  std::optional<video::bitrate_provenance::record_t> nvenc_base::take_bitrate_observation(uint64_t output_timestamp) noexcept {
+    return bitrate_observations ? bitrate_observations->take_output(
+      video::bitrate_application::output_stage_e::nvenc_output_timestamp,
+      video::bitrate_application::checked_timestamp(output_timestamp)) : std::nullopt;
+  }
+
+  std::weak_ptr<const video::bitrate_provenance::current_setting_t> nvenc_base::current_bitrate_setting() const noexcept {
+    return bitrate_observations ? bitrate_observations->current_setting_view() :
+      std::weak_ptr<const video::bitrate_provenance::current_setting_t> {};
+  }
+
+  bool nvenc_base::publish_usable_bitrate_open() noexcept {
+    return bitrate_observations && bitrate_observations->publish_usable_nvenc_open();
+  }
+
+  void nvenc_base::retire_bitrate_observations() noexcept {
+    if (bitrate_observations) bitrate_observations->retire();
   }
 
   uint32_t nvenc_base::min_struct_version(uint32_t version, uint32_t v11_struct_version, uint32_t v12_struct_version) {

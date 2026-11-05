@@ -19,7 +19,12 @@
 #include <vector>
 #include <utility>
 #include "stream_bitrate.h"
+#include "live_tuning_fec.h"
 #include "vrr_trace.h"
+#include "native_video_signal.h"
+#include "live_tuning_native.h"
+
+namespace stream_native_reception { class scope_t; }
 
 namespace adaptive_bitrate {
 
@@ -32,6 +37,7 @@ namespace adaptive_bitrate {
     double max_change_rate = 0.20;     // Max 20% change per adjustment
     double ewma_alpha = 0.3;           // EWMA smoothing factor (0-1, higher = more responsive)
     int adjustment_interval_ms = 1000; // How often to adjust
+    bool native_downward = false;     // Separate experimental opt-in; preserve aggregate field order.
   };
 
   /// Live Tuning history keeps at most this many entries per stream scope.
@@ -75,7 +81,12 @@ namespace adaptive_bitrate {
    * - fec_target, fec_published: an allocation request, or its actual frame-boundary publication;
    * - fec_retired, fec_cancelled: an actual percentage retirement, or cancellation without one;
    * - fec_restored: the encoder confirmed the higher rate after F0 was already published;
-   * - fec_refused, fec_deferred, fec_unavailable: existing transaction/evidence diagnostics.
+   * - fec_refused, fec_deferred, fec_unavailable: existing transaction/evidence diagnostics;
+   * - native_diagnostic_transition: the static live_tuning_native::transition_reason_e name (cause) of the
+   *   native episode transition recorded just before it, including refusals that earlier left no row, or
+   *   reset_by_writer_or_scope when a writer or scope change discarded a spent episode;
+   * - native_diagnostic_bucket: the static bucket_disposition_e name (cause) of one closed or discarded
+   *   response bucket. Diagnostic only: it is neither a native action nor response credit.
    * Typed fec_transition evidence, when present, distinguishes allocation changes from requests and
    * confirmations. Absence means unavailable, never a configured or published percentage of zero.
    */
@@ -108,6 +119,11 @@ namespace adaptive_bitrate {
     double input_packet_loss_percent = 0.0;
     double input_rtt_ms = 0.0;
     std::optional<fec_transition_t> fec_transition;
+    /// Experimental native evidence; separate from RTT/loss and never a restore capability.
+    std::optional<live_tuning_native::evidence_t> native_transition;
+    /// Typed reason and latest response-bucket fact on native diagnostic entries. Internal: the serialized entry
+    /// carries only its open kind/cause strings, and no decision reads this.
+    std::optional<live_tuning_native::diagnostic_t> native_diagnostic;
   };
 
   /** A bounded, oldest-first copy of one stream scope's history. */
@@ -358,6 +374,36 @@ namespace adaptive_bitrate {
   /** Return the current encoder request, including one-shot rollback work. */
   std::optional<live_bitrate_request_t> get_live_bitrate_request();
 
+  /// Passive nonblocking native diagnostic inspection only; never a policy input or write capability.
+  native_video_signal::context_t inspect_native_context(std::uint64_t expected_generation,
+                                                       std::string_view expected_app_session) noexcept;
+
+  /// Immediate callback only. No queued observation or read-only context is action authority.
+  /// True means a current observation was consumed, not that a write occurred or is permitted later.
+  bool update_native_signal(const std::shared_ptr<stream_native_reception::scope_t> &owner,
+                            std::string_view app_session, std::string_view launch_nonce,
+                            const native_video_signal::signal_t &signal, bool published,
+                            const std::function<bool()> &current_caller);
+
+  // Historical origin for an encoder about to open at this exact rate. Unlike
+  // a live update, initialization precedes runtime-support publication. This
+  // snapshot neither authorizes an SDK operation nor acknowledges application.
+  std::optional<live_bitrate_request_t> get_encoder_open_request(
+    std::uint64_t generation, int configured_encoder_kbps);
+
+  // A read-only ceiling for an already submission-bound frame, never an
+  // applied-setting receipt. Missing/contaminated/busy scopes keep legacy for
+  // new frames; already admitted frames must freeze or tighten.
+  struct live_pacing_cap_t {
+    std::uint64_t generation = 0;
+    std::uint64_t revision = 0;
+    int target_encoder_kbps = 0;
+    // Nominal policy target in F0 units, before a trial's encoder allocation.
+    // Without a trial the nominal and actual targets are the same.
+    int policy_encoder_kbps = target_encoder_kbps;
+  };
+  std::optional<live_pacing_cap_t> get_live_pacing_cap(std::uint64_t generation);
+
   // The callback may only update the encoder; it must not call this controller.
   // Validate, apply and acknowledge under one boundary with operator changes.
   bool apply_live_bitrate_request(const live_bitrate_request_t &request,
@@ -377,6 +423,9 @@ namespace adaptive_bitrate {
   void note_fec_partial_deficit(std::uint64_t generation,
                                std::chrono::steady_clock::time_point received_at);
   /// Packetizer-only: one coherent immutable publication, scoped to this frame.
+  live_tuning_fec::selection_t frame_fec_selection(std::uint64_t generation, std::int64_t frame_index,
+                                                 int configured_fallback);
+  /// Allocation-only compatibility wrapper over the same selection operation.
   std::pair<int, int> frame_fec_allocation(std::uint64_t generation, std::int64_t frame_index,
                                           int configured_fallback);
 
@@ -497,7 +546,8 @@ namespace adaptive_bitrate {
     const std::string &reason = {},
     int initial_encoder_bitrate_kbps = 0,
     bool in_place = false,
-    int in_place_floor_kbps = 1
+    int in_place_floor_kbps = 1,
+    std::weak_ptr<const video::bitrate_provenance::current_setting_t> current_setting = {}
   );
 
   /**

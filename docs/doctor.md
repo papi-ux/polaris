@@ -112,6 +112,12 @@ last two only when the client carries them. With no client, or with two, they ar
 one client's answer is no answer for another. `stream_instance_id` names one stream for a report
 about it. It is observational only and never accepted as input.
 
+Each client with a `stream_instance_id` also carries `handshake_bitrate_units`: how its own
+handshake split its bitrate request into video, FEC and audio, under `units`, with `available` and
+`reason` saying when that row has no record of its own yet. It is an as-of diagnostic with
+`action_authority` false, and Doctor takes no action from it. It has no top-level copy. See
+[Bitrate units](live-tuning.md#bitrate-units).
+
 Each client also carries `encoder_backend`, the encoder its own stream's encode loop last sampled,
 such as `nvenc`, `vaapi`, `vulkan`, `software` or `pyrowave`. It is absent until that stream's first
 sample, and `last_session` keeps it when the stream ends. With a single client streaming it repeats
@@ -156,6 +162,36 @@ interval between two admitted reports. Rejected reports change none of it, it st
 stream's scope, and it is absent whenever the receipt is. All of it is report timing only: it does not
 say when frames were encoded or sent, so it attributes nothing to congestion, a media rate or
 capacity, and a cadence without gaps is not a measurement of zero video loss.
+
+A client that sees `features.live_media_frame_submission_v1` may add an optional
+`sample.frame_submission` object (version 1) to that same telemetry report: one coherent snapshot of
+its decoder-submission bridge, with a fresh connection nonce, a native epoch, a snapshot sequence, the
+last complete decode unit's wire frame number, cumulative unit and payload totals, and two times on
+the client's own clock. It also names the launch it belongs to: the client sends a fresh
+`frameSubmissionLaunchNonce` with each launch or resume attempt, a successful response echoes it as
+`frameSubmissionLaunchNonce`, and the owner's `/polaris/v1/session/status` serves it as
+`frame_submission_launch_nonce` beside the same stream's `app_session_id` and `session_generation`. A
+report whose `launch_nonce` is not that exact stream's is never joined. A missing or malformed nonce
+leaves the launch and the legacy telemetry exactly as they were; watch-only streams keep none. The host keeps a bounded ledger, for each stream generation, of every frame
+its sender began: the frame number, the immutable encoder setting the packet carried, and what the
+actual send calls returned. Tracing does not need to be on. The report's `frame_submission_receipt`, and
+`client_media_interval.frame_submission_receipt` for the newest one of the same stream, join the
+frames since the previous snapshot one by one. They are `available` only when every one of those
+frames was sent with complete successful send calls within the existing five-second coverage bound
+and under one exact encoder application (lifetime, application sequence, origin revision, kbps and
+origin, so A, then B, then A again at the same rate is mixed). Then the receipt gives that setting,
+the frame range, the frames emitted, the units the client submitted, the frames absent at decoder
+submission and the payload bytes over the client's interval. Otherwise it names why: a baseline, a
+new native epoch, a refused snapshot (another launch, old epoch, another nonce, replayed sequence,
+regressing or incoherent counters, a cursor the sender never reached), a stale interval (a send that
+began or ended outside the bound included), a frame missing from or
+evicted from the ledger, a pending, failed, fallback, cancelled or unknown send, a missing setting,
+or mixed settings. A refused snapshot never replaces the newer baseline; any other valid snapshot
+becomes the next one, and an empty one never refreshes the evidence age. Frames absent at submission
+are not network packet loss, the payload rate is neither capacity nor the encoder's achieved rate,
+and none of it reaches Live Tuning, FEC, pacing, the network verdict or the legacy counters. A
+malformed section only makes this receipt unavailable; the legacy counters are answered exactly as
+before, and a report without the section gets no receipt at all.
 
 The session health served beside it, and by the other paired endpoints, takes the same stream's
 codec and encoder for `active_encoder` and `encoder_selection`, for the AV1 part of `decoder_risk`,

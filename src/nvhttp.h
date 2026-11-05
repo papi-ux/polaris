@@ -25,6 +25,9 @@
 
 // local includes
 #include "crypto.h"
+#ifdef POLARIS_TESTS
+  #include "doctor_ai_explanation.h"
+#endif
 #include "nvhttp_query.h"
 #include "pyrowave_availability.h"
 #include "process.h"
@@ -718,6 +721,33 @@ namespace nvhttp {
 
     /// The port the route answers on, or 0 when the server did not start.
     unsigned short port() const;
+
+  private:
+    struct impl_t;
+    std::unique_ptr<impl_t> impl;
+  };
+
+  /**
+   * @brief The paired Doctor explanation route (#613) on an HTTPS server of its own, for tests.
+   *
+   * Serves the production POST handler, scope reader, request store and worker behind the
+   * production client certificate check. The test supplies only the service hooks at the I/O
+   * boundary (provider, clock, configuration, snapshot identity); empty hooks are production.
+   * GET /polaris/v1/doctor/explanation/descriptor answers the descriptor session status attaches,
+   * computed by the same pure function from the same reads, with the final Doctor it describes.
+   */
+  class doctor_explanation_route_for_tests_t {
+  public:
+    doctor_explanation_route_for_tests_t(const std::string &cert_file,
+                                         const std::string &key_file,
+                                         doctor_ai_explanation::service_t::hooks_t hooks);
+    ~doctor_explanation_route_for_tests_t();
+    doctor_explanation_route_for_tests_t(const doctor_explanation_route_for_tests_t &) = delete;
+    doctor_explanation_route_for_tests_t &operator=(const doctor_explanation_route_for_tests_t &) = delete;
+
+    /// The port the route answers on, or 0 when the server did not start.
+    unsigned short port() const;
+    doctor_ai_explanation::service_t &service();
 
   private:
     struct impl_t;

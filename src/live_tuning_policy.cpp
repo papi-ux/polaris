@@ -100,6 +100,8 @@ namespace live_tuning_policy {
         return "climb";
       case state_e::rtt_cut:
         return "rtt_cut";
+      case state_e::native_hold:
+        return "native_hold";
     }
     return "normal";
   }
@@ -707,6 +709,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::report(std::int64_t now_ms, double expected, double lost) {
+    if (state_ == state_e::native_hold) return;
     const bool gap = last_report_ms_ && now_ms - *last_report_ms_ > REPORT_GAP_MS;
     last_report_ms_ = now_ms;
     if (expected <= 0.0) {
@@ -898,6 +901,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::rtt(std::int64_t now_ms, double smoothed_rtt_ms) {
+    if (state_ == state_e::native_hold) return;
     if (last_rtt_ && smoothed_rtt_ms != *last_rtt_) {
       rises_ = smoothed_rtt_ms > *last_rtt_ ? rises_ + 1 : 0;
     }
@@ -925,6 +929,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::tick(std::int64_t now_ms) {
+    if (state_ == state_e::native_hold) return;
     if (state_ == state_e::descend && phase_ == phase_e::first && !blind_step_ && last_report_ms_ &&
         now_ms - *last_report_ms_ > MISSING_MS) {
       // The probe's first step cannot be judged: the reports stopped, maybe because the link is overloaded.
@@ -1039,7 +1044,19 @@ namespace live_tuning_policy {
     set_target(target_ * RTT_CUT, "rtt", now_ms);
   }
 
+  bool policy_t::native_downward(std::int64_t now_ms, int expected_kbps, int next_kbps) {
+    if (state_ != state_e::normal || target_ != expected_kbps ||
+        next_kbps < floor_ || next_kbps >= target_ || fec_request()) return false;
+    // Do not use adopt/rebase/set_target: they retire evidence belonging to legacy families.
+    ++changes_;
+    last_change_ = {now_ms, target_, next_kbps, "native_elapsed_standing"};
+    target_ = next_kbps;
+    state_ = state_e::native_hold;
+    return true;
+  }
+
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
+    if (state_ == state_e::native_hold && kbps == target_) return;
     fec_revert();
     measured_.clear();
     retained_queue_ceiling_.reset();
@@ -1085,6 +1102,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::rebase(int base_kbps, int floor_kbps) {
+    if (state_ == state_e::native_hold && base_kbps == base_ && floor_kbps == floor_) return;
     fec_revert();
     measured_.clear();
     retained_queue_ceiling_.reset();
@@ -1114,6 +1132,11 @@ namespace live_tuning_policy {
     if (state_ == state_e::hold && hi_ && *hi_ <= target_) {
       hi_.reset();
     }
+    // Only this explicit changed request/floor, not native evidence, can resume the old policy.
+    if (state_ == state_e::native_hold) {
+      state_ = state_e::normal;
+      after_change_ = after_change_e::down;
+    }
   }
 
   void policy_t::configure_fec(int configured_percentage) {
@@ -1131,6 +1154,7 @@ namespace live_tuning_policy {
   }
 
   std::optional<int> policy_t::fec_request() const {
+    if (state_ == state_e::native_hold) return std::nullopt;
     if (fec_wanted_ && *fec_wanted_ != fec_pct_) {
       return fec_wanted_;
     }

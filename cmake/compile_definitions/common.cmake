@@ -88,6 +88,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/live_tuning_policy.cpp"
         "${CMAKE_SOURCE_DIR}/src/doctor_actions.h"
         "${CMAKE_SOURCE_DIR}/src/doctor_actions.cpp"
+        "${CMAKE_SOURCE_DIR}/src/doctor_ai_explanation.h"
+        "${CMAKE_SOURCE_DIR}/src/doctor_ai_explanation.cpp"
         "${CMAKE_SOURCE_DIR}/src/doctor_v2.h"
         "${CMAKE_SOURCE_DIR}/src/doctor_v2.cpp"
         "${CMAKE_SOURCE_DIR}/src/doctor_trial.h"

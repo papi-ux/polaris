@@ -157,6 +157,22 @@ another stream's figures. A client with no stream here is answered about the fir
 has recorded its handshake. A stream in a Space reports through its worker and carries no
 `bitrate_units` yet, and capabilities answered for a Space's profile do not announce it.
 
+The web console's stream stats, `GET /api/stats/stream` and its event stream, show the same object
+for each streaming client as `clients[].handshake_bitrate_units.units`, beside that row's
+`stream_instance_id`. Each row answers from its own handshake only. While the row is still in its
+handshake, `available` is false, `reason` is `handshake_not_recorded` and `units` is null. In a
+snapshot where nothing streams, `reason` is `not_streaming`. A row is never given another stream's
+figures, and a watcher's null `split_kbps` stays null. `basis` is `rtsp_handshake_record`,
+`snapshot` is `as_of_diagnostic`, and `action_authority` is always false. `requested_kbps`,
+`warp_factor`, `cap_kbps`, `cap_source`, `split_kbps`, `encoder_kbps`, `audio_kbps`,
+`fec_percentage` and `formula` are the mapping the handshake negotiated and recorded, and a later
+live change does not rewrite them. `live_encoder_kbps` is different: it is the rate the row's own
+encode loop last reported when the stats were read, or `encoder_kbps` until the first report, so it
+can change after a live bitrate, Live Tuning or Doctor change. Neither acknowledges a particular
+bitrate write or shows what media was delivered. There is no top-level copy, even with one client,
+and a row with no `stream_instance_id` carries none. The object is observational only and never
+accepted as input. The paired session status and capabilities are unchanged.
+
 ## API contract
 
 `GET /api/live-tuning` requires web administrator authentication. Its response
