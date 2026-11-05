@@ -247,6 +247,13 @@ namespace proc {
     return true;
   }
 
+  std::optional<std::uint64_t> session_lifecycle_gate_t::try_idle_generation() const {
+    std::unique_lock lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || _state != state_e::idle || _stop_waiting || _launch_to_stop_handoff ||
+        _restore_fenced || _rtsp_setups_in_flight) return std::nullopt;
+    return _generation;
+  }
+
   bool session_lifecycle_gate_t::try_begin_rtsp_launch(
       std::uint64_t expected_generation, const std::function<void()> &on_admitted) {
     std::unique_lock lock(_mutex);
@@ -9074,7 +9081,7 @@ namespace proc {
     // Later capture/encoder setup calls reuse the same recorder and its original budgets.
     vrr_trace::start_from_environment();
     // Capture outside the lifecycle mutex; publication alone takes its existing lock.
-    if (app.source == "epic_launcher") remember_epic_launcher();
+    if (app.source == "epic_launcher") remember_epic_launcher(platf::epic::capture_origin_t::launch_discovery);
     auto &sync = session_lifecycle_sync();
     std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex);
 #ifdef __linux__
@@ -11898,15 +11905,142 @@ namespace proc {
   }
 #endif
 
-  void proc_t::remember_epic_launcher() {
+  platf::epic::capture_result_t proc_t::remember_epic_launcher(platf::epic::capture_origin_t origin) {
 #ifdef __linux__
+    auto &sync = session_lifecycle_sync();
+    std::uint64_t generation;
+    {
+      std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+      generation = _epic_setup.generation();
+    }
     std::string reason;
     auto proof = platf::epic::prove_launcher(reason);
-    if (!proof) return; // Best effort; failure does not erase a retained proof or grant authority.
-    auto &sync = session_lifecycle_sync();
+    // Best effort; failure does not erase an otherwise valid retained proof or grant authority.
+    if (!proof) return {platf::epic::capture_state_t::unavailable, generation, reason};
     std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+    if (generation != _epic_setup.generation())
+      return {platf::epic::capture_state_t::superseded, _epic_setup.generation(), "setup_generation_changed"};
+    const auto result = _epic_setup.capture(*proof, origin);
     _epic_launcher_proof = std::move(proof);
+    return result;
+#else
+    (void) origin;
+    return {platf::epic::capture_state_t::unsupported, 0, "epic_linux_only"};
 #endif
+  }
+
+  epic_scan_result_t proc_t::scan_epic_library(const std::vector<std::filesystem::path> &homes) {
+    epic_scan_result_t out;
+#ifdef __linux__
+    auto &sync = session_lifecycle_sync();
+    platf::epic::setup_history_t::scan_ticket_t ticket;
+    std::shared_ptr<const char> owner;
+    const auto idle_generation = _session_lifecycle_gate->try_idle_generation();
+    bool idle = false;
+    {
+      const auto sessions = rtsp_stream::session_snapshot({});
+      std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+      idle = idle_generation.has_value() && _app_id <= 0 && !_launch_session && sessions.active_sessions == 0 && sessions.pending_sessions == 0;
+      owner = sync.capture_owner.load();
+      ticket = _epic_setup.begin_scan();
+    }
+    std::string reason;
+    const auto before = platf::epic::prove_launcher(reason);
+    {
+      std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+      out.capture = {platf::epic::capture_state_t::unavailable, _epic_setup.generation(), reason};
+      if (before) {
+        out.capture = _epic_setup.observe_scan(ticket, *before);
+        if (out.capture.state != platf::epic::capture_state_t::superseded) _epic_launcher_proof = *before;
+      }
+    }
+    // Only the official metadata slice sits between these observations; no other library scan.
+    out.snapshot = epic_library::scan(homes);
+    const auto after = platf::epic::prove_launcher(reason);
+    {
+      const auto current_generation = _session_lifecycle_gate->try_idle_generation();
+      const auto sessions = rtsp_stream::session_snapshot({});
+      std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+      idle = idle && current_generation == idle_generation && owner == sync.capture_owner.load() && _app_id <= 0 && !_launch_session &&
+        sessions.active_sessions == 0 && sessions.pending_sessions == 0;
+      out.state = _epic_setup.finish_scan(ticket, out.snapshot, after ? &*after : nullptr, idle);
+      out.receipt_revision = _epic_setup.receipt_revision();
+    }
+#else
+    (void) homes;
+    out.capture = {platf::epic::capture_state_t::unsupported, 0, "epic_linux_only"};
+    out.state = platf::epic::scan_state_t::unsupported;
+#endif
+    return out;
+  }
+
+  epic_setup_read_t proc_t::read_epic_setup(const std::optional<epic_library::identity_t> &identity,
+                                         platf::epic::prerequisite_state_t prerequisites) {
+    epic_setup_read_t out;
+#ifdef __linux__
+    out.supported = true;
+    out.facts.state = platf::epic::readiness_state_t::busy;
+    out.facts.reason = "session_busy";
+    auto &sync = session_lifecycle_sync();
+    if (sync.epic_setup_reading.exchange(true)) { out.facts.reason = "check_in_progress"; return out; }
+    auto release_read = util::fail_guard([&]() { sync.epic_setup_reading.store(false); });
+    std::optional<platf::epic::launcher_proof_t> proof;
+    platf::epic::setup_history_t history;
+    std::shared_ptr<const char> owner;
+    const auto idle_generation = _session_lifecycle_gate->try_idle_generation();
+    if (!idle_generation) return out;
+    {
+      const auto sessions = rtsp_stream::session_snapshot({});
+      std::unique_lock<std::recursive_mutex> lock(sync.mutex, std::try_to_lock);
+      if (!lock.owns_lock()) return out;
+      if (_app_id > 0 || _launch_session || sessions.active_sessions || sessions.pending_sessions) return out;
+      if (_epic_setup_epoch.empty()) _epic_setup_epoch = uuid_util::uuid_t::generate().string();
+      out.epoch = _epic_setup_epoch;
+      proof = _epic_launcher_proof;
+      history = _epic_setup;
+      owner = sync.capture_owner.load();
+    }
+    // No lifecycle mutex or admission gate is held across filesystem/process inspection.
+    const auto metadata = epic_library::scan(game_library::library_home_roots());
+    const auto title = identity ? epic_library::find(metadata, *identity) : std::nullopt;
+    const auto target = title ? std::make_optional(epic_process_title(*title)) : std::nullopt;
+    out.facts = platf::epic::evaluate_setup(proof ? &*proof : nullptr, target ? &*target : nullptr, true, prerequisites);
+    if (identity && !title) {
+      out.facts.state = platf::epic::readiness_state_t::unknown;
+      out.facts.runtime = platf::epic::runtime_state_t::unknown;
+      out.facts.reason = "epic_installation_unavailable";
+    }
+    const auto final_metadata = epic_library::scan(game_library::library_home_roots());
+    if (identity && !epic_library::same_snapshot(metadata, final_metadata)) {
+      out.facts.state = platf::epic::readiness_state_t::unknown;
+      out.facts.runtime = platf::epic::runtime_state_t::unknown;
+      out.facts.reason = "epic_installation_changed";
+    }
+    {
+      const auto current_generation = _session_lifecycle_gate->try_idle_generation();
+      const auto sessions = rtsp_stream::session_snapshot({});
+      std::unique_lock<std::recursive_mutex> lock(sync.mutex, std::try_to_lock);
+      if (!current_generation || current_generation != idle_generation || !lock.owns_lock() || owner != sync.capture_owner.load() ||
+          history.generation() != _epic_setup.generation() || history.revision() != _epic_setup.revision() ||
+          _app_id > 0 || _launch_session || sessions.active_sessions || sessions.pending_sessions) {
+        out.facts = {};
+        out.facts.reason = "setup_generation_changed";
+        out.receipt = platf::epic::receipt_state_t::unknown;
+        return out;
+      }
+      if (out.facts.proof == platf::epic::proof_state_t::changed) _epic_setup.invalidate_receipt();
+      out.metadata_available = final_metadata.available;
+      out.receipt = _epic_setup.receipt(final_metadata, out.facts.proof == platf::epic::proof_state_t::valid);
+      out.last_scan = _epic_setup.last_scan();
+      out.revision = _epic_setup.revision();
+      out.receipt_revision = _epic_setup.receipt_revision();
+    }
+#else
+    (void) identity;
+    (void) prerequisites;
+    out.facts.reason = "epic_linux_only";
+#endif
+    return out;
   }
 
   std::pair<int, nlohmann::json> proc_t::epic_session_control(const std::string &action,

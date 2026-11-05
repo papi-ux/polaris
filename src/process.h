@@ -51,8 +51,8 @@
 #include "steam_lifetime.h"
 #ifdef __linux__
 #include "platform/linux/steam_title_process.h"
-#include "platform/linux/epic_process.h"
 #endif
+#include "platform/linux/epic_process.h"
 #include "epic_library.h"
 #include "emulator_library.h"
 #include "game_library_scanner.h"
@@ -1081,6 +1081,8 @@ namespace proc {
   public:
     void begin_launch(const std::function<void()> &on_admitted = {});
     std::optional<std::uint64_t> capture_launch_generation() const;
+    // Passive setup sampling: no waits, reservations or state changes.
+    std::optional<std::uint64_t> try_idle_generation() const;
     bool try_begin_rtsp_launch();
     bool try_begin_rtsp_launch(std::uint64_t expected_generation,
                                const std::function<void()> &on_admitted = {});
@@ -1147,13 +1149,34 @@ namespace proc {
     session_status_snapshot_t snapshot;
   };
 
+  // Internal setup facts. No JSON projection or new launch restrictions belong here.
+  struct epic_scan_result_t {
+    epic_library::snapshot_t snapshot;
+    platf::epic::capture_result_t capture;
+    platf::epic::scan_state_t state {platf::epic::scan_state_t::required};
+    std::uint64_t receipt_revision {0};
+  };
+  struct epic_setup_read_t {
+    bool supported {false};
+    platf::epic::setup_readiness_t facts;
+    platf::epic::receipt_state_t receipt {platf::epic::receipt_state_t::required};
+    platf::epic::scan_state_t last_scan {platf::epic::scan_state_t::required};
+    std::string epoch;
+    std::uint64_t revision {0}, receipt_revision {0};
+    bool metadata_available {false};
+  };
+
   class proc_t {
   public:
     // Called only by the authenticated host web console. No paired-client mutation route.
     std::pair<int, nlohmann::json> epic_session_control(const std::string &action = {},
       const std::string &session_id = {}, const std::string &revision = {}, bool confirmed = false);
     // Best-effort, in-memory original-file proof from authenticated official-provider discovery.
-    void remember_epic_launcher();
+    platf::epic::capture_result_t remember_epic_launcher(
+      platf::epic::capture_origin_t = platf::epic::capture_origin_t::provider_choice);
+    epic_scan_result_t scan_epic_library(const std::vector<std::filesystem::path> &homes);
+    epic_setup_read_t read_epic_setup(const std::optional<epic_library::identity_t> &title = {},
+      platf::epic::prerequisite_state_t = platf::epic::prerequisite_state_t::unknown);
     std::pair<int, nlohmann::json> desktop_steam_control(const std::string &unique_id, bool can_launch,
       const std::string &action = {}, const std::string &revision = {}, bool confirm_game_quit = false);
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
@@ -1372,6 +1395,8 @@ namespace proc {
 #ifdef __linux__
       // Mutex-protected scoped Console stop owner; only that stop may clean up during its drain.
       const void *console_cleanup_owner = nullptr;
+      // Coalesces all owner setup reads, including two tabs selecting different titles.
+      std::atomic<bool> epic_setup_reading {false};
 #endif
       /// Set while a stop runs because someone ended the session on purpose.
       std::atomic<bool> stop_ends_session {false};
@@ -1457,6 +1482,8 @@ namespace proc {
     std::unique_ptr<platf::epic::adopted_game_t> _epic_grant;
     std::string _epic_grant_revision;
     std::optional<platf::epic::launcher_proof_t> _epic_launcher_proof;
+    platf::epic::setup_history_t _epic_setup;
+    std::string _epic_setup_epoch;
     std::optional<platf::epic::private_session_t> _epic_private_session;
     std::uint64_t _epic_private_request_ticks = 0;
     std::uint64_t _epic_private_birth_upper_ticks = 0;

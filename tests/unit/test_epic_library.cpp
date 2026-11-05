@@ -45,6 +45,41 @@ TEST(EpicLibraryTests, CompletedInstallUsesExactTripleAndDirectoryNameWithoutAcc
   EXPECT_EQ(s.games[0].name, "Alan Wake 2");
   EXPECT_EQ(s.games[0].platform, "Windows");
 }
+
+TEST(EpicLibraryTests, SetupSnapshotBindingUsesAvailableExactMetadataIndependentOfOrder) {
+  auto second = row();
+  second["artifactId"] = "other";
+  second["installationId"] = "install2";
+  const auto first = parse({row(), second});
+  ASSERT_TRUE(first.available);
+  EXPECT_TRUE(epic_library::same_snapshot(first, parse({second, row()})));
+  EXPECT_FALSE(epic_library::same_snapshot(first, parse({row()})));
+  EXPECT_TRUE(epic_library::same_snapshot({true, {}, {}}, {true, {}, {}}));
+  EXPECT_FALSE(epic_library::same_snapshot({false, {}, {}}, {true, {}, {}}));
+  EXPECT_FALSE(epic_library::same_snapshot({false, {}, {}}, {false, {}, {}}));
+  // Every field of the selected installation participates; neither a title label nor a
+  // client-supplied completion flag may substitute for the server metadata snapshot.
+  for (int field = 0; field < 10; ++field) {
+    auto changed = first;
+    auto &game = changed.games.front();
+    switch (field) {
+      case 0: game.identity.namespace_id += "x"; break;
+      case 1: game.identity.item_id += "x"; break;
+      case 2: game.identity.artifact_id += "x"; break;
+      case 3: game.installation_id += "x"; break;
+      case 4: game.name += "x"; break;
+      case 5: game.launch_executable += "x"; break;
+      case 6: game.version += "x"; break;
+      case 7: game.install_dir /= "changed"; break;
+      case 8: game.data_root /= "changed"; break;
+      case 9: game.platform = "Linux"; break;
+    }
+    EXPECT_FALSE(epic_library::same_snapshot(first, changed)) << field;
+  }
+  auto warned = first;
+  warned.warnings.push_back("Metadata needs attention");
+  EXPECT_FALSE(epic_library::same_snapshot(first, warned));
+}
 TEST(EpicLibraryTests, OwnerBlockerMessageNeverChangesTheGenericRefusalOrAction) {
   const std::string generic = "Another AppImage app is running on the host, and Polaris can't tell it apart from Epic.";
   const std::string action = "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.";

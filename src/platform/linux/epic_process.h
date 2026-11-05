@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "../../epic_library.h"
+
 namespace vrr_clock {
   class compositor_lease_t;
 }
@@ -98,6 +100,76 @@ namespace platf::epic {
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
   // Revalidates the retained original file without requiring a launcher or AppImage mount.
   bool verify_launcher(const launcher_proof_t &, std::string &reason);
+  // File identity and inspection context, without I/O. Neither comparison grants authority.
+  bool same_launcher_file(const launcher_proof_t &, const launcher_proof_t &);
+  // The same desktop task, boot, namespace, cgroup, mount and original file at two samples.
+  // Matching bookends do not establish continuous presence between samples.
+  bool same_launcher_observation(const launcher_proof_t &, const launcher_proof_t &);
+
+  enum class capture_origin_t { provider_choice, launch_discovery, scan };
+  enum class capture_state_t { captured, unchanged, unavailable, superseded, unsupported };
+  struct capture_result_t {
+    capture_state_t state {capture_state_t::unavailable};
+    std::uint64_t generation {0};
+    std::string reason;
+  };
+  enum class scan_state_t { required, checking, complete, metadata_unavailable, launcher_unobserved, launcher_changed, superseded, session_busy, unsupported };
+  enum class receipt_state_t { required, complete, previous, unknown };
+
+  /** In-memory setup history only. Caller serializes access; methods do no native I/O.
+   * This owns no launch/adoption permission. Replacing this object (host restart) drops history.
+   * The web never supplies a ticket, launcher proof, metadata snapshot or completed flag.
+   */
+  class setup_history_t {
+  public:
+    class scan_ticket_t {
+    private:
+      std::uint64_t sequence {0}, generation {0};
+      std::shared_ptr<const char> epoch;
+      std::optional<launcher_proof_t> before;
+      friend class setup_history_t;
+    };
+    capture_result_t capture(const launcher_proof_t &, capture_origin_t);
+    scan_ticket_t begin_scan();
+    // Rejects a slow capture if another scan or a different file generation won publication.
+    capture_result_t observe_scan(scan_ticket_t &, const launcher_proof_t &);
+    scan_state_t finish_scan(const scan_ticket_t &, const epic_library::snapshot_t &,
+                            const launcher_proof_t *after, bool idle_same_session);
+    receipt_state_t receipt(const epic_library::snapshot_t &, bool proof_valid) const;
+    const std::optional<launcher_proof_t> &proof() const { return proof_; }
+    std::uint64_t generation() const { return generation_; }
+    std::uint64_t revision() const { return revision_; }
+    std::uint64_t receipt_revision() const { return receipt_revision_; }
+    scan_state_t last_scan() const { return last_scan_; }
+    capture_origin_t origin() const { return origin_; }
+    void invalidate_receipt();
+
+  private:
+    bool current(const scan_ticket_t &) const;
+    std::optional<launcher_proof_t> proof_;
+    std::shared_ptr<const epic_library::snapshot_t> snapshot_;
+    std::uint64_t generation_ {0}, sequence_ {0}, revision_ {0}, receipt_revision_ {0};
+    std::shared_ptr<const char> epoch_ {std::make_shared<const char>()};
+    scan_state_t last_scan_ {scan_state_t::required};
+    capture_origin_t origin_ {capture_origin_t::provider_choice};
+  };
+
+  enum class desktop_state_t { not_checked, open, closed, unknown };
+  enum class proof_state_t { required, valid, changed, unavailable };
+  enum class runtime_state_t { not_checked, not_selected, absent, busy, unknown };
+  enum class prerequisite_state_t { available, unavailable, unknown };
+  enum class readiness_state_t { busy, needs_action, launcher_closed, ready, unknown };
+  struct setup_readiness_t {
+    desktop_state_t desktop {desktop_state_t::not_checked};
+    proof_state_t proof {proof_state_t::required};
+    runtime_state_t runtime {runtime_state_t::not_checked};
+    readiness_state_t state {readiness_state_t::unknown};
+    std::string reason;
+  };
+  // Passive sampled facts only: no URI, pidfd/adoption, compositor, logs or launch_failure writes.
+  // A missing scan receipt is deliberately NOT a launch prerequisite.
+  setup_readiness_t evaluate_setup(const launcher_proof_t *, const title_t *, bool host_idle,
+                                   prerequisite_state_t = prerequisite_state_t::unknown);
   // Whether a retained AppImage's runtime knows --appimage-mount. One that does not would treat the
   // flag as the launcher's own argument and start it outside any sandbox, without the request.
   bool appimage_mounts_itself(const launcher_proof_t &);
@@ -213,6 +285,8 @@ namespace platf::epic {
     std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason, std::shared_ptr<backend_t>);
     std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr);
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t>);
+    setup_readiness_t evaluate_setup(const launcher_proof_t *, const title_t *, bool host_idle,
+                                     prerequisite_state_t, std::shared_ptr<backend_t>);
     std::optional<bool> title_runtime_absent(const title_t &, std::string &reason, std::shared_ptr<backend_t>);
     std::optional<private_session_t> pin_private_session(
       std::shared_ptr<const vrr_clock::compositor_lease_t>, const std::string &generation, std::string &reason, std::shared_ptr<backend_t>);

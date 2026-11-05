@@ -1963,6 +1963,30 @@ TEST(SessionRoleContractTests, ViewerOnlySessionsAggregateToViewer) {
 }
 
 
+TEST(SessionLifecycleGateTests, EpicSetupIdleSampleDoesNotReserveOrWaitForTheHost) {
+  proc::session_lifecycle_gate_t gate;
+  const auto generation = gate.try_idle_generation();
+  ASSERT_TRUE(generation);
+  // A read did not reserve admission; a launch and an RTSP setup can still enter normally.
+  ASSERT_TRUE(gate.try_begin_rtsp_launch(*generation));
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_launch();
+  ASSERT_TRUE(gate.try_begin_rtsp_setup(*generation));
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_rtsp_setup();
+  ASSERT_TRUE(gate.try_begin_snapshot_now());
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_snapshot();
+  ASSERT_TRUE(gate.try_fence_restore());
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.release_restore_fence();
+  ASSERT_TRUE(gate.begin_stop());
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_stop();
+  EXPECT_NE(gate.try_idle_generation(), generation);
+  EXPECT_TRUE(gate.try_idle_generation());
+}
+
 TEST(SessionLifecycleGateTests, StopWaitsForAdmittedLaunchAndBlocksPendingReplacement) {
   using namespace std::chrono_literals;
 

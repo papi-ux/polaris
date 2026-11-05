@@ -7,6 +7,7 @@
 #ifdef __linux__
 
 #include <src/platform/linux/epic_process.h>
+#include <src/launch_failure.h>
 #include <src/steamos_session.h>
 #include <src/vrr_compositor_identity.h>
 
@@ -1877,6 +1878,320 @@ TEST_F(EpicProcess, RetainedNativeLauncherProofRechecksMagicAndOwnerWithoutAProc
   host->uid = 1001;
   EXPECT_FALSE(ep::verify_launcher(*proof, error));
   EXPECT_EQ(error, "launcher_owner_changed");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupColdOpenObservationDoesNotInventAScanOrPublishAProof) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  ep::setup_history_t history;
+  const auto facts = ep::testing::evaluate_setup(nullptr, nullptr, true, ep::prerequisite_state_t::unknown, host);
+  EXPECT_EQ(facts.desktop, ep::desktop_state_t::open);
+  EXPECT_EQ(facts.proof, ep::proof_state_t::required);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::needs_action);
+  EXPECT_FALSE(history.proof());
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupReceiptRequiresSuccessfulMetadataAndMatchingDesktopBookends) {
+  const auto appimage = host->fuse_launcher();
+  const auto before = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(before) << error;
+  ep::setup_history_t history;
+  auto scan = history.begin_scan();
+  EXPECT_EQ(history.observe_scan(scan, *before).state, ep::capture_state_t::captured);
+  EXPECT_EQ(history.last_scan(), ep::scan_state_t::checking);
+  const auto after = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(after) << error;
+  const epic_library::snapshot_t empty {true, {}, {}};
+  EXPECT_EQ(history.finish_scan(scan, empty, &*after, true), ep::scan_state_t::complete);
+  EXPECT_GT(history.receipt_revision(), 0U);
+  EXPECT_EQ(history.receipt(empty, true), ep::receipt_state_t::complete);
+  auto different_metadata = empty;
+  different_metadata.warnings.push_back("The metadata snapshot changed");
+  EXPECT_EQ(history.receipt(different_metadata, true), ep::receipt_state_t::previous);
+  // Only the proven original is needed after Epic exits and its AppImage mount disappears.
+  host->pids.clear();
+  host->identities.erase("/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher");
+  const auto facts = ep::testing::evaluate_setup(&*before, nullptr, true, ep::prerequisite_state_t::unknown, host);
+  EXPECT_EQ(facts.desktop, ep::desktop_state_t::closed);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::launcher_closed);
+  EXPECT_EQ(history.receipt(empty, facts.proof == ep::proof_state_t::valid), ep::receipt_state_t::complete);
+  EXPECT_EQ(before->path(), appimage);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupProviderAndLaunchDiscoveryNeverCreateAScanReceipt) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  ep::setup_history_t history;
+  EXPECT_EQ(history.capture(*proof, ep::capture_origin_t::provider_choice).state, ep::capture_state_t::captured);
+  const auto generation = history.generation();
+  EXPECT_EQ(history.capture(*proof, ep::capture_origin_t::launch_discovery).state, ep::capture_state_t::unchanged);
+  EXPECT_EQ(history.origin(), ep::capture_origin_t::launch_discovery);
+  EXPECT_EQ(history.generation(), generation);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+  auto closed_scan = history.begin_scan();
+  EXPECT_EQ(history.finish_scan(closed_scan, {true, {}, {}}, nullptr, true), ep::scan_state_t::launcher_unobserved);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+}
+
+TEST_F(EpicProcess, SetupFailedRescanKeepsOnlyExplicitPreviousHistory) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  ep::setup_history_t history;
+  auto first = history.begin_scan();
+  history.observe_scan(first, *proof);
+  EXPECT_EQ(history.finish_scan(first, {false, {}, {}}, &*proof, true), ep::scan_state_t::metadata_unavailable);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+  auto good = history.begin_scan();
+  history.observe_scan(good, *proof);
+  ASSERT_EQ(history.finish_scan(good, {true, {}, {}}, &*proof, true), ep::scan_state_t::complete);
+  const auto receipt_revision = history.receipt_revision();
+  auto failed = history.begin_scan();
+  history.observe_scan(failed, *proof);
+  EXPECT_EQ(history.finish_scan(failed, {false, {}, {}}, &*proof, true), ep::scan_state_t::metadata_unavailable);
+  EXPECT_EQ(history.receipt_revision(), receipt_revision);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::previous);
+  EXPECT_EQ(history.receipt({false, {}, {}}, true), ep::receipt_state_t::unknown);
+  EXPECT_EQ(history.receipt({true, {}, {}}, false), ep::receipt_state_t::unknown);
+}
+
+TEST_F(EpicProcess, SetupSameFileRecapturePreservesReceiptButChangedFileDoesNot) {
+  const fs::path exe = "/usr/bin/EpicGamesLauncher";
+  host->add_process(43, exe, "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  ep::setup_history_t history;
+  auto scan = history.begin_scan();
+  history.observe_scan(scan, *proof);
+  ASSERT_EQ(history.finish_scan(scan, {true, {}, {}}, &*proof, true), ep::scan_state_t::complete);
+  const auto generation = history.generation(), receipt = history.receipt_revision();
+  const auto recaptured = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(recaptured) << error;
+  EXPECT_EQ(history.capture(*recaptured, ep::capture_origin_t::provider_choice).state, ep::capture_state_t::unchanged);
+  EXPECT_EQ(history.generation(), generation);
+  EXPECT_EQ(history.receipt_revision(), receipt);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::complete);
+  ++host->identities[exe].changed_ns;
+  host->identities["/proc/43/exe"] = host->identities[exe];
+  const auto changed = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(changed) << error;
+  EXPECT_FALSE(ep::same_launcher_file(*proof, *changed));
+  EXPECT_EQ(history.capture(*changed, ep::capture_origin_t::launch_discovery).state, ep::capture_state_t::captured);
+  EXPECT_GT(history.generation(), generation);
+  EXPECT_EQ(history.receipt_revision(), 0U);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+}
+
+TEST_F(EpicProcess, SetupLauncherRestartOrExecBetweenBookendsCannotCompleteScan) {
+  const fs::path exe = "/usr/bin/EpicGamesLauncher";
+  host->add_process(43, exe, "/fixture/owner", 10003);
+  const auto before = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(before) << error;
+  ep::setup_history_t history;
+  auto scan = history.begin_scan();
+  history.observe_scan(scan, *before);
+  host->files["/proc/43/stat"] = stat_line(43, 20003);
+  const auto restarted = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(restarted) << error;
+  EXPECT_TRUE(ep::same_launcher_file(*before, *restarted));
+  EXPECT_FALSE(ep::same_launcher_observation(*before, *restarted));
+  EXPECT_EQ(history.finish_scan(scan, {true, {}, {}}, &*restarted, true), ep::scan_state_t::launcher_changed);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupOldScanOrOldProcessEpochCannotOverwriteNewerReceipt) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  ep::setup_history_t history;
+  auto old = history.begin_scan();
+  history.observe_scan(old, *proof);
+  auto newer = history.begin_scan();
+  history.observe_scan(newer, *proof);
+  ASSERT_EQ(history.finish_scan(newer, {true, {}, {}}, &*proof, true), ep::scan_state_t::complete);
+  const auto revision = history.revision();
+  EXPECT_EQ(history.finish_scan(old, {false, {}, {}}, nullptr, true), ep::scan_state_t::superseded);
+  EXPECT_EQ(history.observe_scan(old, *proof).state, ep::capture_state_t::superseded);
+  EXPECT_EQ(history.revision(), revision);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::complete);
+  ep::setup_history_t restarted;
+  auto first = restarted.begin_scan();
+  restarted.observe_scan(first, *proof);
+  EXPECT_EQ(restarted.finish_scan(newer, {true, {}, {}}, &*proof, true), ep::scan_state_t::superseded);
+  EXPECT_EQ(restarted.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+}
+
+TEST_F(EpicProcess, SetupSessionChangeAndInvalidationRetireOutstandingScans) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  ep::setup_history_t history;
+  auto scan = history.begin_scan();
+  history.observe_scan(scan, *proof);
+  EXPECT_EQ(history.finish_scan(scan, {true, {}, {}}, &*proof, false), ep::scan_state_t::session_busy);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+  auto later = history.begin_scan();
+  history.observe_scan(later, *proof);
+  history.invalidate_receipt();
+  EXPECT_EQ(history.finish_scan(later, {true, {}, {}}, &*proof, true), ep::scan_state_t::superseded);
+}
+
+TEST_F(EpicProcess, SetupReadyRequiresSelectedRuntimeAndKnownPrerequisitesButNotAReceipt) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->pids.clear();
+  const auto title = host->title();
+  const auto generic = ep::testing::evaluate_setup(&*proof, nullptr, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(generic.state, ep::readiness_state_t::launcher_closed);
+  EXPECT_EQ(generic.runtime, ep::runtime_state_t::not_selected);
+  EXPECT_EQ(ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::unknown, host).state, ep::readiness_state_t::unknown);
+  EXPECT_EQ(ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::unavailable, host).state, ep::readiness_state_t::needs_action);
+  const auto ready = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(ready.desktop, ep::desktop_state_t::closed);
+  EXPECT_EQ(ready.proof, ep::proof_state_t::valid);
+  EXPECT_EQ(ready.runtime, ep::runtime_state_t::absent);
+  EXPECT_EQ(ready.state, ep::readiness_state_t::ready) << ready.reason;
+  const auto unproved = ep::testing::evaluate_setup(nullptr, &title, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(unproved.state, ep::readiness_state_t::needs_action);
+  EXPECT_EQ(unproved.reason, "epic_launcher_proof_required");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupUnknownLauncherCensusAndPrivateCopyNeverMeanDesktopClosedOrOpen) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->files["/proc/43/cgroup"] = "0::/user.slice/polaris.service\n";
+  auto facts = ep::testing::evaluate_setup(&*proof, nullptr, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.desktop, ep::desktop_state_t::unknown);
+  EXPECT_EQ(facts.reason, "launcher_present_unplaced");
+  host->pids.clear();
+  host->add_protected_process(45);
+  facts = ep::testing::evaluate_setup(&*proof, nullptr, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.desktop, ep::desktop_state_t::unknown);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::unknown);
+  EXPECT_EQ(facts.reason, "launcher_inventory_incomplete");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupUnreadableHeaderHasGenericUnresolvedReason) {
+  host->headers.erase(runtime / "files/bin/wine64-preloader");
+  const auto facts = ep::testing::evaluate_setup(nullptr, nullptr, true, ep::prerequisite_state_t::unknown, host);
+  EXPECT_EQ(facts.desktop, ep::desktop_state_t::unknown);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::unknown);
+  EXPECT_EQ(facts.reason, "launcher_census_unresolved");
+}
+
+TEST_F(EpicProcess, SetupWindowsPrefixUnknownIsDistinctFromNativeAndBusyRuntime) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->vanish(43);
+  auto title = host->title();
+  auto facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.runtime, ep::runtime_state_t::busy);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::needs_action);
+  host->pids.clear();
+  host->identities.erase(prefix_path);
+  facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.runtime, ep::runtime_state_t::unknown);
+  EXPECT_EQ(facts.reason, "title_prefix_unavailable");
+  title.platform = "Linux";
+  host->headers[image] = std::string("\177ELF", 4);
+  facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.runtime, ep::runtime_state_t::absent);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::ready) << facts.reason;
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupBusyReadDoesNoIoAndPreservesThreadLocalLaunchFailure) {
+  launch_failure::refuse(418, "sentinel", "Existing attempt");
+  const auto facts = ep::testing::evaluate_setup(nullptr, nullptr, false, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::busy);
+  EXPECT_EQ(facts.desktop, ep::desktop_state_t::not_checked);
+  EXPECT_TRUE(host->reads.empty());
+  const auto pending = launch_failure::take();
+  ASSERT_TRUE(pending);
+  EXPECT_EQ(pending->code, "sentinel");
+  launch_failure::refuse(418, "second_sentinel", "Another attempt");
+  ep::testing::evaluate_setup(nullptr, nullptr, true, ep::prerequisite_state_t::unknown, host);
+  const auto after_idle_check = launch_failure::take();
+  ASSERT_TRUE(after_idle_check);
+  EXPECT_EQ(after_idle_check->code, "second_sentinel");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupFileAndContextChangesNeverStayReady) {
+  const fs::path exe = "/usr/bin/EpicGamesLauncher";
+  host->add_process(43, exe, "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->pids.clear();
+  ++host->identities[exe].inode;
+  auto facts = ep::testing::evaluate_setup(&*proof, nullptr, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.proof, ep::proof_state_t::changed);
+  EXPECT_NE(facts.state, ep::readiness_state_t::launcher_closed);
+  --host->identities[exe].inode;
+  host->links["/proc/self/ns/cgroup"] = "cgroup:[999]";
+  facts = ep::testing::evaluate_setup(&*proof, nullptr, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.proof, ep::proof_state_t::unavailable);
+  EXPECT_NE(facts.state, ep::readiness_state_t::launcher_closed);
+  host->links["/proc/self/ns/cgroup"] = "cgroup:[123]";
+  host->files["/proc/sys/kernel/random/boot_id"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  facts = ep::testing::evaluate_setup(&*proof, nullptr, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.proof, ep::proof_state_t::unavailable);
+  EXPECT_NE(facts.state, ep::readiness_state_t::launcher_closed);
+}
+
+TEST_F(EpicProcess, SetupCannotMixBackendsOrReuseAReceiptAfterObservedFileInvalidation) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  auto foreign = std::make_shared<fixture_t>();
+  const auto facts = ep::testing::evaluate_setup(&*proof, nullptr, true, ep::prerequisite_state_t::available, foreign);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::unknown);
+  EXPECT_EQ(facts.reason, "inspection_context_changed");
+  EXPECT_TRUE(foreign->reads.empty());
+  ep::setup_history_t history;
+  auto scan = history.begin_scan();
+  history.observe_scan(scan, *proof);
+  ASSERT_EQ(history.finish_scan(scan, {true, {}, {}}, &*proof, true), ep::scan_state_t::complete);
+  history.invalidate_receipt();
+  // Restoring the same bytes or returning an older reply cannot restore the invalidated receipt.
+  EXPECT_EQ(history.capture(*proof, ep::capture_origin_t::provider_choice).state, ep::capture_state_t::unchanged);
+  EXPECT_EQ(history.receipt({true, {}, {}}, true), ep::receipt_state_t::required);
+  EXPECT_EQ(history.finish_scan(scan, {true, {}, {}}, &*proof, true), ep::scan_state_t::superseded);
+}
+
+TEST_F(EpicProcess, SetupFinalProofCheckRejectsAnUpdateDuringTheSelectedRuntimeRead) {
+  const fs::path exe = "/usr/bin/EpicGamesLauncher";
+  host->add_process(43, exe, "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->pids.clear();
+  bool updated = false;
+  host->after_access = [&](const fs::path &path) {
+    if (!updated && path == prefix_path) { ++host->identities[exe].changed_ns; updated = true; }
+  };
+  const auto title = host->title();
+  const auto facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::available, host);
+  EXPECT_TRUE(updated);
+  EXPECT_EQ(facts.proof, ep::proof_state_t::changed);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::unknown);
   EXPECT_TRUE(host->opened.empty());
   EXPECT_TRUE(host->signals.empty());
 }

@@ -237,6 +237,15 @@ namespace epic_library {
     return out;
   }
 
+  bool same_snapshot(const snapshot_t &a, const snapshot_t &b) {
+    if (!a.available || !b.available || a.games.size() != b.games.size() || a.warnings != b.warnings) return false;
+    auto left = a.games, right = b.games;
+    const auto order = [](const installation_t &x, const installation_t &y) { return key(x.identity) < key(y.identity); };
+    std::sort(left.begin(), left.end(), order);
+    std::sort(right.begin(), right.end(), order);
+    return left == right;
+  }
+
   std::optional<installation_t> find(const snapshot_t &s, const identity_t &i) {
     if (!s.available || !valid_identity(i)) return {};
     const auto it = std::find_if(s.games.begin(), s.games.end(), [&](const auto &g) { return g.identity == i; });
