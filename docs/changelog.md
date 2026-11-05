@@ -7,6 +7,7 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Mission Control can save **Allow source-paced VRR (experimental)** without an "Unsupported config key" error.
 - Spaces is no longer a preview. The console drops its Preview labels and the docs drop the preview wording. The section is now **Current limits**, and `spaces.md#preview-limits` links become `#current-limits`. The limit shown on the Spaces page no longer says there is no runtime download, because Host Setup has one. One Space at a time still holds.
 - Mission Control shows a live session card first while a stream runs: the game and its cover, the device playing it, how long the stream has run, **Disconnect Client** and **End**. Its actions move below the details at phone width. A connection chip appears only when the host confirms it from its own Tailscale peer status (direct, DERP relay or peer relay), so a local stream has none. The stream status adds `session_elapsed_s`, the host's own count, so a page opened mid-stream shows the time too. See `docs/mission-control.md`.
 - Doctor's findings read in plain language, with what is happening, what to try and one action first. Confidence, the evidence rows and Explain move one level down, behind **Why Doctor says this**. A frame pacing finding now names a concrete step, and an issue without its own step no longer repeats the headline as its advice. Only the wording changes on the host: no field is renamed, and Nova for Android shows the new text. Nova for Linux draws its own Doctor copy from `primary_issue` and keeps it for now.
