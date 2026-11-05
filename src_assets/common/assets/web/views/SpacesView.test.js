@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { mount, flushPromises } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SpacesView from './SpacesView.vue'
@@ -75,12 +76,22 @@ describe('the Spaces page', () => {
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 
-  it('links the guide on papi-ux.com and marks the preview', async () => {
+  it('links the guide on papi-ux.com and states its limit, with no Preview label', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(clients)))
     wrapper = start()
     await flushPromises()
     expect(wrapper.get('a[href="https://papi-ux.com/docs/spaces/"]').text()).toBe('Spaces guide')
-    expect(wrapper.get('.meta-pill').text()).toBe('Preview')
+    expect(wrapper.get('[data-spaces-limit]').text()).toBe('One Space at a time')
+    expect(wrapper.text()).not.toContain('Preview')
     expect(wrapper.classes()).toContain('operator-console')
+  })
+
+  it('keeps no Preview label for Spaces in the sidebar or the page copy', () => {
+    const nav = readFileSync('src_assets/common/assets/web/nav-metadata.js', 'utf8')
+    expect(nav.split('\n').find(line => line.includes("commandId: 'spaces'"))).not.toContain('badge')
+    const { spaces } = JSON.parse(readFileSync('src_assets/common/assets/web/public/assets/locale/en.json', 'utf8'))
+    expect(Object.values(spaces).filter(text => /preview/i.test(text))).toEqual([])
+    // A limit that no longer holds must not come back: Host Setup downloads the runtime.
+    expect(spaces.current_limits).not.toMatch(/download/i)
   })
 })

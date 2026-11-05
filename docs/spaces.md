@@ -7,7 +7,7 @@ games through Heroic. Two players can use their own Spaces at the same time, one
 can keep a Space on a server without a monitor, or a handheld and a TV can share
 one Space at different times.
 
-Spaces are a preview. One limit shapes everything below: the host runs one
+One limit shapes everything below: the host runs one
 Space at a time. The gaming runtime is published, so **Host Setup** can
 download it, and which runtime you get depends on your graphics card. The
 NVIDIA runtime has been played end to end on an NVIDIA host. The other one,
@@ -95,7 +95,7 @@ explain why.
 If **Docker Engine** passes but **Polaris access to Docker** fails, confirm that
 the system daemon is running and that the Polaris process received the new
 group membership. Docker Desktop, remote Docker contexts and rootless Docker
-are not the supported engine in this preview.
+are not supported.
 
 ### Fedora
 
@@ -135,7 +135,7 @@ Return to Spaces and select **Recheck Setup**.
 
 ### Bazzite, SteamOS and other system images
 
-The package commands above do not apply, and the preview does not automate
+The package commands above do not apply, and Polaris does not automate
 Docker on these systems. Use your distribution's supported installation method,
 and do not disable filesystem protection to follow instructions written for
 another distribution.
@@ -260,7 +260,7 @@ nothing left to remove them, and [Uninstall Polaris, or start over](uninstall.md
 has the full order. Package installation and removal never
 change live SELinux policy. Other SELinux distributions need the compatible
 development interfaces and the container reference policy; system images are
-not supported by the helper in the preview.
+not supported by the helper.
 
 ## Download the gaming runtime
 
@@ -417,7 +417,7 @@ device), stopping, or unavailable when the host cannot offer it. A Space that
 reads ready but cannot open because the host is at its limit says so before
 you press, and a refused launch tells you what to change.
 
-**Save before you leave.** In this preview, disconnecting ends the Space's
+**Save before you leave.** Disconnecting ends the Space's
 running game. **Leave Space** asks you to confirm and keeps saves, installed
 games and the launcher's sign-in; a dropped connection ends the session the same
 way. **Resume** is offered only for a session this device owns and does not
@@ -577,7 +577,7 @@ the bitrate and whether the device is on Wi-Fi or Ethernet, and whether picture
 or controls paused too. Compare the same game over Ethernet or another access
 point, with downloads and builds paused on the host, changing one thing at a
 time, and compare one Space with the intended number of players. Low latency
-and zero reported packet loss do not rule out brief audio pauses; the preview
+and zero reported packet loss do not rule out brief audio pauses; testing
 has recorded both host scheduling stalls and wireless delays. Keep the notes
 for **Doctor & Support**.
 
@@ -597,10 +597,10 @@ for **Doctor & Support**.
 - Keep SELinux enabled, and do not add privileged container flags or mount
   the whole device tree.
 
-## Preview limits
+## Current limits
 
 One Space at a time, handheld audio still under investigation, NVIDIA exercised
 and AMD not yet, Heroic's own menus without a controller, Docker on system
 images not automated. The measured results and the exact boundaries are
-in the [preview status report](research/container-multiseat-preview-status.md),
+in the [status report](research/container-multiseat-preview-status.md),
 which links the acceptance and audio reports it summarises.

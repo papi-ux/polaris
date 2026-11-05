@@ -12,7 +12,7 @@
              class="focus-ring inline-flex h-9 items-center rounded-lg border border-storm px-4 text-sm font-medium text-silver transition-colors hover:border-ice hover:text-ice">
             {{ $t('spaces.guide') }}
           </a>
-          <span class="meta-pill" :title="$t('spaces.preview_limits')">{{ $t('spaces.preview') }}</span>
+          <span class="meta-pill" data-spaces-limit>{{ $t('spaces.current_limits') }}</span>
         </div>
       </div>
     </section>

@@ -236,7 +236,7 @@ namespace stream_stats {
     std::uint32_t pyrowave_window_frames = 0;
     std::uint32_t pyrowave_window_ceiling_frames = 0;
     // When add_client() registered this session. A lifecycle time for the record kept once the
-    // session ends, and not serialized while it streams.
+    // session ends. While it streams only session_elapsed_s, measured from it, is serialized.
     std::chrono::system_clock::time_point started_at {};
     // This session's variable-refresh request and policy inputs, frozen by record_vrr_session() when
     // the session starts. Empty for a session that never recorded one.

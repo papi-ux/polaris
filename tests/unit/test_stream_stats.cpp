@@ -3959,6 +3959,75 @@ TEST(StreamStatsDoctorTests, GradesEncoderTimeAgainstTheActiveFpsBudget) {
   EXPECT_EQ(sixty_fps.at("traffic_light"), "amber");
 }
 
+TEST(StreamStatsDoctorTests, GivesAStepThatIsNotTheHeadlineForAnIssueWithNoneOfItsOwn) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.capture_source_fps = 60.0;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 2.0;
+  stats.latency_ms = 4.0;
+
+  const auto recommended = stream_stats::build_doctor_json(stats, {
+    {"primary_issue", "decoder_path"}, {"grade", "watch"}, {"summary", "This device is having a harder time decoding this codec than expected."},
+    {"recommendations", {"This device is having a harder time decoding this codec than expected.", "Use HEVC for the next launch if AV1 keeps hitching on this client."}},
+  });
+  EXPECT_EQ(recommended.at("primary_issue"), "decoder_path");
+  EXPECT_EQ(recommended.at("recommendation").at("body"), "Use HEVC for the next launch if AV1 keeps hitching on this client.");
+
+  const auto bare = stream_stats::build_doctor_json(stats, {
+    {"primary_issue", "decoder_path"}, {"grade", "watch"}, {"summary", "This device is having a harder time decoding this codec than expected."},
+  });
+  EXPECT_EQ(bare.at("recommendation").at("body"), "Lower the stream's resolution or frame rate, then check again.");
+  EXPECT_NE(bare.at("recommendation").at("body"), bare.at("summary"));
+}
+
+TEST(StreamStatsDoctorTests, ReportsHowLongTheStreamHasRunByTheHostClock) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.session_generation = 7;
+  stream_stats::client_stats_t own {};
+  own.session_generation = 7;
+  own.started_at = std::chrono::system_clock::now() - std::chrono::seconds(90);
+  stream_stats::client_stats_t other {};
+  other.session_generation = 6;
+  other.started_at = std::chrono::system_clock::now() - std::chrono::seconds(4000);
+  stats.clients = {other, own};
+
+  const auto elapsed = nlohmann::json::parse(stats.to_json()).at("session_elapsed_s").get<std::int64_t>();
+  EXPECT_GE(elapsed, 90);
+  EXPECT_LT(elapsed, 120);
+
+  // A clock that moved back never reads as a negative time.
+  stats.clients.back().started_at = std::chrono::system_clock::now() + std::chrono::hours(1);
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("session_elapsed_s"), 0);
+}
+
+TEST(StreamStatsDoctorTests, LeavesElapsedTimeOutWhenTheHostHoldsNoStartForThisStream) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.session_generation = 7;
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+
+  stream_stats::client_stats_t other {};
+  other.session_generation = 6;
+  other.started_at = std::chrono::system_clock::now();
+  stats.clients = {other};
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+
+  stream_stats::client_stats_t unstarted {};
+  unstarted.session_generation = 7;
+  stats.clients = {unstarted};
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+
+  stats.clients.front().started_at = std::chrono::system_clock::now();
+  stats.streaming = false;
+  EXPECT_FALSE(nlohmann::json::parse(stats.to_json()).contains("session_elapsed_s"));
+}
+
 TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkEvidence) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -3981,7 +4050,11 @@ TEST(StreamStatsDoctorTests, ClassifiesMetronomicHalfRateAsPacingWithoutNetworkE
   );
 
   EXPECT_EQ(doctor.at("primary_issue"), "frame_pacing");
-  EXPECT_EQ(doctor.at("summary"), "Frame pacing telemetry needs attention.");
+  EXPECT_EQ(doctor.at("summary"), "Frames are not leaving the host at a steady pace, so motion may look uneven.");
+  // The step is concrete, not the headline again and not a path name.
+  EXPECT_EQ(doctor.at("recommendation").at("body"),
+            "Cap the game's frame rate at the stream's frame rate, or lower its graphics settings, then check again.");
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Cap the game's frame rate");
   EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
 
   bool saw_fps_gap = false;
@@ -4108,7 +4181,7 @@ TEST(StreamStatsDoctorTests, SuppressesUnconfirmedPacingSummaryWhenCurrentWindow
   );
 
   EXPECT_EQ(doctor.at("primary_issue"), "none");
-  EXPECT_EQ(doctor.at("summary"), "Streaming telemetry looks ready.");
+  EXPECT_EQ(doctor.at("summary"), "This stream looks healthy.");
   EXPECT_EQ(
     doctor.at("confidence").at("basis"),
     "live_evidence_overrode_unconfirmed_pacing"
@@ -4146,7 +4219,7 @@ TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClea
 
   EXPECT_EQ(doctor.at("version"), 2);
   EXPECT_EQ(doctor.at("primary_issue"), "none");
-  EXPECT_EQ(doctor.at("summary"), "Streaming telemetry looks ready.");
+  EXPECT_EQ(doctor.at("summary"), "This stream looks healthy.");
   EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), "none");
   ASSERT_EQ(doctor.at("suppressed_findings").size(), 1);
   EXPECT_EQ(doctor.at("suppressed_findings").at(0).at("id"), "stale_network_jitter");
@@ -4300,9 +4373,9 @@ TEST(StreamStatsDoctorTests, ControlChannelFindingSaysOnlyWhatTheWindowJudged) {
   // A client that sends no media reports: RTT is judged, loss is not, and nothing says it cleared.
   const auto unreported = judged_doctor(stats);
   EXPECT_EQ(unreported.at("primary_issue"), "control_channel_observation");
-  EXPECT_EQ(unreported.at("summary"), "Control-channel retries were observed, but no video frame loss is measured.");
+  EXPECT_EQ(unreported.at("summary"), "Some control messages had to be resent. Video frame loss is not measured, so this says nothing about the picture.");
   EXPECT_EQ(unreported.at("recommendation").at("body"),
-            "The reliable control channel retried packets, but no video frame loss is measured, and round trip time over "
+            "Some control messages had to be resent, but no video frame loss is measured, and round trip time over "
             "the last 20 seconds stays below network pressure, so Doctor changes nothing for this.");
 
   // Its reports arriving and judged light, with Live Tuning owning the bitrate.
@@ -4313,9 +4386,9 @@ TEST(StreamStatsDoctorTests, ControlChannelFindingSaysOnlyWhatTheWindowJudged) {
   stats.adaptive_bitrate_enabled = true;
   const auto reported = judged_doctor(stats);
   EXPECT_EQ(reported.at("primary_issue"), "control_channel_observation");
-  EXPECT_EQ(reported.at("summary"), "Control-channel retries were observed, but video frame loss stays below network pressure.");
+  EXPECT_EQ(reported.at("summary"), "Some control messages had to be resent, but video frame loss stays low.");
   EXPECT_EQ(reported.at("recommendation").at("body"),
-            "The reliable control channel retried packets, but video frame loss and round trip time over the last 20 "
+            "Some control messages had to be resent, but video frame loss and round trip time over the last 20 "
             "seconds stay below network pressure, so Doctor changes nothing for this. Live Tuning keeps adjusting the "
             "live bitrate on its own.");
   const auto *loss = find_evidence_row(reported, "packet_loss");
@@ -4440,7 +4513,7 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   stats.latency_ms = 8.0;
   const nlohmann::json pressure {{"primary_issue", "network_jitter"}, {"grade", "degraded"}};
 
-  // Sustained frame loss while Live Tuning searches for the link.
+  // Sustained frame loss while Live Tuning holds below the ceiling it found.
   stats.adaptive_bitrate_state = "network_pressure";
   stats.adaptive_bitrate_reason = "holding_under_the_link";
   stats.adaptive_ceiling_bitrate_kbps = 18400;
@@ -4453,7 +4526,8 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   EXPECT_EQ(recheck.at("rollback"), "This check does not change bitrate or stream settings. While Live Tuning is on, it stays the only live bitrate controller.");
   EXPECT_EQ(recheck.at("verification").at("success_when").at(0), "Live Tuning stays the live bitrate owner");
   const auto body = holding.at("recommendation").at("body").get<std::string>();
-  EXPECT_NE(body.find("Live Tuning is lowering the bitrate to what the link carries, and holds under about 19 Mbps, where it found loss"), std::string::npos) << body;
+  EXPECT_NE(body.find("Live Tuning is holding the bitrate under about 19 Mbps, where it found loss"), std::string::npos) << body;
+  EXPECT_EQ(body.find("is lowering the bitrate"), std::string::npos) << body;
   EXPECT_NE(body.find("Doctor measures again instead of changing the bitrate as well"), std::string::npos) << body;
   EXPECT_EQ(holding.at("recommendation").at("next_step_label"), "Recheck Live Tuning");
   EXPECT_EQ(holding.dump().find("turns Live Tuning off"), std::string::npos);
@@ -4471,7 +4545,7 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   const auto cutting = judged_doctor(stats, pressure);
   EXPECT_EQ(cutting.at("safe_recovery_action").at("id"), "recheck_network");
   const auto cutting_body = cutting.at("recommendation").at("body").get<std::string>();
-  EXPECT_NE(cutting_body.find("Live Tuning is lowering the bitrate to what the link carries. Doctor measures again"), std::string::npos) << cutting_body;
+  EXPECT_NE(cutting_body.find("Live Tuning is checking whether a lower bitrate helps. Doctor measures again"), std::string::npos) << cutting_body;
 
   // Live Tuning keeps the bitrate: Doctor's window calls this loss pressure, but it has not risen enough for
   // Live Tuning to cut. Doctor says so rather than that Live Tuning is lowering it, and still takes no step.
@@ -4527,6 +4601,85 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   EXPECT_NE(frozen.at("safe_recovery_action").at("id"), "recheck_network");
   const auto frozen_body = frozen.at("recommendation").at("body").get<std::string>();
   EXPECT_NE(frozen_body.find("this encoder cannot change bitrate during a live stream"), std::string::npos) << frozen_body;
+}
+
+TEST(StreamStatsDoctorTests, LiveTuningNetworkCopyRequiresTheReportedStateAndReason) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.adaptive_target_bitrate_kbps = 16000;
+  stats.adaptive_bitrate_enabled = true;
+  stats.adaptive_bitrate_active = true;
+  stats.adaptive_runtime_update_supported = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 2.0;
+  stats.network_risk = true;
+  stats.packet_loss = 3.4;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
+  stats.latency_ms = 8.0;
+
+  const struct {
+    const char *state;
+    const char *reason;
+    int ceiling_kbps;
+    bool ceiling_is_queue;
+    const char *explanation;
+  } cases[] {
+    // The RP6 observation: ownership and frame timing variation do not establish a cut.
+    {"frame_pacing_observed", "frame_pacing", 0, false, "Live Tuning observed frame timing variation"},
+    {"frame_pacing_observed", "frame_pacing", 18400, false, "Live Tuning observed frame timing variation"},
+    {"network_pressure", "holding_under_the_link", 18400, false, "Live Tuning is holding the bitrate under about 19 Mbps, where it found loss"},
+    {"network_pressure", "holding_under_a_queue", 18400, true, "Live Tuning is holding the bitrate under about 19 Mbps, where it found a queue"},
+    {"network_pressure", "holding_under_the_link", 0, false, "Live Tuning is holding the bitrate. Doctor measures again"},
+    {"network_pressure", "packet_loss", 0, false, "Live Tuning is checking whether a lower bitrate helps"},
+    {"network_pressure", "standing_queue", 18400, true, "Live Tuning is checking whether a lower bitrate helps"},
+    // Bisection can move either way; a ceiling alone does not establish a hold or a cut.
+    {"network_pressure", "finding_the_link", 18400, false, "Live Tuning is checking what bitrate the link carries"},
+    {"recovering", "waiting_to_climb", 0, false, "Live Tuning controls the live bitrate"},
+    {"recovering", "testing_a_step_up", 18400, false, "Live Tuning controls the live bitrate"},
+    {"recovering", "climbing", 0, false, "Live Tuning controls the live bitrate"},
+    {"encoder_pressure", "encode_load", 0, false, "Live Tuning controls the live bitrate"},
+    {"recreating_encoder", "packet_loss", 18400, false, "Live Tuning controls the live bitrate"},
+    {"doctor_override", "holding_under_the_link", 18400, false, "Live Tuning controls the live bitrate"},
+    {"explicit_live_target", "frame_pacing", 0, false, "Live Tuning controls the live bitrate"},
+    {"rollback_pending", "unknown", 0, false, "Live Tuning controls the live bitrate"},
+    {"unknown", "packet_loss", 18400, false, "Live Tuning controls the live bitrate"},
+    {"network_pressure", "unknown", 18400, false, "Live Tuning controls the live bitrate"},
+    {"", "", 0, false, "Live Tuning controls the live bitrate"},
+  };
+
+  for (const auto &item : cases) {
+    SCOPED_TRACE(std::string {item.state} + "/" + item.reason);
+    stats.adaptive_bitrate_state = item.state;
+    stats.adaptive_bitrate_reason = item.reason;
+    stats.adaptive_ceiling_bitrate_kbps = item.ceiling_kbps;
+    stats.adaptive_ceiling_is_queue = item.ceiling_is_queue;
+    const auto doctor = judged_doctor(stats, {{"primary_issue", "network_jitter"}, {"grade", "degraded"}});
+    ASSERT_EQ(doctor.at("primary_issue"), "network_jitter");
+    const auto &recommendation = doctor.at("recommendation");
+    const auto body = recommendation.at("body").get<std::string>();
+    EXPECT_NE(body.find(item.explanation), std::string::npos) << body;
+    EXPECT_EQ(body.find("is lowering the bitrate"), std::string::npos) << body;
+    EXPECT_NE(body.find("Doctor measures again instead of changing the bitrate as well"), std::string::npos) << body;
+    EXPECT_EQ(recommendation.at("next_step_label"), "Recheck Live Tuning");
+    EXPECT_EQ(recommendation.at("expected_effect"),
+              "Doctor will measure video frame loss and round trip time again while Live Tuning controls the bitrate.");
+    const auto &action = doctor.at("safe_recovery_action");
+    EXPECT_EQ(action.at("id"), "recheck_network");
+    EXPECT_EQ(action.at("capability"), "recheck");
+    EXPECT_FALSE(action.at("undo").at("supported").get<bool>());
+    const auto *owner = find_evidence_row(doctor, "live_bitrate_owner");
+    ASSERT_NE(owner, nullptr);
+    EXPECT_EQ(owner->at("value"), "auto_safe");
+  }
 }
 
 TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuatorStates) {
@@ -7249,12 +7402,12 @@ TEST(StreamStatsDoctorTests, PyroWaveEncoderLoadAsksForASmallerPictureNotALowerB
   ASSERT_EQ(doctor.at("primary_issue"), "encoder_load");
   const auto body = doctor.at("recommendation").at("body").get<std::string>();
   EXPECT_NE(body.find("resolution or FPS"), std::string::npos) << body;
-  EXPECT_EQ(body.find("Trim bitrate"), std::string::npos) << body;
+  EXPECT_EQ(body.find("frame rate or bitrate"), std::string::npos) << body;
 
   stats.codec = "hevc";
   const auto hevc = stream_stats::build_doctor_json(stats, nlohmann::json::object());
   ASSERT_EQ(hevc.at("primary_issue"), "encoder_load");
-  EXPECT_NE(hevc.at("recommendation").at("body").get<std::string>().find("Trim bitrate"), std::string::npos);
+  EXPECT_NE(hevc.at("recommendation").at("body").get<std::string>().find("frame rate or bitrate"), std::string::npos);
 }
 
 TEST(StreamStatsDoctorTests, CleanReductionWithoutAPairedProfileRestoresTheLaunchBitrate) {

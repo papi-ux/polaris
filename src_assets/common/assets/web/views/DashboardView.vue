@@ -19,6 +19,21 @@
     <EpicSessionControls v-if="hostPlatform === 'linux' && currentApp?.source === 'epic_launcher'" class="mb-4" />
 
     <div class="mc-shell" :class="{ 'dashboard-live-shell': stageMode === 'live', 'is-preview-expanded': stageMode === 'live' && showPreview && previewExpanded }">
+      <!-- The stream at a glance, with the two ways to stop it. -->
+      <LiveSessionCard
+        v-if="stageMode === 'live'"
+        :title="currentAppName"
+        :art-src="stageView.artSrc"
+        :device="sessionDeviceLabel"
+        :stats="stats"
+        :witnessed-start-ms="activeStartedAt || 0"
+        :can-disconnect="Boolean(connectedClientUuid)"
+        :can-end="currentAppAvailable && Boolean(currentAppUuid) && !dashboardSpaces.hasActivity"
+        :disconnecting="disconnectingClient"
+        @disconnect="disconnectConfirmOpen = true"
+        @ended="refreshApps"
+      />
+
       <!-- The stage: what is playing (or next up), its main action, the route, then the readings.
            Space sessions keep their own section above and no stage. -->
       <MissionStage
@@ -42,6 +57,7 @@
         <template v-if="stageMode === 'live' || stageMode === 'idle'" #reason>
           <!-- Only a blocked preview needs a reason; the stage note already says it starts on request. -->
           <p v-if="stageMode === 'live' && !showPreview && spacesPreviewBlocked" id="dashboard-preview-blocked-reason" class="mc-stage-reason" data-preview-hidden-reason>{{ $t('dashboard_spaces.no_preview') }}</p>
+          <p v-if="stageSteamNote" class="mc-stage-reason" data-steam-launch-note>{{ stageSteamNote }}</p>
           <p v-if="stageMode === 'idle' && featuredApp && !currentAppAvailable" id="mission-stage-launch-reason" class="mc-stage-reason">Waiting for current app status.</p>
           <p v-if="stageMode === 'idle' && featuredApp && novaLaunchWaiting" id="mission-stage-nova-reason" class="mc-stage-reason" data-nova-launch-reason>{{ t('mission_control.nova_launch_waiting') }}</p>
         </template>
@@ -96,16 +112,6 @@
           <RoutePanel v-if="stageMode === 'live'" :title="t('mission_control.route')" :nodes="liveRouteNodes">
             <template #foot>
               <span class="meta-pill">{{ viewerCountLabel }}</span>
-              <button
-                v-if="connectedClientUuid"
-                type="button"
-                :disabled="disconnectingClient"
-                @click="disconnectConfirmOpen = true"
-                class="focus-ring dashboard-action-button mc-action-danger disabled:cursor-wait disabled:opacity-70"
-                data-disconnect-client
-              >
-                {{ $t('dashboard.disconnect_client') }}
-              </button>
             </template>
           </RoutePanel>
           <RoutePanel v-else :title="t('mission_control.route')" :nodes="unavailableRouteNodes" />
@@ -212,60 +218,45 @@
         <div class="mc-deck-main">
           <!-- Doctor: the host's own per-second diagnosis, written as a note with its guarded fix. -->
           <section v-if="stageMode === 'live'" class="dashboard-doctor-card mc-panel mc-doctor" :class="doctorPanelClass" data-dashboard-doctor>
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div class="min-w-0">
-                <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.doctor') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
-                <div class="mt-2 flex min-w-0 items-start gap-2">
-                  <span class="mt-2 inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
-                  <p class="mc-doctor-headline">{{ doctorHeadline }}</p>
-                </div>
-                <div class="mt-3 flex flex-wrap items-center gap-2" data-dashboard-doctor-meta role="list" aria-label="Doctor confidence and Live Tuning status">
-                  <div v-if="doctorConfidenceLabel" class="control-chip" role="listitem">{{ doctorConfidenceLabel }}</div>
-                  <div class="meta-pill" :class="autoQuality.toneClass" role="listitem">{{ autoQuality.compactLabel }}</div>
-                  <div class="inline-flex" role="listitem">
-                  </div>
-                </div>
-                <p v-if="doctorRecommendation" class="mt-3 max-w-3xl text-sm leading-relaxed text-support">{{ doctorRecommendation }}</p>
-                <p v-if="doctorExplanation" class="mt-3 max-w-3xl rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-sm leading-relaxed text-silver">
-                  {{ doctorExplanation }}
-                </p>
-              </div>
-              <div class="flex shrink-0 flex-wrap items-center gap-2">
-                <button
-                  v-if="doctorSafeAction && doctorActionExecutable"
-                  type="button"
-                  class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
-                  :disabled="doctorActionPending"
-                  @click="requestDoctorSafeAction"
-                >
-                  {{ doctorActionPending ? $t('dashboard.doctor_action_working') : doctorSafeAction.label }}
-                </button>
-                <span v-else-if="doctorSafeAction" class="dashboard-doctor-advice" :title="doctorSafeAction.rollback || ''">
-                  Suggested: {{ doctorSafeAction.label }}
-                </span>
-                <button
-                  v-if="aiStatus?.enabled && doctor"
-                  type="button"
-                  class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
-                  :disabled="doctorExplainPending"
-                  @click="explainDoctorVerdict"
-                >
-                  {{ doctorExplainPending ? $t('dashboard.doctor_explaining') : $t('dashboard.doctor_explain') }}
-                </button>
-                <button
-                  v-if="doctorActionUndoAvailable"
-                  type="button"
-                  class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
-                  :disabled="doctorActionPending"
-                  @click="undoDoctorAction"
-                >
-                  {{ $t('dashboard.doctor_action_undo') }}
-                </button>
-              </div>
+            <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.doctor') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
+            <div class="mt-2 flex min-w-0 items-start gap-2">
+              <span class="mt-2 inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
+              <p class="mc-doctor-headline">{{ doctorHeadline }}</p>
+            </div>
+            <p v-if="doctorStep.text" class="mt-3 max-w-3xl text-sm leading-relaxed text-support" data-doctor-try>
+              <span v-if="doctorStep.title" class="font-semibold text-silver">{{ doctorStep.title }}: </span>{{ doctorStep.text }}
+            </p>
+            <div v-if="(doctorSafeAction && doctorActionExecutable) || doctorAdvice || doctorActionUndoAvailable" class="mt-3 flex flex-wrap items-center gap-2" data-doctor-action>
+              <button
+                v-if="doctorSafeAction && doctorActionExecutable"
+                type="button"
+                class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
+                :disabled="doctorActionPending"
+                @click="requestDoctorSafeAction"
+              >
+                {{ doctorActionPending ? $t('dashboard.doctor_action_working') : doctorSafeAction.label }}
+              </button>
+              <span v-else-if="doctorAdvice" class="dashboard-doctor-advice" :title="doctorSafeAction.rollback || ''">
+                Suggested: {{ doctorAdvice }}
+              </span>
+              <button
+                v-if="doctorActionUndoAvailable"
+                type="button"
+                class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
+                :disabled="doctorActionPending"
+                @click="undoDoctorAction"
+              >
+                {{ $t('dashboard.doctor_action_undo') }}
+              </button>
             </div>
             <p v-if="doctorActionStatus" class="mt-3 text-xs leading-relaxed text-storm" role="status" aria-live="polite">
               {{ doctorActionStatus }}
             </p>
+            <!-- One level deeper: what the verdict rests on. Opening it is the viewer's choice and survives updates. -->
+            <details class="mt-3" data-doctor-more @toggle="doctorMoreOpened ||= $event.target.open">
+              <summary class="focus-ring min-h-11 cursor-pointer rounded-lg py-2.5 text-sm font-medium text-ice">{{ $t('dashboard.doctor_more') }}</summary>
+              <DoctorDetails v-if="doctorMoreOpened" :doctor="doctor" :stats="stats" :auto-quality="autoQuality" :explainable="Boolean(aiStatus?.enabled && doctor)" />
+            </details>
           </section>
 
           <!-- Without a current report Doctor waits instead of judging old numbers; an applied fix can still be undone. -->
@@ -342,7 +333,7 @@
                 <div class="flex flex-wrap gap-1.5" data-dashboard-frame-health>
                   <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
                   <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
-                  <span class="data-pill" :class="frameHealth.intervalErrorTone">{{ frameHealth.intervalError }} target interval error</span>
+                  <span class="data-pill" :class="frameHealth.intervalErrorTone" :title="frameHealth.intervalErrorTitle" :data-frame-interval-basis="frameHealth.intervalBasis">{{ frameHealth.intervalErrorLabel }}</span>
                 </div>
                 <p v-if="prefersReducedMotion" class="mt-2 text-sm text-support">Live charts are paused while reduced motion is enabled.</p>
               </section>
@@ -515,7 +506,7 @@ import { useDeviceJoinedToast } from '../composables/useDeviceJoinedToast.js'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync, resolveStreamDisplayMode } from '../client-settings-sync'
 import { captureStatusTone } from '../capture-status-tone.js'
-import StreamPacingReadout from '../components/StreamPacingReadout.vue'
+import { frameIntervalReadout } from '../stream-pacing-readout.js'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { doctorIsWaitingForStream } from '../doctor-observation.js'
@@ -607,25 +598,18 @@ async function refreshApps() {
   }
 }
 
-// Hero context: what is being played and for how long. current_app arrives
-// with the /api/apps payload; duration ticks against the SSE stats clock.
+// Hero context: what is being played. current_app arrives with the /api/apps payload.
 const EpicSessionControls = defineAsyncComponent(() => import('../components/EpicSessionControls.vue'))
+const LiveSessionCard = defineAsyncComponent(() => import('../components/LiveSessionCard.vue'))
+const DoctorDetails = defineAsyncComponent(() => import('../components/DoctorDetails.vue'))
+// The per-client pacing readout sits in the diagnostics disclosure, so it loads on demand like
+// Doctor's details and keeps the startup bundle inside the web budget.
+const StreamPacingReadout = defineAsyncComponent(() => import('../components/StreamPacingReadout.vue'))
 const currentAppUuid = ref('')
 const currentAppAvailable = ref(false)
 const allAppsById = ref({})
 const currentApp = computed(() => (currentAppUuid.value ? allAppsById.value[currentAppUuid.value] || null : null))
 const currentAppName = computed(() => currentApp.value?.name || '')
-
-const sessionDurationLabel = computed(() => {
-  // Touch stats so the label re-computes on every SSE tick.
-  void stats.value
-  if (!activeStartedAt.value) return ''
-  const totalS = Math.max(0, Math.round((Date.now() - activeStartedAt.value) / 1000))
-  if (totalS < 60) return `${totalS}s`
-  const minutes = Math.floor(totalS / 60)
-  if (minutes < 60) return `${minutes} min`
-  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
-})
 
 const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices } = useAiOptimizer()
 
@@ -1032,6 +1016,13 @@ const liveSessionTitle = computed(() => (
 ))
 
 
+// The card's device line: the one device playing and its client, or every device watching.
+const sessionDeviceLabel = computed(() => {
+  const clients = connectedClients.value
+  if (clients.length !== 1) return clients.map(client => client.name).filter(Boolean).join(', ')
+  return [clients[0].name, liveClientFamily(clients[0])].filter(Boolean).join(' · ')
+})
+
 const liveSummary = computed(() => {
   return buildLiveSummary({
     stats: stats.value || {},
@@ -1245,21 +1236,25 @@ const previewStatusText = computed(() => {
 
 
 
-// Frame health: dropped/duplicate ratios and mean target-interval error arrive
-// on every SSE tick. The interval metric is not statistical network jitter.
+// Frame health: dropped/duplicate ratios and the frame interval error arrive
+// on every SSE tick. The interval metric is not statistical network jitter, and
+// its basis (requested interval or source-relative encode handoff) is named.
 const frameHealth = computed(() => {
   const s = stats.value || {}
   const dropped = Number(s.dropped_frame_ratio)
   const duplicate = Number(s.duplicate_frame_ratio)
-  const intervalError = Number(s.frame_interval_error_ms ?? s.frame_jitter_ms)
+  const interval = frameIntervalReadout(s, t)
   const pct = (v) => (Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : '--')
   return {
     dropped: pct(dropped),
     droppedTone: Number.isFinite(dropped) && dropped > 0.02 ? 'text-danger' : Number.isFinite(dropped) && dropped > 0.005 ? 'text-warning' : '',
     duplicate: pct(duplicate),
     duplicateTone: Number.isFinite(duplicate) && duplicate > 0.05 ? 'text-warning' : '',
-    intervalError: Number.isFinite(intervalError) ? `${intervalError.toFixed(1)} ms` : '--',
-    intervalErrorTone: Number.isFinite(intervalError) && intervalError > 4 ? 'text-warning' : '',
+    intervalBasis: interval.basis,
+    intervalError: interval.value,
+    intervalErrorLabel: interval.label,
+    intervalErrorTitle: interval.title,
+    intervalErrorTone: interval.tone,
   }
 })
 
@@ -1283,39 +1278,6 @@ function relativeSeen(value) {
 }
 
 
-// Doctor "Explain": same AI flow Troubleshooting uses, loaded on demand so
-// the initial bundle stays inside budget.
-const doctorExplanation = ref('')
-const doctorExplainPending = ref(false)
-
-async function explainDoctorVerdict() {
-  if (doctorExplainPending.value) return
-  doctorExplainPending.value = true
-  doctorExplanation.value = ''
-  try {
-    const { explainDoctorWithAi } = await import('../ai-doctor-explanation.js')
-    const configRes = await fetch('./api/config', { credentials: 'include' })
-    const config = (await readConfigOrNull(configRes)) || {}
-    const result = await explainDoctorWithAi({
-      aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
-      config,
-      supportBundle: { config, stream_stats: stats.value || {}, deterministic_summary: doctor.value || {} },
-      deterministicSummary: doctor.value || {},
-    })
-    const explanation = result.explanation || {}
-    const text = [explanation.likely_cause, (explanation.try_first || [])[0]].filter(Boolean).join(' ')
-    if (text) {
-      doctorExplanation.value = text
-    } else {
-      showToast(result.error || t('dashboard.doctor_explain_unavailable'), 'info')
-    }
-  } catch (e) {
-    showToast(t('dashboard.doctor_explain_unavailable') + ` (${e.message})`, 'error')
-  } finally {
-    doctorExplainPending.value = false
-  }
-}
-
 // ── Doctor: the host's deterministic per-second diagnosis (SSE `doctor`) ──
 const doctor = computed(() => stats.value?.doctor || null)
 
@@ -1328,13 +1290,14 @@ const doctorHeadline = computed(() => {
   return d.summary || d.primary_issue
 })
 
-// The host emits recommendation as {title, body, ...}, not a string.
-const doctorRecommendation = computed(() => {
+// The host emits recommendation as {title, body, ...}. A step that only repeats the headline is
+// dropped: the same sentence twice reads as a stutter.
+const doctorStep = computed(() => {
   const rec = doctor.value?.recommendation
-  if (!rec) return ''
-  if (typeof rec === 'string') return rec
-  return [rec.title, rec.body].filter(Boolean).join('. ')
+  const text = typeof rec === 'string' ? rec : rec?.body || ''
+  return { title: rec?.title || '', text: text === doctor.value?.summary ? '' : text }
 })
+const doctorMoreOpened = ref(false)
 
 const doctorPanelClass = computed(() => {
   if (doctorIsWaitingForStream(doctor.value, stats.value)) return 'border-l-storm/60 bg-void/20'
@@ -1360,11 +1323,6 @@ const doctorLightClass = computed(() => {
   }
 })
 
-const doctorConfidenceLabel = computed(() => {
-  const level = doctor.value?.confidence?.level
-  return level ? t('dashboard.doctor_confidence', { level }) : ''
-})
-
 // The host describes a safe recovery action. Every executable action
 // targets this web server's own /api/doctor/action route; the /api/ gate
 // below is a defensive filter so a host emitting an endpoint this web
@@ -1375,6 +1333,13 @@ const doctorSafeAction = computed(() => {
   const action = doctor.value?.safe_recovery_action
   if (!action || action.kind === 'none' || !action.label) return null
   return action
+})
+
+// One button: a step Doctor can run. "Manual" and export name a kind of action rather than something
+// to press, so they are not offered as a suggestion; the step already says what to do.
+const doctorAdvice = computed(() => {
+  const action = doctorSafeAction.value
+  return action && action.kind !== 'manual_guidance' && action.kind !== 'export' ? action.label : ''
 })
 
 const doctorActionExecutable = computed(() => {
@@ -2038,11 +2003,11 @@ const stageView = computed(() => {
     const artSrc = appCoverSrc(app)
     return {
       slate: dashboardSpaces.value.hasActivity ? t('dashboard_spaces.host_telemetry') : t('mission_control.live'),
-      timecode: sessionDurationLabel.value,
+      timecode: '',
       kicker: t('mission_control.now_streaming'),
       title: currentAppName.value || liveSessionTitle.value,
       meta: [app?.source && app.source !== 'manual' ? app.source : '', runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '', viewerCountLabel.value],
-      note: showPreview.value ? '' : [currentAppName.value ? liveSessionTitle.value : '', artSrc ? t('mission_control.art_note') : t('mission_control.capture_note')].filter(Boolean).join(' '),
+      note: showPreview.value ? '' : (artSrc ? t('mission_control.art_note') : t('mission_control.capture_note')),
       noteTone: '', artSrc, heroSrc: appArtworkSrc(app, 'hero'), logoSrc: appArtworkSrc(app, 'logo'),
     }
   }
@@ -2062,6 +2027,9 @@ const stageView = computed(() => {
     logoSrc: appArtworkSrc(featured?.app, 'logo'),
   }
 })
+
+// Steam may stop at its own launch dialog for a title with several launch options.
+const stageSteamNote = computed(() => (stageMode.value === 'live' ? currentApp.value : featuredApp.value?.app)?.['steam-launch-note'] || '')
 
 // ── Diagnostics disclosure ──
 const diagnosticsOpen = ref(false)

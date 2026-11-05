@@ -2,7 +2,7 @@
 # enableWsi=true always: layer built; attach-only has been flaky — keep nested path available.
 #
 # Tracks ValveSoftware/gamescope master (not only the nixpkgs tag) for compositor
-# fixes. Re-check patches + meson flags after each bump.
+# fixes. Re-check patches, postPatch + meson flags after each bump.
 # Drop checklist: nix/patches/gamescope/README.md (grep POLARIS-UPSTREAM-REMOVE).
 {
   gamescope,
@@ -41,28 +41,26 @@ in
     hash = "sha256-WkaTWBZuUR/EPMb7btuqIgK2M8HivEYBWLwrMDsxVwY=";
   };
 
-  # Keep only nixpkgs packaging patches that still apply on master.
-  # The two pending upstream fetchpatches on 3.16.24 are already in master.
-  patches =
-    (builtins.filter (
-      p:
-      let
-        s = toString p;
-      in
-      lib.hasInfix "shaders-path" s || lib.hasInfix "gamescopereaper" s
-    ) (old.patches or [ ]))
-    ++ [
-      # HDR capture stack (format negotiation + optional cursor + stamp).
-      # DROP 10/11 when equivalent upstream lands; stamp is Polaris-only.
-      ../../patches/gamescope/10-pipewire-offer-10-bit-BT2020-PQ.patch
-      ../../patches/gamescope/11-pipewire-composite-cursor.patch
-      ../../patches/gamescope/12-polaris-stamp-version-polhdrN.patch
-      # Polaris-only keepers until proven redundant with 10:
-      ../../patches/gamescope/02-headless-hdr-colorimetry.patch
-      ../../patches/gamescope/03-pipewire-prefer-dmabuf.patch
-      # ValveSoftware/gamescope#2217: headless prefers discrete GPU if unpinned.
-      ../../patches/gamescope/06-prefer-discrete-gpu-2217.patch
-    ];
+  # None of the host's patches: the importing host's nixpkgs, not this flake's
+  # lock, supplies `old`, and its gamescope recipe matches its own release.
+  # NixOS 26.05's shaders-path.patch targets a file master has since moved.
+  patches = [
+    # nixpkgs packaging patches, vendored at the revision matching master:
+    # data under $out instead of /usr, and an absolute gamescopereaper path.
+    # postPatch fills in both placeholders.
+    ../../patches/gamescope/shaders-path.patch
+    ../../patches/gamescope/gamescopereaper.patch
+    # HDR capture stack (format negotiation + optional cursor + stamp).
+    # DROP 10/11 when equivalent upstream lands; stamp is Polaris-only.
+    ../../patches/gamescope/10-pipewire-offer-10-bit-BT2020-PQ.patch
+    ../../patches/gamescope/11-pipewire-composite-cursor.patch
+    ../../patches/gamescope/12-polaris-stamp-version-polhdrN.patch
+    # Polaris-only keepers until proven redundant with 10:
+    ../../patches/gamescope/02-headless-hdr-colorimetry.patch
+    ../../patches/gamescope/03-pipewire-prefer-dmabuf.patch
+    # ValveSoftware/gamescope#2217: headless prefers discrete GPU if unpinned.
+    ../../patches/gamescope/06-prefer-discrete-gpu-2217.patch
+  ];
 
   # Master dropped glm_include_dir / stb_include_dir meson options.
   mesonFlags = [
@@ -71,17 +69,23 @@ in
     (lib.mesonBool "enable_tests" false)
   ];
 
-  # Materialize glm/stb wrap-git deps from nix store (sandbox has no network).
-  postPatch =
-    (old.postPatch or "")
-    + ''
-      rm -rf subprojects/glm subprojects/stb
-      cp -a ${glmSrc} subprojects/glm
-      cp -a ${stbSrc} subprojects/stb
-      chmod -R u+w subprojects/glm subprojects/stb
-      cp -f subprojects/packagefiles/glm/meson.build subprojects/glm/meson.build
-      cp -f subprojects/packagefiles/stb/meson.build subprojects/stb/meson.build
-    '';
+  # Not old.postPatch, for the same reason as the patches: on 26.05 it
+  # substitutes into the file its own shaders-path.patch targets.
+  postPatch = ''
+    substituteInPlace src/Utils/DirHelpers.cpp --replace-fail "@out@" "$out"
+    substituteInPlace src/Utils/Process.cpp \
+      --replace-fail "@gamescopereaper@" "$out/bin/gamescopereaper"
+    patchShebangs subprojects/libdisplay-info/tool/gen-search-table.py
+    patchShebangs default_extras_install.sh
+
+    # Materialize glm/stb wrap-git deps from nix store (sandbox has no network).
+    rm -rf subprojects/glm subprojects/stb
+    cp -a ${glmSrc} subprojects/glm
+    cp -a ${stbSrc} subprojects/stb
+    chmod -R u+w subprojects/glm subprojects/stb
+    cp -f subprojects/packagefiles/glm/meson.build subprojects/glm/meson.build
+    cp -f subprojects/packagefiles/stb/meson.build subprojects/stb/meson.build
+  '';
 
   # Capability stamp from patch 12 — fail the build if patches did not apply.
   doInstallCheck = true;

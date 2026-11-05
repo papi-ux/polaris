@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <fstream>
+#include <istream>
 #include <iterator>
 #include <mutex>
 #include <set>
@@ -1122,6 +1123,363 @@ namespace game_library {
       add(home / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam");
     }
     return roots;
+  }
+
+  namespace {
+    // appinfo.vdf versions, per SteamDatabase/SteamAppInfo: v40 adds a second hash to each entry and
+    // v41 moves every key name into a string table at the end of the file.
+    constexpr std::uint32_t k_appinfo_v39 = 0x07564427;
+    constexpr std::uint32_t k_appinfo_v40 = 0x07564428;
+    constexpr std::uint32_t k_appinfo_v41 = 0x07564429;
+    constexpr std::uint32_t k_appinfo_max_entry_bytes = 64 * 1024 * 1024;
+    constexpr std::uint32_t k_appinfo_max_strings = 4 * 1024 * 1024;
+    constexpr int k_appinfo_max_depth = 32;
+
+    template<class T>
+    bool read_little_endian(std::istream &in, T &value) {
+      std::array<unsigned char, sizeof(T)> bytes {};
+      if (!in.read(reinterpret_cast<char *>(bytes.data()), bytes.size())) {
+        return false;
+      }
+      value = 0;
+      for (std::size_t i = 0; i < bytes.size(); ++i) {
+        value = static_cast<T>(value | (static_cast<T>(bytes[i]) << (8 * i)));
+      }
+      return true;
+    }
+
+    /// The fields of one launch option that decide whether Steam can offer it.
+    struct appinfo_launch_option_t {
+      std::string oslist;
+      std::string osarch;
+      std::string steamdeck;
+      bool conditional = false;
+
+      /// Steam's key case varies between titles: Hades writes BetaKey.
+      void note(std::string_view key, std::string value) {
+        std::string name {key};
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name == "oslist") {
+          oslist = std::move(value);
+        } else if (name == "osarch") {
+          osarch = std::move(value);
+        } else if (name == "steamdeck") {
+          steamdeck = std::move(value);
+        } else if ((name == "betakey" || name == "ownsdlc") && !value.empty()) {
+          conditional = true;
+        }
+      }
+    };
+
+    /// Walks one entry's binary key/values in memory, keeping only config/launch.
+    class appinfo_entry_reader_t {
+    public:
+      appinfo_entry_reader_t(std::string_view bytes, const std::vector<std::string> *strings):
+          bytes_ {bytes},
+          strings_ {strings} {
+      }
+
+      std::optional<std::vector<appinfo_launch_option_t>> launch_options() {
+        std::vector<appinfo_launch_option_t> options;
+        if (!read_map(0, {}, options)) {
+          return std::nullopt;
+        }
+        return options;
+      }
+
+    private:
+      enum class where_t { none, appinfo, config, launch, option, option_config };
+
+      bool take_byte(unsigned char &value) {
+        if (at_ >= bytes_.size()) {
+          return false;
+        }
+        value = static_cast<unsigned char>(bytes_[at_++]);
+        return true;
+      }
+
+      bool take_text(std::string &text) {
+        const auto end = bytes_.find('\0', at_);
+        if (end == std::string_view::npos) {
+          return false;
+        }
+        text = std::string {bytes_.substr(at_, end - at_)};
+        at_ = end + 1;
+        return true;
+      }
+
+      bool skip(std::size_t count) {
+        if (bytes_.size() - at_ < count) {
+          return false;
+        }
+        at_ += count;
+        return true;
+      }
+
+      bool take_name(std::string &name) {
+        if (!strings_) {
+          return take_text(name);
+        }
+        if (bytes_.size() - at_ < 4) {
+          return false;
+        }
+        std::uint32_t index = 0;
+        for (int i = 0; i < 4; ++i) {
+          index |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes_[at_ + i])) << (8 * i);
+        }
+        at_ += 4;
+        if (index >= strings_->size()) {
+          return false;
+        }
+        name = (*strings_)[index];
+        return true;
+      }
+
+      static where_t child_of(where_t parent, std::string_view name, int depth) {
+        if (depth == 0 && name == "appinfo") return where_t::appinfo;
+        if (parent == where_t::appinfo && name == "config") return where_t::config;
+        if (parent == where_t::config && name == "launch") return where_t::launch;
+        if (parent == where_t::launch) return where_t::option;
+        if (parent == where_t::option && name == "config") return where_t::option_config;
+        return where_t::none;
+      }
+
+      bool read_map(int depth, where_t where, std::vector<appinfo_launch_option_t> &options) {
+        if (depth > k_appinfo_max_depth) {
+          return false;
+        }
+        while (true) {
+          unsigned char type = 0;
+          if (!take_byte(type)) {
+            // Steam ends the top level at the entry's size; a nested map has to close itself.
+            return depth == 0;
+          }
+          if (type == 0x08) {
+            return true;
+          }
+          std::string name;
+          if (!take_name(name)) {
+            return false;
+          }
+          switch (type) {
+            case 0x00: {
+              const auto child = child_of(where, name, depth);
+              if (child == where_t::option) {
+                options.emplace_back();
+              }
+              if (!read_map(depth + 1, child, options)) {
+                return false;
+              }
+              break;
+            }
+            case 0x01: {
+              std::string value;
+              if (!take_text(value)) {
+                return false;
+              }
+              if (where == where_t::option_config && !options.empty()) {
+                options.back().note(name, std::move(value));
+              }
+              break;
+            }
+            case 0x02: {  // int32
+              if (bytes_.size() - at_ < 4) {
+                return false;
+              }
+              std::uint32_t value = 0;
+              for (int i = 0; i < 4; ++i) {
+                value |= static_cast<std::uint32_t>(static_cast<unsigned char>(bytes_[at_ + i])) << (8 * i);
+              }
+              at_ += 4;
+              if (where == where_t::option_config && !options.empty()) {
+                options.back().note(name, std::to_string(static_cast<std::int32_t>(value)));
+              }
+              break;
+            }
+            case 0x03:  // float
+            case 0x04:  // pointer
+            case 0x06:  // color
+              if (!skip(4)) {
+                return false;
+              }
+              break;
+            case 0x07:  // uint64
+            case 0x0a:  // int64
+              if (!skip(8)) {
+                return false;
+              }
+              break;
+            default:
+              return false;
+          }
+        }
+      }
+
+      std::string_view bytes_;
+      const std::vector<std::string> *strings_;
+      std::size_t at_ = 0;
+    };
+
+    bool oslist_names(std::string_view oslist, std::string_view os) {
+      if (oslist.empty()) {
+        return true;
+      }
+      std::string lower {oslist};
+      std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      return lower.find(os) != std::string::npos;
+    }
+
+    // Hades lists 18 launch options and Steam offered three of them on a 64-bit desktop: those that
+    // need no beta branch, are not for macOS or 32-bit systems, and are not Steam Deck's own.
+    int offered_launch_options(const std::vector<appinfo_launch_option_t> &options) {
+      int offered = 0;
+      for (const std::string_view os : {"windows", "linux"}) {
+        for (const std::string_view steam_deck : {"0", "1"}) {
+          int count = 0;
+          for (const auto &option : options) {
+            if (!option.conditional && option.osarch != "32" && oslist_names(option.oslist, os) &&
+                (option.steamdeck.empty() || option.steamdeck == steam_deck)) {
+              ++count;
+            }
+          }
+          offered = std::max(offered, count);
+        }
+      }
+      return offered;
+    }
+
+    std::optional<std::vector<std::string>> read_appinfo_strings(std::istream &in, std::int64_t offset) {
+      const auto resume = in.tellg();
+      in.seekg(offset);
+      std::uint32_t count = 0;
+      if (offset <= 0 || !in || !read_little_endian(in, count) || count > k_appinfo_max_strings) {
+        return std::nullopt;
+      }
+      std::vector<std::string> strings;
+      strings.reserve(count);
+      for (std::uint32_t i = 0; i < count; ++i) {
+        std::string text;
+        if (!std::getline(in, text, '\0')) {
+          return std::nullopt;
+        }
+        strings.push_back(std::move(text));
+      }
+      in.clear();
+      in.seekg(resume);
+      return strings;
+    }
+  }  // namespace
+
+  std::map<std::string, int> parse_steam_launch_option_counts(std::istream &appinfo, const std::set<std::string> &appids) {
+    std::map<std::string, int> counts;
+    std::uint32_t magic = 0;
+    std::uint32_t universe = 0;
+    if (appids.empty() || !read_little_endian(appinfo, magic) || !read_little_endian(appinfo, universe)) {
+      return counts;
+    }
+    if (magic != k_appinfo_v39 && magic != k_appinfo_v40 && magic != k_appinfo_v41) {
+      return counts;
+    }
+    std::int64_t strings_offset = 0;
+    if (magic == k_appinfo_v41 && !read_little_endian(appinfo, strings_offset)) {
+      return counts;
+    }
+    // Read once a title asked for turns up, so a library with none of them costs only the skips.
+    std::optional<std::vector<std::string>> strings;
+    const std::size_t after_size = 4 + 4 + 8 + 20 + 4 + (magic == k_appinfo_v39 ? 0 : 20);
+
+    while (counts.size() < appids.size()) {
+      std::uint32_t appid = 0;
+      std::uint32_t size = 0;
+      if (!read_little_endian(appinfo, appid) || appid == 0 || !read_little_endian(appinfo, size) || size < after_size) {
+        break;
+      }
+      const auto name = std::to_string(appid);
+      if (!appids.contains(name)) {
+        appinfo.seekg(size, std::ios::cur);
+        if (!appinfo) {
+          break;
+        }
+        continue;
+      }
+      if (size > k_appinfo_max_entry_bytes) {
+        break;
+      }
+      appinfo.seekg(static_cast<std::streamoff>(after_size), std::ios::cur);
+      std::string bytes(size - after_size, '\0');
+      if (!appinfo || !appinfo.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+        break;
+      }
+      if (magic == k_appinfo_v41 && !strings) {
+        strings = read_appinfo_strings(appinfo, strings_offset);
+        if (!strings) {
+          break;
+        }
+      }
+      appinfo_entry_reader_t reader {bytes, magic == k_appinfo_v41 ? &*strings : nullptr};
+      if (const auto options = reader.launch_options()) {
+        counts[name] = offered_launch_options(*options);
+      }
+    }
+    return counts;
+  }
+
+  std::string steam_launch_choice_note(int options) {
+    if (options < 2) {
+      return {};
+    }
+    return "Steam may ask which version of this game to start, because it has several launch options. "
+           "If it does, choose one in the stream.";
+  }
+
+  std::map<std::string, int> steam_launch_option_counts(const std::set<std::string> &appids) {
+    if (appids.empty()) {
+      return {};
+    }
+    static std::mutex mutex;
+    static std::map<std::string, int> cached;
+    static std::set<std::string> cached_for;
+    static std::filesystem::path cached_path;
+    static std::filesystem::file_time_type cached_time {};
+    static std::uintmax_t cached_size = 0;
+
+    // The newest appinfo.vdf, when a home holds more than one Steam: the one Steam is writing.
+    std::error_code error;
+    std::filesystem::path newest;
+    std::filesystem::file_time_type newest_time {};
+    for (const auto &root : steam_data_roots(library_home_roots())) {
+      auto path = root / "appcache" / "appinfo.vdf";
+      const auto time = std::filesystem::last_write_time(path, error);
+      if (!error && (newest.empty() || time > newest_time)) {
+        newest = std::move(path);
+        newest_time = time;
+      }
+    }
+    if (newest.empty()) {
+      return {};
+    }
+    const auto size = std::filesystem::file_size(newest, error);
+    if (error) {
+      return {};
+    }
+
+    std::lock_guard lock {mutex};
+    const bool covered = std::includes(cached_for.begin(), cached_for.end(), appids.begin(), appids.end());
+    if (!covered || newest != cached_path || newest_time != cached_time || size != cached_size) {
+      std::ifstream in {newest, std::ios::binary};
+      // Every title asked for so far, so callers with different lists do not each rescan the file.
+      cached_for.insert(appids.begin(), appids.end());
+      try {
+        cached = in ? parse_steam_launch_option_counts(in, cached_for) : std::map<std::string, int> {};
+      } catch (const std::exception &) {
+        // Only a note depends on this, so a file it cannot read costs the note and nothing else.
+        cached.clear();
+      }
+      cached_path = newest;
+      cached_time = newest_time;
+      cached_size = size;
+    }
+    return cached;
   }
 
   steam_input_config_t parse_steam_input_vdf(std::string_view vdf_payload) {

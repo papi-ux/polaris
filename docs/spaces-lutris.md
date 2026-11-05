@@ -4,10 +4,10 @@ A Lutris Space has its own launcher library, accounts, game installations and
 saves. Install and configure games in Lutris, then open their tiles from Nova.
 It does not reuse the Lutris library on the host's regular desktop.
 
-This uses the [Spaces preview](spaces.md#preview-limits). Complete
+This uses [Spaces](spaces.md). Complete
 [Host Setup](spaces.md#host-setup) first; the runtime supplies Lutris inside
-the Space. The preview currently allows one active Space per host; see the
-preview limits for graphics and audio acceptance. Have touch or a mouse
+the Space. A host runs one active Space at a time; see the
+[current limits](spaces.md#current-limits) for graphics and audio. Have touch or a mouse
 available for launcher setup. A game's controller support depends on that
 game and its runner.
 
@@ -39,7 +39,7 @@ for that game. Change the runner or Wine settings in Lutris; change streaming
 resolution and frame rate in Nova's **Play Setup**. Start at 60 FPS and check
 picture, sound and controls before raising the target.
 
-Save before leaving: a disconnect ends the running game in this preview.
+Save before leaving: a disconnect ends the running game.
 Installed games, saves and launcher sign-ins remain in the Space. **Resume**
 only applies to a session your device still owns, and does not mean a
 disconnected game kept running.
@@ -52,7 +52,7 @@ disconnected game kept running.
 | One installed game is absent | Check whether it is hidden in Lutris. If you just changed the library, exit Lutris normally, save any running game before leaving the Space, then refresh Nova. |
 | A tile opens Lutris but the game fails | Check the game's installation, runner and launch settings in Lutris. Appearing in the library does not guarantee that a game is compatible. |
 | Setup needs a pointer | Use touch or a mouse in the launcher. Test the game's own controller input after it starts. |
-| The Space cannot open | Read its reported status and use **Recheck Setup** in Polaris. The same preview capacity and graphics limits apply to Lutris. |
+| The Space cannot open | Read its reported status and use **Recheck Setup** in Polaris. The same capacity and graphics limits apply to Lutris. |
 
 Use the Space card in Polaris for [runtime updates](spaces.md#runtime-updates).
 The runtime supplies the launcher; the Space keeps the player's installed

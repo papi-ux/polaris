@@ -82,6 +82,7 @@ namespace private_state_file {
     read_status_e status = read_status_e::io_error;
     std::string payload;
     refusal_t refusal;
+    unsigned mode = 0;  ///< Permission bits from the descriptor that supplied the payload.
 
     explicit operator bool() const {
       return status == read_status_e::ok;
@@ -133,6 +134,8 @@ namespace private_state_file {
   // One cross-process transaction. Contention fails immediately so callers can
   // retain session authority without waiting on an unrelated file-lock holder.
   // The callback must not call another persistence operation on this path.
+  // Replacements preserve stricter owner permissions and remove every bit
+  // outside 0600, even when the payload itself has not changed.
   write_result_t update_atomic(const std::filesystem::path &target, std::size_t max_bytes,
     const std::function<std::optional<std::string>(const read_result_t &)> &update,
     bool permit_public_read = false, refusal_log_e refusal_log = refusal_log_e::walk);

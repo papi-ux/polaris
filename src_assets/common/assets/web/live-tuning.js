@@ -15,6 +15,13 @@ export function parseLiveTuning(value) {
 export function liveTuningLabel(value, confirmed = true) {
   if (!value || !confirmed) return 'Live Tuning: Unknown'
   if (!value.enabled) return 'Live Tuning Off'
+  // The controller's frame_pacing_observed status reaches this object only as reason frame_pacing:
+  // it changes no bitrate, so the state still reads stable or adjusting. Say what was observed
+  // rather than "stable"; it says nothing about the client display's refresh or VRR.
+  if (value.reason === 'frame_pacing') {
+    if (value.state === 'stable') return 'On — frame timing variation observed'
+    if (value.state === 'adjusting') return 'On — adjusting; frame timing variation observed'
+  }
   const labels = { waiting: 'On — waiting for a stream', unavailable: 'On — unavailable for this stream',
     applying: 'On — applying bitrate', measuring: 'On — measuring', adjusting: 'On — adjusting', stable: 'Live Tuning On — stable' }
   return labels[value.state] || 'Live Tuning: Unknown'

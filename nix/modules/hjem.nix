@@ -28,11 +28,7 @@ let
       set -euo pipefail
       confdir="''${XDG_CONFIG_HOME:-$HOME/.config}/polaris"
       mkdir -p "$confdir"
-      if [ ! -f "$confdir/polaris.conf" ]; then
-        cp ${session.polarisConfSeed} "$confdir/polaris.conf"
-        chmod 600 "$confdir/polaris.conf"
-        echo "polaris-hjem-activate: seeded $confdir/polaris.conf"
-      fi
+      ${lib.getExe session.seedConfig} "$confdir/polaris.conf" ${session.polarisConfSeed}
       systemctl --user daemon-reload
       # .wants/ from hjem should already pull units; enable is idempotent fallback.
       systemctl --user enable polaris-gamescope-idle.service polaris.service 2>/dev/null || true

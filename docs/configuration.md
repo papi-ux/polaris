@@ -11,6 +11,17 @@ you want to script setup, review current values, or recover from a broken UI sta
 | App library | `~/.config/polaris/apps.json` | Published apps and launch behavior |
 | Runtime state | `~/.config/polaris/polaris_state.json` | Saved UI and session state |
 
+The config file can hold API secrets. Polaris saves it through an atomic replacement with
+permissions no wider than `0600`; stricter owner permissions are preserved. New and migrated
+files are private from creation, and startup restricts excess access left by older versions.
+
+`POST /api/config` and `PATCH /api/config` both preserve every existing setting omitted from
+the request. To reset a setting to its default, explicitly send its key with `null` (or an
+empty string for a non-secret setting), for example `{"max_bitrate": null}`. Configuration
+sends this reset when an edited option returns to its default. **Reset Local Changes** only
+discards unsaved edits; it does not reset the host. Blank write-only secret placeholders remain
+unchanged; use `clear_ai_api_key` or `clear_steamgriddb_api_key` to clear those credentials.
+
 If you change `port` in `polaris.conf`, the web UI moves to `https://localhost:<port + 1>`.
 
 Add installed Steam titles from the web UI's Applications library scan. The Nix modules do not

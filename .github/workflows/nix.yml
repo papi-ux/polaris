@@ -9,6 +9,8 @@ name: Nix
 #   patch-stacks  needs no nix at all and runs in about a second, so it is also
 #                 wired into Public Hygiene and runs on every push.
 #   eval / build  install nix; scoped to changes that can reach them.
+#   stable        eval and build again against the current stable nixpkgs,
+#                 because a host that follows its own nixpkgs replaces our lock.
 #   web-ui-deps   just the npm-deps fixed-output derivation: no CUDA, no CMake,
 #                 seconds long. Runs on every package-lock.json move so a stale
 #                 npmDepsHash (see #392) surfaces on the PR that causes it
@@ -120,6 +122,54 @@ jobs:
         # Log only — the assertion already ran inside the derivation. Worth
         # printing so the stamp a session negotiates against is visible here.
         run: ./result/bin/gamescope --version || true
+
+  stable:
+    name: Stable nixpkgs
+    # The documented setup has polaris.inputs.nixpkgs follow the host, so a
+    # NixOS stable user builds against their release, not flake.lock. The
+    # gamescope recipe that gamescope-polaris overrides differs between the two,
+    # and only a build against stable shows whether the override still holds.
+    # A separate job, so a stable-only regression cannot hide the locked results.
+    # Bump the release when the next one ships.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      STABLE_NIXPKGS: github:NixOS/nixpkgs/nixos-26.05
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL https://nixos.org/nix/install -o "$RUNNER_TEMP/install-nix.sh"
+          sh "$RUNNER_TEMP/install-nix.sh" --no-daemon --no-channel-add
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+      - name: Pin the stable revision
+        # Resolve the branch once so every step below uses, and the log names,
+        # the same revision.
+        run: |
+          rev=$(nix flake metadata --json "$STABLE_NIXPKGS" | jq -r .locked.rev)
+          echo "$STABLE_NIXPKGS -> $rev"
+          echo "STABLE_NIXPKGS=github:NixOS/nixpkgs/$rev" >> "$GITHUB_ENV"
+
+      - name: Check flake outputs
+        # Includes gamescope-patch-phase: the package's own patches and path
+        # fixups, applied to its pinned source, without compiling anything.
+        run: nix flake check --print-build-logs --override-input nixpkgs "$STABLE_NIXPKGS"
+
+      - name: Evaluate every package
+        run: |
+          for package in gamescope-polaris gamescope-hdr xdg-desktop-portal-gamescope polaris-stream default; do
+            printf '%s -> ' "$package"
+            nix eval --raw --override-input nixpkgs "$STABLE_NIXPKGS" ".#packages.x86_64-linux.$package.drvPath"
+            printf '\n'
+          done
+
+      - name: Build the patched compositor and the portal backend
+        run: |
+          nix build --print-build-logs --override-input nixpkgs "$STABLE_NIXPKGS" \
+            .#gamescope-polaris .#xdg-desktop-portal-gamescope
 
   web-ui-deps:
     name: Build polaris-stream npm deps

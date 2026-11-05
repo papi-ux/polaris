@@ -552,9 +552,8 @@ namespace config {
   video_t::ai_optimizer_t ai_optimizer_settings(std::unordered_map<std::string, std::string> &vars);
 
   /**
-   * @brief Take group and other write access away from the configuration file, which the
-   *        settings store refuses to save into.
-   * @details Only a regular file this process owns is changed, and only its write bits; a
+   * @brief Restrict the configuration file, which can contain write-only secrets, to at most 0600.
+   * @details Only a regular file this process owns is changed; stricter owner access is kept. A
    *          symlink, another user's file or a missing file is left as it is.
    * @param path The configuration file.
    * @return False when the file needed restricting and could not be, which is logged.

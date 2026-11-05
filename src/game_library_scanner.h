@@ -6,8 +6,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <iosfwd>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -247,6 +249,31 @@ namespace game_library {
 
   /** @brief Every localconfig.vdf belonging to a Steam user under the given roots. */
   std::vector<std::filesystem::path> steam_localconfig_paths(const std::vector<std::filesystem::path> &roots);
+
+  /**
+   * @brief How many launch options Steam may offer for each title, read from one appinfo.vdf.
+   *
+   * Only the titles asked for are parsed; every other entry is skipped by its size. An option that
+   * needs a beta branch or a DLC is not counted, because owning either cannot be read here, and
+   * neither is one for 32-bit systems. The count is the largest of the Windows and Linux sets, with
+   * and without Steam Deck's options, since which applies is Steam's call. So it says only that
+   * Steam may ask: a choice the player told Steam to remember is not read either. A file or entry
+   * that cannot be understood reports nothing.
+   */
+  std::map<std::string, int> parse_steam_launch_option_counts(std::istream &appinfo, const std::set<std::string> &appids);
+
+  /**
+   * @brief Launch option counts from this host's Steam, cached until appinfo.vdf changes.
+   *
+   * Read only: Steam's own files and settings are never written.
+   */
+  std::map<std::string, int> steam_launch_option_counts(const std::set<std::string> &appids);
+
+  /**
+   * @brief What to tell a player about a title with this many launch options.
+   * @return The sentence, or an empty string when Steam has nothing to ask.
+   */
+  std::string steam_launch_choice_note(int options);
 
   /** @brief Where Steam keeps its data, for each home directory we know about. */
   std::vector<std::filesystem::path> steam_data_roots(const std::vector<std::filesystem::path> &home_roots);

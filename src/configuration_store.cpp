@@ -286,7 +286,7 @@ namespace configuration_store {
     return observed ? observed->revision : std::string {};
   }
   static result update(const std::string &path, const std::optional<std::string> &expected,
-                       const std::function<std::string(const std::string &)> &transform,
+                       const std::function<std::string(const private_state_file::read_result_t &)> &transform,
                        bool require_existing) {
     std::lock_guard guard(lock);
     bool conflict = false;
@@ -305,7 +305,7 @@ namespace configuration_store {
           return std::nullopt;
         }
         if (require_existing && !read) return std::nullopt;
-        auto next = transform(read.payload);
+        auto next = transform(read);
         next_revision = digest(next);
         return next;
       }, true, private_state_file::refusal_log_e::caller);
@@ -336,11 +336,16 @@ namespace configuration_store {
                  const std::optional<std::string> &expected) {
     return update(path, expected, [&](const auto &) { return contents; }, false);
   }
+  result initialize(const std::string &path, const std::string &contents) {
+    return update(path, std::nullopt, [&](const auto &current) {
+      return current ? current.payload : contents;
+    }, false);
+  }
   result patch(const std::string &path,
                const std::unordered_map<std::string, std::string> &updates,
                const std::optional<std::string> &expected) {
     return update(path, expected, [&](const auto &current) {
-      return config_file_update::apply(current, updates).content;
+      return config_file_update::apply(current.payload, updates).content;
     }, true);
   }
 }

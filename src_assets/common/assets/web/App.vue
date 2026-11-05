@@ -120,7 +120,7 @@
         </button>
       </div>
       <div class="flex items-center border-t border-storm/20 px-3 py-2 text-xs text-storm" :class="sidebarCollapsed ? 'justify-center' : 'justify-between'">
-        <span :title="`${displayVersion} · Polaris`">{{ sidebarCollapsed ? `v${compactVersion}` : displayVersion }}</span>
+        <button type="button" class="focus-ring inline-flex min-h-9 items-center rounded-lg px-1 text-storm" :title="`${displayVersion} · Polaris`" :aria-label="`Polaris ${displayVersion}`" data-app-version @click="pressVersion">{{ sidebarCollapsed ? `v${compactVersion}` : displayVersion }}</button>
         <button
           type="button"
           class="focus-ring inline-flex items-center justify-center rounded-lg p-2 text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
@@ -158,6 +158,7 @@
       </div>
     </main>
     <CommandPalette v-if="commandPaletteActivated" v-model="commandPaletteOpen" />
+    <SecretCodePanel v-if="codePanelOpen" @close="codePanelOpen = false" />
     <Toast />
   </div>
   <div v-else>
@@ -181,8 +182,10 @@ import { isPublicRoute, normalizeRoutePath } from './router-helpers.js'
 import { settingsUnreadable, showsSettingsBanner } from './settings-unreadable.js'
 import { createNavSections, getNavItemByPath } from './nav-metadata.js'
 import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } from './update-center.js'
+import { versionPressCounter } from './secret-code.js'
 
 const CommandPalette = defineAsyncComponent(() => import('./CommandPalette.vue'))
+const SecretCodePanel = defineAsyncComponent(() => import('./components/SecretCodePanel.vue'))
 const route = useRoute()
 const commandPaletteOpen = ref(false)
 const commandPaletteActivated = ref(false)
@@ -194,6 +197,11 @@ const sidebarOpen = ref(false)
 const sidebarCollapsed = ref(localStorage.getItem('sidebarCollapsed') === 'true')
 const appVersion = ref('')
 const appVersionLoading = ref(false)
+const codePanelOpen = ref(false)
+const countVersionPress = versionPressCounter()
+function pressVersion() {
+  if (countVersionPress()) codePanelOpen.value = true
+}
 const sidebarUpdateHost = ref({ platform: '', distro: {} })
 const sidebarLatestRelease = ref(null)
 const sidebarPrereleaseRelease = ref(null)

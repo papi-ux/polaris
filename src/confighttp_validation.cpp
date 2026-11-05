@@ -286,6 +286,7 @@ namespace confighttp::validation {
       "vk_quality"sv,
       "vk_rc_mode"sv,
       "vk_tune"sv,
+      "vrr_source_pacing"sv,
       "webrtc_browser_streaming"sv,
       "vt_coder"sv,
       "vt_realtime"sv,

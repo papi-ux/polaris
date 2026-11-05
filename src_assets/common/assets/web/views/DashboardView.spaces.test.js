@@ -50,6 +50,9 @@ async function render(streaming = true, { attach = false, dialogs = false, stats
   await flushPromises()
   shared.stats.value = { streaming, fps: 60, bitrate_kbps: 10000, encode_time_ms: 2, latency_ms: 5, packet_loss: 0, ...stats }
   await flushPromises()
+  // The live session card loads with the first live report.
+  await vi.dynamicImportSettled()
+  await flushPromises()
 }
 const spaceReads = () => fetch.mock.calls.filter(([url]) => url === './api/multiseat/profiles')
 
@@ -533,6 +536,73 @@ describe('Mission Control stage', () => {
     expect(document.activeElement).toBe(wrapper.get('[data-mission-diagnostics-toggle]').element)
   })
 
+})
+
+describe('Mission Control live session card', () => {
+  const card = () => wrapper.get('[data-live-session-card]')
+  const running = { apps: [{ uuid: 'game', name: 'Hades', source: 'steam', 'image-path': 'hades.png' }], current_app: 'game' }
+  const live = { client_name: 'Handheld', stream_instance_id: 'stream-1' }
+
+  it('appears only while a stream is live, with the running game, its cover and the device', async () => {
+    appPayload = running
+    await render(true, { stats: { ...live, session_elapsed_s: 720 } })
+    expect(card().get('[data-session-title]').text()).toBe('Hades')
+    expect(card().get('[data-session-art]').attributes('src')).toBe('./api/covers/image?name=Hades')
+    expect(card().get('[data-session-device] dd').text()).toBe('Handheld · Moonlight / Artemis')
+    expect(card().get('[data-session-elapsed] dd').text()).toBe('12 min')
+    shared.stats.value = { streaming: false }
+    await flushPromises()
+    expect(wrapper.find('[data-live-session-card]').exists()).toBe(false)
+  })
+
+  it('offers End only where the host names the running app', async () => {
+    appPayload = { apps: running.apps, current_app: '' }
+    await render(true, { stats: live })
+    expect(card().find('[data-end-session]').exists()).toBe(false)
+    appPayload = running
+    await wrapper.vm.refreshApps(); await flushPromises()
+    expect(card().find('[data-end-session]').exists()).toBe(true)
+  })
+
+  it('offers no End while a Space is active, which keeps its own controls', async () => {
+    appPayload = running
+    spaces = active('running')
+    await render(true, { stats: live })
+    expect(card().find('[data-end-session]').exists()).toBe(false)
+  })
+
+  it('names every device watching, without claiming a client type for the group', async () => {
+    appPayload = running
+    await render(true, { stats: { ...live, clients: [{ name: 'Handheld' }, { name: 'Tablet' }] } })
+    expect(card().get('[data-session-device] dd').text()).toBe('Handheld, Tablet')
+  })
+})
+
+describe('Mission Control Steam launch note', () => {
+  const note = 'Steam may ask which version of this game to start, because it has several launch options. If it does, choose one in the stream.'
+  const hades = { uuid: 'hades', name: 'Hades', source: 'steam', 'last-launched': 2, 'steam-launch-note': note }
+  const control = { uuid: 'control', name: 'Control', source: 'steam', 'last-launched': 1 }
+
+  it('says so on the idle stage for the featured title, and only for that title', async () => {
+    appPayload = { apps: [hades, control], current_app: '' }
+    await render(false)
+    expect(wrapper.get('[data-steam-launch-note]').text()).toBe(note)
+    await wrapper.get('[data-dashboard-feature-app="control"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-steam-launch-note]').exists()).toBe(false)
+  })
+
+  it('says so on the live stage, where a stream stopped at the dialog is being watched', async () => {
+    appPayload = { apps: [hades, control], current_app: 'hades' }
+    await render(true)
+    expect(wrapper.get('[data-steam-launch-note]').text()).toBe(note)
+  })
+
+  it('says nothing for a title with one launch option', async () => {
+    appPayload = { apps: [control], current_app: 'control' }
+    await render(true)
+    expect(wrapper.find('[data-steam-launch-note]').exists()).toBe(false)
+  })
 })
 
 describe('Mission Control Disconnect', () => {

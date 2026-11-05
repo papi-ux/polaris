@@ -2777,7 +2777,7 @@ namespace nvhttp {
       }
       if (virtual_display_risk) {
         issues.push_back("virtual_display_path");
-        recommendations.push_back("Relaunch in headless mode if this title does not need a dedicated display.");
+        recommendations.push_back("Start the next stream in Private Stream if this game does not need its own display.");
       }
 
       std::string primary_issue = "steady";
@@ -2881,17 +2881,17 @@ namespace nvhttp {
       health["grade"] = grade;
       health["primary_issue"] = primary_issue;
       health["summary"] =
-        grade == "collecting" ? "Cadence evidence is pending or stale; keep streaming while Polaris collects it." :
+        grade == "collecting" ? "Polaris is still measuring how smoothly this stream runs." :
         grade == "good" ? "Session looks steady." :
-        network_risk ? "Network jitter is the most likely source of the hitching." :
+        network_risk ? "The network is the most likely cause of the hitching." :
         hdr_source_missing ? hdr_downgrade_message :
-        hdr_risk ? "The current HDR path looks unstable." :
-        virtual_display_risk ? "The virtual display path is likely adding pacing overhead." :
-        decoder_risk ? "The current codec path looks harder on this client than expected." :
+        hdr_risk ? "HDR looks unstable on this stream." :
+        virtual_display_risk ? "The virtual display is probably making frames less even." :
+        decoder_risk ? "This device is having a harder time decoding this codec than expected." :
         nvenc_cuda_disabled_path ? "The NVIDIA path is using a CUDA-disabled CPU copy fallback." :
         capture_pressure ? stream_stats::capture_path_reason_message(capture_reason) :
-        host_render_limited ? "Host render is missing the stream FPS target; lower game render settings or stream FPS before tuning bitrate." :
-        "The stream needs a safer pacing or encode path.";
+        host_render_limited ? "The game is not reaching the stream's frame rate on the host." :
+        "This stream is not running as smoothly as it should.";
       health["issues"] = std::move(issues);
       if (stats.video_policy_source_time || cadence_unavailable) {
         health["frame_pacing_measurement_available"] = !cadence_unavailable;
@@ -3596,7 +3596,7 @@ namespace nvhttp {
       return contract;
     }
 
-    nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {
+    nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app, const std::map<std::string, int> &launch_options) {
       nlohmann::json contract;
       const bool is_steam = !app.steam_appid.empty() || boost::iequals(app.source, "steam");
       contract[v1::steam_launch::available] = is_steam;
@@ -3616,9 +3616,16 @@ namespace nvhttp {
         std::string {proc::STEAM_LAUNCH_MODE_DIRECT},
         std::string {proc::STEAM_LAUNCH_MODE_BIG_PICTURE}
       });
-      contract[v1::steam_launch::mode_reason] = mode == proc::STEAM_LAUNCH_MODE_BIG_PICTURE ?
+      std::string mode_reason = mode == proc::STEAM_LAUNCH_MODE_BIG_PICTURE ?
         "Steam Big Picture compatibility mode may also receive controller input." :
         "Direct launch avoids opening Steam Big Picture.";
+      // Said here because no launch command is known to skip Steam's dialog without a setting of the player's changing.
+      if (const auto options = launch_options.find(app.steam_appid); options != launch_options.end()) {
+        if (const auto note = game_library::steam_launch_choice_note(options->second); !note.empty()) {
+          mode_reason += " " + note;
+        }
+      }
+      contract[v1::steam_launch::mode_reason] = std::move(mode_reason);
       return contract;
     }
 
@@ -10214,6 +10221,13 @@ namespace nvhttp {
       const bool desktop_offers_its_own_screen =
         library_desktop_offers_own_screen(apps, settings_metadata::host_virtual_display_available());
 
+      // Read once for the whole library, because the file holds every app Steam knows.
+      std::set<std::string> steam_appids;
+      for (const auto &app : apps) {
+        if (!app.steam_appid.empty()) steam_appids.insert(app.steam_appid);
+      }
+      const auto steam_launch_options = game_library::steam_launch_option_counts(steam_appids);
+
       int idx = 0;
       for (auto &app : apps) {
         if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;
@@ -10269,7 +10283,7 @@ namespace nvhttp {
           }
         }
         game[v1::game::launch_mode] = launch_mode_contract_for_app(app);
-        game[v1::game::steam_launch] = steam_launch_contract_for_app(app);
+        game[v1::game::steam_launch] = steam_launch_contract_for_app(app, steam_launch_options);
         bool steam_lifetime_game_mode = false;
 #ifdef __linux__
         steam_lifetime_game_mode = platf::game_mode_host::session_live();

@@ -130,7 +130,7 @@ play.
   and [changelog](docs/changelog.md) cover what changed in each version and
   what's still being checked.
 - **Extras to try when you want them.** These stay out of the way until you
-  choose them. [Spaces](https://papi-ux.com/docs/spaces/) (preview) gives each
+  choose them. [Spaces](https://papi-ux.com/docs/spaces/) gives each
   player their own launcher sign-in, library and saves on one PC.
   [PyroWave](https://papi-ux.com/docs/pyrowave/) (experimental) trades
   bandwidth for very fast decoding on a wired local network and runs only when

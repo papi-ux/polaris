@@ -383,7 +383,7 @@ TEST(ConfigNewInstallTests, OnlyTheFileCreationWritesTheNewInstallDefault) {
   std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
   ASSERT_TRUE(in);
   const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  const auto create = source.find("if (!fs::exists(sunshine.config_file)) {\n        auto cfg_file = std::ofstream {sunshine.config_file};");
+  const auto create = source.find("if (!fs::exists(sunshine.config_file)) {\n        auto cfg_file = std::ostringstream {};");
   ASSERT_NE(create, std::string::npos);
   const auto use = source.find("cfg_file << new_install_config(");
   ASSERT_NE(use, std::string::npos);
@@ -421,7 +421,7 @@ namespace {
   };
 }  // namespace
 
-TEST(ConfigFileModeTests, GroupWritableFileLosesOnlyItsWriteBitsAndBecomesSavable) {
+TEST(ConfigFileModeTests, GroupWritableFileBecomesPrivateAndSavable) {
   // umask 002 creates the file 0664 (#769); the settings store refuses it until then.
   config_file_mode_fixture_t fixture {0664};
   EXPECT_EQ(private_state_file::read_secure(fixture.file, 4096, true, false).status,
@@ -429,16 +429,16 @@ TEST(ConfigFileModeTests, GroupWritableFileLosesOnlyItsWriteBitsAndBecomesSavabl
 
   EXPECT_TRUE(config::restrict_config_file_mode(fixture.file));
 
-  EXPECT_EQ(fixture.mode(), 0644u);
+  EXPECT_EQ(fixture.mode(), 0600u);
   const auto read = private_state_file::read_secure(fixture.file, 4096, true, false);
   EXPECT_EQ(read.status, private_state_file::read_status_e::ok);
   EXPECT_EQ(read.payload, "encoder = vaapi\n");
 }
 
-TEST(ConfigFileModeTests, OtherWritableFileLosesBothWriteBits) {
+TEST(ConfigFileModeTests, OtherWritableFileBecomesPrivate) {
   config_file_mode_fixture_t fixture {0666};
   EXPECT_TRUE(config::restrict_config_file_mode(fixture.file));
-  EXPECT_EQ(fixture.mode(), 0644u);
+  EXPECT_EQ(fixture.mode(), 0600u);
 }
 
 TEST(ConfigFileModeTests, PrivateFileIsLeftAlone) {
@@ -459,6 +459,80 @@ TEST(ConfigFileModeTests, SymlinkIsNotFollowed) {
 
   EXPECT_TRUE(config::restrict_config_file_mode(link));
   EXPECT_EQ(fixture.mode(), 0664u);
+}
+
+TEST(ConfigWriteModeTests, VaapiWriterCreatesPrivateFileUnderPermissiveUmask) {
+  config_file_mode_fixture_t fixture {0600};
+  std::filesystem::remove(fixture.file);
+  const auto old_vaapi = config::vaapi::snapshot();
+  const auto old_umask = ::umask(0000);
+  auto restore = util::fail_guard([&] { ::umask(old_umask); config::vaapi::publish(old_vaapi); });
+  ASSERT_EQ(config::write_config_with_vaapi_settings(fixture.file.string(), "steamgriddb_api_key = test-secret\n"), 0);
+  EXPECT_EQ(fixture.mode(), 0600u);
+}
+
+TEST(ConfigWriteModeTests, VaapiWriterKeepsPrivateSecretFileOnAtomicReplacement) {
+  config_file_mode_fixture_t fixture {0600};
+  const auto old_vaapi = config::vaapi::snapshot();
+  auto restore = util::fail_guard([&] { config::vaapi::publish(old_vaapi); });
+  struct stat before {};
+  ASSERT_EQ(::stat(fixture.file.c_str(), &before), 0);
+  ASSERT_EQ(config::write_config_with_vaapi_settings(fixture.file.string(), "steamgriddb_api_key = test-secret\n"), 0);
+  struct stat after {};
+  ASSERT_EQ(::stat(fixture.file.c_str(), &after), 0);
+  EXPECT_NE(after.st_ino, before.st_ino);
+  EXPECT_EQ(fixture.mode(), 0600u);
+}
+
+TEST(ConfigWriteModeTests, VaapiWriterTightensAnUnchangedPublicReadableFile) {
+  config_file_mode_fixture_t fixture {0644};
+  const auto old_vaapi = config::vaapi::snapshot();
+  auto restore = util::fail_guard([&] { config::vaapi::publish(old_vaapi); });
+  ASSERT_EQ(config::write_config_with_vaapi_settings(fixture.file.string(), "encoder = vaapi\n"), 0);
+  EXPECT_EQ(fixture.mode(), 0600u);
+}
+
+TEST(ConfigWriteModeTests, StorePatchTightensAnUnchangedPublicReadableFile) {
+  config_file_mode_fixture_t fixture {0644};
+  ASSERT_EQ(configuration_store::patch(fixture.file.string(), {{"encoder", "vaapi"}}), configuration_store::result::committed);
+  EXPECT_EQ(fixture.mode(), 0600u);
+}
+
+TEST(ConfigWriteModeTests, AtomicReplacementKeepsAReadOnlyOwnersMode) {
+  config_file_mode_fixture_t fixture {0400};
+  ASSERT_EQ(configuration_store::replace(fixture.file.string(), "steamgriddb_api_key = test-secret\n"), configuration_store::result::committed);
+  EXPECT_EQ(fixture.mode(), 0400u);
+}
+
+TEST(ConfigWriteModeTests, StartupTightensPublicReadAccessWithoutChangingContents) {
+  config_file_mode_fixture_t fixture {0644};
+  ASSERT_TRUE(config::restrict_config_file_mode(fixture.file));
+  EXPECT_EQ(fixture.mode(), 0600u);
+  EXPECT_EQ(private_state_file::read_secure(fixture.file, 4096).payload, "encoder = vaapi\n");
+}
+
+TEST(ConfigWriteModeTests, InitializationCreatesPrivateFileUnderPermissiveUmask) {
+  config_file_mode_fixture_t fixture {0600};
+  std::filesystem::remove(fixture.file);
+  const auto old_umask = ::umask(0000);
+  auto restore = util::fail_guard([&] { ::umask(old_umask); });
+  ASSERT_EQ(configuration_store::initialize(fixture.file.string(), "sunshine_name = new-host\n"), configuration_store::result::committed);
+  EXPECT_EQ(fixture.mode(), 0600u);
+  EXPECT_EQ(private_state_file::read_secure(fixture.file, 4096).payload, "sunshine_name = new-host\n");
+}
+
+TEST(ConfigWriteModeTests, InitializationKeepsConcurrentContentsAndTightensTheirMode) {
+  config_file_mode_fixture_t fixture {0644};
+  ASSERT_EQ(configuration_store::initialize(fixture.file.string(), "sunshine_name = new-host\n"), configuration_store::result::committed);
+  EXPECT_EQ(fixture.mode(), 0600u);
+  EXPECT_EQ(private_state_file::read_secure(fixture.file, 4096).payload, "encoder = vaapi\n");
+}
+
+TEST(ConfigWriteModeTests, InitializationDoesNotReplaceAnExistingEmptyFile) {
+  config_file_mode_fixture_t fixture {0600};
+  std::ofstream {fixture.file};
+  ASSERT_EQ(configuration_store::initialize(fixture.file.string(), "linux_stream_mode = headless_stream\n"), configuration_store::result::committed);
+  EXPECT_TRUE(private_state_file::read_secure(fixture.file, 4096).payload.empty());
 }
 
 // #782: the settings store refused a 0664 polaris.conf on read, and the console

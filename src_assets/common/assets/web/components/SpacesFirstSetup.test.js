@@ -45,8 +45,8 @@ describe('first-space preparation', () => {
     expect(card.text()).toContain('There is nothing to download until a Polaris build includes a verified gaming runtime.')
     // The card sits under Host Setup even when a host check fails, so it must not claim the host is ready.
     expect(card.text()).not.toContain('host checks above are ready')
-    expect(card.get('a').text()).toBe('Preview limits')
-    expect(card.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#preview-limits')
+    expect(card.get('a').text()).toBe('Current limits')
+    expect(card.get('a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#current-limits')
     expect(wrapper.emitted('runtime').at(-1)).toEqual([{ available: false, reason: 'runtime_not_published', download: null, job: '' }])
   })
 

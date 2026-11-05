@@ -52,11 +52,26 @@ namespace args {
 
   /**
    * @brief Print the version to stdout, then exit.
+   * @details A terminal also gets Ursa Minor. Scripts read the version line, so a pipe or a file
+   * gets exactly the output it always did.
    * @examples
    * version();
    * @examples_end
    */
   int version();
+
+  /**
+   * @brief Whether a file descriptor is an interactive terminal.
+   * @param fd The descriptor to check.
+   * @return True only for a terminal, not for a pipe, a file or a closed descriptor.
+   */
+  bool is_interactive_terminal(int fd);
+
+  /**
+   * @brief Ursa Minor in plain ASCII with Polaris marked, as `--version` draws it on a terminal.
+   * @return The drawing, ending in a newline.
+   */
+  std::string_view version_constellation();
 
 #ifdef __linux__
   /**

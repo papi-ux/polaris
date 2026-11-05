@@ -164,7 +164,7 @@ describe('host recording settings', () => {
     expect(requestedUrls().some((url) => url.includes('/api/recording'))).toBe(false)
   })
 
-  it('turning the policy back Off writes neither key, so the defaults apply', async () => {
+  it('turning the policy back Off explicitly resets both keys to their defaults', async () => {
     await openRecordingTab({ recording_enabled: 'enabled', recording_replay_buffer: 'enabled' })
     await wrapper.get('#recording_policy_off').setValue()
     await settle()
@@ -174,8 +174,8 @@ describe('host recording settings', () => {
     await settle()
     const body = postedConfig()
     expect(body).not.toBeNull()
-    expect(body).not.toHaveProperty('recording_enabled')
-    expect(body).not.toHaveProperty('recording_replay_buffer')
+    expect(body).toHaveProperty('recording_enabled', null)
+    expect(body).toHaveProperty('recording_replay_buffer', null)
   })
 
   it('opening and editing the tab sends nothing until Save, and never a recorder request', async () => {

@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <array>
 #include <csignal>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <format>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -40,7 +42,10 @@ extern "C" {
   #include <unistd.h>
 #endif
 #ifdef _WIN32
+  #include <io.h>
   #include <iphlpapi.h>
+#else
+  #include <unistd.h>
 #endif
 }
 
@@ -621,8 +626,41 @@ namespace args {
     return 0;
   }
 
+  bool is_interactive_terminal(int fd) {
+#ifdef _WIN32
+    return _isatty(fd) != 0;
+#else
+    return isatty(fd) == 1;
+#endif
+  }
+
+  std::string_view version_constellation() {
+    // Seven stars: the handle runs from Polaris to the corner of the bowl.
+    return R"(
+  (*) Polaris
+    \
+     *
+      \
+       *
+        \
+         *-----*
+         |     |
+         *-----*    Ursa Minor
+)";
+  }
+
   int version() {
     // version was already logged at startup
+#ifdef _WIN32
+    const int out = _fileno(stdout);
+#else
+    const int out = fileno(stdout);
+#endif
+    if (is_interactive_terminal(out)) {
+      // The log line goes first, and it goes through its own sink.
+      logging::log_flush();
+      std::cout << version_constellation() << std::flush;
+    }
     return 0;
   }
 

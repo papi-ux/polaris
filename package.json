@@ -26,11 +26,10 @@
     "tailwindcss": "^4.2.2",
     "uplot": "^1.6.32",
     "vue": "3.5.42",
-    "vue-i18n": "11.1.12",
+    "vue-i18n": "11.4.16",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
-    "@codecov/vite-plugin": "2.0.1",
     "@eslint/js": "10.0.1",
     "@playwright/test": "^1.59.1",
     "@vitejs/plugin-vue": "6.0.1",
@@ -39,9 +38,9 @@
     "eslint-plugin-vue": "10.8.0",
     "globals": "17.5.0",
     "jsdom": "29.0.2",
-    "vite": "^6.4.4",
+    "vite": "^6.4.5",
     "vite-plugin-ejs": "1.8.0",
-    "vitest": "4.1.11",
+    "vitest": "4.1.12",
     "vue-eslint-parser": "10.4.0"
   },
   "overrides": {

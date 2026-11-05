@@ -84,6 +84,19 @@ TEST(ConfigValidationTests, RejectsUnsupportedConfigKeys) {
   EXPECT_NE(error.find("Unsupported config key"), std::string::npos);
 }
 
+TEST(ConfigValidationTests, AcceptsVrrSourcePacingAndStillRejectsUnknownKeys) {
+  for (const auto *value : {"enabled", "disabled"}) {
+    nlohmann::json payload = {{"vrr_source_pacing", value}};
+    std::string error;
+    EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+
+    payload["definitely_not_a_real_config_key"] = "value";
+    error.clear();
+    EXPECT_FALSE(confighttp::validation::validate_config_payload(payload, error));
+    EXPECT_EQ(error, "Unsupported config key: definitely_not_a_real_config_key");
+  }
+}
+
 TEST(ConfigValidationTests, AcceptsAiApiKeyClearForPersistence) {
   nlohmann::json payload = {
     {"ai_api_key", ""},
@@ -332,8 +345,8 @@ TEST(AppValidationTests, RejectsUnexpectedCommandShapes) {
 }
 
 TEST(ConfigValidationTests, PatchMergeKeepsUnmentionedKeysAndDropsEmptiedOnes) {
-  // POST /api/config rewrites the file from its body; a one-key PATCH must
-  // not do that. Found the hard way when a single-key POST truncated a live
+  // Both POST and PATCH preserve unmentioned keys. Found the hard way when
+  // the old single-key POST behavior truncated a live
   // config to two lines.
   const std::unordered_map<std::string, std::string> existing {
     {"port", "47989"},

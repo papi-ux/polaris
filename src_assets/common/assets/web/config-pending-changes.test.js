@@ -110,6 +110,43 @@ function mountConfigView(config = {}, firstResponse = null) {
 }
 
 describe('ConfigView pending changes review', () => {
+  it('posts an explicit null reset when a stored option returns to its default', async () => {
+    const wrapper = mountConfigView({ max_bitrate: 42000 })
+    await flushConfigLoad()
+    wrapper.vm.config.max_bitrate = 0
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true }) })
+    expect(await wrapper.vm.save()).toBe(true)
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body)
+    expect(body).toHaveProperty('max_bitrate', null)
+    expect(body).not.toHaveProperty('adaptive_bitrate_enabled')
+    wrapper.unmount()
+  })
+
+  it('Reset Local Changes restores the stored value without sending a reset', async () => {
+    const wrapper = mountConfigView({ max_bitrate: 42000 })
+    await flushConfigLoad()
+    wrapper.vm.config.max_bitrate = 0
+    wrapper.vm.resetLocalChanges()
+    expect(wrapper.vm.config.max_bitrate).toBe(42000)
+    expect(global.fetch.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps a blank secret placeholder unchanged after saving a replacement', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+    wrapper.vm.config.steamgriddb_api_key = 'test-replacement-key'
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true }) })
+    expect(await wrapper.vm.save()).toBe(true)
+    wrapper.vm.config.steamgriddb_api_key = ''
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true }) })
+    expect(await wrapper.vm.save()).toBe(true)
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body)
+    expect(body).not.toHaveProperty('steamgriddb_api_key')
+    expect(body).not.toHaveProperty('clear_steamgriddb_api_key')
+    wrapper.unmount()
+  })
+
   it.each(['onReady', 'onTimeout'])('refreshes host capabilities only after restart readiness (%s)', async (outcome) => {
     const wrapper = mountConfigView()
     await flushConfigLoad()

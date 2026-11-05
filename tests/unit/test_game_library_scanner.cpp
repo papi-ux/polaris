@@ -4,9 +4,16 @@
 #include <src/game_library_scanner.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <map>
 #include <nlohmann/json.hpp>
+#include <set>
+#include <sstream>
+#include <vector>
 
 namespace {
   std::filesystem::path lutris_test_root(const std::string &name) {
@@ -1087,4 +1094,292 @@ TEST(HeroicRuntimeSnapshotTests, DoesNotBorrowRuntimeFromAnotherHomeOrImportUnin
   EXPECT_EQ(std::get<2>(snapshot.begin()->first), "SameId");
   EXPECT_EQ(snapshot.begin()->second.platform, "windows");
   EXPECT_TRUE(snapshot.begin()->second.runtime.empty());
+}
+
+namespace {
+  constexpr std::uint32_t k_appinfo_v39_magic = 0x07564427;
+  constexpr std::uint32_t k_appinfo_v40_magic = 0x07564428;
+  constexpr std::uint32_t k_appinfo_v41_magic = 0x07564429;
+
+  template<class T>
+  std::string little_endian(T value) {
+    std::string bytes;
+    for (std::size_t i = 0; i < sizeof(T); ++i) {
+      bytes.push_back(static_cast<char>((static_cast<std::uint64_t>(value) >> (8 * i)) & 0xff));
+    }
+    return bytes;
+  }
+
+  /// Writes Steam's binary key/values, with key names inline or in v41's string table.
+  class appinfo_writer_t {
+  public:
+    explicit appinfo_writer_t(std::uint32_t magic): magic_ {magic} {
+    }
+
+    std::string name(const std::string &text) {
+      if (magic_ != k_appinfo_v41_magic) {
+        return text + std::string(1, '\0');
+      }
+      const auto found = std::find(strings_.begin(), strings_.end(), text);
+      const auto index = static_cast<std::uint32_t>(found - strings_.begin());
+      if (found == strings_.end()) {
+        strings_.push_back(text);
+      }
+      return little_endian(index);
+    }
+
+    std::string map(const std::string &key, const std::string &children) {
+      return std::string(1, '\x00') + name(key) + children + std::string(1, '\x08');
+    }
+
+    std::string text(const std::string &key, const std::string &value) {
+      return std::string(1, '\x01') + name(key) + value + std::string(1, '\0');
+    }
+
+    std::string number(const std::string &key, std::int32_t value) {
+      return std::string(1, '\x02') + name(key) + little_endian(value);
+    }
+
+    std::string entry(std::uint32_t appid, const std::string &vdf) {
+      const auto hashes = std::string(20, 'h') + little_endian<std::uint32_t>(1) + (magic_ == k_appinfo_v39_magic ? std::string {} : std::string(20, 'b'));
+      const auto body = little_endian<std::uint32_t>(0) + little_endian<std::uint32_t>(0) + little_endian<std::uint64_t>(0) + hashes + vdf;
+      return little_endian(appid) + little_endian(static_cast<std::uint32_t>(body.size())) + body;
+    }
+
+    std::string file(const std::string &entries) {
+      std::string file = little_endian(magic_) + little_endian<std::uint32_t>(1);
+      if (magic_ != k_appinfo_v41_magic) {
+        return file + entries + little_endian<std::uint32_t>(0);
+      }
+      const auto offset = file.size() + 8 + entries.size() + 4;
+      file += little_endian(static_cast<std::int64_t>(offset)) + entries + little_endian<std::uint32_t>(0);
+      file += little_endian(static_cast<std::uint32_t>(strings_.size()));
+      for (const auto &text : strings_) {
+        file += text + std::string(1, '\0');
+      }
+      return file;
+    }
+
+    /// An app's appinfo with these launch options, as appinfo/config/launch.
+    std::string app(const std::vector<std::string> &options) {
+      std::string launch;
+      for (std::size_t i = 0; i < options.size(); ++i) {
+        launch += map(std::to_string(i), options[i]);
+      }
+      return map("appinfo", number("appid", 1) + map("common", text("name", "A game")) + map("config", text("installdir", "A game") + map("launch", launch)));
+    }
+
+    std::string option(const std::string &executable, const std::string &oslist) {
+      return text("executable", executable) + text("type", "default") + map("config", text("oslist", oslist));
+    }
+
+  private:
+    std::uint32_t magic_;
+    std::vector<std::string> strings_;
+  };
+
+  std::map<std::string, int> counts_of(const std::string &file, const std::set<std::string> &appids) {
+    std::istringstream in {file, std::ios::binary};
+    return game_library::parse_steam_launch_option_counts(in, appids);
+  }
+}  // namespace
+
+class SteamLaunchOptionsTest: public ::testing::TestWithParam<std::uint32_t> {};
+
+// Hades as the device session saw it: DirectX, Vulkan and 32-bit, all on Windows, between other apps.
+TEST_P(SteamLaunchOptionsTest, CountsEveryOptionSteamCanOfferForTheTitlesAskedFor) {
+  appinfo_writer_t writer {GetParam()};
+  const auto hades = writer.app({
+    writer.option("x64/Hades.exe", "windows"),
+    writer.option("x64Vk/Hades.exe", "windows"),
+    writer.option("x86/Hades.exe", "windows"),
+  });
+  const auto one = writer.app({writer.option("Game.exe", "windows")});
+  const auto not_asked = writer.app({writer.option("a", "windows"), writer.option("b", "windows")});
+  const auto file = writer.file(writer.entry(10, not_asked) + writer.entry(1145360, hades) + writer.entry(20, one));
+
+  const auto counts = counts_of(file, {"1145360", "20", "999"});
+  EXPECT_EQ(counts.at("1145360"), 3);
+  EXPECT_EQ(counts.at("20"), 1);
+  // Not asked for, so not parsed, and absent from the file, so unknown rather than zero.
+  EXPECT_FALSE(counts.contains("10"));
+  EXPECT_FALSE(counts.contains("999"));
+}
+
+// Every launch option of Hades (1145360) as a host's appinfo.vdf lists them, with only the fields
+// that decide what Steam offers. On a 64-bit desktop Steam's dialog offered three: SELECT LAUNCH
+// OPTION (3) with DirectX, Vulkan and 32-bit, which are the first, 14th and 15th rows here.
+TEST_P(SteamLaunchOptionsTest, CountsTheThreeOptionsSteamOffersForHades) {
+  struct row_t {
+    const char *description, *oslist, *osarch, *beta, *steam_deck;
+  };
+  const std::vector<row_t> rows {
+    {"Hades (DirectX - Default)", "windows", "64", "", ""},
+    {"32-bit", "windows", "32", "", ""},
+    {"Debug", "windows", "64", "nightly-qa", ""},
+    {"Debug x86", "windows", "", "nightly-qa", ""},
+    {"Debug", "windows", "64", "prev-nightly", ""},
+    {"Debug", "windows", "32", "prev-nightly", ""},
+    {"Release", "windows", "64", "nightly-qa", ""},
+    {"Ship", "windows", "64", "nightly-qa", ""},
+    {"Play Hades", "windows", "64", "techbeta", ""},
+    {"", "macos", "", "", ""},
+    {"Vulkan Debug", "windows", "64", "nightly-qa", ""},
+    {"Vulkan Release", "windows", "64", "nightly-qa", ""},
+    {"Vulkan Ship", "windows", "64", "nightly-qa", ""},
+    {"Hades (Vulkan)", "windows", "64", "", "0"},
+    {"Hades (32-bit)", "windows", "64", "", "0"},
+    {"Hades (Vulkan - Steam Deck)", "windows", "64", "", "1"},
+    {"Hades (Apple Silicon)", "macos", "", "nightly-qa", ""},
+    {"Hades (Intel Mac)", "macos", "", "nightly-qa", ""}
+  };
+  appinfo_writer_t writer {GetParam()};
+  std::vector<std::string> options;
+  for (const auto &row : rows) {
+    auto config = writer.text("oslist", row.oslist);
+    if (*row.osarch) config += writer.text("osarch", row.osarch);
+    if (*row.beta) config += writer.text("BetaKey", row.beta);
+    if (*row.steam_deck) config += writer.text("steamdeck", row.steam_deck);
+    options.push_back(writer.text("description", row.description) + writer.map("config", config));
+  }
+  EXPECT_EQ(rows.size(), 18u);
+  EXPECT_EQ(counts_of(writer.file(writer.entry(1145360, writer.app(options))), {"1145360"}).at("1145360"), 3);
+}
+
+// One build for each kind of system, not a choice for the player.
+TEST_P(SteamLaunchOptionsTest, LeavesOutA32BitBuildAndCountsSteamDecksOwnApart) {
+  appinfo_writer_t writer {GetParam()};
+  const auto bitness = writer.app({
+    writer.map("config", writer.text("oslist", "windows") + writer.text("osarch", "64")),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("osarch", "32")),
+  });
+  const auto per_device = writer.app({
+    writer.map("config", writer.text("oslist", "windows") + writer.text("steamdeck", "0")),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("steamdeck", "1")),
+  });
+  const auto integer_flag = writer.app({
+    writer.map("config", writer.text("oslist", "windows") + writer.number("steamdeck", 0)),
+    writer.map("config", writer.text("oslist", "windows") + writer.number("steamdeck", 1)),
+  });
+  const auto counts = counts_of(writer.file(writer.entry(1, bitness) + writer.entry(2, per_device) + writer.entry(3, integer_flag)), {"1", "2", "3"});
+  EXPECT_EQ(counts.at("1"), 1);
+  EXPECT_EQ(counts.at("2"), 1);
+  EXPECT_EQ(counts.at("3"), 1);
+}
+
+TEST_P(SteamLaunchOptionsTest, ReadsSteamsKeysInWhateverCaseATitleWritesThem) {
+  appinfo_writer_t writer {GetParam()};
+  const auto gated = writer.app({
+    writer.option("Game.exe", "windows"),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("BetaKey", "nightly")),
+    writer.map("config", writer.text("OSList", "macos")),
+    writer.map("config", writer.text("oslist", "windows") + writer.text("OwnsDlc", "12345")),
+  });
+  EXPECT_EQ(counts_of(writer.file(writer.entry(1, gated)), {"1"}).at("1"), 1);
+}
+
+TEST_P(SteamLaunchOptionsTest, LeavesOutOptionsThatNeedABetaOrADlc) {
+  appinfo_writer_t writer {GetParam()};
+  const auto gated = writer.app({
+    writer.option("Game.exe", "windows"),
+    writer.text("executable", "Beta.exe") + writer.map("config", writer.text("oslist", "windows") + writer.text("betakey", "public-beta")),
+    writer.text("executable", "Dlc.exe") + writer.map("config", writer.text("oslist", "windows") + writer.text("ownsdlc", "12345")),
+    writer.text("executable", "Dlc2.exe") + writer.map("config", writer.text("oslist", "windows") + writer.number("ownsdlc", 12345)),
+  });
+  EXPECT_EQ(counts_of(writer.file(writer.entry(1, gated)), {"1"}).at("1"), 1);
+}
+
+TEST_P(SteamLaunchOptionsTest, CountsTheLargerPlatformSetBecauseEitherCanRun) {
+  appinfo_writer_t writer {GetParam()};
+  const auto split = writer.app({writer.option("a.exe", "windows"), writer.option("b.exe", "windows"), writer.option("c", "linux")});
+  const auto both = writer.app({writer.text("executable", "a"), writer.option("b", "linux,windows")});
+  const auto counts = counts_of(writer.file(writer.entry(1, split) + writer.entry(2, both)), {"1", "2"});
+  EXPECT_EQ(counts.at("1"), 2);
+  EXPECT_EQ(counts.at("2"), 2);
+}
+
+TEST_P(SteamLaunchOptionsTest, ReportsNothingForAnEntryItCannotUnderstand) {
+  appinfo_writer_t writer {GetParam()};
+  const auto good = writer.app({writer.option("a", "windows"), writer.option("b", "windows")});
+  // An unknown value type stops that entry; the next one still reads.
+  const auto unknown_type = writer.map("appinfo", std::string(1, '\x7f') + writer.name("mystery"));
+  const auto file = writer.file(writer.entry(1, unknown_type) + writer.entry(2, good));
+  const auto counts = counts_of(file, {"1", "2"});
+  EXPECT_FALSE(counts.contains("1"));
+  EXPECT_EQ(counts.at("2"), 2);
+  // A nested map that never closes is not a complete entry.
+  auto open_ended = writer.app({writer.option("a", "windows")});
+  open_ended.pop_back();
+  open_ended.pop_back();
+  EXPECT_FALSE(counts_of(writer.file(writer.entry(3, open_ended)), {"3"}).contains("3"));
+}
+
+TEST_P(SteamLaunchOptionsTest, StopsAtATruncatedFileWithoutReadingPastIt) {
+  appinfo_writer_t writer {GetParam()};
+  const auto app = writer.app({writer.option("a", "windows"), writer.option("b", "windows")});
+  const auto file = writer.file(writer.entry(1, app));
+  for (std::size_t length = 0; length < 60 && length < file.size(); ++length) {
+    EXPECT_FALSE(counts_of(file.substr(0, length), {"1"}).contains("1")) << length;
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(EachAppinfoVersion, SteamLaunchOptionsTest, ::testing::Values(k_appinfo_v39_magic, k_appinfo_v40_magic, k_appinfo_v41_magic));
+
+TEST(SteamLaunchOptions, RefusesAFileOfAnotherFormat) {
+  EXPECT_TRUE(counts_of("", {"1"}).empty());
+  EXPECT_TRUE(counts_of(little_endian<std::uint32_t>(0x12345678) + little_endian<std::uint32_t>(1) + little_endian<std::uint32_t>(0), {"1"}).empty());
+}
+
+TEST(SteamLaunchOptions, AV41KeyOutsideTheStringTableReportsNothing) {
+  appinfo_writer_t writer {k_appinfo_v41_magic};
+  const auto name_past_the_table = std::string(1, '\x00') + little_endian<std::uint32_t>(9999) + std::string(1, '\x08');
+  EXPECT_FALSE(counts_of(writer.file(writer.entry(1, name_past_the_table)), {"1"}).contains("1"));
+}
+
+#ifndef _WIN32
+TEST(SteamLaunchOptions, ReadsThisHostsFileWithoutChangingItAndNoticesWhenSteamDoes) {
+  const auto home = test_paths::root() / "steam_launch_options_home";
+  std::filesystem::remove_all(home);
+  const auto appcache = home / ".local" / "share" / "Steam" / "appcache";
+  std::filesystem::create_directories(appcache);
+  const auto path = appcache / "appinfo.vdf";
+
+  appinfo_writer_t writer {k_appinfo_v41_magic};
+  const auto hades = writer.file(writer.entry(1145360, writer.app({writer.option("a", "windows"), writer.option("b", "windows"), writer.option("c", "windows")})));
+  std::ofstream(path, std::ios::binary) << hades;
+  // Ahead of any real Steam under the account's own home, which the lookup also reads.
+  const auto newest = std::filesystem::file_time_type::clock::now() + std::chrono::hours(24);
+  std::filesystem::last_write_time(path, newest);
+
+  const char *previous = std::getenv("HOME");
+  const std::string saved_home = previous ? previous : "";
+  ASSERT_EQ(setenv("HOME", home.c_str(), 1), 0);
+
+  EXPECT_EQ(game_library::steam_launch_option_counts({"1145360"}).at("1145360"), 3);
+  EXPECT_TRUE(game_library::steam_launch_option_counts({}).empty());
+  std::ifstream written(path, std::ios::binary);
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(written), {}), hades);
+  EXPECT_EQ(std::filesystem::last_write_time(path), newest);
+
+  // Steam rewriting the file is noticed, and a smaller answer replaces the larger one.
+  appinfo_writer_t rewriter {k_appinfo_v41_magic};
+  std::ofstream(path, std::ios::binary | std::ios::trunc) << rewriter.file(rewriter.entry(1145360, rewriter.app({rewriter.option("a", "windows")})));
+  std::filesystem::last_write_time(path, newest + std::chrono::hours(1));
+  EXPECT_EQ(game_library::steam_launch_option_counts({"1145360"}).at("1145360"), 1);
+
+  if (previous) {
+    setenv("HOME", saved_home.c_str(), 1);
+  } else {
+    unsetenv("HOME");
+  }
+  std::filesystem::remove_all(home);
+}
+#endif
+
+TEST(SteamLaunchOptions, NotesOnlyATitleSteamHasSomethingToAskAbout) {
+  EXPECT_EQ(game_library::steam_launch_choice_note(0), "");
+  EXPECT_EQ(game_library::steam_launch_choice_note(1), "");
+  const auto note = game_library::steam_launch_choice_note(3);
+  EXPECT_NE(note.find("may ask"), std::string::npos);
+  EXPECT_NE(note.find("several launch options"), std::string::npos);
 }

@@ -12,6 +12,14 @@ Without the keep option, Steam started by the stream follows the existing cleanu
 
 Private streams keep their existing lifecycle: Disconnect preserves a resumable session; End Session cleans up the private runtime. Game Mode's Steam remains owned by Game Mode. This setting does not control physical monitor sleep and does not restart Steam after End Session.
 
+## Games with several launch options
+
+Some games list more than one way to start in Steam: Hades offers DirectX, Vulkan and 32-bit. Steam shows **Select launch option** for those games and waits, so the game starts only once someone chooses inside the stream. On a handheld that can mean dragging the cursor to **Play**.
+
+Polaris leaves that choice to Steam. No launch command has been confirmed to skip the dialog, and Polaris never changes your Steam settings. Steam's dialog has its own checkbox to remember your selection, and the game's **Properties** in Steam can change that selection later.
+
+Mission Control and the game's `steam_launch.mode_reason` say **Steam may ask** for a title with more than one launch option. Nova's Play Setup does not show this yet. Polaris reads the options from Steam's `appcache/appinfo.vdf`, without writing to it. It leaves out options that need a beta branch or DLC and builds for 32-bit systems. It cannot see a choice you told Steam to remember, so the note can appear for a game that starts straight away.
+
 ## Nova controls
 
 Nova's selected PC menu and Command Center offer **Steam** on Android and Linux. Open Steam, Open Big Picture, and Quit Steam use the selected paired host. Status is observed from the host. Quit requires an additional confirmation when a game is running. These controls are unavailable for viewers, another client's session, private runtimes, and Game Mode.

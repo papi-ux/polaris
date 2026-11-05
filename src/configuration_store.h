@@ -37,6 +37,9 @@ namespace configuration_store {
   enum class result { committed, conflict, failed };
   result replace(const std::string &path, const std::string &contents,
                  const std::optional<std::string> &expected = std::nullopt);
+  /// Create a private file atomically. A file created concurrently keeps its
+  /// contents and receives the same permission restriction as any other save.
+  result initialize(const std::string &path, const std::string &contents);
   result patch(const std::string &path,
                const std::unordered_map<std::string, std::string> &updates,
                const std::optional<std::string> &expected = std::nullopt);
