@@ -174,7 +174,10 @@ namespace live_tuning_native {
       if (bucket_second_ >= 0 && second != bucket_second_) {
         const bool adjacent = second == bucket_second_ + 1;
         const bool covered = adjacent && bucket_count_ >= 4 && bucket_last_ns_ - bucket_first_ns_ >= gap_ns;
-        const bool initial = phase_ == phase_e::response && response_initial_bucket_;
+        // Only a first bucket whose response began strictly inside its absolute second is a leading partial second.
+        // A response that begins exactly on the boundary has a whole-second first bucket under the original rule.
+        const bool initial = phase_ == phase_e::response && response_initial_bucket_ &&
+          response_started_ns_ % second_ns != 0;
         if (phase_ == phase_e::response) response_initial_bucket_ = false;
         if (initial && adjacent && !covered) {
           // Source behavior correction: the first response bucket starts at the response itself, inside an absolute

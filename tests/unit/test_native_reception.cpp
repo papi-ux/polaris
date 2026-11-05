@@ -1219,6 +1219,41 @@ TEST(NativeDownwardEpisode, TransitionAndBucketNamesAreStaticDistinctIdentifiers
   EXPECT_EQ(dispositions.size(), 7u);
 }
 
+TEST(NativeDownwardEpisode, ResponseStartingExactlyOnASecondBoundaryKeepsTheFourReportMinimum) {
+  // The first D report lands exactly on a steady-second boundary, so the first bucket spans the whole second:
+  // three reports 450 ms apart are a genuine undercount, not a leading partial second, and must still refuse.
+  namespace ltn = live_tuning_native;
+  ltn::episode_t aligned;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(aligned));
+  for (const int ms : {13000, 13450, 13900}) {
+    EXPECT_FALSE(aligned.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(aligned.phase(), ltn::phase_e::response) << ms;
+  }
+  EXPECT_FALSE(aligned.observe(native_d_signal(14350, 3500, 3600)));
+  EXPECT_EQ(aligned.phase(), ltn::phase_e::unassessed);
+  EXPECT_EQ(aligned.diagnostic().reason, ltn::transition_reason_e::bucket_coverage);
+  EXPECT_EQ(aligned.diagnostic().bucket.disposition, ltn::bucket_disposition_e::coverage_short);
+  EXPECT_EQ(aligned.diagnostic().bucket.count, 3u);
+  EXPECT_EQ(aligned.diagnostic().bucket.span_ns, 900'000'000);
+  for (int ms = 14450; ms <= 18050; ms += 100) EXPECT_FALSE(aligned.observe(native_d_signal(ms, 3500, 3600)));
+  EXPECT_EQ(aligned.phase(), ltn::phase_e::unassessed);
+  // One millisecond into the second the same reports cover only the rest of it: that entry keeps the no-credit
+  // discard, and only four later full sub-trigger buckets can respond.
+  ltn::episode_t late;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(late));
+  for (const int ms : {13001, 13451, 13901, 14351}) {
+    EXPECT_FALSE(late.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(late.phase(), ltn::phase_e::response) << ms;
+  }
+  EXPECT_EQ(late.diagnostic().bucket.disposition, ltn::bucket_disposition_e::initial_partial_discarded);
+  for (int ms = 14451; ms < 18000; ms += 100) {
+    EXPECT_FALSE(late.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(late.phase(), ltn::phase_e::response) << ms;
+  }
+  EXPECT_FALSE(late.observe(native_d_signal(18051, 3500, 3600)));
+  EXPECT_EQ(late.phase(), ltn::phase_e::responded);
+}
+
 TEST_F(NativeReception, RecentDifferentFramesKeepBothActualReport35CollisionKeys) {
   // These genuine sender keys collided before the actual trace had sent 6333 datagrams.
   frame(297);frame(298);frame(299);
