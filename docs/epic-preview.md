@@ -55,7 +55,8 @@ The ordered rows distinguish three facts:
 3. **Epic closed: check Private Stream setup** is a current sample, separate from that
    history. With no selected title it says **Epic is closed; choose a game to check its setup**.
    The current host reports prerequisite support as unknown, so a selected game is never
-   labelled ready by this implementation. The checklist cannot confirm sign-in, cloud saves,
+   labelled ready by this implementation. Its Windows setup-folder and runtime checks still
+   run: an unreadable folder, a busy runtime and a sampled absent runtime remain distinct. The checklist cannot confirm sign-in, cloud saves,
    encoder startup or future launch success. **Polaris checks again when you launch.** A
    missing checklist receipt does not add an admission restriction to existing launch paths.
 
@@ -85,7 +86,7 @@ launch or other mutation is automatically retried; browser storage holds no setu
 | Epic changed or updated / retained proof changed | Open the updated launcher on the desktop, rescan, then quit it. An old receipt cannot validate the new file. |
 | Epic still open | Quit it yourself on the host desktop, then **Check again**. Checks never close a program. |
 | Choose a game | Select an official Epic installation in the checklist's picker. This does not alter import staging. |
-| Selected-game support unknown | This host cannot confirm all Private Stream prerequisites. Use Mirror Desktop or rely on the independent actual-launch checks; no ready claim is made. |
+| Selected-game support unknown | Selected-title Windows setup-folder and runtime diagnostics still run. A sampled absent game/runtime is reported separately; this host cannot confirm all Private Stream prerequisites. Use Mirror Desktop or rely on the independent actual-launch checks; no ready claim is made. |
 | Private Stream prerequisites unavailable | Use Mirror Desktop or review the host's explicit labwc Private Stream configuration. |
 | Windows setup folder unknown (N3) | For a first play on this PC, play once in Mirror Desktop, then close the game and Epic. If played before, finish any update and check that the folder is readable. This is not proof the game was never played. |
 | Installation unavailable or changed | Complete the install/update in Epic, rescan and select the current installation again. |

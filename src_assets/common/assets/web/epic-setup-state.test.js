@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { emptyEpicSetup, reduceEpicSetup, epicSetupPresentation } from './epic-setup-state'
 import { epicSample, epicTitle } from './epic-setup-fixtures'
+import { readEpicSetup } from './epic-setup-contract'
 
 const present = facts => epicSetupPresentation(reduceEpicSetup(emptyEpicSetup(), { type: 'sample', facts: epicSample(facts) }))
 describe('Epic setup facts and historical rows', () => {
@@ -36,6 +37,23 @@ describe('Epic setup facts and historical rows', () => {
     const p = present({ selected: epicTitle, runtime: 'absent', prerequisites })
     expect(p.rows[2].status).toBe("Can't check")
     expect(p.summary).not.toContain('ready for Private Stream')
+  })
+  it.each([
+    { runtime: 'unknown', reason: 'windows_setup_unknown', state: 'unknown', text: 'Windows setup folder' },
+    { runtime: 'busy', reason: 'epic_game_already_running', state: 'needs_action', text: 'exact runtime is still running' },
+    { runtime: 'absent', reason: 'private_mode_unavailable', state: 'unknown', text: 'exact runtime were not found at this sample' },
+  ])('surfaces selected $runtime diagnostics through the wire reader with unknown support', ({ text, ...diagnostic }) => {
+    const facts = readEpicSetup(epicSample({ ...diagnostic, selected: epicTitle, prerequisites: 'unknown' }))
+    expect(facts).not.toBeNull()
+    const p = epicSetupPresentation(reduceEpicSetup(emptyEpicSetup(), { type: 'sample', facts }))
+    expect(p.rows[2].message).toContain(text)
+    expect(p.rows[2].status).not.toBe('Complete')
+    expect(p.summary).not.toContain('ready for Private Stream')
+    if (diagnostic.runtime === 'absent') expect(p.message).toContain("can't confirm all Private Stream prerequisites")
+    if (diagnostic.reason === 'windows_setup_unknown') {
+      expect(p.message).toContain('If this is your first play')
+      expect(p.message).toContain("If you've played before")
+    }
   })
   it('requires selected, positively known support for a sampled ready label', () => {
     const p = present({ selected: epicTitle, runtime: 'absent', prerequisites: 'available', state: 'ready', reason: 'ready' })

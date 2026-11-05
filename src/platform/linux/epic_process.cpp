@@ -2437,20 +2437,25 @@ namespace platf::epic {
           out.state = readiness_state_t::launcher_closed;
           out.reason = "choose_game";
         } else {
-          if (prerequisites != prerequisite_state_t::available) {
-            out.state = prerequisites == prerequisite_state_t::unavailable ? readiness_state_t::needs_action : readiness_state_t::unknown;
-            out.reason = "private_mode_unavailable";
-            return out;
-          }
+          // Selected-title diagnostics are independent of prerequisite support. An unknown
+          // capability must not hide an unreadable Windows prefix or an exact busy runtime.
           const auto absent = runtime_absent(*title, reason, *backend);
           if (!absent) {
             out.runtime = runtime_state_t::unknown;
             out.reason = reason;
-            return out;
+          } else {
+            out.runtime = *absent ? runtime_state_t::absent : runtime_state_t::busy;
+            if (!*absent) {
+              out.state = readiness_state_t::needs_action;
+              out.reason = "epic_game_already_running";
+            } else if (prerequisites != prerequisite_state_t::available) {
+              out.state = prerequisites == prerequisite_state_t::unavailable ? readiness_state_t::needs_action : readiness_state_t::unknown;
+              out.reason = "private_mode_unavailable";
+            } else {
+              out.state = readiness_state_t::ready;
+              out.reason = "ready";
+            }
           }
-          out.runtime = *absent ? runtime_state_t::absent : runtime_state_t::busy;
-          out.state = *absent ? readiness_state_t::ready : readiness_state_t::needs_action;
-          out.reason = *absent ? "ready" : "epic_game_already_running";
         }
         // The slow census/runtime reads may have crossed a launcher update or permission change.
         if (!verify_launcher(*proof, reason) || !setup_context_current(*proof)) {

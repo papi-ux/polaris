@@ -8,6 +8,7 @@
 #include <Simple-Web-Server/client_https.hpp>
 #include <atomic>
 #include <thread>
+#include <tuple>
 
 namespace confighttp {
   using setup_server_t = SimpleWeb::Server<SimpleWeb::HTTPS>;
@@ -229,6 +230,37 @@ TEST_F(EpicSetupHttp, BusyUnavailableMetadataAndSuccessfulEmptyScanRemainDistinc
     });
   }
 }
+TEST_F(EpicSetupHttp, SelectedTitleDiagnosticsProjectWithUnknownPrerequisites) {
+  using namespace platf::epic;
+  for (const auto &[runtime, reason, public_reason] : std::vector<std::tuple<runtime_state_t, std::string, std::string>> {
+      {runtime_state_t::unknown, "title_prefix_unavailable", "windows_setup_unknown"},
+      {runtime_state_t::busy, "epic_game_already_running", "epic_game_already_running"},
+      {runtime_state_t::absent, "private_mode_unavailable", "private_mode_unavailable"}}) {
+    reader = [&](const auto &) {
+      ++calls;
+      proc::epic_setup_read_t out;
+      out.supported = true;
+      out.epoch = "selected-epoch";
+      out.metadata_available = true;
+      out.facts.desktop = desktop_state_t::closed;
+      out.facts.proof = proof_state_t::valid;
+      out.facts.runtime = runtime;
+      out.facts.reason = reason;
+      out.facts.state = runtime == runtime_state_t::busy ? readiness_state_t::needs_action : readiness_state_t::unknown;
+      return out;
+    };
+    run([&](auto &client, const auto &) {
+      const auto body = get(client, "?namespace=ns&item_id=item&artifact_id=game", 200, bearer);
+      EXPECT_EQ(body.at("prerequisites"), "unknown");
+      EXPECT_EQ(body.at("reason"), public_reason);
+      EXPECT_EQ(body.at("runtime"), runtime == runtime_state_t::busy ? "busy" : runtime == runtime_state_t::absent ? "absent" : "unknown");
+      EXPECT_NE(body.at("state"), "ready");
+      EXPECT_NE(body.at("selected"), nullptr);
+    });
+  }
+  EXPECT_EQ(calls, 3);
+}
+
 TEST_F(EpicSetupHttp, ReaderExceptionReturnsPrivateGenericUnavailable) {
   reader = [&](const auto &) -> proc::epic_setup_read_t { ++calls; throw std::runtime_error("private path"); };
   run([&](auto &client, const auto &) { EXPECT_EQ(get(client, "", 503, bearer).at("error"), "status_unavailable"); });

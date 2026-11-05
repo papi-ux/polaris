@@ -84,7 +84,7 @@ namespace {
     std::map<fs::path, std::vector<std::string>> listings;
     std::map<std::string, ep::testing::unit_t> units;
     std::vector<std::string> unit_queries;
-    std::set<fs::path> denied_links;
+    std::set<fs::path> denied_links, denied_canonical;
     std::map<fs::path, int> status_errors, directory_errors, absence_probe_errors;
     std::set<fs::path> live_absence_probes;
     std::vector<fs::path> closed_absence_probes;
@@ -442,6 +442,7 @@ namespace {
     }
 
     std::optional<fs::path> canonical(const fs::path &path) override {
+      if (denied_canonical.count(path)) return std::nullopt;
       if (resolved.count(path)) {
         return resolved.at(path);
       }
@@ -2113,6 +2114,62 @@ TEST_F(EpicProcess, SetupWindowsPrefixUnknownIsDistinctFromNativeAndBusyRuntime)
   facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::available, host);
   EXPECT_EQ(facts.runtime, ep::runtime_state_t::absent);
   EXPECT_EQ(facts.state, ep::readiness_state_t::ready) << facts.reason;
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupUnknownPrerequisitesStillDiagnoseMissingAndUnreadableWindowsPrefix) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->pids.clear();
+  const auto title = host->title();
+  const auto prefix = host->identities.at(prefix_path);
+  for (const bool unreadable : {false, true}) {
+    if (unreadable) {
+      host->identities[prefix_path] = prefix;
+      host->denied_canonical.insert(prefix_path); // Present, but canonical inspection is refused.
+    } else host->identities.erase(prefix_path);
+    const auto facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::unknown, host);
+    EXPECT_EQ(facts.runtime, ep::runtime_state_t::unknown);
+    EXPECT_EQ(facts.state, ep::readiness_state_t::unknown);
+    EXPECT_EQ(facts.reason, "title_prefix_unavailable");
+  }
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupUnknownPrerequisitesStillReportBusyRuntime) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->vanish(43); // Keep the fixture's exact game and wineserver running.
+  const auto title = host->title();
+  const auto facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::unknown, host);
+  EXPECT_EQ(facts.desktop, ep::desktop_state_t::closed);
+  EXPECT_EQ(facts.runtime, ep::runtime_state_t::busy);
+  EXPECT_EQ(facts.state, ep::readiness_state_t::needs_action);
+  EXPECT_EQ(facts.reason, "epic_game_already_running");
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, SetupUnknownPrerequisitesReportAbsentRuntimeWithoutReadyForWindowsAndNative) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host);
+  ASSERT_TRUE(proof) << error;
+  host->pids.clear();
+  auto title = host->title();
+  for (const auto *platform : {"Windows", "Linux"}) {
+    title.platform = platform;
+    if (title.platform == "Linux") host->headers[image] = std::string("\177ELF", 4);
+    const auto facts = ep::testing::evaluate_setup(&*proof, &title, true, ep::prerequisite_state_t::unknown, host);
+    EXPECT_EQ(facts.desktop, ep::desktop_state_t::closed);
+    EXPECT_EQ(facts.proof, ep::proof_state_t::valid);
+    EXPECT_EQ(facts.runtime, ep::runtime_state_t::absent);
+    EXPECT_EQ(facts.state, ep::readiness_state_t::unknown);
+    EXPECT_EQ(facts.reason, "private_mode_unavailable");
+  }
   EXPECT_TRUE(host->opened.empty());
   EXPECT_TRUE(host->signals.empty());
 }

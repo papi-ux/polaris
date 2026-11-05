@@ -88,7 +88,9 @@ export function epicSetupPresentation(state) {
           rows[2].status = "Can't check"
           rows[2].message = f.prerequisites === 'unavailable'
             ? 'Private Stream prerequisites are unavailable. Use Mirror Desktop or check the host configuration.'
-            : "Epic is closed. This host can't confirm all Private Stream prerequisites for the selected game."
+            : f.runtime === 'absent'
+              ? "Epic is closed. This game and its exact runtime were not found at this sample. This host can't confirm all Private Stream prerequisites for the selected game."
+              : "Epic is closed. This host can't confirm all Private Stream prerequisites for the selected game."
         }
       } else if (f.desktop === 'unknown' || f.proof === 'unavailable' || f.reason === 'check_unresolved') {
         rows[2].status = "Can't check"
