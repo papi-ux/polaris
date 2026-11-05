@@ -4,6 +4,7 @@
 
 import { streamClientFamilyLabel } from './client-family.js'
 import { judgedVideoFrameLoss } from './diagnostics-export.js'
+import { frameIntervalBasis } from './stream-pacing-readout.js'
 
 export function formatNumber(value, digits = 1) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
@@ -25,6 +26,17 @@ export function formatJudgedLoss(s = {}, t) {
   if (s?.client_family === 'moonlight') return t('troubleshooting.snapshot_loss_not_reported')
   if (s?.network_verdict?.loss_state === 'stale') return t('troubleshooting.snapshot_loss_stale')
   return t('troubleshooting.snapshot_loss_not_judged')
+}
+
+// Frame timing names what its interval error is measured against, as Mission Control's frame-health
+// pill does: the requested interval, or encode handoff against a source-paced stream's own intervals.
+function frameTimingRow(s, t) {
+  const basis = frameIntervalBasis(s)
+  const key = basis === 'fixed_grid' ? 'troubleshooting.snapshot_frame_timing_value' : `troubleshooting.snapshot_frame_timing_value_${basis}`
+  return { label: t('troubleshooting.snapshot_frame_timing'), value: t(key, {
+    age: formatNumber(s.avg_frame_age_ms, 2), error: formatNumber(s.frame_interval_error_ms ?? s.frame_jitter_ms, 2),
+    basis: t(`config.stream_pacing_${basis}`), source: t('config.stream_pacing_source_time'),
+  }) }
 }
 
 // A figure reads "1.87% video frame loss", its absence "video frame loss not judged yet".
@@ -233,7 +245,7 @@ export function buildSessionSnapshotRows(stats, t, { streamDisplay = null, prove
     { label: t('troubleshooting.snapshot_optimization_source'), value: s.optimization_source || t('troubleshooting.snapshot_default_word') },
     { label: t('troubleshooting.snapshot_network'), value: t(lossKey(s, 'troubleshooting.snapshot_network_value'), { latency: formatJudgedRtt(s), loss: formatJudgedLoss(s, t) }) },
     { label: t('troubleshooting.snapshot_frame_delivery'), value: t('troubleshooting.snapshot_frame_delivery_value', { duplicate: formatNumber((s.duplicate_frame_ratio || 0) * 100, 2), dropped: formatNumber((s.dropped_frame_ratio || 0) * 100, 2) }) },
-    { label: t('troubleshooting.snapshot_frame_timing'), value: t('troubleshooting.snapshot_frame_timing_value', { age: formatNumber(s.avg_frame_age_ms, 2), error: formatNumber(s.frame_interval_error_ms ?? s.frame_jitter_ms, 2) }) },
+    frameTimingRow(s, t),
   ]
   const lastWrite = lastWriteRow(t, provenance)
   if (lastWrite) rows.push(lastWrite)
