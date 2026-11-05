@@ -69,13 +69,22 @@ namespace {
         check(client, cookie);
       });
     }
+    void expect_private_headers(const SimpleWeb::CaseInsensitiveMultimap &headers) {
+      const auto cache_control = headers.find("Cache-Control");
+      ASSERT_NE(cache_control, headers.end());
+      EXPECT_EQ(cache_control->second, "private, no-store");
+      const auto content_type = headers.find("Content-Type");
+      ASSERT_NE(content_type, headers.end());
+      EXPECT_EQ(content_type->second, "application/json");
+      const auto content_type_options = headers.find("X-Content-Type-Options");
+      ASSERT_NE(content_type_options, headers.end());
+      EXPECT_EQ(content_type_options->second, "nosniff");
+    }
     json get(client_t &client, const std::string &query, int status,
              const SimpleWeb::CaseInsensitiveMultimap &headers) {
       const auto response = client.request("GET", "/api/epic/setup" + query, "", headers);
       EXPECT_EQ(std::stoi(response->status_code), status);
-      EXPECT_EQ(response->header.at("Cache-Control"), "private, no-store");
-      EXPECT_EQ(response->header.at("Content-Type"), "application/json");
-      EXPECT_EQ(response->header.at("X-Content-Type-Options"), "nosniff");
+      expect_private_headers(response->header);
       return json::parse(response->content.string());
     }
   };
@@ -136,7 +145,9 @@ TEST_F(EpicSetupHttp, ValidatedExactTitleIsPassedWithoutPathsOrClientAuthority) 
   reader = [&](const auto &title) {
     ++calls;
     EXPECT_TRUE(title);
-    if (title) EXPECT_EQ(*title, (epic_library::identity_t {"ns", "item", "game"}));
+    if (title) {
+      EXPECT_EQ(*title, (epic_library::identity_t {"ns", "item", "game"}));
+    }
     return proc::epic_setup_read_t {};
   };
   run([&](auto &client, const auto &) {
