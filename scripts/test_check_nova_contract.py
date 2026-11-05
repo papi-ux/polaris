@@ -14,6 +14,19 @@ spec.loader.exec_module(contract)
 
 
 class NovaContractAudit(unittest.TestCase):
+    def test_web_definitions_read_every_declared_output_and_refuse_missing_output(self):
+        generator = contract.generator_module(Path(__file__).resolve().parent.parent)
+        manifest = {'js_outputs': {'default': {'file': generator.JS},
+                                  'epic_setup': {'file': 'src_assets/common/assets/web/generated/epic.js'}}}
+        files = {generator.JS: "export const SHARED = Object.freeze({ VALUE: 'value', })",
+                 manifest['js_outputs']['epic_setup']['file']:
+                     "export const EPIC = Object.freeze({ SCAN: 'scan', })"}
+        self.assertEqual(contract.web_definitions(generator, manifest, files.__getitem__),
+                         {'SHARED.VALUE': 'value', 'EPIC.SCAN': 'scan'})
+        del files[manifest['js_outputs']['epic_setup']['file']]
+        with self.assertRaises(KeyError):
+            contract.web_definitions(generator, manifest, files.__getitem__)
+
     def test_javascript_optional_brackets_still_require_the_declared_receiver(self):
         reader = {'function': 'selected', 'receiver': 'pyrowave', 'style': 'javascript',
                   'reads': ['starved']}

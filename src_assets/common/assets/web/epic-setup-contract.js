@@ -1,5 +1,5 @@
 // Used only by the lazy Epic setup surface. Unknown hosts/facts confer no readiness.
-import { EPIC_SETUP_STATUS, EPIC_SETUP_TITLE, EPIC_SETUP_SCAN, EPIC_SETUP_SCAN_ENVELOPE, EPIC_SETUP_ERROR } from './generated/polarisV1Contract'
+import { EPIC_SETUP_STATUS, EPIC_SETUP_TITLE, EPIC_SETUP_SCAN, EPIC_SETUP_SCAN_ENVELOPE, EPIC_SETUP_ERROR } from './generated/polarisV1EpicSetupContract'
 
 export const setupEnums = {
   desktop: ['not_checked', 'open', 'closed', 'unknown'],

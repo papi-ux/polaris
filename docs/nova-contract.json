@@ -14,9 +14,21 @@
     "Drift found when this manifest was introduced, on 2026-08-06, is recorded under",
     "known_drift so it is tracked rather than rediscovered.",
     "",
-    "Schema format 2 is additive: ordered fields and legacy nova_reader entries remain. Only generated:true objects use generated names in S1a; wire object versions are unchanged."
+    "Schema format 2 is additive: ordered fields and legacy nova_reader entries remain. Only generated:true objects use generated names in S1a; wire object versions are unchanged.",
+    "js_outputs declares generated browser modules by name; an object defaults to default and may select js_output. Output paths stay under web/generated. Restricted outputs list their only allowed direct importers; other feature code uses those audited readers. Splitting outputs keeps lazy feature keys out of the initial shared module."
   ],
   "version": 2,
+  "js_outputs": {
+    "default": {
+      "file": "src_assets/common/assets/web/generated/polarisV1Contract.js"
+    },
+    "epic_setup": {
+      "file": "src_assets/common/assets/web/generated/polarisV1EpicSetupContract.js",
+      "importers": [
+        "src_assets/common/assets/web/epic-setup-contract.js"
+      ]
+    }
+  },
   "objects": {
     "video_queue": {
       "$comment": [
@@ -4076,7 +4088,8 @@
           "launcher_changed",
           "unsupported"
         ]
-      }
+      },
+      "js_output": "epic_setup"
     },
     "epic_setup_title": {
       "$comment": [
@@ -4116,7 +4129,8 @@
             "artifact_id"
           ]
         }
-      }
+      },
+      "js_output": "epic_setup"
     },
     "epic_setup_scan": {
       "$comment": [
@@ -4187,7 +4201,8 @@
           "session_busy",
           "unsupported"
         ]
-      }
+      },
+      "js_output": "epic_setup"
     },
     "epic_setup_scan_envelope": {
       "$comment": [
@@ -4219,7 +4234,8 @@
             "epic_setup"
           ]
         }
-      }
+      },
+      "js_output": "epic_setup"
     },
     "epic_setup_error": {
       "$comment": [
@@ -4266,7 +4282,8 @@
           "invalid_selection",
           "status_unavailable"
         ]
-      }
+      },
+      "js_output": "epic_setup"
     }
   },
   "known_drift": {

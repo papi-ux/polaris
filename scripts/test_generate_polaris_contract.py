@@ -71,6 +71,65 @@ class ContractGeneratorTests(unittest.TestCase):
         self.assertEqual(self.invoke('--check')[0], 1)
         self.assertEqual(target.read_bytes(), before)
 
+    def feature_output(self):
+        feature = 'src_assets/common/assets/web/generated/feature.js'
+        reader = 'src_assets/common/assets/web/epic-setup-contract.js'
+        self.schema['js_outputs'] = {'default': {'file': generator.JS},
+                                     'epic_setup': {'file': feature, 'importers': [reader]}}
+        obj = self.schema['objects']['sample']
+        obj['js_output'] = 'epic_setup'
+        obj['consumers'] = {'polaris_web': {'file': reader, 'reads': ['value']}}
+        self.write(reader, "import { SAMPLE } from './generated/feature'\n")
+        self.store_schema()
+        return feature, reader
+
+    def test_every_declared_output_is_checked_even_when_empty_missing_or_stale(self):
+        feature, _ = self.feature_output()
+        self.assertEqual(self.invoke()[0], 0)
+        for path in (generator.CPP, generator.JS, feature):
+            with self.subTest(path=path):
+                target = self.root / path
+                original = target.read_bytes()
+                target.unlink()
+                code, output = self.invoke('--check')
+                self.assertEqual(code, 1)
+                self.assertIn('stale generated output: ' + path, output)
+                self.assertFalse(target.exists())
+                target.write_bytes(original + b'// stale\n')
+                self.assertEqual(self.invoke('--check')[0], 1)
+                self.assertEqual(target.read_bytes(), original + b'// stale\n')
+                target.write_bytes(original)
+        self.assertEqual(self.invoke('--check')[0], 0)
+
+    def test_import_audit_refuses_feature_imports_outside_boundary_and_wrong_key_source(self):
+        _, reader = self.feature_output()
+        generator.audit_js_imports(self.root, self.schema)
+        outside = 'src_assets/common/assets/web/views/AppsView.vue'
+        for statement in ("import { SAMPLE } from '../generated/feature'",
+                          "export { SAMPLE } from '../generated/feature.js'",
+                          "const keys = import('../generated/feature')",
+                          "const keys = require('../generated/feature.js')",
+                          "import {\n SAMPLE as keys\n} from '../generated/feature'"):
+            with self.subTest(statement=statement):
+                self.write(outside, statement)
+                with self.assertRaisesRegex(ValueError, 'outside feature boundary'):
+                    generator.audit_js_imports(self.root, self.schema)
+        (self.root / outside).unlink()
+        self.write(reader, "import { SAMPLE as keys } from './generated/polarisV1Contract'\n")
+        with self.assertRaisesRegex(ValueError, 'wrong output'):
+            generator.audit_js_imports(self.root, self.schema)
+
+    def test_output_declarations_refuse_unknown_unsafe_duplicate_or_changed_default(self):
+        self.feature_output()
+        for mutation in ('unknown', 'unsafe', 'duplicate', 'default'):
+            changed = copy.deepcopy(self.schema)
+            if mutation == 'unknown': changed['objects']['sample']['js_output'] = 'missing'
+            if mutation == 'unsafe': changed['js_outputs']['epic_setup']['file'] = '../feature.js'
+            if mutation == 'duplicate': changed['js_outputs']['epic_setup']['file'] = generator.JS
+            if mutation == 'default': changed['js_outputs']['default']['file'] = 'other.js'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                generator.validate(changed)
+
     def test_identifiers_keywords_duplicate_members_and_constant_collisions_refuse(self):
         for fields in (['BadName'], ['while'], ['value', 'value']):
             with self.subTest(fields=fields):
@@ -94,10 +153,22 @@ class ContractGeneratorTests(unittest.TestCase):
         generator.audit_emitters(ROOT, schema, definitions)
         self.assertNotIn(b'::space_launch_mode {', outputs[generator.CPP])
         self.assertNotIn(b'LIVE_TUNING', outputs[generator.JS])
-        self.assertEqual(set(re.findall(rb'export const (\w+)', outputs[generator.JS])),
-                         {b'SPACES_CAPACITY', b'HOST_POWER', b'SESSION_ENCODER_SELECTION', b'LINUX_GPU_PROFILE',
-                          b'PYROWAVE_BITRATE', b'EPIC_SETUP_STATUS', b'EPIC_SETUP_TITLE', b'EPIC_SETUP_SCAN',
-                          b'EPIC_SETUP_SCAN_ENVELOPE', b'EPIC_SETUP_ERROR'})
+        # W29: one output / 10 exports. Split deliberately: default 5, Epic 5.
+        expected = {
+            generator.JS: {b'SPACES_CAPACITY', b'HOST_POWER', b'SESSION_ENCODER_SELECTION',
+                           b'LINUX_GPU_PROFILE', b'PYROWAVE_BITRATE'},
+            'src_assets/common/assets/web/generated/polarisV1EpicSetupContract.js':
+                {b'EPIC_SETUP_STATUS', b'EPIC_SETUP_TITLE', b'EPIC_SETUP_SCAN',
+                 b'EPIC_SETUP_SCAN_ENVELOPE', b'EPIC_SETUP_ERROR'},
+        }
+        self.assertEqual(set(outputs), {generator.CPP, *expected})
+        for path, exports in expected.items():
+            self.assertEqual(set(re.findall(rb'export const (\w+)', outputs[path])), exports)
+            self.assertEqual(len(re.findall(rb"^  [A-Z_]+: '", outputs[path], re.M)),
+                             44 if path == generator.JS else 27)
+        self.assertEqual(hashlib.sha256(outputs[generator.JS].split(b'\n', 3)[3]).hexdigest(),
+                         '6c1d6f3108f35ca3f4398153e32bd77aea270a8e7cb002a9cdfed8f992fb83c1')
+        generator.audit_js_imports(ROOT, schema)
         for reader in schema['objects']['spaces_capacity']['consumers']['polaris_web']:
             source = (ROOT / reader['file']).read_text()
             self.assertIn('import { SPACES_CAPACITY }', source)

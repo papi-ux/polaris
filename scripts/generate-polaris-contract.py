@@ -76,10 +76,35 @@ def owner_name(schema: dict, name: str, field: str | None = None) -> str:
         name = parent
 
 
+def js_outputs(schema: dict) -> dict:
+    outputs = schema.get('js_outputs', {'default': {'file': JS}})
+    if not isinstance(outputs, dict) or outputs.get('default') != {'file': JS}:
+        raise ValueError('default JS output must retain its existing path')
+    paths = set()
+    for name, declaration in outputs.items():
+        if not IDENTIFIER.fullmatch(name):
+            raise ValueError('invalid JS output name: ' + name)
+        path = declaration['file']
+        if (not isinstance(path, str) or not path.startswith(str(Path(JS).parent) + '/') or
+                not path.endswith('.js') or '..' in Path(path).parts or path in paths):
+            raise ValueError('invalid/duplicate JS output path: ' + str(path))
+        paths.add(path)
+        if 'importers' in declaration:
+            allowed = declaration['importers']
+            if not isinstance(allowed, list) or not allowed or len(set(allowed)) != len(allowed):
+                raise ValueError('restricted JS output needs distinct importers: ' + name)
+            if any(not p.startswith('src_assets/common/assets/web/') or '..' in Path(p).parts for p in allowed):
+                raise ValueError('invalid JS output importer: ' + name)
+    return outputs
+
+
 def validate(schema: dict) -> None:
     if schema.get('version') != 2 or not isinstance(schema.get('objects'), dict):
         raise ValueError('generator requires additive schema format 2')
+    outputs = js_outputs(schema)
     for name, obj in schema['objects'].items():
+        if obj.get('js_output', 'default') not in outputs:
+            raise ValueError('undeclared JS output: ' + name)
         if not IDENTIFIER.fullmatch(name) or name in CPP_KEYWORDS:
             raise ValueError('invalid/reserved object name: ' + name)
         fields = obj['fields']
@@ -242,7 +267,8 @@ def render(schema: dict, schema_bytes: bytes, generator_bytes: bytes) -> dict[st
                   '// schema-sha256: ' + hashlib.sha256(schema_bytes).hexdigest() + '\n'
                   '// generator-sha256: ' + hashlib.sha256(generator_bytes).hexdigest() + '\n')
     cpp = [provenance, '#pragma once\n\n']
-    js = [provenance]
+    declarations = js_outputs(schema)
+    js = {name: [provenance] for name in declarations}
     exports = set()
     for name, obj in schema['objects'].items():
         if not obj.get('generated'):
@@ -259,12 +285,50 @@ def render(schema: dict, schema_bytes: bytes, generator_bytes: bytes) -> dict[st
             if export in exports:
                 raise ValueError('JS constant collision: ' + export)
             exports.add(export)
-            js.append('export const ' + export + ' = Object.freeze({\n')
+            target = js[obj.get('js_output', 'default')]
+            target.append('export const ' + export + ' = Object.freeze({\n')
             for field in obj['fields']:
                 if field in reads:
-                    js.append(f"  {field.upper()}: '{field}',\n")
-            js.append('})\n')
-    return {CPP: ''.join(cpp).encode(), JS: ''.join(js).encode()}
+                    target.append(f"  {field.upper()}: '{field}',\n")
+            target.append('})\n')
+    return {CPP: ''.join(cpp).encode(), **{declarations[name]['file']: ''.join(parts).encode() for name, parts in js.items()}}
+
+
+def audit_js_imports(root: Path, schema: dict) -> None:
+    """Guard restricted lazy outputs and prevent keys being read from another output.
+
+    Cover static imports/re-exports and literal dynamic imports/require, including
+    extensionless relative paths. Keys and allowed direct readers come from the manifest.
+    """
+    declarations = js_outputs(schema)
+    targets = {(root / d['file']).resolve(): d for d in declarations.values()}
+    owners = {name.upper(): (root / declarations[obj.get('js_output', 'default')]['file']).resolve()
+              for name, obj in schema['objects'].items()
+              if any(kind == 'polaris_web' and reader['reads'] for kind, reader in consumers(obj))}
+    imports = re.compile(r"(?:\b(?:import|export)\s+(?P<bindings>[^;]*?)\s+from\s*|"
+                         r"\bimport\s*|\b(?:import|require)\s*\(\s*)['\"](?P<path>[^'\"]+)['\"]")
+    web = root / 'src_assets/common/assets/web'
+    for source in sorted(web.rglob('*')):
+        if source.suffix not in ('.js', '.vue') or source.resolve() in targets:
+            continue
+        # Comments are not dependencies. Preserve quoted module specifiers.
+        code = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', '', source.read_text())
+        for match in imports.finditer(code):
+            specifier = match['path']
+            if not specifier.startswith('.'):
+                continue
+            target = (source.parent / specifier).resolve()
+            if not target.suffix:
+                target = target.with_suffix('.js')
+            if target not in targets:
+                continue
+            declaration = targets[target]
+            relative = source.relative_to(root).as_posix()
+            if 'importers' in declaration and relative not in declaration['importers']:
+                raise ValueError('restricted JS output imported outside feature boundary: ' + relative)
+            for binding in re.findall(r'\b[A-Z][A-Z0-9_]*\b', match['bindings'] or ''):
+                if binding in owners and owners[binding] != target:
+                    raise ValueError('JS key imported from wrong output: ' + binding + ' at ' + relative)
 
 
 def write_or_check(root: Path, outputs: dict[str, bytes], check: bool) -> bool:
@@ -295,6 +359,7 @@ def main(argv=None) -> int:
         outputs = render(schema, raw, Path(__file__).read_bytes())
         # Resolve actual key tokens against definitions that --check byte-compares below.
         audit_emitters(args.root, schema, generated_values(outputs[CPP].decode()))
+        audit_js_imports(args.root, schema)
         if not write_or_check(args.root, outputs, args.check):
             return 1
     except (OSError, ValueError, KeyError, TypeError) as error:
