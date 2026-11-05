@@ -90,7 +90,10 @@ devices, the last session, the mode new sessions start in, the GPU and Live Tuni
 it on the stage without starting anything; **Launch** on the poster, shown when you point at it
 or move to it with the keyboard and always on a touch screen, starts that title. **Library**
 opens the full library. **Host vitals** shows GPU temperature, load, encoder load, and VRAM as
-gauges; a gauge without data is not drawn rather than showing a placeholder. The host's route,
+gauges; a gauge without data is not drawn rather than showing a placeholder. When the host's
+encoder check could not start NVENC and selected the CPU encoder, a note under Host vitals says
+so, with what to check; see
+[VAAPI or software encode fallback](troubleshooting.md#vaapi-or-software-encode-fallback). The host's route,
 with its displays, audio and paired devices, is in **Diagnostics**.
 
 ## Stage artwork

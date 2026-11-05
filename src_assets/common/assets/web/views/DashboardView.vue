@@ -303,6 +303,13 @@
                 Troubleshoot
               </router-link>
             </div>
+            <div v-if="encoderFallback" class="dashboard-degraded-state" data-dashboard-encoder-fallback>
+              <div class="min-w-0">
+                <div class="text-sm font-semibold text-warning-bright">{{ encoderFallback.title }}</div>
+                <div class="mt-1 text-sm leading-relaxed text-support">{{ encoderFallback.action }}</div>
+              </div>
+              <router-link to="/troubleshooting" class="focus-ring dashboard-degraded-action">{{ $t('navbar.troubleshoot') }}</router-link>
+            </div>
           </template>
 
           <!-- One disclosure for the dense detail; opening it is the viewer's choice and survives updates. -->
@@ -362,6 +369,7 @@
                   <div v-for="row in gpuRows" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ row.value }}</dd></div>
                 </dl>
                 <p v-else class="text-sm text-support">Host telemetry is warming up. GPU temperature, encoder load, and VRAM gauges will appear after the host reports system stats.</p>
+                <p v-if="encoderFallback" class="mt-2 text-sm text-warning-bright" data-dashboard-encoder-fallback>{{ encoderFallback.title }} {{ encoderFallback.action }}</p>
               </section>
 
               <section v-if="stageMode === 'idle' || stageMode === 'spaces' || stageMode === 'unavailable'" class="mc-diag-wide min-w-0">
@@ -511,6 +519,7 @@ import { frameIntervalReadout } from '../stream-pacing-readout.js'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { doctorIsWaitingForStream } from '../doctor-observation.js'
+import { nvencCpuFallbackNotice } from '../encoder-fallback-notice.js'
 import { buildReadyCheckDisplay, isIdleVirtualDisplayCheck } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import { readConfigOrNull } from '../config-cache.js'
@@ -1740,6 +1749,9 @@ const stageMode = computed(() => missionStageMode({
   streaming: Boolean(stats.value?.streaming),
   spacesActive: dashboardSpaces.value.hasActivity,
 }))
+// The host's completed encoder probe, from a current report only: the unavailable stage shows no old values.
+const encoderFallback = computed(() => (stageMode.value === 'idle' || stageMode.value === 'live')
+  ? nvencCpuFallbackNotice(doctor.value?.advanced_evidence?.encoder_selection, t) : null)
 
 // ── Director greeting ──
 const activeTheme = ref(typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') || 'polaris' : 'polaris')

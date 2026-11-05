@@ -165,9 +165,9 @@ class ContractGeneratorTests(unittest.TestCase):
         for path, exports in expected.items():
             self.assertEqual(set(re.findall(rb'export const (\w+)', outputs[path])), exports)
             self.assertEqual(len(re.findall(rb"^  [A-Z_]+: '", outputs[path], re.M)),
-                             44 if path == generator.JS else 27)
+                             45 if path == generator.JS else 27)
         self.assertEqual(hashlib.sha256(outputs[generator.JS].split(b'\n', 3)[3]).hexdigest(),
-                         '6c1d6f3108f35ca3f4398153e32bd77aea270a8e7cb002a9cdfed8f992fb83c1')
+                         '97c4501e6fdb07e1bff21fd7d417cab4ae76bc57f51d7b866d4349bc8e372443')
         generator.audit_js_imports(ROOT, schema)
         for reader in schema['objects']['spaces_capacity']['consumers']['polaris_web']:
             source = (ROOT / reader['file']).read_text()

@@ -141,7 +141,7 @@ describe('cross-cutting accessibility and mobile polish', () => {
     expect(doctor).toContain('<section class="page-header troubleshooting-page-header">')
     // Card titles and their status badges share a row until enlarged text needs
     // both lines; then the badge drops below instead of pushing out of the card.
-    expect(doctor.match(/<div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">/g)).toHaveLength(10)
+    expect(doctor.match(/<div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">/g)).toHaveLength(11)
     expect(doctor).not.toContain('<div class="flex items-center justify-between gap-3">')
     expect(rule('.troubleshooting-card-header > *')).toMatch(/max-width:\s*100%/)
     // Self-test columns are sized in text units: three at desktop sizes, one when

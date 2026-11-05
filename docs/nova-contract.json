@@ -2222,21 +2222,35 @@
             "selected_encoder"
           ]
         },
-        "polaris_web": {
-          "file": "src_assets/common/assets/web/views/TroubleshootingView.vue",
-          "style": "javascript",
-          "scope_start": "const doctorAdvancedItems = computed(() => {",
-          "scope_end": "const networkPathReport = computed(",
-          "receiver": "encoderSelection",
-          "reads": [
-            "gpu_driver",
-            "policy",
-            "preferred_encoder",
-            "fallback_encoder",
-            "fallback_used",
-            "reason"
-          ]
-        }
+        "polaris_web": [
+          {
+            "file": "src_assets/common/assets/web/views/TroubleshootingView.vue",
+            "style": "javascript",
+            "scope_start": "const doctorAdvancedItems = computed(() => {",
+            "scope_end": "const networkPathReport = computed(",
+            "receiver": "encoderSelection",
+            "reads": [
+              "gpu_driver",
+              "policy",
+              "preferred_encoder",
+              "fallback_encoder",
+              "fallback_used",
+              "reason"
+            ]
+          },
+          {
+            "file": "src_assets/common/assets/web/encoder-fallback-notice.js",
+            "function": "nvencCpuFallbackNotice",
+            "receiver": "selection",
+            "style": "javascript",
+            "reads": [
+              "fallback_used",
+              "preferred_encoder",
+              "selected_encoder",
+              "reason"
+            ]
+          }
+        ]
       }
     },
     "linux_gpu_profile": {
