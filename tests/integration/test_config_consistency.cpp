@@ -49,7 +49,7 @@ protected:
     std::set<std::string, std::less<>> options;
     std::string content = file_handler::read_file("src/config.cpp");
 
-    // Regex patterns to match different config option types in config.cpp
+    // Match parser helpers and custom parsers that look up a literal key directly.
     const std::vector patterns = {
       std::regex(R"DELIM((?:string_f|path_f|string_restricted_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM((?:int_f|int_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
@@ -57,7 +57,8 @@ protected:
       std::regex(R"DELIM((?:double_f|double_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM(generic_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
       std::regex(R"DELIM(list_prep_cmd_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM(map_int_int_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM")
+      std::regex(R"DELIM(map_int_int_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
+      std::regex(R"DELIM(vars\.find\s*\(\s*"([^"]+)")DELIM")
     };
 
     for (const auto &pattern : patterns) {
@@ -456,6 +457,13 @@ protected:
   }
 };
 
+TEST_F(ConfigConsistencyTest, CollectsCustomParserOptions) {
+  const auto cppOptions = extractConfigCppOptions();
+
+  EXPECT_TRUE(cppOptions.contains("vrr_source_pacing"));
+  EXPECT_TRUE(cppOptions.contains("flags"));
+}
+
 TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   const auto cppOptions = extractConfigCppOptions();
   const auto htmlOptions = extractConfigHtmlOptions();
@@ -518,9 +526,9 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsAreAcceptedByTheConfigApi) {
   // options the user did mean to change.
   std::vector<std::string> rejected;
   for (const auto &option : cppOptions) {
-    if (confighttp::validation::is_local_config_key(option)) {
-      // A dedicated setup transaction owns controller activation and paths.
-      // These cannot be changed or cleared through a generic settings save.
+    if (option == "flags" || confighttp::validation::is_local_config_key(option)) {
+      // Internal flags and controller activation/paths stay outside generic saves;
+      // a dedicated setup transaction owns the controller settings.
       EXPECT_FALSE(allowedKeys.contains(option)) << option;
     } else if (!allowedKeys.contains(option)) {
       rejected.push_back(option);

@@ -84,6 +84,19 @@ TEST(ConfigValidationTests, RejectsUnsupportedConfigKeys) {
   EXPECT_NE(error.find("Unsupported config key"), std::string::npos);
 }
 
+TEST(ConfigValidationTests, AcceptsVrrSourcePacingAndStillRejectsUnknownKeys) {
+  for (const auto *value : {"enabled", "disabled"}) {
+    nlohmann::json payload = {{"vrr_source_pacing", value}};
+    std::string error;
+    EXPECT_TRUE(confighttp::validation::validate_config_payload(payload, error)) << error;
+
+    payload["definitely_not_a_real_config_key"] = "value";
+    error.clear();
+    EXPECT_FALSE(confighttp::validation::validate_config_payload(payload, error));
+    EXPECT_EQ(error, "Unsupported config key: definitely_not_a_real_config_key");
+  }
+}
+
 TEST(ConfigValidationTests, AcceptsAiApiKeyClearForPersistence) {
   nlohmann::json payload = {
     {"ai_api_key", ""},
