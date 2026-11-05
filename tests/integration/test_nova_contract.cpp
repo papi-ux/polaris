@@ -561,7 +561,7 @@ TEST(NovaContractTests, EveryObjectNamesTheFunctionScopingItsNovaReads) {
 TEST(NovaContractTests, FormatTwoKeepsSubsetAndRequiredNullablePresenceExplicit) {
   const auto contract = manifest();
   EXPECT_EQ(contract.at("version"), 2);
-  EXPECT_EQ(contract.at("objects").size(), 46);
+  EXPECT_EQ(contract.at("objects").size(), 48);
   const auto &space = contract.at("objects").at("space_launch_mode");
   const auto &parent = contract.at("objects").at(space.at("subset_of").get<std::string>());
   std::set<std::string> served, omitted, parent_fields;
@@ -581,4 +581,52 @@ TEST(NovaContractTests, FormatTwoKeepsSubsetAndRequiredNullablePresenceExplicit)
     const auto required = units.at("required_present");
     EXPECT_NE(std::find(required.begin(), required.end(), field), required.end());
   }
+}
+
+TEST(NovaContractTests, SessionStatusServesTheRequestersVrrWhateverDoctorsState) {
+  // Nova reads session/status vrr as its own stream's record, so the statement that serves it sits
+  // directly in the handler's body, under no Doctor, streaming or role condition, and before Doctor
+  // is asked at all. The handler serializes that record once, for the requester's generation, and
+  // hands the one value both to the response and to Doctor v2: a second serialization would read the
+  // clock and the host adaptive-sync observation again and could contradict the first.
+  const auto source = read_source_file("src/nvhttp.cpp");
+  const auto status = source.find("auto polarisSessionStatus = [");
+  ASSERT_NE(status, std::string::npos);
+  const auto status_end = source.find("auto polarisStreamPolicy = [", status);
+  ASSERT_NE(status_end, std::string::npos);
+  const auto handler = source.substr(status, status_end - status);
+  const auto computed = handler.find("const auto requester_vrr = stream_stats::vrr_json(stats, requester_generation);");
+  ASSERT_NE(computed, std::string::npos);
+  EXPECT_EQ(brace_depth(handler, 0, computed), 1);
+  const auto served = handler.find("write_requester_vrr(output, requester_vrr);", computed);
+  ASSERT_NE(served, std::string::npos);
+  EXPECT_EQ(brace_depth(handler, 0, served), 1);
+  const auto doctor_evidence = handler.find("doctor_v2_host_evidence_json(stats, stream_display_mode, requester_vrr)", served);
+  ASSERT_NE(doctor_evidence, std::string::npos);
+  const auto doctor = handler.find("doctor_v2::status(");
+  ASSERT_NE(doctor, std::string::npos);
+  EXPECT_LT(served, doctor);
+  EXPECT_LT(doctor_evidence, doctor);
+  std::size_t serializations = 0;
+  for (auto at = handler.find("vrr_json("); at != std::string::npos; at = handler.find("vrr_json(", at + 1)) {
+    ++serializations;
+  }
+  EXPECT_EQ(serializations, 1u) << "session/status serializes the requester's VRR record once";
+
+  // Neither reader serializes the record again; each takes the handler's value as it is.
+  const auto helper = function_body(source, "write_requester_vrr");
+  ASSERT_FALSE(helper.empty());
+  EXPECT_NE(helper.find("output[\"vrr\"] = requester_vrr;"), std::string::npos) << helper;
+  for (const auto *forbidden : {"vrr_json(", "doctor", "streaming", "client_role", "owned_by_client"}) {
+    EXPECT_EQ(helper.find(forbidden), std::string::npos) << forbidden << " in " << helper;
+  }
+  const auto evidence = function_body(source, "doctor_v2_host_evidence_json");
+  ASSERT_FALSE(evidence.empty());
+  EXPECT_NE(evidence.find("evidence[\"vrr\"] = requester_vrr;"), std::string::npos) << evidence;
+  EXPECT_EQ(evidence.find("vrr_json("), std::string::npos) << evidence;
+  // The explanation route keeps building its own Doctor from one serialization of the same
+  // requester's record.
+  EXPECT_NE(source.find("doctor_v2_host_evidence_json(stats, stream_display_mode, "
+                        "stream_stats::vrr_json(stats, requester_generation))"),
+            std::string::npos);
 }

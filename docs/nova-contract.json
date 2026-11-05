@@ -4764,6 +4764,264 @@
         ]
       },
       "js_output": "epic_setup"
+    },
+    "session_vrr": {
+      "$comment": [
+        "The optional vrr object of GET /polaris/v1/session/status: the variable-refresh record of the",
+        "asking client's own stream, stream_stats::vrr_json for the generation that response names as",
+        "session_generation. It is served whether Doctor v2 is enabled, still collecting or off, and is",
+        "absent when that stream has no record or the client has no live stream here: another client's,",
+        "a Watch row's or an ended session's record never stands in for it, and nothing is defaulted.",
+        "A Watch stream's own record says so itself (fallback_reason watch_or_input_only). schema is 1.",
+        "requested is the admitted request (true, false, malformed or absent) and requested_from launch",
+        "or resume, both frozen for the generation. host_permission is the host's frozen permission to",
+        "source-pace this stream, not proof that it does. effective is true only for a host source-time",
+        "sample at most 2 seconds old on a stream that has not ended; fallback_reason is null exactly",
+        "then. pacing_mode is fixed_grid, source_time_pending, unverified or source_time; capture_pacing",
+        "is unknown unless the host's own receipt proves source_driven. host_pacing appears once the",
+        "host has permission and has recorded a pacing receipt for the stream; host_adaptive_sync is",
+        "null without accepted capture timing. None of this is receiver presentation or physical",
+        "acceptance. clients[].vrr and last_session.vrr of the stream statistics share this shape and",
+        "emitter but carry stream_instance_id instead of session_generation. Readers are declared ahead",
+        "of their Nova implementations (papi-ux/nova#241 Linux, #242 Android); the paired",
+        "check-nova-contract.py reports them unavailable until those readers land."
+      ],
+      "fields": [
+        "capture_pacing",
+        "effective",
+        "fallback_reason",
+        "host_adaptive_sync",
+        "host_pacing",
+        "host_permission",
+        "pacing_mode",
+        "requested",
+        "requested_from",
+        "schema",
+        "session_generation"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/stream_stats.cpp",
+          "function": "vrr_record_json",
+          "declaration": "nlohmann::json j {",
+          "style": "initializer_list",
+          "fields": [
+            "capture_pacing",
+            "effective",
+            "fallback_reason",
+            "host_permission",
+            "pacing_mode",
+            "requested",
+            "requested_from",
+            "schema"
+          ]
+        },
+        {
+          "file": "src/stream_stats.cpp",
+          "function": "vrr_record_json",
+          "style": "subscript",
+          "variable": "j",
+          "fields": [
+            "capture_pacing",
+            "effective",
+            "fallback_reason",
+            "host_pacing",
+            "pacing_mode"
+          ]
+        },
+        {
+          "file": "src/stream_stats.cpp",
+          "function": "vrr_json",
+          "declaration": "vrr_record_json(*client->vrr, {",
+          "style": "initializer_list",
+          "fields": [
+            "session_generation"
+          ]
+        },
+        {
+          "file": "src/stream_stats.cpp",
+          "function": "vrr_json",
+          "style": "subscript",
+          "variable": "result",
+          "fields": [
+            "host_adaptive_sync"
+          ]
+        }
+      ],
+      "generated": true,
+      "optional": [
+        "host_pacing"
+      ],
+      "nullable": [
+        "fallback_reason",
+        "host_adaptive_sync"
+      ],
+      "required_present": [
+        "capture_pacing",
+        "effective",
+        "fallback_reason",
+        "host_adaptive_sync",
+        "host_permission",
+        "pacing_mode",
+        "requested",
+        "requested_from",
+        "schema",
+        "session_generation"
+      ],
+      "informational_ok": [
+        "host_adaptive_sync"
+      ],
+      "types": {
+        "capture_pacing": "string",
+        "effective": "boolean",
+        "fallback_reason": "string",
+        "host_adaptive_sync": "object",
+        "host_pacing": "object",
+        "host_permission": "boolean",
+        "pacing_mode": "string",
+        "requested": "string",
+        "requested_from": "string",
+        "schema": "integer",
+        "session_generation": "integer"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisSessionVrr.kt",
+          "function": "parse",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "capture_pacing",
+            "effective",
+            "fallback_reason",
+            "host_pacing",
+            "host_permission",
+            "pacing_mode",
+            "requested",
+            "requested_from",
+            "schema",
+            "session_generation"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+          "function": "parseSessionVrr",
+          "receiver": "o",
+          "style": "qt_json",
+          "reads": [
+            "capture_pacing",
+            "effective",
+            "fallback_reason",
+            "host_pacing",
+            "host_permission",
+            "pacing_mode",
+            "requested",
+            "requested_from",
+            "schema",
+            "session_generation"
+          ]
+        }
+      }
+    },
+    "session_vrr_host_pacing": {
+      "$comment": [
+        "The host_pacing object inside session_vrr: the host's latest source-pacing receipt for that",
+        "stream. state is waiting, source_time, latched_fallback or unsupported. fresh is true only for",
+        "a sample at most 2 seconds old on a stream that has not ended. last_event and event_counts",
+        "(keyed by event name) are diagnostic. receiver_presentation_verified, physical_acceptance and",
+        "receiver_source_cadence_available are always false: the host proves none of them.",
+        "trace_receipts, a diagnostic watermark object, appears only while the trace watermark is",
+        "accepted. Readers are declared ahead of their Nova implementations, as for session_vrr."
+      ],
+      "fields": [
+        "event_counts",
+        "fresh",
+        "last_event",
+        "physical_acceptance",
+        "receiver_presentation_verified",
+        "receiver_source_cadence_available",
+        "state",
+        "trace_receipts"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/stream_stats.cpp",
+          "function": "vrr_record_json",
+          "declaration": "j[v1::session_vrr::host_pacing] = {",
+          "style": "initializer_list",
+          "fields": [
+            "event_counts",
+            "fresh",
+            "last_event",
+            "physical_acceptance",
+            "receiver_presentation_verified",
+            "receiver_source_cadence_available",
+            "state"
+          ]
+        },
+        {
+          "file": "src/stream_stats.cpp",
+          "function": "vrr_record_json",
+          "style": "subscript",
+          "variable": "host_pacing",
+          "fields": [
+            "trace_receipts"
+          ]
+        }
+      ],
+      "generated": true,
+      "optional": [
+        "trace_receipts"
+      ],
+      "required_present": [
+        "event_counts",
+        "fresh",
+        "last_event",
+        "physical_acceptance",
+        "receiver_presentation_verified",
+        "receiver_source_cadence_available",
+        "state"
+      ],
+      "informational_ok": [
+        "event_counts",
+        "last_event",
+        "physical_acceptance",
+        "receiver_presentation_verified",
+        "receiver_source_cadence_available",
+        "trace_receipts"
+      ],
+      "types": {
+        "event_counts": "object",
+        "fresh": "boolean",
+        "last_event": "string",
+        "physical_acceptance": "boolean",
+        "receiver_presentation_verified": "boolean",
+        "receiver_source_cadence_available": "boolean",
+        "state": "string",
+        "trace_receipts": "object"
+      },
+      "consumers": {
+        "nova_android": {
+          "file": "app/src/main/java/com/papi/nova/api/PolarisSessionVrr.kt",
+          "function": "parseHostPacing",
+          "receiver": "json",
+          "style": "kotlin_org_json",
+          "reads": [
+            "fresh",
+            "state"
+          ]
+        },
+        "nova_deck": {
+          "file": "clients/deck/src/polaris/deck_polaris_client.cpp",
+          "function": "parseSessionVrrHostPacing",
+          "receiver": "o",
+          "style": "qt_json",
+          "reads": [
+            "fresh",
+            "state"
+          ]
+        }
+      }
     }
   },
   "known_drift": {
