@@ -35,6 +35,35 @@ let wrapper
 afterEach(() => { wrapper?.unmount(); h.api = null; vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('EpicSessionControls', () => {
+  it('drops Mirror consent for a private session and explains End without consent controls', async () => {
+    h.api = makeApi()
+    wrapper = mount(EpicSessionControls)
+    await wrapper.get('[data-epic-adopt-start]').trigger('click')
+    Object.assign(h.api.state, {
+      state: 'session_managed', game_state: 'waiting', can_adopt: true, can_release: true,
+      message: 'End closes the whole private session. Cloud-sync completion is not known.',
+    })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(false)
+    expect(wrapper.find('[data-epic-adopt-start]').exists()).toBe(false)
+    expect(wrapper.find('[data-epic-release]').exists()).toBe(false)
+    expect(wrapper.find('[data-epic-unmanaged]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Private Stream')
+    expect(wrapper.text()).not.toContain('Mirror Desktop')
+    expect(wrapper.get('[data-epic-private-session]').text()).toContain('including Epic')
+    expect(wrapper.get('[data-epic-private-details]').text()).toContain('Cloud-sync completion is not known')
+    expect(wrapper.get('[data-epic-state]').text()).toBe('Waiting for game')
+    h.api.state.game_state = 'managed'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-epic-state]').text()).toBe('Session-managed')
+    h.api.state.game_state = 'unavailable'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-epic-state]').text()).toBe('Game unverified')
+    expect(wrapper.get('[data-epic-private-unavailable]').text()).toContain('End still closes')
+    expect(h.api.adopt).not.toHaveBeenCalled()
+    expect(h.api.release).not.toHaveBeenCalled()
+  })
+
   it('renders nothing when there is no active Epic session', () => {
     h.api = makeApi({ available: false, state: '' })
     wrapper = mount(EpicSessionControls)

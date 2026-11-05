@@ -9,6 +9,7 @@
 #include <charconv>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <sstream>
 
 #ifndef _WIN32
@@ -17,6 +18,16 @@
 
 namespace prelaunch::steamos {
   namespace {
+    /// A v1 hierarchy's comma-separated controller field holds systemd's own named hierarchy.
+    bool names_systemd_hierarchy(std::string_view controllers) {
+      while (true) {
+        const auto comma = controllers.find(',');
+        if (controllers.substr(0, comma) == "name=systemd") return true;
+        if (comma == std::string_view::npos) return false;
+        controllers.remove_prefix(comma + 1);
+      }
+    }
+
     bool all_digits(std::string_view text) {
       return !text.empty() && std::all_of(text.begin(), text.end(), [](char c) {
         return c >= '0' && c <= '9';
@@ -313,8 +324,31 @@ namespace prelaunch::steamos {
 
   std::string cgroup_v2_path(std::string_view cgroup) {
     while (!cgroup.empty() && (cgroup.back() == '\n' || cgroup.back() == '\r')) cgroup.remove_suffix(1);
-    if (!cgroup.starts_with("0::/") || cgroup.find('\n') != std::string_view::npos) return {};
-    return std::string {cgroup.substr(3)};
+    // One line per hierarchy. A v1 hierarchy says nothing about where systemd put the process, and
+    // hosts do mount them: Mullvad's split tunnelling mounts net_cls. A named systemd hierarchy is
+    // the exception: systemd then tracks the process there, so the unified path is not its word.
+    std::optional<std::string_view> unified;
+    while (true) {
+      const auto newline = cgroup.find('\n');
+      auto line = cgroup.substr(0, newline);
+      while (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+      const auto first = line.find(':');
+      const auto second = first == std::string_view::npos ? first : line.find(':', first + 1);
+      if (second == std::string_view::npos) return {};
+      const auto id = line.substr(0, first);
+      const auto controllers = line.substr(first + 1, second - first - 1);
+      const auto path = line.substr(second + 1);
+      if (!path.starts_with('/')) return {};
+      if (id == "0") {
+        if (!controllers.empty() || unified) return {};
+        unified = path;
+      } else if (!all_digits(id) || id.front() == '0' || controllers.empty() || names_systemd_hierarchy(controllers)) {
+        return {};
+      }
+      if (newline == std::string_view::npos) break;
+      cgroup.remove_prefix(newline + 1);
+    }
+    return std::string {unified.value_or(std::string_view {})};
   }
 
   bool cgroup_is_logind(std::string_view cgroup) {
@@ -384,7 +418,7 @@ namespace prelaunch::steamos {
   }
 
   bool cgroup_is_manager_unit(std::string_view cgroup, std::uint32_t uid) {
-    // cgroup v2: a single "0::<path>" line. The path is assigned by systemd, not by the process.
+    // The unified line's path, which is assigned by systemd, not by the process.
     const auto owned = cgroup_v2_path(cgroup);
     const std::string_view path {owned};
     const auto user = "/user.slice/user-" + std::to_string(uid) + ".slice/user@" + std::to_string(uid) + ".service/";

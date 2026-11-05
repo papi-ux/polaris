@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+namespace vrr_clock {
+  class compositor_lease_t;
+}
+
 namespace platf::epic {
   struct title_t {
     std::string namespace_id, item_id, artifact_id;
@@ -39,7 +43,7 @@ namespace platf::epic {
     struct engine_t;
   }
 
-  /** An owner consent grant, not a launch/URI causality claim. Destruction only closes the pidfd. */
+  /** An authorized exact-game grant; Mirror needs owner consent. Not URI causality. Destruction only closes the pidfd. */
   class adopted_game_t {
   public:
     ~adopted_game_t();
@@ -64,6 +68,85 @@ namespace platf::epic {
   close_result_t ask_to_close(adopted_game_t &, std::chrono::milliseconds timeout);
   bool desktop_launcher_running(std::string &reason);
   std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason);
+
+  /** A previously proven original executable, never a guessed path or mounted inner ELF. */
+  class launcher_proof_t {
+  public:
+    std::filesystem::path path() const;
+    // The original is a type-2 AppImage, whose runtime FUSE-mounts its own payload.
+    bool appimage() const;
+
+  private:
+    struct state_t;
+    explicit launcher_proof_t(std::shared_ptr<const state_t>);
+    std::shared_ptr<const state_t> state_;
+    friend struct detail::engine_t;
+  };
+
+  // Counts process identities, not logical UI instances. Unlike Mirror presence, nullopt is
+  // unknown. An unassociated AppImage runtime cannot establish absence, even if renamed. A task
+  // running the retained launcher's file counts whatever path it runs it by. A protected
+  // (unreadable) task counts as not Epic only when its world-readable stat, status and cgroup
+  // facts, and its ancestors', place it as the user manager, a vendor user service or a login
+  // session (D-A (B), see session_role); any other protected task leaves this unknown. It answers
+  // only from a listing in which every owner task has been judged, so another user's process or an
+  // unrelated owner task coming and going does not make it unknown. A candidate changing does.
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr);
+  std::optional<launcher_proof_t> prove_launcher(std::string &reason);
+  // Revalidates the retained original file without requiring a launcher or AppImage mount.
+  bool verify_launcher(const launcher_proof_t &, std::string &reason);
+  // Whether a retained AppImage's runtime knows --appimage-mount. One that does not would treat the
+  // flag as the launcher's own argument and start it outside any sandbox, without the request.
+  bool appimage_mounts_itself(const launcher_proof_t &);
+
+  // A sampled admission check, never dispatch authority: true means the requested game
+  // and its exact prefix server are absent, false means busy, nullopt means unknown.
+  // Recheck immediately before dispatch; concurrent launches remain possible afterwards.
+  // Protected tasks are set aside by the same role rule as launcher_instances, and it answers from
+  // the same kind of listing. A missing or unreadable prefix reports "title_prefix_unavailable"; a
+  // first play in Mirror Desktop creates one.
+  std::optional<bool> title_runtime_absent(const title_t &, std::string &reason);
+
+  /**
+   * An opaque scope of the caller's validated, published private compositor generation.
+   * Its supervisor is derived from the retained lease, never from request-supplied integers.
+   */
+  class private_session_t {
+  public:
+    private_session_t(const private_session_t &) = default;
+    private_session_t &operator=(const private_session_t &) = default;
+
+  private:
+    struct state_t;
+    explicit private_session_t(std::shared_ptr<const state_t>);
+    std::shared_ptr<const state_t> state_;
+    friend struct detail::engine_t;
+  };
+
+  // Only pass the runtime lease obtained for this exact validated generation and socket.
+  std::optional<private_session_t> pin_private_session(
+    std::shared_ptr<const vrr_clock::compositor_lease_t>, const std::string &generation, std::string &reason);
+  // The trusted caller records a nonzero dispatch bound in /proc start-time ticks. It may
+  // precede supervisor startup when the URI is its kiosk client; ancestry also fences birth.
+  observation_t observe_in_session(const title_t &, const private_session_t &, std::uint64_t not_before_ticks);
+  // Ancestry/time identify candidates, not URI causation. The caller must separately establish
+  // dispatch/exclusivity authority; neither a different title nor an arbitrary session is adoptable.
+  std::unique_ptr<adopted_game_t> adopt_in_session(
+    const title_t &, const private_session_t &, std::uint64_t not_before_ticks, const observation_t &, std::string &error);
+
+  // One step of a private session's lazy claim on its requested game, from a fresh in-session
+  // observation. The request window bounds the game's birth, never when status or End looks: an
+  // exact game born inside it is retained however late it is first seen, and one born after it
+  // never is. A game not seen yet keeps the claim open; any other unavailable answer retires it.
+  enum class private_claim_t { retain, keep_looking, retire };
+  private_claim_t private_claim(const observation_t &in_session, std::uint64_t request_ticks, std::uint64_t birth_upper_ticks);
+
+  // What private status says about the requested game. Until the window ends, a game not seen yet
+  // is awaited. After it, or with no clock to tell, the game is unverified: it may have opened on
+  // the desktop. The claim itself stays open, so a later look may still retain an early-born game.
+  enum class private_game_t { managed, waiting, unverified };
+  private_game_t private_game_state(bool retained, bool claim_retired, const observation_t &latest,
+                                    std::optional<std::uint64_t> now_ticks, std::uint64_t birth_upper_ticks);
 
   /**
    * Explicit, per-call fixture dependencies. Production never installs a global override.
@@ -90,17 +173,29 @@ namespace platf::epic {
       process_absence_t absence {process_absence_t::unproven};
     };
 
+    /** What this account's systemd user manager reports for one of its loaded units. */
+    struct unit_t {
+      std::string id, load_state, fragment_path, control_group;
+      std::vector<std::string> drop_in_paths;
+      bool transient {true};
+      bool operator==(const unit_t &) const = default;
+    };
+
     struct backend_t {
       virtual ~backend_t() = default;
       virtual std::uint64_t owner_uid() const = 0;
       virtual std::optional<std::string> read(const std::filesystem::path &, std::size_t limit) = 0;
       // Only initial census status may prove absence; ordinary read failures never do.
       virtual status_result_t initial_status(const std::filesystem::path &process, std::size_t limit) { return {read(process / "status", limit)}; }
+      // A /proc/<pid>/exe path reads the executable that task runs, wherever its own path points.
       virtual std::optional<std::string> prefix(const std::filesystem::path &, std::size_t length) = 0;
       virtual std::optional<std::filesystem::path> link(const std::filesystem::path &) = 0;
       // Missing/raced links are not permission denials. Fixture backends opt in explicitly.
       virtual link_result_t inspect_link(const std::filesystem::path &path) { return {link(path), false}; }
       virtual std::optional<std::filesystem::path> canonical(const std::filesystem::path &) = 0;
+      // A bounded read of the user manager, which assigns the unit; nullopt when it cannot be
+      // asked, does not answer in time or has no such unit loaded. Fixture backends opt in.
+      virtual std::optional<unit_t> user_unit(const std::string &) { return std::nullopt; }
       virtual std::optional<file_t> stat(const std::filesystem::path &) = 0;
       virtual std::optional<std::vector<std::string>> list(const std::filesystem::path &, std::size_t limit) = 0;
       virtual int open_pidfd(std::uint64_t pid) = 0;
@@ -113,7 +208,16 @@ namespace platf::epic {
     observation_t observe(const title_t &, std::shared_ptr<backend_t>);
     std::unique_ptr<adopted_game_t> adopt(const title_t &, const observation_t &, std::string &error, std::shared_ptr<backend_t>);
     std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr);
+    std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<bool> title_runtime_absent(const title_t &, std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<private_session_t> pin_private_session(
+      std::shared_ptr<const vrr_clock::compositor_lease_t>, const std::string &generation, std::string &reason, std::shared_ptr<backend_t>);
     // The actual bounded reader, also usable with inert fixture files (including size-zero procfs).
     std::optional<std::string> read_bounded(const std::filesystem::path &, std::size_t limit);
+    // The production backend's initial status of a real /proc entry.
+    status_result_t real_initial_status(const std::filesystem::path &process, std::size_t limit);
+    // Whether a failed status read can begin the proof that a task has gone.
+    bool status_failure_may_be_absence(int error);
   }
 }  // namespace platf::epic

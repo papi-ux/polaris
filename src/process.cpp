@@ -98,6 +98,7 @@
   #include <poll.h>
   #include <pwd.h>
   #include <signal.h>
+  #include <time.h>
   #include <sys/stat.h>
   #include <sys/syscall.h>
   #include <unistd.h>
@@ -1837,6 +1838,13 @@ namespace proc {
       std::string reason;
     };
 
+    /// A process carrying the token outside the fence's session cgroup, and where it is.
+    struct outside_session_process_t {
+      pid_t pid = -1;
+      std::optional<std::uint64_t> start_time;  ///< with the pid, which process it is
+      std::string cgroup;
+    };
+
     struct isolated_session_process_snapshot_t {
       std::vector<pidfd_handle_t> owned;
       std::vector<pidfd_handle_t> ambiguous;
@@ -1847,6 +1855,8 @@ namespace proc {
       std::vector<pidfd_handle_t> flatpak_sandboxes;
       /// What kept the capture from completing, so the log can name it.
       std::vector<unattributed_process_t> unattributed;
+      /// Processes carrying the token outside the fence's session cgroup, which are not the session's.
+      std::vector<outside_session_process_t> outside_session_cgroup;
       bool capture_complete = true;
       bool retryable_capture_failure = false;
       bool hard_capture_failure = false;
@@ -1901,6 +1911,9 @@ namespace proc {
     /// Pids a test's snapshot treats as the bwraps of a live Flatpak instance, which it cannot
     /// make: a live instance needs a systemd scope of its own.
     thread_local const std::set<pid_t> *forced_flatpak_sandbox_pids_for_tests = nullptr;
+    /// A pid a fenced snapshot counts as inside the fence, so a test can stand one process inside a
+    /// session cgroup no real process is in, beside one outside it, whatever cgroup the test runs in.
+    thread_local pid_t forced_session_cgroup_member_pid = -1;
 #endif
 
     std::filesystem::path private_session_runtime_dir();
@@ -1917,8 +1930,33 @@ namespace proc {
       return readdir(directory);
     }
 
+    /**
+     * Whether a process the token names is the session's. Unfenced, the token alone decides. With a
+     * session cgroup (an Epic private session's, Polaris's own), the process must also be inside it:
+     * after the compositor stops, the supervisor tree is gone and its cgroup is what remains of the
+     * session's membership. An unread cgroup is never inside.
+     */
+    bool isolated_session_cgroup_member(
+      const proc_file_read_result_t &cgroup,
+      const std::optional<std::string> &session_cgroup
+    ) {
+      return !session_cgroup || (cgroup.ok() && private_app_stop::in_session_cgroup(
+        flatpak_session_instances::cgroup_from_proc(cgroup.bytes), *session_cgroup));
+    }
+
+    /**
+     * An Epic private session's membership fence: Polaris's own cgroup, which pinning proved its
+     * supervisor and compositor share. Unreadable, or the root, it contains nothing.
+     */
+    std::string epic_private_session_cgroup() {
+      const auto own = read_proc_status_file_result(getpid(), "cgroup");
+      auto group = own.ok() ? flatpak_session_instances::cgroup_from_proc(own.bytes) : std::string {};
+      return group == "/" ? std::string {} : group;
+    }
+
     isolated_session_process_snapshot_t isolated_session_process_snapshot(
-      std::string_view session_instance_id
+      std::string_view session_instance_id,
+      const std::optional<std::string> &session_cgroup = std::nullopt
     ) {
       isolated_session_process_snapshot_t snapshot;
 #ifdef POLARIS_TESTS
@@ -2074,7 +2112,32 @@ namespace proc {
         if (!environment_before_matches) {
           continue;
         }
+        auto cgroup_before = session_cgroup ? read_proc_status_file_result(pid, "cgroup") : proc_file_read_result_t {};
 #ifdef POLARIS_TESTS
+        const bool forced_session_cgroup_member = session_cgroup && pid == forced_session_cgroup_member_pid && cgroup_before.ok();
+        const auto real_cgroup_before = cgroup_before;
+        if (forced_session_cgroup_member) {
+          cgroup_before.bytes = "0::" + *session_cgroup + '\n';
+        }
+#endif
+        if (session_cgroup && !cgroup_before.ok()) {
+          if (process_vanished_during_proc_read(cgroup_before.error)) {
+            snapshot.mark_retryable_failure();
+          } else {
+            snapshot.mark_hard_failure(pid, "its cgroup could not be read");
+          }
+          continue;
+        }
+        if (!isolated_session_cgroup_member(cgroup_before, session_cgroup)) {
+          // Handed the token, but outside the session: never captured, never signalled.
+          snapshot.outside_session_cgroup.push_back({pid, proc_start_time_ticks(pid), flatpak_session_instances::cgroup_from_proc(cgroup_before.bytes)});
+          continue;
+        }
+#ifdef POLARIS_TESTS
+        if (forced_session_cgroup_member) {
+          // Placed in the fence for membership only: the capture's bookend compares its real reads.
+          cgroup_before = real_cgroup_before;
+        }
         if (pid == forced_isolated_session_capture_failure_pid) {
           snapshot.mark_hard_failure();
           continue;
@@ -2133,6 +2196,12 @@ namespace proc {
                                      environ_after.bytes,
                                      session_instance_id
                                    );
+        if (session_cgroup) {
+          // The fence is part of the capture's identity: a process that moved while it was captured
+          // is no longer known to be the session's.
+          const auto cgroup_after = read_proc_status_file_result(pid, "cgroup");
+          environment_matches = environment_matches && cgroup_after.ok() && cgroup_after.bytes == cgroup_before.bytes;
+        }
 #ifdef POLARIS_TESTS
         if (pid == forced_live_post_capture_ambiguity_pid && !forced_live_post_capture_token_hidden) {
           environment_matches = false;
@@ -2172,14 +2241,15 @@ namespace proc {
 
     isolated_session_process_snapshot_t isolated_session_process_snapshot_after_quiescence(
       std::string_view session_instance_id,
-      std::string_view reason
+      std::string_view reason,
+      const std::optional<std::string> &session_cgroup = std::nullopt
     ) {
       constexpr int max_attempts = 4;
       constexpr auto retry_delay = 50ms;
       std::vector<pidfd_handle_t> retained_owned;
       std::vector<pidfd_handle_t> unresolved_ambiguous;
       for (int attempt = 1; attempt <= max_attempts; ++attempt) {
-        auto snapshot = isolated_session_process_snapshot(session_instance_id);
+        auto snapshot = isolated_session_process_snapshot(session_instance_id, session_cgroup);
         for (auto &owned : retained_owned) {
           if (pidfd_has_exited(owned)) {
             continue;
@@ -2248,7 +2318,29 @@ namespace proc {
       bool terminated_any = false;  ///< it found live processes of the generation and signalled them
       bool sandboxes_remained = false;  ///< Flatpak sandbox processes of the generation were live
       int unattributed = 0;  ///< processes that kept its capture from completing
+      int outside_session_cgroup = 0;  ///< token bearers its fence left running outside the session's cgroup
     };
+
+    /// Pid and start time: one process, however many of a sweep's snapshots see it.
+    using outside_session_reported_t = std::set<std::pair<pid_t, std::optional<std::uint64_t>>>;
+
+    /**
+     * Name each token bearer a snapshot's fence left outside the session, once per sweep. It is
+     * left running, so this line is its only record, and it is written whichever way the sweep ends.
+     */
+    void log_outside_session_processes(
+      const isolated_session_process_snapshot_t &snapshot,
+      outside_session_reported_t &reported,
+      std::string_view reason
+    ) {
+      for (const auto &outside : snapshot.outside_session_cgroup) {
+        if (!reported.insert({outside.pid, outside.start_time}).second) {
+          continue;
+        }
+        BOOST_LOG(warning) << "process: left pid="sv << outside.pid << " running: it carries the session token outside the session's cgroup ("sv
+                           << outside.cgroup << ") "sv << reason;
+      }
+    }
 
     /// Name each process that kept the capture from completing, once, with its comm and parent.
     int log_unattributed_processes(const isolated_session_process_snapshot_t &snapshot, std::string_view reason) {
@@ -2275,7 +2367,8 @@ namespace proc {
       std::string_view reason,
       std::vector<pidfd_handle_t> *tracked_detached_children = nullptr,
       std::chrono::milliseconds graceful_timeout = std::chrono::milliseconds(2s),
-      isolated_sweep_report_t *sweep = nullptr
+      isolated_sweep_report_t *sweep = nullptr,
+      const std::optional<std::string> &session_cgroup = std::nullopt
     ) {
       if (session_instance_id.empty()) {
         return false;
@@ -2289,8 +2382,17 @@ namespace proc {
           false
         );
       }
+      // Unfenced, no snapshot records an outsider, so this reports nothing.
+      outside_session_reported_t outside_reported;
+      const auto report_outside = [&outside_reported, reason, sweep](const isolated_session_process_snapshot_t &snapshot) {
+        log_outside_session_processes(snapshot, outside_reported, reason);
+        if (sweep) {
+          sweep->outside_session_cgroup = static_cast<int>(outside_reported.size());
+        }
+      };
       for (int pass = 0; pass < 2; ++pass) {
-        auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
+        auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason, session_cgroup);
+        report_outside(snapshot);
         if (!snapshot.capture_complete) {
           BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
           const auto unattributed = log_unattributed_processes(snapshot, reason);
@@ -2356,7 +2458,8 @@ namespace proc {
         }
       }
 
-      const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
+      const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason, session_cgroup);
+      report_outside(final_snapshot);
       if (sweep && !final_snapshot.capture_complete) {
         sweep->capture_complete = false;
       }
@@ -2965,8 +3068,13 @@ namespace proc {
     }
 
     /// Everything the host reads of each process for private_app_stop::classify, in one pass.
-    std::vector<private_app_stop::process_facts_t> read_process_facts(const flatpak_session_instances::proc_reader_t &reader) {
+    std::vector<private_app_stop::process_facts_t> read_process_facts(
+      const flatpak_session_instances::proc_reader_t &reader,
+      const std::optional<std::filesystem::path> &held_image = std::nullopt
+    ) {
       namespace fsi = flatpak_session_instances;
+      // The kernel keeps a task's name to its first 15 bytes, so the launcher's own name can match too.
+      const auto held_name = held_image ? held_image->filename().string().substr(0, 15) : std::string {};
       std::vector<private_app_stop::process_facts_t> facts;
       for (const auto pid : reader.all_pids()) {
         if (pid <= 1 || pid == getpid()) {
@@ -2985,8 +3093,9 @@ namespace proc {
           boost::trim(*comm);
           fact.comm = std::move(*comm);
         }
-        if (fact.comm == "sleep") {
-          // labwc's `sleep infinity` startup client is told apart by its arguments.
+        if (fact.comm == "sleep" || (!held_name.empty() && fact.comm == held_name)) {
+          // labwc's `sleep infinity` startup client is told apart by its arguments, and so are a
+          // held AppImage's runtime and FUSE daemon.
           if (auto cmdline = reader.read(pid, "cmdline")) {
             fact.cmdline = std::move(*cmdline);
           }
@@ -3012,6 +3121,10 @@ namespace proc {
       bool immediate = false;
       /// A Steam context's app was stopped by the Steam lane just before, which keeps its own fact.
       bool steam_context = false;
+      /// An Epic private session's own cgroup: the token alone admits nothing outside it.
+      std::optional<std::string> session_cgroup;
+      /// The retained AppImage whose mount the launcher runs from, ended after the phase.
+      std::optional<std::filesystem::path> held_image;
       std::vector<std::string> launched_app_ids;
       std::filesystem::path runtime_dir;
       private_app_stop::timings_t timings;
@@ -3030,6 +3143,8 @@ namespace proc {
       stream_stats::app_stop_t stop;
       std::vector<pid_t> signalled_sigterm;  ///< every pid sent SIGTERM, for the tests
       std::vector<pid_t> signalled_sigkill;  ///< every pid sent SIGKILL, for the tests
+      std::optional<pid_t> mount_first;  ///< the one pid of the mount sent SIGTERM first, for the tests
+      std::vector<pid_t> mount_rest;  ///< the pids of the mount sent SIGTERM after that wait, for the tests
     };
 
     /**
@@ -3076,8 +3191,10 @@ namespace proc {
                         << attribution.unresolved.front().app_id << '/' << attribution.unresolved.front().id;
       }
 
-      const auto facts = read_process_facts(reader);
-      const auto session = private_app_stop::classify(facts, request.supervisor, token, instances, getuid());
+      const auto held_path = request.held_image ? std::make_optional(request.held_image->string()) : std::nullopt;
+      const auto held_view = held_path ? std::make_optional(std::string_view {*held_path}) : std::nullopt;
+      const auto facts = read_process_facts(reader, request.held_image);
+      const auto session = private_app_stop::classify(facts, request.supervisor, token, instances, getuid(), request.session_cgroup, held_view);
       if (!session.launch_chain.empty()) {
         BOOST_LOG(info) << "process: private app stop: leaving "sv << session.launch_chain.size()
                         << " process(es) that ran the launcher to exit with it"sv;
@@ -3197,7 +3314,7 @@ namespace proc {
       const auto track_new_app_processes = [&]() {
         std::vector<fsi::process_t> added;
         std::vector<fsi::process_t> added_backstop;
-        const auto fresh = private_app_stop::classify(read_process_facts(reader), request.supervisor, token, instances, getuid());
+        const auto fresh = private_app_stop::classify(read_process_facts(reader, request.held_image), request.supervisor, token, instances, getuid(), request.session_cgroup, held_view);
         for (const auto &process : fresh.session) {
           if (tracked.insert({process.pid, process.start_time}).second) {
             added.push_back(process);
@@ -3328,8 +3445,34 @@ namespace proc {
         return remaining.empty() || wait_for_pidfds_exit(remaining, timeout);
       };
 
-      report.outcome = private_app_stop::run(plan, actions, request.timings);
+      const auto timings = request.held_image ? private_app_stop::with_mount_phase(request.timings) : request.timings;
+      report.outcome = private_app_stop::run(plan, actions, timings);
       const auto &outcome = report.outcome;
+
+      // The launcher has gone, so the mount it ran from can too. One first, then wait on both: SIGTERM
+      // to the runtime that holds the mount also ends its FUSE daemon, and a daemon signalled again
+      // meanwhile dies before it unmounts, which leaves a dead mount in /tmp until reboot.
+      if (request.held_image) {
+        const auto mount = open_exact_pidfds(
+          private_app_stop::classify(read_process_facts(reader, request.held_image), request.supervisor, token, instances, getuid(), request.session_cgroup, held_view).held_appimage
+        );
+        if (!mount.empty()) {
+          BOOST_LOG(info) << "process: private app stop: ending the AppImage mount's "sv << mount.size() << " process(es) now the launcher has gone"sv;
+          report.mount_first = mount.front().pid;
+          (void) send_pidfd_signal(mount.front(), SIGTERM);
+          if (!wait_for_pidfds_exit(mount, timings.mount_first_wait)) {
+            for (const auto &handle : mount) {
+              if (!pidfd_has_exited(handle)) {
+                report.mount_rest.push_back(handle.pid);
+              }
+            }
+            (void) signal_all(mount, SIGTERM);
+            if (!wait_for_pidfds_exit(mount, timings.mount_last_wait)) {
+              BOOST_LOG(warning) << "process: private app stop: the AppImage mount's processes remain; the sweep after the compositor stop ends them"sv;
+            }
+          }
+        }
+      }
 
       auto &stop = report.stop;
       stop.path = outcome.path.empty() ? "exited_before_stop" : outcome.path;
@@ -6183,8 +6326,8 @@ namespace proc {
     request.entry = entry;
     request.client_uuid = client_uuid;
     request.lifecycle_generation = lifecycle_generation;
-    // Epic Preview never performs a Game Mode transition: its supported admission is
-    // the already-running desktop launcher in Mirror Desktop, checked before launch.
+    // Epic Preview never performs a Game Mode transition. Both supported admissions
+    // refuse a live Game Mode host before launching a desktop or private launcher.
     request.policy_enabled = app.leave_game_mode_before_launch && app.source != "epic_launcher";
     if (!request.policy_enabled) {
       // Off: no scan, no probe, nothing recorded. The launch is the one it always was.
@@ -6848,7 +6991,8 @@ namespace proc {
     const std::filesystem::path &runtime_dir,
     bool immediate,
     int timing_divisor,
-    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close
+    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close,
+    const std::optional<std::filesystem::path> &held_image
   ) {
     private_app_stop_test_result_t result;
     const auto supervisor_start = proc_start_time_ticks(supervisor_pid);
@@ -6860,9 +7004,10 @@ namespace proc {
     request.supervisor = {supervisor_pid, *supervisor_start};
     request.immediate = immediate;
     request.runtime_dir = runtime_dir;
+    request.held_image = held_image;
     auto &timings = request.timings;
     const auto divisor = std::max(1, timing_divisor);
-    for (auto *timing : {&timings.budget, &timings.close_request, &timings.close_wait_floor, &timings.exit_timeout_ceiling, &timings.sigterm, &timings.sigterm_after_close, &timings.immediate_sigterm, &timings.sigkill_wait, &timings.left_settle, &timings.launcher_settle, &timings.launcher_quit, &timings.backstop_wait}) {
+    for (auto *timing : {&timings.budget, &timings.close_request, &timings.close_wait_floor, &timings.exit_timeout_ceiling, &timings.sigterm, &timings.sigterm_after_close, &timings.immediate_sigterm, &timings.sigkill_wait, &timings.left_settle, &timings.launcher_settle, &timings.launcher_quit, &timings.backstop_wait, &timings.mount_first_wait, &timings.mount_last_wait}) {
       *timing /= divisor;
     }
     if (request_close) {
@@ -6886,6 +7031,8 @@ namespace proc {
     result.elapsed = report.outcome.elapsed;
     result.sigterm = report.signalled_sigterm;
     result.sigkill = report.signalled_sigkill;
+    result.mount_first = report.mount_first;
+    result.mount_rest = report.mount_rest;
     return result;
   }
 
@@ -7210,6 +7357,47 @@ namespace proc {
 
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id) {
     return terminate_isolated_session_processes(session_instance_id, "during exact-generation test"sv);
+  }
+
+  bool terminate_fenced_exact_generation_processes_for_tests(
+    std::string_view session_instance_id,
+    const std::optional<std::string> &session_cgroup
+  ) {
+    return terminate_isolated_session_processes(session_instance_id, "during fenced exact-generation test"sv, nullptr, std::chrono::milliseconds(2s), nullptr, session_cgroup);
+  }
+
+  exact_generation_sweep_test_result_t exact_generation_sweep_for_tests(
+    std::string_view session_instance_id,
+    const std::optional<std::string> &session_cgroup,
+    pid_t session_member_pid,
+    const std::set<pid_t> &recorded_flatpak_sandboxes
+  ) {
+    const auto previous_member = forced_session_cgroup_member_pid;
+    const auto previous_sandboxes = forced_flatpak_sandbox_pids_for_tests;
+    auto restore = util::fail_guard([previous_member, previous_sandboxes]() {
+      forced_session_cgroup_member_pid = previous_member;
+      forced_flatpak_sandbox_pids_for_tests = previous_sandboxes;
+    });
+    forced_session_cgroup_member_pid = session_member_pid;
+    forced_flatpak_sandbox_pids_for_tests = &recorded_flatpak_sandboxes;
+    isolated_sweep_report_t sweep;
+    exact_generation_sweep_test_result_t result;
+    result.complete = terminate_isolated_session_processes(
+      session_instance_id,
+      "during exact-generation sweep test"sv,
+      nullptr,
+      std::chrono::milliseconds(2s),
+      &sweep,
+      session_cgroup
+    );
+    result.capture_complete = sweep.capture_complete;
+    result.sandboxes_remained = sweep.sandboxes_remained;
+    result.outside_session_cgroup = sweep.outside_session_cgroup;
+    return result;
+  }
+
+  std::string epic_private_session_cgroup_for_tests() {
+    return epic_private_session_cgroup();
   }
 
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id, std::chrono::milliseconds graceful_timeout) {
@@ -8770,7 +8958,109 @@ namespace proc {
         proc.initial_capture
       );
     }
+
+    platf::epic::title_t epic_process_title(const epic_library::installation_t &title) {
+      return {title.identity.namespace_id, title.identity.item_id, title.identity.artifact_id,
+        title.install_dir, title.launch_executable, title.data_root, title.platform};
+    }
+
+    int admit_private_epic(const epic_library::installation_t &title, const platf::epic::launcher_proof_t *proof) {
+      std::string reason;
+      // Setup step (N2, accepted for now): the launcher proof lives in memory only, so it is
+      // needed again after every Polaris restart and every Epic update.
+      if (!proof || !platf::epic::verify_launcher(*proof, reason))
+        return launch_failure::refuse(503, "epic_launcher_proof_required", "Polaris needs to see Epic open on the host desktop once before a Private Stream.",
+          "Open Epic once on the host desktop and scan Epic in the Polaris Library, then quit Epic completely and try Private Stream again. Repeat this after Polaris restarts or Epic updates.");
+      const auto launchers = platf::epic::launcher_instances(reason, proof);
+      if (!launchers) {
+        BOOST_LOG(info) << "Epic Private Stream: launcher census unknown: "sv << reason;
+        // N4: an AppImage that is not the retained launcher cannot be told apart from Epic.
+        if (reason == "launcher_census_unresolved")
+          return launch_failure::refuse(503, "epic_other_appimage_running", "Another AppImage app is running on the host, and Polaris can't tell it apart from Epic.",
+            "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.");
+        if (reason == "launcher_inventory_incomplete")
+          return launch_failure::refuse(503, "epic_protected_process_unplaced", "A protected program on the host isn't a recognised session or system process, so Polaris can't confirm Epic is closed.",
+            "Quit Epic and any app that hides its process details on the host, then try again, or use Mirror Desktop.");
+        return launch_failure::refuse(503, "epic_launcher_inventory_unknown", "Polaris cannot verify that Epic is completely closed for this user.",
+          "Quit Epic and other AppImages on the host, check process visibility, then try again or use Mirror Desktop.");
+      }
+      if (*launchers != 0)
+        return launch_failure::refuse(409, "epic_open_on_desktop", "Epic is already running for this user. A private request could reach that existing launcher.",
+          "Quit Epic completely on the host to play privately, or use Mirror Desktop.");
+      const auto absent = platf::epic::title_runtime_absent(epic_process_title(title), reason);
+      if (!absent) {
+        BOOST_LOG(info) << "Epic Private Stream: game runtime census unknown: "sv << reason;
+        // N3, accepted for now: a missing or unreadable prefix cannot be checked. A first play makes one.
+        if (reason == "title_prefix_unavailable")
+          return launch_failure::refuse(503, "epic_first_play_in_mirror", "This game's Wine prefix is missing or can't be read on this host, so Polaris can't check it for Private Stream.",
+            "If you haven't played it on this host yet, play it once in Mirror Desktop to create its prefix, then quit it and Epic, and try Private Stream again.");
+        if (reason == "title_runtime_inventory_incomplete")
+          return launch_failure::refuse(503, "epic_protected_process_unplaced", "A protected program on the host isn't a recognised session or system process, so Polaris can't confirm this game is closed.",
+            "Close this game and any app that hides its process details on the host, then try again, or use Mirror Desktop.");
+        return launch_failure::refuse(503, "epic_runtime_inventory_unknown", "The requested game's runtime or prefix could not be checked completely.",
+          "Open Epic on the host, finish this game's setup or update, then close the game and Epic completely before trying again.");
+      }
+      if (!*absent)
+        return launch_failure::refuse(409, "epic_game_already_running", "The requested game or its exact prefix server is still running.",
+          "Close that game and let its runtime exit on the host, or use Mirror Desktop.");
+      if (!platf::epic::verify_launcher(*proof, reason))
+        return launch_failure::refuse(503, "epic_launcher_proof_changed", "The retained Epic launcher executable changed during admission.",
+          "Open Epic on the host desktop, scan the official library again, then quit Epic before retrying Private Stream.");
+      return 0;
+    }
+
+    struct epic_request_window_t {
+      std::uint64_t lower, upper;
+    };
+
+    // The boot clock in /proc start-time ticks, the unit an Epic request window is kept in.
+    std::optional<std::uint64_t> epic_boottime_ticks() {
+      timespec now {};
+      const auto hz = sysconf(_SC_CLK_TCK);
+      if (hz <= 0 || hz > 1'000'000'000L || clock_gettime(CLOCK_BOOTTIME, &now) != 0 ||
+          now.tv_sec <= 0 || now.tv_nsec < 0 || now.tv_nsec >= 1'000'000'000L) return std::nullopt;
+      const auto seconds = static_cast<std::uint64_t>(now.tv_sec);
+      const auto ticks = static_cast<std::uint64_t>(hz);
+      if (seconds > (UINT64_MAX - ticks) / ticks) return std::nullopt;
+      return seconds * ticks + static_cast<std::uint64_t>(now.tv_nsec) * ticks / 1'000'000'000;
+    }
+
+    std::optional<epic_request_window_t> epic_request_birth_window() {
+      // This is sampled BEFORE requesting startup, not an invented URI-dispatch timestamp.
+      const auto lower = epic_boottime_ticks();
+      const auto hz = sysconf(_SC_CLK_TCK);
+      if (!lower || hz <= 0) return std::nullopt;
+      const auto span = 30 * static_cast<std::uint64_t>(hz);
+      if (*lower == 0 || *lower > UINT64_MAX - span) return std::nullopt;
+      return epic_request_window_t {*lower, *lower + span};
+    }
+
+    std::string epic_private_kiosk_command(const std::filesystem::path &directory, const std::string &command) {
+      const auto quote = [](const std::string &text) {
+        return "'" + boost::replace_all_copy(text, "'", "'\\''") + "'";
+      };
+      // The existing kiosk shell has no cwd parameter. This exec-only shell changes cwd
+      // without changing Polaris's process-wide directory or creating an on-disk wrapper.
+      return "/bin/sh -c " + quote("cd -- " + quote(directory.string()) + " && exec " + command);
+    }
+
+    /**
+     * A private Epic session's startup client. An AppImage's runtime cannot mount inside strict
+     * gamepad isolation, so that one case gets the stage. Every other is the plain kiosk command.
+     */
+    std::string epic_private_startup_command(const std::filesystem::path &launcher, const epic_library::installation_t &title,
+      const std::string &game_cmd, bool appimage_under_isolation, const std::function<std::string(const std::string &)> &isolate) {
+      return appimage_under_isolation ? epic_library::appimage_stage_command(launcher, title.install_dir, title.identity, isolate) :
+                                        isolate(epic_private_kiosk_command(title.install_dir, game_cmd));
+    }
   }  // namespace
+
+  #ifdef POLARIS_TESTS
+  std::string epic_private_startup_command_for_tests(const std::filesystem::path &launcher, const epic_library::installation_t &title,
+    const std::string &game_cmd, bool appimage_under_isolation, const std::function<std::string(const std::string &)> &isolate) {
+    return epic_private_startup_command(launcher, title, game_cmd, appimage_under_isolation, isolate);
+  }
+  #endif
 #endif
 
   int proc_t::execute_impl(
@@ -8781,27 +9071,38 @@ namespace proc {
     // Existing process-wide opt-in setup, before the first launch policy and history scope.
     // Later capture/encoder setup calls reuse the same recorder and its original budgets.
     vrr_trace::start_from_environment();
+    // Capture outside the lifecycle mutex; publication alone takes its existing lock.
+    if (app.source == "epic_launcher") remember_epic_launcher();
     auto &sync = session_lifecycle_sync();
     std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex);
 #ifdef __linux__
     std::optional<epic_library::installation_t> epic_title;
     std::optional<std::string> epic_command;
+    bool epic_private = false;
     if (app.source == "epic_launcher") {
       const auto selection = resolve_launch_selection_for_app(app, launch_selection_request_from_session(*launch_session));
       if (selection.refusal) return selection.refusal;
-      if (selection.selection != "desktop_display" || platf::game_mode_host::session_live() ||
-          (launch_session->client_selected_topology && launch_session->stream_mode != "desktop_display") ||
-          (launch_session->resolved_profile_from_client && launch_session->expected_stream_mode != "desktop_display")) {
-        return launch_failure::refuse(409, "epic_preview_mirror_only", "Epic Preview currently supports Mirror Desktop only.",
-          "Select Mirror Desktop and open Epic on the host desktop. Private Stream, Host Virtual Display and Spaces are not available for this Preview.");
+      epic_private = selection.selection == "headless_stream" &&
+        (app.launch_as == "headless_stream" || (launch_session->client_selected_topology && launch_session->stream_mode == "headless_stream"));
+      if ((!epic_private && selection.selection != "desktop_display") || platf::game_mode_host::session_live() ||
+          !launch_session->worker_profile_key.empty() || !launch_session->worker_library_target.empty() ||
+          (launch_session->client_selected_topology && launch_session->stream_mode != selection.selection) ||
+          (launch_session->resolved_profile_from_client && launch_session->expected_stream_mode != selection.selection)) {
+        return launch_failure::refuse(409, "epic_preview_mode_unavailable", "Epic Preview requires Mirror Desktop or an explicit labwc Private Stream.",
+          "Choose Mirror Desktop or labwc Private Stream. Host Virtual Display, Gamescope, Game Mode and Spaces are unavailable for this provider.");
       }
       epic_title = epic_library::find(epic_library::scan(game_library::library_home_roots()), app.epic_identity);
       if (!epic_title) return launch_failure::refuse(503, "epic_installation_unavailable", "This Epic installation is incomplete, changed or unavailable.", "Open Epic on the desktop, finish any update, then scan the library again.");
       std::string reason;
-      const auto launcher = platf::epic::desktop_launcher_executable(reason);
-      if (!launcher || !platf::epic::desktop_launcher_running(reason))
-        return launch_failure::refuse(503, "epic_desktop_launcher_required", "Epic must already be running on the host desktop.", "Open the official Epic Linux Preview on the desktop, then launch this game again.");
-      epic_command = epic_library::launch_command(*launcher, epic_title->identity);
+      if (epic_private) {
+        if (const auto refusal = admit_private_epic(*epic_title, _epic_launcher_proof ? &*_epic_launcher_proof : nullptr)) return refusal;
+        epic_command = epic_library::launch_command(_epic_launcher_proof->path(), epic_title->identity);
+      } else {
+        const auto launcher = platf::epic::desktop_launcher_executable(reason);
+        if (!launcher || !platf::epic::desktop_launcher_running(reason))
+          return launch_failure::refuse(503, "epic_desktop_launcher_required", "Epic must already be running on the host desktop.", "Open the official Epic Linux Preview on the desktop, then launch this game again.");
+        epic_command = epic_library::launch_command(*launcher, epic_title->identity);
+      }
     }
 #else
     if (app.source == "epic_launcher") return launch_failure::refuse(501, "epic_linux_only", "Epic Preview requires a Linux host.", "Use the official Linux Preview on a Linux desktop.");
@@ -8837,11 +9138,15 @@ namespace proc {
       // with their tree, and once the snapshot completes the retained
       // processes (if any) are terminated right here.
       const bool retained_session_owned_cage = _session_used_cage_compositor;
+      // A retained private Epic generation keeps its cgroup fence (#582).
       const bool generation_reaped = !_session_instance_id.empty() &&
                                      terminate_isolated_session_processes(
                                        _session_instance_id,
                                        "re-validated at next launch"sv,
-                                       retained_session_owned_cage ? nullptr : &_detached_child_pidfds
+                                       retained_session_owned_cage ? nullptr : &_detached_child_pidfds,
+                                       std::chrono::milliseconds(2s),
+                                       nullptr,
+                                       _epic_private_requested ? std::make_optional(epic_private_session_cgroup()) : std::nullopt
                                      );
       const bool reaped = generation_reaped &&
                           (retained_session_owned_cage || _detached_child_authority_complete);
@@ -9012,6 +9317,11 @@ namespace proc {
       if (session_mode_failed) {
         restore_prelaunch_display_policy();
         platf::reevaluate_capture_sources();
+        if (epic_private) {
+          this->initial_video_config_saved = false;
+          return launch_failure::refuse(503, "epic_private_mode_unavailable", "The selected Epic Private Stream mode is unavailable.",
+            "Restore the labwc Private Stream runtime or explicitly choose Mirror Desktop; no desktop launch was requested.");
+        }
         if (resolved_selection.pinned) {
           this->initial_video_config_saved = false;
           return refuse_launch_as_unavailable(app, std::move(mode_error));
@@ -9084,6 +9394,12 @@ namespace proc {
     _epic_grant.reset(); // Replacement never carries an earlier consent forward.
     _epic_grant_revision.clear();
     _epic_title = epic_title;
+    _epic_private_session.reset();
+    _epic_private_request_ticks = 0;
+    _epic_private_birth_upper_ticks = 0;
+    _epic_private_requested = epic_private;
+    _epic_private_grant_retired = false;
+    _epic_private_held_image.reset();
     if (epic_command) {
       _app.cmd.clear();
       _app.detached = {*epic_command};
@@ -10580,6 +10896,13 @@ namespace proc {
                        << path_policy.selection << "] backend=["sv << path_policy.backend_name << ']';
       return launch_failure::refuse(503, "private_runtime_unavailable", "The private stream runtime (" + std::string {path_policy.backend_name} + ") is not available on this host for " + std::string {path_policy.selection} + ".", "Install labwc on the host, or gamescope for Gamescope Stream, or use Mirror Desktop.");
     }
+    if (_epic_private_requested && (session_mode != stream_display_policy::k_headless_stream ||
+        mirror_desktop_session || !use_cage_compositor_for_session || !requested_headless_for_session ||
+        nested_wsi_session || gamescope_stream_session || !private_runtime ||
+        private_runtime->backend_id() != stream_display_policy::k_runtime_labwc)) {
+      return launch_failure::refuse(409, "epic_private_runtime_required", "Epic Private Stream requires this launch's actual labwc private runtime.",
+        "Select labwc for Private Stream, or explicitly choose Mirror Desktop. Epic was not launched on the desktop.");
+    }
 
     auto log_runtime_state = [&]() {
       platf::runtime_state_t runtime_state;
@@ -11057,7 +11380,51 @@ namespace proc {
         // Flatpak launcher, so it needs the same warning at its own launch site.
         warn_on_portal_display_hop(_app.detached[0]);
         const std::string game_cmd = session_launch_linux::sanitize_cage_command(_app.detached[0]);
-        if (!start_cage_with_runtime_fallback(game_cmd)) {
+        bool started = false;
+        if (_epic_private_requested) {
+          // Revalidate the retained original and both complete sampled admission checks
+          // immediately before our one request. Later external launches are not excluded.
+          const auto current = epic_library::find(epic_library::scan(game_library::library_home_roots()), _epic_title->identity);
+          if (!current || current->install_dir != _epic_title->install_dir || current->launch_executable != _epic_title->launch_executable ||
+              current->data_root != _epic_title->data_root || current->platform != _epic_title->platform)
+            return launch_failure::refuse(503, "epic_installation_changed", "This Epic installation changed before its private request.", "Finish the update in Epic and scan the library again; no private request was sent.");
+          if (const auto refusal = admit_private_epic(*_epic_title, _epic_launcher_proof ? &*_epic_launcher_proof : nullptr)) return refusal;
+          prepare_headless_gamepad_isolation();
+          const bool appimage_under_isolation = gamepad_isolation_plan.strict_applied() && _epic_launcher_proof->appimage();
+          // Isolated or not, the launcher runs from this file's mount, so End ends the mount after it.
+          if (_epic_launcher_proof->appimage()) _epic_private_held_image = _epic_launcher_proof->path();
+          if (appimage_under_isolation && !platf::epic::appimage_mounts_itself(*_epic_launcher_proof))
+            return launch_failure::refuse(503, "epic_appimage_mount_unavailable", "This Epic AppImage can't be mounted ahead of Private Stream's controller isolation.",
+              "Update Epic on the host desktop and scan the library again, set headless_gamepad_isolation to disabled, or use Mirror Desktop. No private request was sent.");
+          const auto window = epic_request_birth_window();
+          if (!window)
+            return launch_failure::refuse(503, "epic_request_clock_unavailable", "A safe process-clock lower bound could not be recorded.", "Try again after checking the host's process clock; no Epic request was sent.");
+          _epic_private_request_ticks = window->lower;
+          _epic_private_birth_upper_ticks = window->upper;
+          _session_used_cage_compositor = true; // Failed startup still owns only this generation's cleanup.
+          confighttp::set_session_state(confighttp::session_state_e::cage_starting);
+          confighttp::emit_session_event("cage_starting", "Starting Epic in Private Stream");
+          // Never repeat a URI after a partial runtime/encoder failure. Empty probe
+          // runtimes above carry no Epic request; the real startup is attempted once.
+          started = start_cage_session(
+            epic_private_startup_command(_epic_launcher_proof->path(), *_epic_title, game_cmd, appimage_under_isolation, command_with_gamepad_isolation),
+            force_windowed_cage_for_gpu_native, strict_session_encoder);
+          if (started) {
+            std::string reason;
+            const auto lease = stream_runtime::labwc::compositor_lease(
+              _session_instance_id, capture_generation.private_wayland_socket);
+            _epic_private_session = platf::epic::pin_private_session(lease, _session_instance_id, reason);
+            if (!_epic_private_session) {
+              _epic_private_grant_retired = true;
+              BOOST_LOG(warning) << "Epic Private Stream: published session scope could not be pinned: " << reason;
+              return launch_failure::refuse(503, "epic_private_scope_unavailable", "The new private session's process identity could not be retained safely.",
+                "End this private session before trying again. The request was not repeated or redirected to the desktop.");
+            }
+          }
+        } else {
+          started = start_cage_with_runtime_fallback(game_cmd);
+        }
+        if (!started) {
           BOOST_LOG(error) << "session_manager: Failed to start cage with game"sv;
           confighttp::emit_session_event("error", "Failed to start cage compositor");
           return launch_failure::refuse_if_unexplained(503, "private_runtime_start_failed", "The private stream compositor did not start on the host.", "Check that labwc is installed on the host; the host journal has the compositor error, and the Doctor names the private runtime.");
@@ -11481,6 +11848,65 @@ namespace proc {
   }
 #endif
 
+#ifdef __linux__
+  platf::epic::observation_t proc_t::retain_epic_private_game() {
+    if (_epic_grant) {
+      auto observed = platf::epic::inspect(*_epic_grant);
+      if (!observed.available) _epic_private_grant_retired = true;
+      return observed; // Never drop a retired grant to look for a replacement.
+    }
+    if (_epic_private_grant_retired)
+      return {false, "private_claim_retired", "", "unknown", 0, 0};
+    if (!_epic_private_requested || !_epic_title || !_epic_private_session || !_epic_private_request_ticks ||
+        _epic_private_birth_upper_ticks < _epic_private_request_ticks) {
+      _epic_private_grant_retired = true;
+      return {false, "private_scope_unavailable", "", "unknown", 0, 0};
+    }
+    const auto &title = *_epic_title;
+    const auto current = epic_library::find(epic_library::scan(game_library::library_home_roots()), title.identity);
+    if (!current || current->install_dir != title.install_dir || current->launch_executable != title.launch_executable ||
+        current->data_root != title.data_root || current->platform != title.platform) {
+      _epic_private_grant_retired = true;
+      return {false, "private_installation_changed", "", "unknown", 0, 0};
+    }
+    const auto target = epic_process_title(title);
+    auto observed = platf::epic::observe_in_session(target, *_epic_private_session, _epic_private_request_ticks);
+    // Lazy status or End may arrive much later. Bound the candidate's birth,
+    // not when the owner opens Mission Control or ends a long-running game.
+    switch (platf::epic::private_claim(observed, _epic_private_request_ticks, _epic_private_birth_upper_ticks)) {
+      case platf::epic::private_claim_t::keep_looking:
+        return observed;
+      case platf::epic::private_claim_t::retire:
+        _epic_private_grant_retired = true;
+        if (observed.available) return {false, "private_game_outside_birth_window", "", "unknown", 0, 0};
+        return observed;
+      case platf::epic::private_claim_t::retain:
+        break;
+    }
+    std::string error;
+    _epic_grant = platf::epic::adopt_in_session(target, *_epic_private_session, _epic_private_request_ticks, observed, error);
+    if (!_epic_grant) {
+      _epic_private_grant_retired = true;
+      return {false, "private_adoption_refused", "", "unknown", 0, 0};
+    }
+    _epic_grant_revision = _session_instance_id + ":" + observed.revision;
+    observed = platf::epic::inspect(*_epic_grant);
+    if (!observed.available) _epic_private_grant_retired = true;
+    return observed;
+  }
+#endif
+
+  void proc_t::remember_epic_launcher() {
+#ifdef __linux__
+    std::string reason;
+    auto proof = platf::epic::prove_launcher(reason);
+    if (!proof) return; // Best effort; failure does not erase a retained proof or grant authority.
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lock(sync.mutex);
+    _epic_launcher_proof = std::move(proof);
+#endif
+  }
+
   std::pair<int, nlohmann::json> proc_t::epic_session_control(const std::string &action,
       const std::string &session_id, const std::string &revision, bool confirmed) {
     const auto refused = [](int status, const char *code, const char *error) -> std::pair<int, nlohmann::json> {
@@ -11496,6 +11922,30 @@ namespace proc {
     if (!_epic_title || !_launch_session || _app.source != "epic_launcher" || _app_id <= 0) {
       if (!action.empty()) return refused(409, "session_ended", "This Epic session has ended. No permission was changed.");
       return {200, {{"status", true}, {"version", 1}, {"available", false}}};
+    }
+    if (_epic_private_requested) {
+      if (!action.empty())
+        return refused(409, "session_managed", "Private Stream owns this session. Manual game adoption or release is unavailable.");
+      const auto observed = retain_epic_private_game();
+      const auto game = platf::epic::private_game_state(bool(_epic_grant), _epic_private_grant_retired, observed,
+        epic_boottime_ticks(), _epic_private_birth_upper_ticks);
+      // Past its launch window, a game never seen in the session may have opened on the desktop. The
+      // claim stays open: an exact game born inside the window is still retained if it shows later.
+      const bool unseen_after_window = game == platf::epic::private_game_t::unverified &&
+        !_epic_private_grant_retired && observed.reason == "game_not_observed";
+      const char *message = game == platf::epic::private_game_t::managed ?
+        "Private Stream retains this exact requested game. End asks it to close, allows a bounded Epic grace period, then ends the whole private session, including Epic and any additional in-session games. Disconnect and Resume preserve it. Cloud-sync completion is not known." :
+        game == platf::epic::private_game_t::waiting ?
+        "The requested game is not currently observed. Only an exact game born within the original 30-second request window can be retained, even at a later End. End closes the whole private session; no other title can acquire this game's individual close authority." :
+        unseen_after_window ?
+        "The requested game has not appeared in this private session within its 30-second launch window, so Polaris can't verify it. If it opened on the host desktop instead, that copy isn't part of this session and End won't close it. A game born inside the window can still be retained if it appears later. End closes the whole private session." :
+        "The requested game was born outside its one-shot launch window or its identity could not be retained. It will not be replaced automatically. End still ends the whole private session; exact-game graceful closure is not confirmed.";
+      return {200, {{"status", true}, {"version", 1}, {"available", true}, {"state", "session_managed"},
+        {"game_state", game == platf::epic::private_game_t::managed ? "managed" : (game == platf::epic::private_game_t::waiting ? "waiting" : "unavailable")},
+        {"code", unseen_after_window ? std::string {"game_not_observed_after_launch_window"} : observed.reason}, {"app_uuid", _app.uuid}, {"app_name", _app.name},
+        {"session_id", _session_instance_id}, {"revision", _epic_grant_revision},
+        {"runtime", observed.runtime}, {"can_adopt", false}, {"can_release", false},
+        {"uninspected_process_count", observed.uninspected_process_count}, {"message", message}}};
     }
     if (_launch_session->expected_stream_mode != "desktop_display" || _session_instance_id.empty())
       return refused(409, "unsupported_mode", "Epic controls are available only for this Mirror Desktop session.");
@@ -12394,6 +12844,11 @@ namespace proc {
     request.immediate = immediate;
     request.steam_context = context_uses_steam(_app);
     request.runtime_dir = private_session_runtime_dir();
+    if (_epic_private_requested) {
+      // #582: an outside process handed this token is not the private Epic session's.
+      request.session_cgroup = epic_private_session_cgroup();
+      request.held_image = _epic_private_held_image;
+    }
     if (auto app_id = private_session_attach::flatpak_run_app_id(_app.cmd)) {
       request.launched_app_ids.push_back(std::move(*app_id));
     }
@@ -12437,7 +12892,7 @@ namespace proc {
   }
 
   void proc_t::terminate_isolated_session_generation() {
-    if (_app.source == "epic_launcher") {
+    if (_app.source == "epic_launcher" && !_epic_private_requested) {
       // URI forwarding is not game ownership. Epic's only closing authority is the
       // explicitly adopted pidfd; never enter generic generation/group escalation.
       _session_instance_id.clear();
@@ -12493,12 +12948,15 @@ namespace proc {
       std::chrono::seconds(_app.exit_timeout)
     );
     isolated_sweep_report_t sweep;
+    // A private Epic session's token counts only inside its own cgroup; every other session keeps
+    // the token alone, as before.
     const bool isolated_cleanup_complete = terminate_isolated_session_processes(
       _session_instance_id,
       reason,
       (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr,
       graceful_timeout,
-      &sweep
+      &sweep,
+      _epic_private_requested ? std::make_optional(epic_private_session_cgroup()) : std::nullopt
     );
     const bool detached_authority_complete =
       _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;
@@ -12635,14 +13093,40 @@ namespace proc {
     media_stop.fence = session_media::prepare_for_stop();
     stop_steam_big_picture_input_guard();
 
+    const bool purposeful_epic_end = sync.stop_ends_session.load() && !daemon_shutdown_requested();
+    const auto epic_end_deadline = std::chrono::steady_clock::now() + 5s;
+    if (_epic_private_requested && purposeful_epic_end) {
+      // End is also a lazy observation opportunity. Only a game born inside the
+      // original request window can qualify; a retired grant never retargets.
+      const auto observed = retain_epic_private_game();
+      if (!observed.available) {
+        BOOST_LOG(warning) << "Epic Private Stream: requested-game graceful closure is unconfirmed; ending only the owned private session, without selecting another game"sv;
+        confighttp::emit_session_event("warning", "The requested game could not be verified. End will close the whole private session, including Epic and additional in-session games; exact-game graceful closure is unconfirmed.");
+      }
+    }
     if (_epic_grant) {
       // Replacement, daemon shutdown and incidental cleanup only release consent. A purposeful
       // End may request SIGTERM through the retained exact pidfd, with no escalation or retarget.
-      if (sync.stop_ends_session.load() && !daemon_shutdown_requested()) {
-        const auto result = platf::epic::ask_to_close(*_epic_grant, 5s);
+      if (purposeful_epic_end) {
+        const auto close_timeout = _epic_private_requested ?
+          std::clamp(std::chrono::duration_cast<std::chrono::milliseconds>(epic_end_deadline - std::chrono::steady_clock::now()), 0ms, 5000ms) : 5000ms;
+        const auto result = platf::epic::ask_to_close(*_epic_grant, close_timeout);
         if (!result.closed) {
-          BOOST_LOG(warning) << "Epic Preview: game exit was not confirmed; close it on the host. No broader termination was attempted."sv;
-          confighttp::emit_session_event("warning", "Epic game exit was not confirmed. The stream ended; close the game on the host.");
+          if (_epic_private_requested) {
+            BOOST_LOG(warning) << "Epic Private Stream: exact-game exit was not confirmed; ordinary owned-session teardown follows, not a graceful-close guarantee"sv;
+            confighttp::emit_session_event("warning", "The requested game's graceful exit was not confirmed. The owned private session will now end, including Epic and additional in-session games.");
+          } else {
+            BOOST_LOG(warning) << "Epic Preview: game exit was not confirmed; close it on the host. No broader termination was attempted."sv;
+            confighttp::emit_session_event("warning", "Epic game exit was not confirmed. The stream ended; close the game on the host.");
+          }
+        } else if (_epic_private_requested) {
+          // Share the existing five-second Epic close budget. This is only an
+          // allowed bounded grace period; there is no Epic cloud-state reader.
+          const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(epic_end_deadline - std::chrono::steady_clock::now());
+          if (remaining > 0ms) {
+            BOOST_LOG(info) << "Epic Private Stream: exact game exited; allowing bounded launcher grace before session teardown, cloud-sync state unknown"sv;
+            std::this_thread::sleep_for(std::min(2000ms, remaining));
+          }
         }
       }
       _epic_grant.reset();
@@ -12689,6 +13173,14 @@ namespace proc {
     // Keep exact-generation ancestors alive while proving pressure-vessel client
     // ancestry above, then terminate every exact-generation process via pidfds.
     terminate_isolated_session_generation();
+    _epic_private_session.reset();
+    _epic_private_request_ticks = 0;
+    _epic_private_birth_upper_ticks = 0;
+    _epic_private_held_image.reset();
+    // An incomplete private cleanup still owns its generation. Do not let a later
+    // teardown mistake that retained generation for the unmanaged Mirror exception.
+    _epic_private_requested = _epic_private_requested && !_session_instance_id.empty();
+    _epic_private_grant_retired = _epic_private_requested;
 
     if (_retained_steam_shutdown && !retry_retained_steam_shutdown()) {
       BOOST_LOG(error) << "process: retained Steam singleton shutdown remains incomplete"sv;

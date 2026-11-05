@@ -1,17 +1,19 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 
 // The management states the backend may report for an active Epic session.
-const VALID_STATES = new Set(['unmanaged', 'confirmable', 'managed', 'closing', 'unavailable', 'ended'])
+const VALID_STATES = new Set(['unmanaged', 'confirmable', 'managed', 'session_managed', 'closing', 'unavailable', 'ended'])
+const PRIVATE_GAME_STATES = new Set(['managed', 'waiting', 'unavailable'])
 
 /**
  * The owner-confirmed Epic Preview session the Mission Control console polls:
  * GET ./api/epic/session on a bounded, completion-driven 5s timer that pauses
  * while the tab is hidden and backs off while the host is not answering.
  *
- * Ownership is never automatic. adopt() sends the explicit owner grant
+ * Mirror Desktop's adopt() sends the explicit owner grant
  * (confirm:true with the current session/revision); release() leaves the game
  * running and only clears the grant. Neither the poll nor a read-back ever
  * replays an action: a refused, errored or stale POST is surfaced, not retried.
+ * Private Stream is managed with its session and offers neither consent action.
  *
  * @param {{ intervalMs?: number, maxBackoffMs?: number, timeoutMs?: number,
  *   shouldPoll?: () => boolean }} options
@@ -43,7 +45,7 @@ export function useEpicSession(options = {}) {
   function emptyState() {
     return {
       available: false, app_uuid: '', app_name: '', session_id: '', revision: '',
-      state: '', runtime: 'unknown', can_adopt: false, can_release: false, message: '',
+      state: '', game_state: '', code: '', runtime: 'unknown', can_adopt: false, can_release: false, message: '',
       uninspected_process_count: 0,
     }
   }
@@ -79,6 +81,7 @@ export function useEpicSession(options = {}) {
       } else {
         const count = data.uninspected_process_count === undefined ? 0 : data.uninspected_process_count
         const validCount = Number.isSafeInteger(count) && count >= 0 && count <= 8192
+        const privateSession = data.state === 'session_managed'
         Object.assign(state, emptyState(), {
           available: true,
           app_uuid: data.app_uuid || '',
@@ -87,10 +90,13 @@ export function useEpicSession(options = {}) {
           revision: data.revision || '',
           // An unrecognized state is shown as unavailable, never guessed as managed.
           state: validCount && VALID_STATES.has(data.state) ? data.state : 'unavailable',
+          game_state: privateSession
+            ? (PRIVATE_GAME_STATES.has(data.game_state) ? data.game_state : 'unavailable') : '',
+          code: typeof data.code === 'string' ? data.code : '',
           runtime: data.runtime || 'unknown',
           uninspected_process_count: validCount ? count : 0,
-          can_adopt: validCount && Boolean(data.can_adopt),
-          can_release: data.can_release === true,
+          can_adopt: !privateSession && validCount && Boolean(data.can_adopt),
+          can_release: !privateSession && data.can_release === true,
           message: data.message || '',
         })
       }
@@ -161,6 +167,11 @@ export function useEpicSession(options = {}) {
   /** Leave the game running and clear the grant only. Never signals the game. */
   async function release() {
     if (acting.value) return false
+    if (state.state === 'session_managed') {
+      actionError.value = 'Private Stream is managed with its session. Use End Session to close it.'
+      errorSession = state.session_id
+      return false
+    }
     if (!state.available || !state.session_id || !state.revision) {
       actionError.value = 'There is no current Epic session to leave.'
       errorSession = state.session_id

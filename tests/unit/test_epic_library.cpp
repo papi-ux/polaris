@@ -112,6 +112,33 @@ TEST(EpicLibraryTests, UriEncodesSeparatorsAndRejectsInjectedIdentifiers) {
   EXPECT_EQ(epic_library::launch_command("/fixture/player/Epic's App.AppImage", title),
     "'/fixture/player/Epic'\\''s App.AppImage' 'com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true'");
 }
+TEST(EpicLibraryTests, TheAppImageStageNeverGivesTheRequestToTheMountStep) {
+  const auto uri = epic_library::launch_uri(title);
+  std::string isolated;
+  const auto stage = epic_library::appimage_stage_command("/fixture/My Desk's/Epic.AppImage", "/games/Alan Wake's 2", title, [&](const std::string &inner) {
+    isolated = inner;
+    return "ISOLATE(" + inner + ")";
+  });
+  // The request appears once, inside the isolated command and nowhere else.
+  EXPECT_EQ(stage.find(uri), stage.rfind(uri));
+  EXPECT_EQ(isolated, "cd -- '/games/Alan Wake'\\''s 2' && exec \"$APPDIR/AppRun\" '" + uri + "'");
+  EXPECT_LT(stage.find("ISOLATE("), stage.find(uri));
+  // The mount step takes no request, and quotes the path whatever it holds.
+  const auto mount = stage.substr(0, stage.find('\n', stage.find("--appimage-mount")));
+  EXPECT_EQ(mount.find(uri), std::string::npos);
+  EXPECT_NE(mount.find("exec '/fixture/My Desk'\\''s/Epic.AppImage' --appimage-mount)"), std::string::npos);
+  EXPECT_NE(stage.find("cd -- '/games/Alan Wake'\\''s 2' || exit 127\n"), std::string::npos);
+  EXPECT_NE(stage.find("export APPDIR APPIMAGE='/fixture/My Desk'\\''s/Epic.AppImage' ARGV0='/fixture/My Desk'\\''s/Epic.AppImage' OWD=\"$PWD\"\n"), std::string::npos);
+  // Fd 9 stays clear of the diagnostics pipes and the identity channel, and the wait stays inside the 30 s birth window.
+  EXPECT_NE(stage.find("exec 9< <("), std::string::npos);
+  EXPECT_NE(stage.find("read -r -t 10 APPDIR <&9"), std::string::npos);
+  const auto keep = [](const std::string &) { return std::string {"bwrap"}; };
+  EXPECT_THROW(epic_library::appimage_stage_command("relative.AppImage", "/games/a", title, keep), std::invalid_argument);
+  EXPECT_THROW(epic_library::appimage_stage_command("/fixture/a\nb.AppImage", "/games/a", title, keep), std::invalid_argument);
+  EXPECT_THROW(epic_library::appimage_stage_command("/fixture/a.AppImage", "relative", title, keep), std::invalid_argument);
+  EXPECT_THROW(epic_library::appimage_stage_command("/fixture/a.AppImage", "/games/a", {"bad id", "b", "c"}, keep), std::invalid_argument);
+}
+
 TEST(EpicLibraryTests, CatalogMatchesAllThreeIdentifiersNeverNameAlone) {
   // Legendary's actual file wraps the catalog record in metadata; app_name is its artifact.
   json catalog {{"app_name", "artifact"}, {"metadata", {{"namespace", "sandbox"}, {"id", "catalog"}, {"title", "Actual title"}}}};

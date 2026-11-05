@@ -106,6 +106,85 @@ describe('AppsView staged import review', () => {
     document.body.innerHTML = ''
   })
 
+  it('explains the Epic Private Stream setup steps only when Epic titles are listed', async () => {
+    resetScannerState()
+    scannerState.epicGames.value = []
+    let wrapper = mountAppsView()
+    await flushAppsViewLoad()
+    await wrapper.find('button').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-epic-private-setup]').exists()).toBe(false)
+    wrapper.unmount()
+
+    scannerState.epicGames.value = [
+      { name: 'Alan Wake 2', source: 'epic_launcher', provider: 'official', namespace: 'n', item_id: 'i', artifact_id: 'a', selected: false, already_imported: true },
+    ]
+    wrapper = mountAppsView()
+    await flushAppsViewLoad()
+    await wrapper.find('button').trigger('click')
+    await nextTick()
+    const setup = wrapper.find('[data-epic-private-setup]')
+    expect(setup.exists()).toBe(true)
+    expect(setup.text()).toContain('open Epic once on the host desktop while you scan here, then quit it')
+    expect(setup.text()).toContain('after Polaris restarts or Epic updates')
+    expect(setup.text()).toContain('Play each game once in Mirror Desktop before its first Private Stream')
+    scannerState.epicGames.value = []
+  })
+
+  it('names an Epic title in the import card and the review row as the other sources are named', async () => {
+    resetScannerState()
+    scannerState.steamGames.value = []
+    scannerState.heroicGames.value = []
+    scannerState.epicGames.value = [
+      { name: 'Alan Wake 2', source: 'epic_launcher', provider: 'official', installed_platform: 'windows', runtime: 'proton', namespace: 'n', item_id: 'i', artifact_id: 'a', selected: true, already_imported: false },
+      { name: 'Rocket League', source: 'epic_launcher', provider: 'heroic', installed_platform: 'windows', runtime: 'wine', namespace: 'n', item_id: 'j', artifact_id: 'b', selected: true, already_imported: false },
+    ]
+    const wrapper = mountAppsView()
+    await flushAppsViewLoad()
+    await wrapper.find('button').trigger('click')
+    await nextTick()
+
+    const cards = wrapper.findAll('.library-import-game-card')
+    const chips = (card) => card.findAll('.control-chip').map((chip) => chip.text())
+    expect(chips(cards[0])).toEqual(['Staged', 'Epic', 'Windows via Proton'])
+    expect(chips(cards[1])).toEqual(['Staged', 'Heroic', 'Windows via Wine'])
+
+    wrapper.vm.showImportReview = true
+    await nextTick()
+    const rows = wrapper.findAll('.library-import-review-row')
+    expect(rows[0].findAll('.control-chip')[0].text()).toBe('Epic')
+    expect(rows[1].findAll('.control-chip')[0].text()).toBe('Heroic')
+    for (const raw of ['epic_launcher', 'Epic Launcher', 'official', 'proton', 'windows']) {
+      expect(wrapper.findAll('.control-chip').map((chip) => chip.text())).not.toContain(raw)
+    }
+    scannerState.epicGames.value = []
+  })
+
+  it('gives an imported Epic title a named source badge in its own colour', async () => {
+    resetScannerState()
+    const wrapper = mountAppsView((url) => (url.includes('./api/apps') ? Promise.resolve({
+      json: () => Promise.resolve({
+        apps: [
+          { uuid: 'a', name: 'Alan Wake 2', source: 'epic_launcher', cmd: 'x' },
+          { uuid: 'b', name: 'Hades', source: 'steam', cmd: 'y' },
+          { uuid: 'c', name: 'Old', source: 'custom_thing', cmd: 'z' },
+        ],
+        current_app: '',
+        host_name: 'Test Host',
+        host_uuid: 'host-1',
+      }),
+    }) : null))
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+    const badge = (uuid) => wrapper.find(`[data-library-app="${uuid}"] h3 + span`)
+    expect(badge('a').text()).toBe('Epic')
+    expect(badge('a').classes()).toContain('text-ice')
+    expect(badge('b').text()).toBe('Steam')
+    expect(badge('b').classes()).toContain('text-info')
+    // A source this build has no name for still shows what it is.
+    expect(badge('c').text()).toBe('custom_thing')
+  })
+
   it('keeps a sticky staged summary with source counts and primary import action', async () => {
     resetScannerState()
     const wrapper = mountAppsView()

@@ -144,6 +144,19 @@ describe('AppsView Library Quick Launch rail', () => {
     expect(recentCard.find('.library-quick-launch-action').classes()).not.toContain('w-full')
   })
 
+  it('names each source on a launch card', async () => {
+    const wrapper = mountAppsView({ apps: [
+      { uuid: 'a', name: 'Alan Wake 2', cmd: 'x', source: 'epic_launcher' },
+      { uuid: 'b', name: 'Hades', cmd: 'y', source: 'steam' },
+    ] })
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+    const pills = wrapper.findAll('.library-quick-launch-rail .meta-pill').map((pill) => pill.text())
+    expect(pills).toContain('Epic')
+    expect(pills).toContain('Steam')
+    expect(pills).not.toContain('epic_launcher')
+  })
+
   it('pins the running app and routes broken entries to repair copy instead of launch', async () => {
     const wrapper = mountAppsView({
       currentApp: 'ready-basic',

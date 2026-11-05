@@ -6,12 +6,19 @@
 
 #ifdef __linux__
 
+#include "src/vrr_compositor_identity.h"
+
+#ifdef POLARIS_BUILD_GIO
+  #include "steamos_bus.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
 #include <climits>
 #include <fcntl.h>
+#include <map>
 #include <mutex>
 #include <openssl/sha.h>
 #include <poll.h>
@@ -37,6 +44,12 @@ namespace platf::epic {
     constexpr std::size_t mount_limit = 2 * 1024 * 1024;
     constexpr std::size_t process_limit = 8192;
     constexpr std::size_t snapshot_limit = 64 * 1024 * 1024;
+    // One user-manager read; a stalled manager makes the census unknown after this, never longer.
+    constexpr std::chrono::milliseconds unit_query_timeout {1000};
+    // Listings one admission census may take to find nothing left to judge, which bounds its work.
+    constexpr int census_listings = 16;
+    // A protected task's ancestor that exits reparents it, so its private walk is read afresh this often.
+    constexpr int ancestry_walks = 3;
 
     struct refusal_t: std::runtime_error {
       using std::runtime_error::runtime_error;
@@ -121,17 +134,34 @@ namespace platf::epic {
     struct stat_t {
       std::uint64_t pid, parent, start;
       char state;
+      std::uint64_t flags;
     };
 
-    stat_t parse_stat(const std::string &text) {
+    // Any task's stat as the kernel wrote it. kthreadd's start time is 0, which only parse_stat refuses.
+    stat_t stat_fields(const std::string &text) {
       const auto left = text.find('(');
       const auto right = text.rfind(')');
       require(left != std::string::npos && right != std::string::npos && left > 1 && right > left && text[left - 1] == ' ', "malformed_process_stat");
       const auto fields = words(text.substr(right + 1));
       require(fields.size() >= 20 && fields[0].size() == 1, "incomplete_process_stat");
-      stat_t result {number(std::string_view(text).substr(0, left - 1)), number(fields[1]), number(fields[19]), fields[0][0]};
+      return {number(std::string_view(text).substr(0, left - 1)), number(fields[1]), number(fields[19]), fields[0][0], number(fields[6])};
+    }
+
+    stat_t parse_stat(const std::string &text) {
+      const auto result = stat_fields(text);
       require(result.pid > 1 && result.pid <= INT_MAX && result.start > 0, "invalid_process_identity");
       return result;
+    }
+
+    bool dead_state(char state) {
+      return state == 'Z' || state == 'X' || state == 'x';
+    }
+
+    // The kernel sets PF_EXITING first, drops the task's memory, and only then makes it a zombie, which
+    // can take seconds for a large process. Throughout, its links and maps read as missing.
+    bool exiting(const stat_t &task) {
+      constexpr std::uint64_t pf_exiting = 0x4;
+      return dead_state(task.state) || (task.flags & pf_exiting) != 0;
     }
 
     std::string cgroup(const std::string &text) {
@@ -182,6 +212,118 @@ namespace platf::epic {
       }
       require(found, "missing_process_uid");
       return owned;
+    }
+
+    bool token(const std::string &value) {
+      return !value.empty() && value.size() <= 256 && std::all_of(value.begin(), value.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+      });
+    }
+
+    enum class credentials_t { owner, root, other };
+
+    /** All four status UIDs, classified without refusing a mix: lineage needs root as well as the owner. */
+    credentials_t credentials(const std::string &text, std::uint64_t owner) {
+      std::optional<credentials_t> result;
+      std::istringstream stream(text);
+      std::string line;
+      while (std::getline(stream, line)) {
+        if (line.compare(0, 4, "Uid:") == 0) {
+          require(!result, "ambiguous_process_uid");
+          const auto ids = words(line.substr(4));
+          require(ids.size() == 4, "incomplete_process_uid");
+          const auto all = [&ids](std::uint64_t uid) {
+            return std::all_of(ids.begin(), ids.end(), [uid](const auto &id) { return number(id) == uid; });
+          };
+          result = all(owner) ? credentials_t::owner : all(0) ? credentials_t::root : credentials_t::other;
+        }
+      }
+      require(result.has_value(), "missing_process_uid");
+      return *result;
+    }
+
+    // The kernel task name in stat, which may itself contain spaces and parentheses.
+    std::string stat_name(const std::string &text) {
+      const auto left = text.find('(');
+      const auto right = text.rfind(')');
+      require(left != std::string::npos && right != std::string::npos && right > left, "malformed_process_stat");
+      return text.substr(left + 1, right - left - 1);
+    }
+
+    std::optional<std::string> status_name(const std::string &text) {
+      std::istringstream stream(text);
+      std::string line;
+      while (std::getline(stream, line)) {
+        if (line.compare(0, 5, "Name:") == 0) {
+          const auto first = line.find_first_not_of(" \t", 5);
+          return first == std::string::npos ? std::string {} : line.substr(first);
+        }
+      }
+      return std::nullopt;
+    }
+
+    /**
+     * Only ever refuses. A task whose own name could be Epic, an AppImage, Wine, Proton or a
+     * Windows game is never placed by session_role(), whatever its placement says. A name is
+     * chosen by the task itself, so it never admits on its own.
+     */
+    bool unrelated_name(std::string name) {
+      std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : static_cast<char>(c);
+      });
+      for (const char *marker : {"epic", "appimage", "wine", "proton"}) {
+        if (name.find(marker) != std::string::npos) {
+          return false;
+        }
+      }
+      return !name.empty() && !(name.size() >= 4 && name.compare(name.size() - 4, 4, ".exe") == 0);
+    }
+
+    enum class placement_t { none, user_manager, user_service, login_session };
+
+    /**
+     * Where a unified cgroup puts a task among the roles admission may set aside, all inside this
+     * owner's user slice. systemd and logind assign these units; the task does not name them.
+     */
+    placement_t placement(const std::string &group, std::uint64_t owner) {
+      const auto uid = std::to_string(owner);
+      std::vector<std::string> parts;
+      for (const auto &part : fs::path(group).relative_path()) {
+        parts.push_back(part.string());
+      }
+      if (parts.size() < 3 || parts[0] != "user.slice" || parts[1] != "user-" + uid + ".slice") {
+        return placement_t::none;
+      }
+      const auto ends = [](const std::string &text, std::string_view suffix) {
+        return text.size() > suffix.size() && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+      };
+      if (parts.size() == 3) {
+        // A logind login session: session-<id>.scope directly under the user slice.
+        const auto &scope = parts[2];
+        return scope.compare(0, 8, "session-") == 0 && ends(scope, ".scope") && token(scope.substr(8, scope.size() - 14)) ?
+                 placement_t::login_session :
+                 placement_t::none;
+      }
+      if (parts[2] != "user@" + uid + ".service") {
+        return placement_t::none;
+      }
+      if (parts.size() == 4) {
+        return parts[3] == "init.scope" ? placement_t::user_manager : placement_t::none;
+      }
+      // A service unit of the user manager. Application launches (app-*), transient runs (run-*)
+      // and D-Bus activations (dbus-*) are not session services, and nothing nests below a unit.
+      // A unit's name can be chosen by whoever starts it, so session_role() also asks the manager.
+      const auto &slice = parts[3];
+      const auto &unit = parts[4];
+      if (parts.size() != 5 || (slice != "session.slice" && slice != "background.slice" && slice != "app.slice") || !ends(unit, ".service")) {
+        return placement_t::none;
+      }
+      for (const char *prefix : {"app-", "run-", "dbus-"}) {
+        if (unit.compare(0, std::string_view(prefix).size(), prefix) == 0) {
+          return placement_t::none;
+        }
+      }
+      return placement_t::user_service;
     }
 
     struct map_t {
@@ -271,6 +413,30 @@ namespace platf::epic {
         file_t directory;
       };
       std::vector<uninspected_t> uninspected;
+      // Set only by a private snapshot, whose every protected task must be proved outside.
+      bool private_census {false};
+
+      // What an admission census has decided about a task, for as long as that task's start time holds.
+      enum class verdict_t { foreign, dead, negative, protected_task, candidate };
+
+      struct judged_t {
+        std::uint64_t start;
+        verdict_t verdict;
+        bool born_in_census;
+        fs::path exe;
+        std::optional<file_t> image;
+      };
+
+      /**
+       * Set only by an admission census, and what it refuses with when a candidate changes or
+       * vanishes, or when churn leaves no listing with nothing to judge. A snapshot keeps no record:
+       * it samples one listing.
+       */
+      const char *census_changed {nullptr};
+      std::map<std::uint64_t, judged_t> judged;
+      int listings {0};
+      // A candidate or protected task was recorded after the last bookend of them.
+      bool unproved {false};
 
       std::string counted(std::optional<std::string> text) {
         auto value = needed(std::move(text), "incomplete_process_observation");
@@ -281,6 +447,60 @@ namespace platf::epic {
 
       std::string read(const fs::path &path, std::size_t limit = small_limit) {
         return counted(backend.read(path, limit));
+      }
+
+      /**
+       * The kernel's proof that a task has exited or is exiting, so it cannot receive the request.
+       * Procfs can hide a live process, so a missing file proves nothing alone. A task on its way out
+       * still has a status, and its stat says where it is; its start time goes to @p start, since it
+       * stays listed until it is reaped.
+       */
+      bool gone(std::uint64_t pid, std::uint64_t *start = nullptr) {
+        const auto path = fs::path("/proc") / std::to_string(pid);
+        // Twice, since an exiting task can be reaped between the two reads, or between an open and a read.
+        for (int look = 0; look < 2; ++look) {
+          const auto status = backend.initial_status(path, small_limit);
+          if (!status.text) {
+            if (status.absence == testing::process_absence_t::vanished) {
+              return true;
+            }
+            continue;
+          }
+          if (const auto text = backend.read(path / "stat", small_limit)) {
+            try {
+              const auto task = stat_fields(*text);
+              if (start) {
+                *start = task.start;
+              }
+              return exiting(task);
+            }
+            catch (const refusal_t &) {
+              return false;
+            }
+          }
+        }
+        return false;
+      }
+
+      /**
+       * For a catch block. Only a non-candidate the kernel proves gone is skipped: it cannot receive
+       * the request, and any child it left is judged as its own task. Anything else still refuses.
+       */
+      void rethrow_unless_gone(std::uint64_t pid, bool candidate) {
+        std::uint64_t start = 0;
+        if (!gone(pid, &start)) {
+          throw;
+        }
+        if (candidate) {
+          if (census_changed) {
+            throw refusal_t(census_changed);
+          }
+          throw;
+        }
+        judged.erase(pid);
+        if (start) {
+          note(pid, start, verdict_t::dead);
+        }
       }
 
       fs::path link(const fs::path &path) {
@@ -335,29 +555,291 @@ namespace platf::epic {
                same_file(process.directory, stat(path)) && !exe.target && exe.permission_denied;
       }
 
-      std::vector<process_t> launchers() {
-        // This is a presence-only prerequisite, never game selection or signal authority. An
-        // unrelated protected desktop process cannot supply a launcher or an AppImage proof.
-        // Once an executable is a candidate, every identity/namespace/bookend remains required.
+      /**
+       * The same private protected task: its stat, owner status and pinned proc directory, which
+       * may be owner- or root-owned. What it executes now is not part of its identity.
+       */
+      bool still_same_task(const uninspected_t &process) {
+        const auto path = fs::path("/proc") / std::to_string(process.identity.pid);
+        const auto current = parse_stat(read(path / "stat"));
+        return current.pid == process.identity.pid && current.start == process.identity.start &&
+               current.state != 'Z' && current.state != 'X' && current.state != 'x' &&
+               check_uid(read(path / "status"), backend.owner_uid()) && same_file(process.directory, stat(path));
+      }
+
+      struct lineage_t {
+        stat_t identity;
+        std::string group;
+        credentials_t credentials;
+      };
+
+      // World-readable facts only: stat, status credentials and the unified cgroup, never PID 1.
+      lineage_t lineage(std::uint64_t pid) {
+        const auto path = fs::path("/proc") / std::to_string(pid);
+        const auto identity = parse_stat(read(path / "stat"));
+        require(identity.pid == pid && identity.state != 'Z' && identity.state != 'X' && identity.state != 'x', "protected_lineage_unproven");
+        return {identity, cgroup(read(path / "cgroup")), credentials(read(path / "status"), backend.owner_uid())};
+      }
+
+      static bool same_lineage(const lineage_t &a, const lineage_t &b) {
+        return a.identity.pid == b.identity.pid && a.identity.start == b.identity.start && a.identity.parent == b.identity.parent &&
+               a.group == b.group && a.credentials == b.credentials;
+      }
+
+      /** Every fact a protected task was set aside by, so the census end can require all of them again. */
+      struct role_t {
+        std::string name;
+        std::vector<lineage_t> chain;
+        std::optional<testing::unit_t> unit;
+      };
+
+      static bool same_role(const role_t &a, const role_t &b) {
+        return a.name == b.name && a.unit == b.unit && a.chain.size() == b.chain.size() &&
+               std::equal(a.chain.begin(), a.chain.end(), b.chain.begin(), same_lineage);
+      }
+
+      // What the user manager reported for each unit this census asked about, asked once.
+      std::map<std::string, std::optional<testing::unit_t>> units;
+      std::vector<role_t> roles;
+      std::string placed_group;
+
+      std::optional<testing::unit_t> unit(const std::string &name) {
+        if (!units.count(name)) {
+          units[name] = backend.user_unit(name);
+        }
+        return units.at(name);
+      }
+
+      // A root-owned regular file the system installed in a vendor or administrator unit
+      // directory, never a user's own unit or a transient unit, at a reported path not reached
+      // through a link. The manager resolves an alias to its unit before it reports these paths.
+      bool vendor_unit_file(const std::string &text) {
+        const fs::path path = text;
+        if (!safe_absolute_path(path) || !(inside(path, "/usr/lib/systemd/user") || inside(path, "/etc/systemd/user"))) {
+          return false;
+        }
+        const auto file = backend.stat(path);
+        const auto directory = backend.stat(path.parent_path());
+        return file && directory && backend.canonical(path) == path && S_ISREG(file->mode) && file->uid == 0 &&
+               S_ISDIR(directory->mode) && directory->uid == 0 && ((file->mode | directory->mode) & (S_IWGRP | S_IWOTH)) == 0;
+      }
+
+      /**
+       * The manager's own account of the unit a cgroup names: loaded, not transient, assigned this
+       * exact cgroup and defined only by vendor files. A unit made by systemd-run, one in the user's
+       * own unit directory and one a user drop-in changes are not, whatever they are called.
+       */
+      bool vendor_service(const std::string &group) {
+        const auto name = fs::path(group).filename().string();
+        const auto facts = unit(name);
+        return facts && facts->id == name && facts->load_state == "loaded" && !facts->transient && facts->control_group == group &&
+               vendor_unit_file(facts->fragment_path) &&
+               std::all_of(facts->drop_in_paths.begin(), facts->drop_in_paths.end(), [this](const auto &file) { return vendor_unit_file(file); });
+      }
+
+      /**
+       * D-A (B), papi's 2026-10-29 decision on #420. At private admission a protected owner task,
+       * whose executable, maps and links the owner cannot read, counts as "not Epic" only when its
+       * world-readable kernel facts mark it as an unrelated session or system process. Those facts
+       * are its stat (name, parent, start time), its status (name, credentials) and its unified
+       * cgroup, and the same for each ancestor; never maps, exe, cwd, argv or environ. With U the
+       * owner's slice /user.slice/user-<uid>.slice and M its manager U/user@<uid>.service, exactly
+       * three roles qualify:
+       *
+       *  1. The user manager itself, M/init.scope: a child of PID 1, or a child of that scope's
+       *     owner-credentialed child of PID 1 ("systemd --user" and its "(sd-pam)").
+       *  2. A vendor user service, M/{session,background,app}.slice/<unit>.service, other than an
+       *     application launch (app-*), a transient run (run-*) or a D-Bus activation (dbus-*).
+       *     The user manager must report the unit loaded, not transient, in that exact cgroup and
+       *     defined by root-owned files in /usr/lib/systemd/user or /etc/systemd/user alone, so a
+       *     unit from systemd-run or the user's own unit directory refuses whatever its name. Every
+       *     ancestor up to the user manager is owner-credentialed in that same unit, so the manager
+       *     started it rather than an application ("kwin_wayland", "ssh-agent").
+       *  3. A login session, U/session-<id>.scope, whose parent is root in that same scope and whose
+       *     ancestors are all root up to PID 1 (an SSH login's unprivileged "sshd-session").
+       *
+       * Polaris's own service, or anything inside its cgroup, never qualifies. Each ancestor is no
+       * younger than its child, and every edge is read again before the role counts; a vanished,
+       * reused, mixed-credential or changed link leaves it unproven. The task's stat and status
+       * names must agree and must not look like Epic, an AppImage, Wine, Proton or a Windows game;
+       * that screen can only refuse. Anything else, including any application placement, an
+       * unanswered or ambiguous manager query, refuses. recheck_placed() requires the whole proof
+       * again at the census end.
+       *
+       * This is the owner-visible residual papi accepted, not a proof of absence. If it is ever
+       * wrong, a hidden desktop launcher receives the request and the game opens on the desktop:
+       * the in-session ownership check stays the backstop, so Private shows "Game unverified", End
+       * closes only the private session, and nothing outside that session is signalled.
+       */
+      std::optional<role_t> session_role(const uninspected_t &task, const std::string &own_group) {
+        try {
+          const auto owner = backend.owner_uid();
+          const auto path = fs::path("/proc") / std::to_string(task.identity.pid);
+          const auto name = stat_name(read(path / "stat"));
+          if (status_name(read(path / "status")) != name || !unrelated_name(name)) {
+            return std::nullopt;
+          }
+          std::vector<lineage_t> chain {lineage(task.identity.pid)};
+          if (chain[0].identity.start != task.identity.start || chain[0].credentials != credentials_t::owner) {
+            return std::nullopt;
+          }
+          std::set<std::uint64_t> visited {task.identity.pid};
+          while (chain.back().identity.parent != 1) {
+            const auto parent = chain.back().identity.parent;
+            if (parent <= 1 || chain.size() >= 64 || !visited.insert(parent).second) {
+              return std::nullopt;
+            }
+            auto next = lineage(parent);
+            if (next.identity.start > chain.back().identity.start) {
+              return std::nullopt;
+            }
+            chain.push_back(std::move(next));
+          }
+          const auto &group = chain[0].group;
+          const auto manager_scope = "/user.slice/user-" + std::to_string(owner) + ".slice/user@" + std::to_string(owner) + ".service/init.scope";
+          const auto owned_in = [&chain](std::size_t i, const std::string &unit) {
+            return chain[i].credentials == credentials_t::owner && chain[i].group == unit;
+          };
+          bool placed = false;
+          std::optional<testing::unit_t> service;
+          switch (service_cgroup(group, own_group) ? placement_t::none : placement(group, owner)) {
+            case placement_t::user_manager:
+              placed = chain.size() == 1 || (chain.size() == 2 && owned_in(1, group));
+              break;
+            case placement_t::user_service:
+              placed = chain.size() >= 2 && owned_in(chain.size() - 1, manager_scope);
+              for (std::size_t i = 1; placed && i + 1 < chain.size(); ++i) {
+                placed = owned_in(i, group);
+              }
+              placed = placed && vendor_service(group);
+              service = placed ? unit(fs::path(group).filename().string()) : std::nullopt;
+              break;
+            case placement_t::login_session:
+              placed = chain.size() >= 2 && chain[1].group == group;
+              for (std::size_t i = 1; placed && i < chain.size(); ++i) {
+                placed = chain[i].credentials == credentials_t::root;
+              }
+              break;
+            case placement_t::none:
+              break;
+          }
+          if (!placed) {
+            return std::nullopt;
+          }
+          for (const auto &edge : chain) {
+            if (!same_lineage(edge, lineage(edge.identity.pid))) {
+              return std::nullopt;
+            }
+          }
+          return role_t {name, std::move(chain), std::move(service)};
+        }
+        catch (const refusal_t &) {
+          return std::nullopt;
+        }
+      }
+
+      /**
+       * Admission sets aside the protected tasks the census recorded since its last placement, each
+       * by session_role(), or refuses. One the kernel proves gone needs no role.
+       */
+      void place_protected(const char *reason) {
+        if (roles.size() == uninspected.size()) {
+          return;
+        }
+        if (placed_group.empty()) {
+          placed_group = cgroup(read("/proc/self/cgroup"));
+        }
+        for (std::size_t i = roles.size(); i < uninspected.size();) {
+          auto role = session_role(uninspected[i], placed_group);
+          if (!role && gone(uninspected[i].identity.pid)) {
+            judged.erase(uninspected[i].identity.pid);
+            uninspected.erase(uninspected.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+          }
+          require(role.has_value(), reason);
+          roles.push_back(std::move(*role));
+          ++i;
+        }
+      }
+
+      // A set-aside task must still be the same protected task when the census ends, and every fact
+      // that set it aside must still hold: its names and their veto, each lineage edge's parent,
+      // cgroup and credentials, and what the user manager reports for its unit, asked again. One that
+      // is reused, becomes readable or changes its role meanwhile was never checked. One the kernel
+      // proves gone cannot receive the request, and its unit is not asked about for it again.
+      void recheck_placed(const char *reason) {
+        if (uninspected.empty()) {
+          return;
+        }
+        require(roles.size() == uninspected.size() && cgroup(read("/proc/self/cgroup")) == placed_group, reason);
+        for (std::size_t i = 0; i < uninspected.size();) {
+          const auto pid = uninspected[i].identity.pid;
+          bool same = false;
+          try {
+            const auto again = still_uninspected(uninspected[i]) ? session_role(uninspected[i], placed_group) : std::nullopt;
+            same = again && same_role(*again, roles[i]);
+          }
+          catch (const refusal_t &) {
+            if (!gone(pid)) {
+              throw;
+            }
+          }
+          if (same) {
+            ++i;
+            continue;
+          }
+          require(gone(pid), reason);
+          judged.erase(pid);
+          uninspected.erase(uninspected.begin() + static_cast<std::ptrdiff_t>(i));
+          roles.erase(roles.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+        std::set<std::string> asked;
+        for (const auto &role : roles) {
+          if (role.unit) {
+            asked.insert(role.unit->id);
+          }
+        }
+        for (const auto &name : asked) {
+          require(backend.user_unit(name) == units.at(name), reason);
+        }
+      }
+
+      std::uint64_t owner_and_namespace() {
         const auto owner = backend.owner_uid();
         require(owner != 0, "host_owner_uid_required");
         group_namespace = needed(backend.link("/proc/self/ns/cgroup"), "unknown_cgroup_namespace");
         const auto ns = group_namespace.string();
         require(ns.size() > 9 && ns.compare(0, 8, "cgroup:[") == 0 && ns.back() == ']' &&
                   number(std::string_view(ns).substr(8, ns.size() - 9)) > 0, "unknown_cgroup_namespace");
+        return owner;
+      }
+
+      /** Every task of one /proc listing, its names checked. PID 1 is never a census's task. */
+      std::vector<std::uint64_t> listed_tasks() {
         const auto names = needed(backend.list("/proc", process_limit), "incomplete_process_table");
         std::set<std::uint64_t> seen;
-        std::vector<process_t> result;
+        std::vector<std::uint64_t> result;
         for (const auto &name : names) {
           if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) {
             continue;
           }
           const auto pid = number(name);
           require(pid > 0 && pid <= INT_MAX && seen.insert(pid).second, "ambiguous_process_table");
-          if (pid == 1) {
-            continue;
+          if (pid != 1) {
+            result.push_back(pid);
           }
-          const auto path = fs::path("/proc") / name;
+        }
+        return result;
+      }
+
+      std::vector<process_t> launchers() {
+        // This is a presence-only prerequisite, never game selection or signal authority. An
+        // unrelated protected desktop process cannot supply a launcher or an AppImage proof.
+        // Once an executable is a candidate, every identity/namespace/bookend remains required.
+        const auto owner = owner_and_namespace();
+        std::vector<process_t> result;
+        for (const auto pid : listed_tasks()) {
+          const auto path = fs::path("/proc") / std::to_string(pid);
           const auto exe = backend.link(path / "exe");
           if (!exe) {
             continue;
@@ -388,40 +870,87 @@ namespace platf::epic {
         return result;
       }
 
-      std::vector<process_t> table(const fs::path &game_image = {}) {
+      void note(std::uint64_t pid, std::uint64_t start, verdict_t verdict, fs::path exe = {}, std::optional<file_t> image = {}) {
+        if (census_changed) {
+          judged[pid] = {start, verdict, listings > 1, std::move(exe), std::move(image)};
+          unproved = unproved || verdict == verdict_t::candidate || verdict == verdict_t::protected_task;
+        }
+      }
+
+      /** The same task, still the owner's, still running the same executable link and, when one was read, file. */
+      bool stable_negative(const stat_t &identity, const fs::path &exe, const file_t *image = nullptr) {
+        const auto path = fs::path("/proc") / std::to_string(identity.pid);
+        const auto last = parse_stat(read(path / "stat"));
+        return last.pid == identity.pid && last.start == identity.start && !dead_state(last.state) &&
+               check_uid(read(path / "status"), backend.owner_uid()) && stat(path).uid == backend.owner_uid() &&
+               link(path / "exe") == exe && (!image || same_file(*image, stat(path / "exe")));
+      }
+
+      /**
+       * Whether a task is the owner's at all: false for another user's and for one the kernel proves
+       * gone. An absence it does not prove refuses here, with no second probe. A census reads the
+       * start time first, so a foreign verdict holds for this task alone and an owner task that
+       * reuses its PID is new at the next listing.
+       */
+      bool owner_owns(std::uint64_t pid) {
+        const auto path = fs::path("/proc") / std::to_string(pid);
+        std::uint64_t listed_start = 0;
+        if (census_changed) {
+          try {
+            listed_start = stat_fields(read(path / "stat")).start;
+          }
+          catch (const refusal_t &) {
+            rethrow_unless_gone(pid, false);
+            return false;
+          }
+        }
+        // A same-UID non-dumpable process can have a root-owned proc directory.
+        // Read non-secret status first, so it cannot silently disappear from an owned scan.
+        auto status = backend.initial_status(path, small_limit);
+        if (!status.text && (status.absence == testing::process_absence_t::vanished || ((census_changed || private_census) && gone(pid)))) {
+          return false;
+        }
+        if (check_uid(counted(std::move(status.text)), backend.owner_uid())) {
+          return true;
+        }
+        note(pid, listed_start, verdict_t::foreign);
+        return false;
+      }
+
+      /**
+       * One task of table(): foreign, exited, protected, a stable negative or a row. Only a task
+       * already known to be a row can make a read failure refuse once the kernel proves it gone.
+       */
+      void table_task(std::uint64_t pid, const fs::path &game_image, std::vector<process_t> &result) {
+        if (!owner_owns(pid)) {
+          return;
+        }
         const auto owner = backend.owner_uid();
-        require(owner != 0, "host_owner_uid_required");
-        group_namespace = needed(backend.link("/proc/self/ns/cgroup"), "unknown_cgroup_namespace");
-        const auto ns = group_namespace.string();
-        require(ns.size() > 9 && ns.compare(0, 8, "cgroup:[") == 0 && ns.back() == ']' &&
-                  number(std::string_view(ns).substr(8, ns.size() - 9)) > 0, "unknown_cgroup_namespace");
-        const auto names = needed(backend.list("/proc", process_limit), "incomplete_process_table");
-        std::set<std::uint64_t> seen;
-        std::vector<process_t> result;
-        for (const auto &name : names) {
-          if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) { return c >= '0' && c <= '9'; })) {
-            continue;
+        const auto path = fs::path("/proc") / std::to_string(pid);
+        bool candidate = false;
+        try {
+          const auto directory = stat(path);
+          if (directory.uid != owner) {
+            // Nothing past status and stat is readable here. Only the private census may keep
+            // such an owner task, as protected, for its stat-ancestry outside proof; it never
+            // becomes a row. Every other scan refuses, as before.
+            require(private_census, "unreadable_owner_process");
+            const auto first = parse_stat(read(path / "stat"));
+            require(first.pid == pid, "process_pid_changed");
+            if (dead_state(first.state)) {
+              return;
+            }
+            const auto last = parse_stat(read(path / "stat"));
+            require(last.pid == pid && last.start == first.start && !dead_state(last.state) &&
+                      check_uid(read(path / "status"), owner) && same_file(directory, stat(path)), "protected_process_changed");
+            uninspected.push_back({first, directory});
+            return;
           }
-          const auto pid = number(name);
-          require(pid > 0 && pid <= INT_MAX && seen.insert(pid).second, "ambiguous_process_table");
-          if (pid == 1) {
-            continue;
-          }
-          const auto path = fs::path("/proc") / name;
-          // A same-UID non-dumpable process can have a root-owned proc directory.
-          // Read non-secret status first, so it cannot silently disappear from an owned scan.
-          auto status = backend.initial_status(path, small_limit);
-          if (!status.text && status.absence == testing::process_absence_t::vanished) {
-            continue;
-          }
-          if (!check_uid(counted(std::move(status.text)), owner)) {
-            continue;
-          }
-          require(stat(path).uid == owner, "unreadable_owner_process");
           const auto first = parse_stat(read(path / "stat"));
           require(first.pid == pid, "process_pid_changed");
-          if (first.state == 'Z' || first.state == 'X' || first.state == 'x') {
-            continue;
+          if (dead_state(first.state)) {
+            note(pid, first.start, verdict_t::dead);
+            return;
           }
           const auto exe = backend.inspect_link(path / "exe");
           if (!exe.target && exe.permission_denied) {
@@ -431,37 +960,174 @@ namespace platf::epic {
             uninspected_t denied {first, stat(path)};
             require(still_uninspected(denied), "protected_process_changed");
             uninspected.push_back(denied);
-            continue;
+            note(pid, first.start, verdict_t::protected_task);
+            return;
           }
           const auto executable = needed(exe.target, "unreadable_process_link");
           require(safe_absolute_path(executable), "unresolved_process_link");
+          candidate = game_image.empty() || executable == game_image || executable.filename() == "wineserver";
           auto maps = game_image.empty() ? std::vector<map_t> {} : image_maps(read(path / "maps", maps_limit), game_image);
-          if (!game_image.empty() && maps.empty() && executable != game_image && executable.filename() != "wineserver") {
+          candidate = candidate || !maps.empty();
+          if (!candidate) {
             // This readable process does not map the game and cannot supply its prefix
             // server. It needs a stable negative observation, not close-target authority.
             // In particular, an unrelated app's stale /proc/root view must not block a game.
-            const auto last = parse_stat(read(path / "stat"));
-            require(last.pid == first.pid && last.start == first.start &&
-                      last.state != 'Z' && last.state != 'X' && last.state != 'x' &&
-                      check_uid(read(path / "status"), owner) && stat(path).uid == owner &&
-                      link(path / "exe") == executable, "unmapped_process_changed");
-            continue;
+            if (stable_negative(first, executable)) {
+              note(pid, first.start, verdict_t::negative, executable);
+            }
+            else {
+              // A census judges a task that changed again at its next listing.
+              require(census_changed != nullptr, "unmapped_process_changed");
+            }
+            return;
           }
           process_t row {first, executable, link(path / "cwd"), stat(path / "exe"), cgroup(read(path / "cgroup")), std::move(maps)};
           require(backend.link(path / "ns/cgroup") == group_namespace, "foreign_cgroup_namespace");
           require(same_image(row.image, stat(row.exe)) && same_image(row.image, stat(path / "root" / row.exe.relative_path())), "process_executable_view_changed");
           require(unchanged(row), "process_changed_during_read");
           result.push_back(std::move(row));
+          note(pid, first.start, verdict_t::candidate);
+        }
+        catch (const refusal_t &) {
+          rethrow_unless_gone(pid, candidate);
+        }
+      }
+
+      std::vector<process_t> table(const fs::path &game_image = {}) {
+        (void) owner_and_namespace();
+        std::vector<process_t> result;
+        for (const auto pid : listed_tasks()) {
+          table_task(pid, game_image, result);
         }
         return result;
       }
-    };
 
-    bool token(const std::string &value) {
-      return !value.empty() && value.size() <= 256 && std::all_of(value.begin(), value.end(), [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
-      });
-    }
+      struct owner_task_t {
+        stat_t identity;
+        fs::path exe;
+        file_t image;
+      };
+
+      /**
+       * One task owner_owns() kept: its stat and executable link, with no identity required yet; a
+       * protected task is recorded as uninspected, exactly as table() records it. The caller gives
+       * full identity() only to its candidates and a stable_negative() to the rest, and owns the
+       * read failures, as table_task() does.
+       */
+      std::optional<owner_task_t> owner_task(std::uint64_t pid) {
+        const auto owner = backend.owner_uid();
+        const auto path = fs::path("/proc") / std::to_string(pid);
+        require(stat(path).uid == owner, "unreadable_owner_process");
+        const auto first = parse_stat(read(path / "stat"));
+        require(first.pid == pid, "process_pid_changed");
+        if (dead_state(first.state)) {
+          note(pid, first.start, verdict_t::dead);
+          return std::nullopt;
+        }
+        const auto exe = backend.inspect_link(path / "exe");
+        if (!exe.target && exe.permission_denied) {
+          uninspected_t denied {first, stat(path)};
+          require(still_uninspected(denied), "protected_process_changed");
+          uninspected.push_back(denied);
+          note(pid, first.start, verdict_t::protected_task);
+          return std::nullopt;
+        }
+        const auto executable = needed(exe.target, "unreadable_process_link");
+        require(safe_absolute_path(executable), "unresolved_process_link");
+        // The task's own executable handle stays statable for a Flatpak or deleted path.
+        return owner_task_t {first, executable, stat(path / "exe")};
+      }
+
+      enum class standing_t { stands, changed, vanished };
+
+      /**
+       * Whether what the census decided about a task still holds. A candidate that changes refuses.
+       * A negative that execs, a foreign task born during the census that is now the owner's (a root
+       * process can setuid and then exec), and an exiting task that runs again (a thread's exec makes
+       * its leader a zombie until it takes over the PID and start time) are judged again; the rest only
+       * need their start time.
+       */
+      standing_t standing(std::uint64_t pid, const judged_t &task) {
+        const auto path = fs::path("/proc") / std::to_string(pid);
+        const bool candidate = task.verdict == verdict_t::candidate;
+        try {
+          const auto now = stat_fields(read(path / "stat"));
+          require(!candidate || (now.start == task.start && !exiting(now)), census_changed);
+          if (now.start != task.start) {
+            return standing_t::changed;
+          }
+          if (task.verdict == verdict_t::foreign && task.born_in_census && check_uid(read(path / "status"), backend.owner_uid())) {
+            return standing_t::changed;
+          }
+          if (task.verdict == verdict_t::negative && !stable_negative(now, task.exe, task.image ? &*task.image : nullptr)) {
+            return standing_t::changed;
+          }
+          if (task.verdict == verdict_t::dead && !exiting(now)) {
+            return standing_t::changed;
+          }
+          return standing_t::stands;
+        }
+        catch (const refusal_t &) {
+          rethrow_unless_gone(pid, candidate);
+          return standing_t::vanished;
+        }
+      }
+
+      /** What the next listing holds that this census has not judged, everything the first time. */
+      std::vector<std::uint64_t> unjudged() {
+        require(++listings <= census_listings, census_changed);
+        const auto tasks = listed_tasks();
+        const std::set<std::uint64_t> listed(tasks.begin(), tasks.end());
+        for (auto task = judged.begin(); task != judged.end();) {
+          if (listed.count(task->first)) {
+            ++task;
+            continue;
+          }
+          require(task->second.verdict != verdict_t::candidate, census_changed);
+          task = judged.erase(task);
+        }
+        std::vector<std::uint64_t> fresh;
+        for (const auto pid : tasks) {
+          const auto found = judged.find(pid);
+          const auto current = found == judged.end() ? standing_t::changed : standing(pid, found->second);
+          if (current == standing_t::changed) {
+            judged.erase(pid);
+            fresh.push_back(pid);
+          }
+        }
+        return fresh;
+      }
+
+      /**
+       * Replaces a whole-system bookend: this census may answer only from a listing in which every
+       * owner task has been judged, each candidate and role proved after its judgement. The last
+       * listing follows those proofs, so a birth during a slow manager query is judged too. Churn
+       * that leaves no such listing refuses at the cap; nothing retries the census.
+       */
+      template<class Judge, class Bookend>
+      void settle(Judge judge_tasks, Bookend bookend) {
+        for (;;) {
+          for (auto fresh = unjudged(); !fresh.empty(); fresh = unjudged()) {
+            judge_tasks(fresh);
+          }
+          if (!unproved) {
+            return;
+          }
+          unproved = false;
+          bookend();
+        }
+      }
+
+      /** A candidate's full identity, as table() requires of every row it returns. */
+      process_t identity(const owner_task_t &task) {
+        const auto path = fs::path("/proc") / std::to_string(task.identity.pid);
+        process_t row {task.identity, task.exe, link(path / "cwd"), task.image, cgroup(read(path / "cgroup")), {}};
+        require(backend.link(path / "ns/cgroup") == group_namespace, "foreign_cgroup_namespace");
+        require(same_image(row.image, stat(row.exe)) && same_image(row.image, stat(path / "root" / row.exe.relative_path())), "process_executable_view_changed");
+        require(unchanged(row), "process_changed_during_read");
+        return row;
+      }
+    };
 
     struct digest_t {
       std::string bytes;
@@ -520,8 +1186,183 @@ namespace platf::epic {
       return base / parts[0];
     }
 
-    observation_t snapshot(const title_t &title, backend_t &backend) {
+    struct private_context_t {
+      std::shared_ptr<const vrr_clock::compositor_lease_t> lease;
+      std::shared_ptr<backend_t> backend;
+      std::string generation, boot;
+      fs::path group_namespace;
+      process_t host, supervisor, compositor;
+    };
+
+    bool session_current(const private_context_t &session) {
+      try {
+        return session.lease && session.lease->current();
+      }
+      catch (const std::exception &) {
+        return false;
+      }
+    }
+
+    process_t session_process(reader_t &read, std::uint64_t pid) {
+      require(pid > 1 && pid <= INT_MAX, "invalid_private_process");
+      if (read.group_namespace.empty()) {
+        read.group_namespace = needed(read.backend.link("/proc/self/ns/cgroup"), "unknown_cgroup_namespace");
+        const auto ns = read.group_namespace.string();
+        require(ns.size() > 9 && ns.compare(0, 8, "cgroup:[") == 0 && ns.back() == ']' &&
+                  number(std::string_view(ns).substr(8, ns.size() - 9)) > 0, "unknown_cgroup_namespace");
+      }
+      const auto path = fs::path("/proc") / std::to_string(pid);
+      const auto identity = parse_stat(read.read(path / "stat"));
+      require(identity.pid == pid && identity.state != 'Z' && identity.state != 'X' && identity.state != 'x' &&
+                check_uid(read.read(path / "status"), read.backend.owner_uid()) && read.stat(path).uid == read.backend.owner_uid(), "private_process_identity_unproven");
+      process_t process {identity, read.link(path / "exe"), read.link(path / "cwd"), read.stat(path / "exe"), cgroup(read.read(path / "cgroup")), {}};
+      require(safe_file(process.image, read.backend.owner_uid(), true) && read.unchanged(process) &&
+                parse_stat(read.read(path / "stat")).parent == identity.parent, "private_process_changed");
+      return process;
+    }
+
+    bool unchanged_session_process(reader_t &read, const process_t &process) {
+      const auto path = fs::path("/proc") / std::to_string(process.stat.pid);
+      return read.unchanged(process) && parse_stat(read.read(path / "stat")).parent == process.stat.parent;
+    }
+
+    void validate_session(reader_t &read, const private_context_t &session) {
+      require(session_current(session), "private_session_not_current");
+      require(session.backend.get() == &read.backend && read.backend.owner_uid() != 0 &&
+                session.lease->process.uid == read.backend.owner_uid() && session.boot == read.boot() &&
+                read.backend.link("/proc/self/ns/cgroup") == session.group_namespace, "private_session_identity_changed");
+      read.group_namespace = session.group_namespace;
+      require(unchanged_session_process(read, session.host) && unchanged_session_process(read, session.supervisor) &&
+                unchanged_session_process(read, session.compositor) && session_current(session), "private_supervisor_changed");
+    }
+
+    private_context_t private_context(std::shared_ptr<const vrr_clock::compositor_lease_t> lease,
+                                      const std::string &generation, std::shared_ptr<backend_t> backend) {
+      require(bool(backend), "missing_process_reader");
+      require(lease && lease->current() && token(generation), "private_session_not_current");
+      require(backend->owner_uid() != 0 && lease->process.uid == backend->owner_uid() &&
+                lease->process.pid > 1 && lease->process.pid <= INT_MAX, "private_compositor_identity_unproven");
+      reader_t read {*backend};
+      const auto boot = read.boot();
+      const auto self = parse_stat(read.read("/proc/self/stat"));
+      const auto host = session_process(read, self.pid);
+      require(host.stat.start == self.start && host.stat.parent == self.parent, "private_host_identity_changed");
+      const auto compositor = session_process(read, static_cast<std::uint64_t>(lease->process.pid));
+      require(compositor.stat.start == lease->process.starttime, "private_compositor_identity_changed");
+      const auto supervisor = session_process(read, compositor.stat.parent);
+      const auto own_group = cgroup(read.read("/proc/self/cgroup"));
+      require(own_group != "/" && host.group == own_group && supervisor.group == own_group && compositor.group == own_group &&
+                supervisor.stat.parent == host.stat.pid && host.stat.start <= supervisor.stat.start &&
+                supervisor.stat.start <= compositor.stat.start && supervisor.exe == host.exe &&
+                same_image(supervisor.image, host.image), "private_supervisor_unproven");
+      private_context_t result {std::move(lease), std::move(backend), generation, boot, read.group_namespace, host, supervisor, compositor};
+      validate_session(read, result);
+      return result;
+    }
+
+    /**
+     * Whether a task descends from this generation's supervisor, read from /proc stat alone, which
+     * stays readable for a protected task. A task, or an ancestor, born before the supervisor
+     * cannot descend from it, and a chain that reaches the root without it is outside. A parent
+     * younger than its child (a reused PID), an unreadable or vanished ancestor and an edge that
+     * changes before the bookend are unproven: they refuse, never count as outside.
+     */
+    bool generation_member(reader_t &read, const stat_t &task, const private_context_t &session) {
+      const auto &supervisor = session.supervisor.stat;
+      auto current = task;
+      std::set<std::uint64_t> visited;
+      std::vector<stat_t> edges;
+      bool member = false;
+      for (std::size_t depth = 0;; ++depth) {
+        require(depth < 4096 && visited.insert(current.pid).second, "ambiguous_private_ancestry");
+        if (current.pid == supervisor.pid) {
+          require(current.start == supervisor.start, "private_supervisor_changed");
+          member = true;
+          break;
+        }
+        if (current.start < supervisor.start || current.parent <= 1) {
+          break;
+        }
+        const auto parent = parse_stat(read.read(fs::path("/proc") / std::to_string(current.parent) / "stat"));
+        require(parent.pid == current.parent && parent.start <= current.start &&
+                  parent.state != 'Z' && parent.state != 'X' && parent.state != 'x', "private_ancestry_unproven");
+        edges.push_back(current);
+        current = parent;
+      }
+      // Reparenting or exit during the walk leaves the answer unproven.
+      for (const auto &edge : edges) {
+        const auto again = parse_stat(read.read(fs::path("/proc") / std::to_string(edge.pid) / "stat"));
+        require(again.pid == edge.pid && again.start == edge.start && again.parent == edge.parent, "private_ancestry_changed");
+      }
+      return member;
+    }
+
+    bool in_private_session(reader_t &read, const process_t &process, const private_context_t &session,
+                            std::vector<process_t> &ancestors) {
+      // Stat ancestry settles membership first, so a copy outside, such as the same title on the
+      // desktop, is skipped without reading its protected desktop ancestors. A member keeps the
+      // exact lineage validation below.
+      if (!generation_member(read, process.stat, session)) {
+        return false;
+      }
+      auto current = process.stat;
+      std::set<std::uint64_t> visited;
+      for (std::size_t depth = 0; depth < 4096; ++depth) {
+        require(visited.insert(current.pid).second, "ambiguous_private_ancestry");
+        if (current.parent <= 1) {
+          return false;
+        }
+        if (current.parent == session.supervisor.stat.pid) {
+          require(session.supervisor.stat.start <= current.start, "private_parent_younger_than_child");
+          return true;
+        }
+        auto parent = session_process(read, current.parent);
+        require(parent.stat.start <= current.start, "private_parent_younger_than_child");
+        current = parent.stat;
+        ancestors.push_back(std::move(parent));
+      }
+      throw refusal_t("private_ancestry_too_deep");
+    }
+
+    /**
+     * Proves a private snapshot's protected task outside this generation; false when the kernel
+     * proves it gone. An ancestor that exits during the walk reparents the task, to the supervisor
+     * if it was a member, since the supervisor is a subreaper, so a failed walk is read afresh a
+     * bounded number of times. One that stays unproven still refuses.
+     */
+    bool outside_generation(reader_t &read, reader_t::uninspected_t &task, const private_context_t &session) {
+      const auto pid = task.identity.pid;
+      for (int walk = 1;; ++walk) {
+        bool member = false;
+        try {
+          if (walk > 1) {
+            const auto current = parse_stat(read.read(fs::path("/proc") / std::to_string(pid) / "stat"));
+            require(current.pid == pid && current.start == task.identity.start, "protected_process_changed");
+            task.identity = current;
+          }
+          member = generation_member(read, task.identity, session);
+        }
+        catch (const refusal_t &) {
+          if (read.gone(pid)) {
+            return false;
+          }
+          if (walk == ancestry_walks) {
+            throw;
+          }
+          continue;
+        }
+        require(!member, "private_process_inventory_incomplete");
+        return true;
+      }
+    }
+
+    observation_t snapshot(const title_t &title, backend_t &backend, const private_context_t *session = nullptr,
+                           std::uint64_t not_before_ticks = 0) {
       reader_t read {backend};
+      if (session) {
+        validate_session(read, *session);
+        require(not_before_ticks > 0, "invalid_private_dispatch_bound");
+      }
       require(token(title.namespace_id) && token(title.item_id) && token(title.artifact_id), "invalid_title_identity");
       require(title.platform == "Windows" || title.platform == "Linux", "unknown_title_runtime");
       require(safe_absolute_path(title.install_dir) && safe_absolute_path(title.data_root), "invalid_title_path");
@@ -542,16 +1383,42 @@ namespace platf::epic {
       const auto boot = read.boot();
       const auto own_group = cgroup(read.read("/proc/self/cgroup"));
       require(own_group != "/", "unknown_polaris_cgroup");
+      read.private_census = session != nullptr;
       const auto processes = read.table(image);
+      std::vector<process_t> ancestors;
+      if (session) {
+        // A protected owner task, including one whose proc directory is not the owner's, is
+        // irrelevant only when stat ancestry proves it outside this generation. A member, or a
+        // task whose ancestry cannot be proved, still refuses. This proves only the protected
+        // tasks the census recorded, never that it recorded every one.
+        for (std::size_t i = 0; i < read.uninspected.size();) {
+          if (outside_generation(read, read.uninspected[i], *session)) {
+            ++i;
+          }
+          else {
+            read.uninspected.erase(read.uninspected.begin() + static_cast<std::ptrdiff_t>(i));
+          }
+        }
+      }
       const process_t *game = nullptr;
       for (const auto &process : processes) {
         if (!process.maps.empty() || process.exe == image) {
+          if (session) {
+            if (!in_private_session(read, process, *session, ancestors)) {
+              continue;
+            }
+            require(process.stat.start >= not_before_ticks, "game_predates_private_dispatch");
+            require(inside(process.group, session->supervisor.group), "private_process_cgroup_mismatch");
+            require(process.stat.pid != session->host.stat.pid && process.stat.pid != session->supervisor.stat.pid &&
+                      process.stat.pid != session->compositor.stat.pid && process.exe.filename() != "EpicGamesLauncher" &&
+                      process.exe.filename() != "wineserver", "private_game_identity_unproven");
+          }
           require(!game, "ambiguous_game_process");
           game = &process;
         }
       }
       require(game != nullptr, "game_not_observed");
-      require(!game->maps.empty() && game->cwd == install && !service_cgroup(game->group, own_group), "game_identity_incomplete");
+      require(!game->maps.empty() && game->cwd == install && (session || !service_cgroup(game->group, own_group)), "game_identity_incomplete");
       require(safe_file(game->image, backend.owner_uid(), true), "unsafe_game_executable");
       const auto process_path = fs::path("/proc") / std::to_string(game->stat.pid);
       require(same_image(image_file, read.stat(process_path / "root" / image.relative_path())), "game_process_root_mismatch");
@@ -567,16 +1434,28 @@ namespace platf::epic {
       digest.add(title.platform);
       digest.add(backend.owner_uid());
       digest.add(boot);
+      if (session) {
+        digest.add("epic-private-candidate-v1");
+        digest.add(session->generation);
+        digest.process(session->host);
+        digest.process(session->supervisor);
+        digest.process(session->compositor);
+        digest.add(not_before_ticks);
+      }
       // The confirmation describes this exact observation, including its inspection limits.
       // A changed protected set invalidates consent; none of these rows can supply a target.
-      std::sort(read.uninspected.begin(), read.uninspected.end(), [](const auto &a, const auto &b) {
-        return a.identity.pid < b.identity.pid;
-      });
-      digest.add(read.uninspected.size());
-      for (const auto &process : read.uninspected) {
-        digest.add(process.identity.pid);
-        digest.add(process.identity.start);
-        digest.file(process.directory, true);
+      // A private observation has only tasks proved outside its generation here, so they are
+      // no part of its revision: an SSH login or a polkit prompt cannot revoke its grant.
+      if (!session) {
+        std::sort(read.uninspected.begin(), read.uninspected.end(), [](const auto &a, const auto &b) {
+          return a.identity.pid < b.identity.pid;
+        });
+        digest.add(read.uninspected.size());
+        for (const auto &process : read.uninspected) {
+          digest.add(process.identity.pid);
+          digest.add(process.identity.start);
+          digest.file(process.directory, true);
+        }
       }
       digest.process(*game);
       digest.file(image_file);
@@ -614,8 +1493,15 @@ namespace platf::epic {
         const auto server_dir = fs::path("/tmp") / (".wine-" + std::to_string(backend.owner_uid())) / server_name.str();
         for (const auto &process : processes) {
           if (process.cwd == server_dir) {
+            if (session) {
+              if (!in_private_session(read, process, *session, ancestors)) {
+                continue;
+              }
+              require(process.stat.start >= not_before_ticks, "prefix_server_predates_private_dispatch");
+              require(inside(process.group, session->supervisor.group), "private_process_cgroup_mismatch");
+            }
             require(!server, "ambiguous_prefix_server");
-            require(runtime(process.exe, base, "wineserver") == game_runtime && !service_cgroup(process.group, own_group), "prefix_runtime_mismatch");
+            require(runtime(process.exe, base, "wineserver") == game_runtime && (session || !service_cgroup(process.group, own_group)), "prefix_runtime_mismatch");
             require(safe_file(process.image, backend.owner_uid(), true) && read.canonical(process.exe) == process.exe, "unsafe_prefix_runtime");
             server = &process;
           }
@@ -650,15 +1536,46 @@ namespace platf::epic {
                 image_mount(read.read(process_path / "mountinfo", mount_limit), image).identity == mount.identity &&
                 read.canonical(title.install_dir) == install && read.canonical(title.data_root) == data &&
                 same_file(install_file, read.stat(install)) && same_file(data_file, read.stat(data)) && boot == read.boot(), "game_changed_during_observation");
+      // The owner-consent set stays exact. A task proved outside a generation cannot join it,
+      // whatever it runs next, but its PID could now name a new task inside, so it must still be
+      // the same task, unless the kernel proves it gone.
       for (const auto &process : read.uninspected) {
-        require(read.still_uninspected(process), "protected_process_changed");
+        bool same = false;
+        try {
+          same = session ? read.still_same_task(process) : read.still_uninspected(process);
+        }
+        catch (const refusal_t &) {
+          if (!session || !read.gone(process.identity.pid)) {
+            throw;
+          }
+          continue;
+        }
+        require(same || (session && read.gone(process.identity.pid)), "protected_process_changed");
       }
-      return {true, "owner_confirmation_required", digest.finish(), native ? "native" : "proton", game->stat.pid, game->stat.start, read.uninspected.size()};
+      if (session) {
+        // Parent edges are identity too: reparenting cannot retain private authority.
+        require(unchanged_session_process(read, *game) && (!server || unchanged_session_process(read, *server)), "private_ancestry_changed");
+        digest.add(game->stat.parent);
+        if (server) {
+          digest.add(server->stat.parent);
+        }
+        std::sort(ancestors.begin(), ancestors.end(), [](const auto &a, const auto &b) {
+          return a.stat.pid < b.stat.pid;
+        });
+        for (const auto &ancestor : ancestors) {
+          require(unchanged_session_process(read, ancestor), "private_ancestry_changed");
+          digest.process(ancestor);
+          digest.add(ancestor.stat.parent);
+        }
+        validate_session(read, *session);
+      }
+      return {true, session ? "private_candidate_requires_dispatch_authority" : "owner_confirmation_required", digest.finish(), native ? "native" : "proton", game->stat.pid, game->stat.start, read.uninspected.size()};
     }
 
-    observation_t safe_snapshot(const title_t &title, backend_t &backend) {
+    observation_t safe_snapshot(const title_t &title, backend_t &backend, const private_context_t *session = nullptr,
+                                std::uint64_t not_before_ticks = 0) {
       try {
-        return snapshot(title, backend);
+        return snapshot(title, backend, session, not_before_ticks);
       }
       catch (const refusal_t &error) {
         return {false, error.what(), "", "unknown", 0, 0};
@@ -668,19 +1585,129 @@ namespace platf::epic {
       }
     }
 
+    std::optional<bool> runtime_absent(const title_t &title, std::string &reason, backend_t &backend) {
+      reason.clear();
+      try {
+        reader_t read {backend};
+        require(token(title.namespace_id) && token(title.item_id) && token(title.artifact_id), "invalid_title_identity");
+        require(title.platform == "Windows" || title.platform == "Linux", "unknown_title_runtime");
+        require(safe_absolute_path(title.install_dir) && safe_absolute_path(title.data_root), "invalid_title_path");
+        const fs::path relative = title.launch_executable;
+        require(!relative.empty() && !relative.is_absolute() && safe_absolute_path(fs::path("/") / relative) &&
+                  title.launch_executable.find('\\') == std::string::npos, "invalid_title_executable");
+        const auto install = read.canonical(title.install_dir);
+        const auto data = read.canonical(title.data_root);
+        const auto image = read.canonical(install / relative);
+        require(inside(image, install) && image != install, "title_image_outside_installation");
+        const auto image_file = read.stat(image);
+        const auto install_file = read.stat(install);
+        const auto data_file = read.stat(data);
+        const auto owner = backend.owner_uid();
+        const bool native = title.platform == "Linux";
+        require(safe_file(image_file, owner, native), "unsafe_title_image");
+        require(S_ISDIR(install_file.mode) && S_ISDIR(data_file.mode) && install_file.inode > 0 && data_file.inode > 0 &&
+                  (install_file.uid == owner || install_file.uid == 0) && data_file.uid == owner &&
+                  ((install_file.mode | data_file.mode) & (S_IWGRP | S_IWOTH)) == 0, "unsafe_title_directory");
+        const auto magic = needed(backend.prefix(image, 4), "unreadable_title_image");
+        require(native ? magic == std::string("\177ELF", 4) : magic.size() == 4 && magic.substr(0, 2) == "MZ", "unsupported_title_image");
+        fs::path prefix_path, server_dir;
+        file_t prefix {};
+        if (!native) {
+          prefix_path = data / "compat/compatdata" / title.artifact_id / "pfx";
+          // A title that has never run has no prefix yet, so its first play is in Mirror Desktop
+          // (N3). This backend cannot tell a missing prefix from an IO failure; both are unknown.
+          const auto resolved = backend.canonical(prefix_path);
+          require(resolved.has_value(), "title_prefix_unavailable");
+          require(*resolved == prefix_path, "redirected_title_prefix");
+          prefix = read.stat(prefix_path);
+          require(S_ISDIR(prefix.mode) && prefix.uid == owner && prefix.inode > 0 &&
+                    (prefix.mode & (S_IWGRP | S_IWOTH)) == 0, "unsafe_title_prefix");
+          std::ostringstream server_name;
+          server_name << "server-" << std::hex << prefix.device << '-' << prefix.inode;
+          server_dir = fs::path("/tmp") / (".wine-" + std::to_string(owner)) / server_name.str();
+        }
+        const auto boot = read.boot();
+        (void) read.owner_and_namespace();
+        read.census_changed = "title_runtime_inventory_changed";
+        // Rows are only the tasks that map or run the title image, and Wine servers. Every other
+        // readable task gets the stable negative the game observation already relies on, so a
+        // Flatpak, a deleted host path or a foreign namespace elsewhere cannot make this unknown.
+        std::vector<process_t> processes;
+        read.settle(
+          [&](const std::vector<std::uint64_t> &fresh) {
+            for (const auto pid : fresh) {
+              read.table_task(pid, image, processes);
+            }
+            // A protected task can be neither row only by its session or system role (D-A (B)).
+            read.place_protected("title_runtime_inventory_incomplete");
+          },
+          [&] {
+            // Bookend each row's image mapping by presence: its whole maps text changes with any allocation.
+            for (const auto &process : processes) {
+              const auto path = fs::path("/proc") / std::to_string(process.stat.pid);
+              bool same = false;
+              try {
+                same = read.unchanged(process) && image_maps(read.read(path / "maps", maps_limit), image).empty() == process.maps.empty();
+              }
+              catch (const refusal_t &) {
+                // A row that vanished or cannot be read now has changed; it is never skipped as gone.
+              }
+              require(same, "title_runtime_inventory_changed");
+            }
+            read.recheck_placed("title_runtime_inventory_changed");
+          }
+        );
+        bool busy = false;
+        for (const auto &process : processes) {
+          busy = busy || process.exe == image || !process.maps.empty() || (!native && process.cwd == server_dir);
+        }
+        require(owner == backend.owner_uid() && boot == read.boot() &&
+                  backend.link("/proc/self/ns/cgroup") == read.group_namespace, "title_runtime_inventory_changed");
+        require(read.canonical(title.install_dir) == install && read.canonical(title.data_root) == data &&
+                  read.canonical(install / relative) == image && same_image(image_file, read.stat(image)) &&
+                  same_file(install_file, read.stat(install)) && same_file(data_file, read.stat(data)), "title_runtime_input_changed");
+        require(native || (read.canonical(prefix_path) == prefix_path && same_image(prefix, read.stat(prefix_path))), "title_prefix_changed");
+        reason = busy ? "title_runtime_busy" : "title_runtime_absent";
+        return !busy;
+      }
+      catch (const refusal_t &error) {
+        reason = error.what();
+      }
+      catch (const std::exception &) {
+        reason = "title_runtime_observation_failed";
+      }
+      return std::nullopt;
+    }
+
     bool same_observation(const observation_t &a, const observation_t &b) {
       return a.available && b.available && !a.revision.empty() && a.revision == b.revision &&
              a.pid == b.pid && a.start_ticks == b.start_ticks && a.runtime == b.runtime;
     }
 
-    std::optional<std::string> read_file(const fs::path &path, std::size_t limit, bool prefix, int *open_error = nullptr) {
+    /** A task's own /proc/<pid>/exe handle, which opens the executable that task runs. */
+    bool task_executable_handle(const fs::path &path) {
+      const auto task = path.parent_path();
+      const auto pid = task.filename().string();
+      return path.filename() == "exe" && task.parent_path() == "/proc" && !pid.empty() &&
+             std::all_of(pid.begin(), pid.end(), [](char c) { return c >= '0' && c <= '9'; });
+    }
+
+    // ENOENT from the open, or ESRCH from a read of a task that exited since the open. Neither proves
+    // absence alone: procfs can hide a live process, so the directory and a pidfd must agree.
+    bool absence_may_follow(int error) {
+      return error == ENOENT || error == ESRCH;
+    }
+
+    std::optional<std::string> read_file(const fs::path &path, std::size_t limit, bool prefix, int *read_error = nullptr) {
       if (limit == 0 || limit > maps_limit) {
         return std::nullopt;
       }
-      const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOFOLLOW);
+      // Only a task's executable handle is followed: the kernel resolves it to that exact file,
+      // under the same ptrace read check as its link. Every other path keeps O_NOFOLLOW.
+      const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | (task_executable_handle(path) ? 0 : O_NOFOLLOW));
       if (fd < 0) {
-        if (open_error) {
-          *open_error = errno;
+        if (read_error) {
+          *read_error = errno;
         }
         return std::nullopt;
       }
@@ -702,6 +1729,9 @@ namespace platf::epic {
           continue;
         }
         if (count < 0) {
+          if (read_error) {
+            *read_error = errno;
+          }
           return std::nullopt;
         }
         if (count == 0) {
@@ -720,13 +1750,13 @@ namespace platf::epic {
       }
 
       testing::status_result_t initial_status(const fs::path &process, std::size_t limit) override {
-        int open_error = 0;
-        auto text = read_file(process / "status", limit, false, &open_error);
+        int read_error = 0;
+        auto text = read_file(process / "status", limit, false, &read_error);
         if (text) {
           return {std::move(text)};
         }
         struct stat info {};
-        if (open_error != ENOENT || ::lstat(process.c_str(), &info) == 0 || errno != ENOENT) {
+        if (!absence_may_follow(read_error) || ::lstat(process.c_str(), &info) == 0 || errno != ENOENT) {
           return {};
         }
 #ifdef SYS_pidfd_open
@@ -769,6 +1799,25 @@ namespace platf::epic {
         std::error_code error;
         auto result = fs::canonical(path, error);
         return error ? std::nullopt : std::make_optional(result);
+      }
+
+      std::optional<testing::unit_t> user_unit(const std::string &name) override {
+#ifdef POLARIS_BUILD_GIO
+        // This account's own user bus, its systemd1 name bound to the user manager's process and
+        // checked again after the read, as the SteamOS session reader does. Never loads a unit.
+        namespace bus = prelaunch::steamos::bus;
+        bus::sources_t sources;
+        sources.uid = static_cast<std::uint32_t>(owner_uid());
+        const bus::budget_t budget {bus::clock_t::now() + unit_query_timeout, {}};
+        bus::user_unit_t unit;
+        if (!bus::read_user_unit(sources, budget, name, unit).ok() || !unit.loaded) {
+          return std::nullopt;
+        }
+        return testing::unit_t {unit.id, unit.load_state, unit.fragment_path, unit.control_group, unit.drop_in_paths, unit.transient};
+#else
+        (void) name;
+        return std::nullopt;
+#endif
       }
 
       std::optional<file_t> stat(const fs::path &path) override {
@@ -968,7 +2017,13 @@ namespace platf::epic {
              read.read(proc / "fdinfo" / keeper.fuse_fd.filename(), 4096) == keeper.fuse_info;
     }
 
-    fs::path launcher_path(backend_t &backend) {
+    struct launcher_image_t {
+      fs::path path;
+      file_t file;
+      bool appimage;
+    };
+
+    launcher_image_t launcher_path(backend_t &backend) {
       reader_t read {backend};
       const auto boot = read.boot();
       const auto own_group = cgroup(read.read("/proc/self/cgroup"));
@@ -991,7 +2046,9 @@ namespace platf::epic {
       auto executable_file = launcher->image;
       std::optional<fs::path> backing_source;
       std::optional<appimage_keeper_t> keeper;
+      bool appimage = false;
       if (mount.point.filename().string().compare(0, 7, ".mount_") == 0 || mount.type.compare(0, 4, "fuse") == 0 || mount.type == "squashfs") {
+        appimage = true;
         // Do not guess Desktop/Downloads paths or use an unpacked AppImage binary without its runtime.
         const fs::path source = mount.source;
         if (safe_absolute_path(source)) {
@@ -1017,14 +2074,26 @@ namespace platf::epic {
                 (!keeper || unchanged_keeper(read, *keeper, *launcher, mount)) &&
                 same_image(executable_file, read.stat(executable)) &&
                 image_mount(read.read(proc / "mountinfo", mount_limit), launcher->exe).identity == mount.identity, "desktop_launcher_changed");
-      return executable;
+      return {executable, executable_file, appimage};
     }
   }  // namespace
+
+  struct launcher_proof_t::state_t {
+    launcher_image_t image;
+    std::uint64_t owner;
+    std::shared_ptr<backend_t> backend;
+  };
+
+  struct private_session_t::state_t {
+    private_context_t context;
+  };
 
   struct adopted_game_t::state_t {
     title_t title;
     observation_t observation;
     std::shared_ptr<backend_t> backend;
+    std::optional<private_context_t> session;
+    std::uint64_t not_before_ticks {0};
     int fd {-1};
     mutable std::mutex mutex;
     mutable bool revoked {false};
@@ -1045,8 +2114,9 @@ namespace platf::epic {
         revoked = true;
         return {false, status == exit_state_t::exited ? "adopted_game_exited" : "retained_pidfd_unavailable", "", "unknown", 0, 0};
       }
-      auto current = safe_snapshot(title, *backend);
-      if (!same_observation(observation, current) || backend->wait(fd, std::chrono::milliseconds::zero()) != exit_state_t::alive || backend->pidfd_pid(fd) != observation.pid) {
+      auto current = safe_snapshot(title, *backend, session ? &*session : nullptr, not_before_ticks);
+      if (!same_observation(observation, current) || backend->wait(fd, std::chrono::milliseconds::zero()) != exit_state_t::alive || backend->pidfd_pid(fd) != observation.pid ||
+          (session && !session_current(*session))) {
         revoked = true;
         return {false, current.available ? "adopted_game_identity_changed" : current.reason, "", "unknown", 0, 0};
       }
@@ -1057,9 +2127,182 @@ namespace platf::epic {
 
   namespace detail {
     struct engine_t {
-      static std::unique_ptr<adopted_game_t> adopt(const title_t &title, const observation_t &observation, std::string &error, std::shared_ptr<backend_t> backend) {
+      static std::optional<std::size_t> launcher_instances(
+        std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher) {
+        reason.clear();
+        try {
+          require(bool(backend), "missing_process_reader");
+          if (known_launcher && !verify_launcher(*known_launcher, reason)) {
+            return std::nullopt;
+          }
+          reader_t read {*backend};
+          const auto boot = read.boot();
+          const auto owner = read.owner_and_namespace();
+          read.census_changed = "launcher_inventory_changed";
+          std::size_t count = 0;
+          const auto judge_task = [&](std::uint64_t pid) {
+            if (!read.owner_owns(pid)) {
+              return;
+            }
+            bool candidate = false;
+            try {
+              const auto task = read.owner_task(pid);
+              if (!task) {
+                return;
+              }
+              const auto path = fs::path("/proc") / std::to_string(pid);
+              // Read through the task's own executable handle, which also opens a Flatpak's or a
+              // replaced (deleted) executable that the host cannot open by its path.
+              const auto header = needed(backend->prefix(path / "exe", 11), "launcher_census_unresolved");
+              // The retained file is known by its identity, not its path: a hard link or another
+              // dentry of the same executable runs the same launcher. It is then a full candidate.
+              const bool known_image = known_launcher && task->image.device == known_launcher->state_->image.file.device &&
+                                       task->image.inode == known_launcher->state_->image.file.inode;
+              // AppImages may be renamed and their runtime may precede the inner launcher.
+              // Never turn such a readable but unassociated runtime into a proven zero.
+              const bool appimage_marker = header.substr(0, 4) == std::string("\177ELF", 4) && header.substr(8, 2) == "AI";
+              const bool named = task->exe.filename() == "EpicGamesLauncher";
+              if (!named && !appimage_marker && !known_image) {
+                // Not a launcher candidate: it needs a stable negative, not a full identity. One
+                // that changed stays unjudged, so the next listing judges it again.
+                if (read.stable_negative(task->identity, task->exe, &task->image)) {
+                  read.note(pid, task->identity.start, reader_t::verdict_t::negative, task->exe, task->image);
+                }
+                return;
+              }
+              candidate = true;
+              require(!appimage_marker || known_image, "launcher_census_unresolved");
+              const auto process = read.identity(*task);
+              require(read.unchanged(process), "launcher_inventory_changed");
+              count += named || known_image;
+              read.note(pid, task->identity.start, reader_t::verdict_t::candidate);
+            }
+            catch (const refusal_t &) {
+              read.rethrow_unless_gone(pid, candidate);
+            }
+          };
+          read.settle(
+            [&](const std::vector<std::uint64_t> &fresh) {
+              for (const auto pid : fresh) {
+                judge_task(pid);
+              }
+              // A protected task is not a launcher only by its session or system role (D-A (B)).
+              read.place_protected("launcher_inventory_incomplete");
+            },
+            [&] { read.recheck_placed("launcher_inventory_changed"); }
+          );
+          require(owner == backend->owner_uid() && boot == read.boot() &&
+                    backend->link("/proc/self/ns/cgroup") == read.group_namespace, "launcher_inventory_changed");
+          if (known_launcher && !verify_launcher(*known_launcher, reason)) {
+            return std::nullopt;
+          }
+          return count;
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "launcher_inventory_failed";
+        }
+        return std::nullopt;
+      }
+
+      static std::optional<private_session_t> pin_private_session(
+        std::shared_ptr<const vrr_clock::compositor_lease_t> lease, const std::string &generation,
+        std::string &reason, std::shared_ptr<backend_t> backend) {
+        reason.clear();
+        try {
+          auto context = private_context(std::move(lease), generation, std::move(backend));
+          auto state = std::make_shared<private_session_t::state_t>(private_session_t::state_t {std::move(context)});
+          return private_session_t(std::move(state));
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "private_session_proof_failed";
+        }
+        return std::nullopt;
+      }
+
+      static observation_t observe_in_session(const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks) {
+        if (!session.state_) {
+          return {false, "missing_private_session", "", "unknown", 0, 0};
+        }
+        const auto &context = session.state_->context;
+        return safe_snapshot(title, *context.backend, &context, not_before_ticks);
+      }
+
+      static std::unique_ptr<adopted_game_t> adopt_in_session(
+        const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks,
+        const observation_t &observation, std::string &error) {
+        if (!session.state_) {
+          error = "missing_private_session";
+          return nullptr;
+        }
+        const auto &context = session.state_->context;
+        return adopt(title, observation, error, context.backend, context, not_before_ticks);
+      }
+
+      static std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
+        reason.clear();
+        try {
+          require(bool(backend), "missing_process_reader");
+          const auto owner = backend->owner_uid();
+          auto image = launcher_path(*backend);
+          require(owner != 0 && owner == backend->owner_uid(), "launcher_owner_changed");
+          auto state = std::make_shared<launcher_proof_t::state_t>(launcher_proof_t::state_t {std::move(image), owner, backend});
+          return launcher_proof_t(std::move(state));
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "launcher_proof_failed";
+        }
+        return std::nullopt;
+      }
+
+      static bool verify_launcher(const launcher_proof_t &proof, std::string &reason) {
+        reason.clear();
+        try {
+          require(bool(proof.state_), "missing_launcher_proof");
+          const auto &state = *proof.state_;
+          reader_t read {*state.backend};
+          const auto &image = state.image;
+          require(state.owner != 0 && state.owner == state.backend->owner_uid(), "launcher_owner_changed");
+          require(safe_absolute_path(image.path) && read.canonical(image.path) == image.path &&
+                    safe_file(image.file, state.owner, true) && (!image.appimage || image.file.uid == state.owner) &&
+                    same_image(image.file, read.stat(image.path)), "launcher_file_changed");
+          const auto header = needed(state.backend->prefix(image.path, image.appimage ? 11 : 4), "unreadable_launcher_executable");
+          require(header.substr(0, 4) == std::string("\177ELF", 4) &&
+                    (!image.appimage || header.substr(8, 3) == std::string("AI\002", 3)), "unknown_launcher_executable");
+          require(read.canonical(image.path) == image.path && same_image(image.file, read.stat(image.path)), "launcher_file_changed");
+          return true;
+        }
+        catch (const refusal_t &error) {
+          reason = error.what();
+        }
+        catch (const std::exception &) {
+          reason = "launcher_verification_failed";
+        }
+        return false;
+      }
+
+      static bool appimage_mounts_itself(const launcher_proof_t &proof) {
+        if (!proof.state_ || !proof.state_->image.appimage) {
+          return false;
+        }
+        // The runtime is a small static ELF ahead of the payload, well inside the bound.
+        const auto &state = *proof.state_;
+        const auto head = state.backend->prefix(state.image.path, std::min<std::uint64_t>(state.image.file.size, maps_limit));
+        return head && head->find("appimage-mount") != std::string::npos;
+      }
+
+      static std::unique_ptr<adopted_game_t> adopt(const title_t &title, const observation_t &observation, std::string &error, std::shared_ptr<backend_t> backend,
+                                                std::optional<private_context_t> session = std::nullopt, std::uint64_t not_before_ticks = 0) {
         error.clear();
-        auto current = safe_snapshot(title, *backend);
+        auto current = safe_snapshot(title, *backend, session ? &*session : nullptr, not_before_ticks);
         if (!same_observation(current, observation)) {
           error = current.available ? "stale_observation" : current.reason;
           return nullptr;
@@ -1068,6 +2311,8 @@ namespace platf::epic {
         state->title = title;
         state->observation = current;
         state->backend = std::move(backend);
+        state->session = std::move(session);
+        state->not_before_ticks = not_before_ticks;
         state->fd = state->backend->open_pidfd(current.pid);
         if (state->fd < 0) {
           error = "pidfd_open_failed";
@@ -1088,6 +2333,18 @@ namespace platf::epic {
   adopted_game_t::~adopted_game_t() = default;
   adopted_game_t::adopted_game_t(adopted_game_t &&) noexcept = default;
   adopted_game_t &adopted_game_t::operator=(adopted_game_t &&) noexcept = default;
+
+  launcher_proof_t::launcher_proof_t(std::shared_ptr<const state_t> state): state_(std::move(state)) {}
+
+  private_session_t::private_session_t(std::shared_ptr<const state_t> state): state_(std::move(state)) {}
+
+  std::filesystem::path launcher_proof_t::path() const {
+    return state_ ? state_->image.path : std::filesystem::path {};
+  }
+
+  bool launcher_proof_t::appimage() const {
+    return state_ && state_->image.appimage;
+  }
 
   observation_t observe(const title_t &title) {
     return safe_snapshot(title, *production_backend());
@@ -1142,6 +2399,57 @@ namespace platf::epic {
     return desktop_launcher_executable(reason).has_value();
   }
 
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher) {
+    return detail::engine_t::launcher_instances(reason, production_backend(), known_launcher);
+  }
+
+  std::optional<launcher_proof_t> prove_launcher(std::string &reason) {
+    return detail::engine_t::prove_launcher(reason, production_backend());
+  }
+
+  bool verify_launcher(const launcher_proof_t &proof, std::string &reason) {
+    return detail::engine_t::verify_launcher(proof, reason);
+  }
+
+  bool appimage_mounts_itself(const launcher_proof_t &proof) {
+    return detail::engine_t::appimage_mounts_itself(proof);
+  }
+
+  std::optional<bool> title_runtime_absent(const title_t &title, std::string &reason) {
+    return runtime_absent(title, reason, *production_backend());
+  }
+
+  std::optional<private_session_t> pin_private_session(
+    std::shared_ptr<const vrr_clock::compositor_lease_t> lease, const std::string &generation, std::string &reason) {
+    return detail::engine_t::pin_private_session(std::move(lease), generation, reason, production_backend());
+  }
+
+  observation_t observe_in_session(const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks) {
+    return detail::engine_t::observe_in_session(title, session, not_before_ticks);
+  }
+
+  std::unique_ptr<adopted_game_t> adopt_in_session(
+    const title_t &title, const private_session_t &session, std::uint64_t not_before_ticks,
+    const observation_t &observation, std::string &error) {
+    return detail::engine_t::adopt_in_session(title, session, not_before_ticks, observation, error);
+  }
+
+  private_claim_t private_claim(const observation_t &in_session, std::uint64_t request_ticks, std::uint64_t birth_upper_ticks) {
+    if (!in_session.available) {
+      return in_session.reason == "game_not_observed" ? private_claim_t::keep_looking : private_claim_t::retire;
+    }
+    return in_session.start_ticks < request_ticks || in_session.start_ticks > birth_upper_ticks ? private_claim_t::retire : private_claim_t::retain;
+  }
+
+  private_game_t private_game_state(bool retained, bool claim_retired, const observation_t &latest,
+                                    std::optional<std::uint64_t> now_ticks, std::uint64_t birth_upper_ticks) {
+    if (retained && latest.available) {
+      return private_game_t::managed;
+    }
+    const bool awaited = !claim_retired && !latest.available && latest.reason == "game_not_observed";
+    return awaited && now_ticks && *now_ticks <= birth_upper_ticks ? private_game_t::waiting : private_game_t::unverified;
+  }
+
   namespace testing {
     observation_t observe(const title_t &title, std::shared_ptr<backend_t> backend) {
       return backend ? safe_snapshot(title, *backend) : observation_t {false, "missing_process_reader", "", "unknown", 0, 0};
@@ -1159,7 +2467,7 @@ namespace platf::epic {
       reason.clear();
       try {
         require(bool(backend), "missing_process_reader");
-        return launcher_path(*backend);
+        return launcher_path(*backend).path;
       }
       catch (const refusal_t &error) {
         reason = error.what();
@@ -1170,8 +2478,38 @@ namespace platf::epic {
       return std::nullopt;
     }
 
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher) {
+      return detail::engine_t::launcher_instances(reason, std::move(backend), known_launcher);
+    }
+
+    std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
+      return detail::engine_t::prove_launcher(reason, std::move(backend));
+    }
+
+    std::optional<bool> title_runtime_absent(const title_t &title, std::string &reason, std::shared_ptr<backend_t> backend) {
+      if (!backend) {
+        reason = "missing_process_reader";
+        return std::nullopt;
+      }
+      return runtime_absent(title, reason, *backend);
+    }
+
+    std::optional<private_session_t> pin_private_session(
+      std::shared_ptr<const vrr_clock::compositor_lease_t> lease, const std::string &generation,
+      std::string &reason, std::shared_ptr<backend_t> backend) {
+      return detail::engine_t::pin_private_session(std::move(lease), generation, reason, std::move(backend));
+    }
+
     std::optional<std::string> read_bounded(const fs::path &path, std::size_t limit) {
       return read_file(path, limit, false);
+    }
+
+    status_result_t real_initial_status(const fs::path &process, std::size_t limit) {
+      return production_backend()->initial_status(process, limit);
+    }
+
+    bool status_failure_may_be_absence(int error) {
+      return absence_may_follow(error);
     }
   }  // namespace testing
 }  // namespace platf::epic
