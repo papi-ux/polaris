@@ -1508,14 +1508,16 @@ async function launchRecentApp(app) {
       method: 'POST',
       body: JSON.stringify({ uuid: app.uuid }),
     })
-    const result = response.ok ? await response.json() : { status: false, error: `HTTP ${response.status}` }
-    if (result.status === true) {
+    let result
+    try { result = await response.json() } catch { /* A proxy/auth failure may have no JSON body. */ }
+    if (response.ok && result?.status === true) {
       showToast(t('dashboard.launched', { name: app.name }), 'success')
       // The stage moves once, to the title that just launched.
       selectedFeaturedUuid.value = ''
       refreshApps()
     } else {
-      showToast(t('dashboard.launch_failed') + (result.error || ''), 'error')
+      const message = typeof result?.error === 'string' && result.error ? result.error : `HTTP ${response.status}`
+      showToast(t('dashboard.launch_failed') + message, 'error')
     }
   } catch (e) {
     showToast(t('dashboard.launch_failed') + e.message, 'error')

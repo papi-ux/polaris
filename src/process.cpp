@@ -8971,13 +8971,15 @@ namespace proc {
       if (!proof || !platf::epic::verify_launcher(*proof, reason))
         return launch_failure::refuse(503, "epic_launcher_proof_required", "Polaris needs to see Epic open on the host desktop once before a Private Stream.",
           "Open Epic once on the host desktop and scan Epic in the Polaris Library, then quit Epic completely and try Private Stream again. Repeat this after Polaris restarts or Epic updates.");
-      const auto launchers = platf::epic::launcher_instances(reason, proof);
+      std::string owner_blocker_label;
+      const auto launchers = platf::epic::launcher_instances(reason, proof, &owner_blocker_label);
       if (!launchers) {
         BOOST_LOG(info) << "Epic Private Stream: launcher census unknown: "sv << reason;
         // N4: an AppImage that is not the retained launcher cannot be told apart from Epic.
         if (reason == "launcher_census_unresolved")
           return launch_failure::refuse(503, "epic_other_appimage_running", "Another AppImage app is running on the host, and Polaris can't tell it apart from Epic.",
-            "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.");
+            "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.",
+            owner_blocker_label.empty() ? std::nullopt : std::make_optional(owner_blocker_label + " (an AppImage) is running; quit it to use Private Stream."));
         if (reason == "launcher_inventory_incomplete")
           return launch_failure::refuse(503, "epic_protected_process_unplaced", "A protected program on the host isn't a recognised session or system process, so Polaris can't confirm Epic is closed.",
             "Quit Epic and any app that hides its process details on the host, then try again, or use Mirror Desktop.");

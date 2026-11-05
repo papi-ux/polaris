@@ -2127,17 +2127,80 @@ namespace platf::epic {
 
   namespace detail {
     struct engine_t {
+      // This runs only AFTER the census has refused, using that attempt's remaining byte/listing
+      // budget. It cannot change the reason, retry admission, grant ownership or signal anything.
+      static std::string blocker_label(reader_t &read, const reader_t::owner_task_t &pinned,
+                                       const std::string &header, const std::string &boot, std::uint64_t owner) {
+        try {
+          const auto label = pinned.exe.filename().string();
+          const auto alnum = [](unsigned char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+          };
+          // Reject, never truncate or repair a name into a different identity. ASCII deliberately
+          // excludes controls, bidi/formatting characters, markup, quotes and account-like names.
+          if (label.empty() || label.size() > 64 || !alnum(label.front()) || label.back() == ' ' ||
+              !std::all_of(label.begin(), label.end(), [&](unsigned char c) {
+                return alnum(c) || c == ' ' || c == '.' || c == '_' || c == '-' || c == '+';
+              })) return {};
+          require(owner == read.backend.owner_uid() && boot == read.boot(), "blocker_changed");
+          require(safe_file(pinned.image, owner, true), "unsafe_blocker_file");
+          const auto process = read.identity(pinned);
+          require(++read.listings <= census_listings, "blocker_budget_exhausted");
+          const auto tasks = read.listed_tasks();
+          require(std::find(tasks.begin(), tasks.end(), pinned.identity.pid) != tasks.end(), "blocker_changed");
+          std::vector<reader_t::owner_task_t> negatives;
+          std::vector<std::uint64_t> foreign;
+          for (const auto pid : tasks) {
+            if (pid == pinned.identity.pid) continue;
+            if (!read.owner_owns(pid)) {
+              foreign.push_back(pid);
+              continue;
+            }
+            const auto task = read.owner_task(pid);
+            // Protected/vanishing tasks cannot disprove another AppImage for this presentation.
+            require(task.has_value(), "blocker_identity_incomplete");
+            const auto path = fs::path("/proc") / std::to_string(pid);
+            const auto other_header = read.counted(read.backend.prefix(path / "exe", 11));
+            require(other_header.substr(0, 4) != std::string("\177ELF", 4) || other_header.substr(8, 2) != "AI",
+                    "multiple_appimage_blockers");
+            negatives.push_back(*task);
+          }
+          require(++read.listings <= census_listings, "blocker_budget_exhausted");
+          require(tasks == read.listed_tasks(), "blocker_set_changed");
+          for (const auto &task : negatives) {
+            const auto path = fs::path("/proc") / std::to_string(task.identity.pid);
+            require(read.stable_negative(task.identity, task.exe, &task.image) &&
+                      same_image(task.image, read.stat(path / "exe")), "blocker_set_changed");
+          }
+          for (const auto pid : foreign) require(!read.owner_owns(pid), "blocker_set_changed");
+          require(read.unchanged(process) &&
+                    read.counted(read.backend.prefix(fs::path("/proc") / std::to_string(pinned.identity.pid) / "exe", 11)) == header &&
+                    read.unchanged(process) && owner == read.backend.owner_uid() && boot == read.boot() &&
+                    read.backend.link("/proc/self/ns/cgroup") == read.group_namespace, "blocker_changed");
+          return label;
+        }
+        catch (const std::exception &) {
+          return {}; // Presentation is unavailable; retain the original, generic refusal.
+        }
+      }
+
       static std::optional<std::size_t> launcher_instances(
-        std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher) {
+        std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher, std::string *owner_blocker_label) {
         reason.clear();
+        if (owner_blocker_label) owner_blocker_label->clear();
+        std::optional<reader_t> observation;
+        std::optional<reader_t::owner_task_t> blocker;
+        std::string blocker_header, boot;
+        std::uint64_t owner = 0;
         try {
           require(bool(backend), "missing_process_reader");
           if (known_launcher && !verify_launcher(*known_launcher, reason)) {
             return std::nullopt;
           }
-          reader_t read {*backend};
-          const auto boot = read.boot();
-          const auto owner = read.owner_and_namespace();
+          observation.emplace(*backend);
+          auto &read = *observation;
+          boot = read.boot();
+          owner = read.owner_and_namespace();
           read.census_changed = "launcher_inventory_changed";
           std::size_t count = 0;
           const auto judge_task = [&](std::uint64_t pid) {
@@ -2171,6 +2234,10 @@ namespace platf::epic {
                 return;
               }
               candidate = true;
+              if (appimage_marker && !known_image && owner_blocker_label) {
+                blocker = *task;
+                blocker_header = header;
+              }
               require(!appimage_marker || known_image, "launcher_census_unresolved");
               const auto process = read.identity(*task);
               require(read.unchanged(process), "launcher_inventory_changed");
@@ -2200,6 +2267,9 @@ namespace platf::epic {
         }
         catch (const refusal_t &error) {
           reason = error.what();
+          if (reason == "launcher_census_unresolved" && owner_blocker_label && blocker && observation) {
+            *owner_blocker_label = blocker_label(*observation, *blocker, blocker_header, boot, owner);
+          }
         }
         catch (const std::exception &) {
           reason = "launcher_inventory_failed";
@@ -2399,8 +2469,8 @@ namespace platf::epic {
     return desktop_launcher_executable(reason).has_value();
   }
 
-  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher) {
-    return detail::engine_t::launcher_instances(reason, production_backend(), known_launcher);
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher, std::string *owner_blocker_label) {
+    return detail::engine_t::launcher_instances(reason, production_backend(), known_launcher, owner_blocker_label);
   }
 
   std::optional<launcher_proof_t> prove_launcher(std::string &reason) {
@@ -2478,8 +2548,8 @@ namespace platf::epic {
       return std::nullopt;
     }
 
-    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher) {
-      return detail::engine_t::launcher_instances(reason, std::move(backend), known_launcher);
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher, std::string *owner_blocker_label) {
+      return detail::engine_t::launcher_instances(reason, std::move(backend), known_launcher, owner_blocker_label);
     }
 
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
