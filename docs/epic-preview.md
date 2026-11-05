@@ -35,6 +35,76 @@ Confirming a provider change keeps that entry's UUID, artwork, history and other
 Polaris never switches an existing Heroic entry automatically. A name alone is not sufficient
 to merge titles, and uncertain catalog data does not authorize a provider change.
 
+## Library setup checklist
+
+In the Linux **Library → Import Games** panel, expand **Epic Private Stream setup**.
+The entry is available even with no discovered Epic titles. Opening it reads setup status;
+it does not scan, launch, switch providers or change staged imports. **Rescan Sources** remains
+an explicit action. Choose an official Epic game in the checklist's separate picker to check
+that installation without changing which games are staged for import.
+
+The ordered rows distinguish three facts:
+
+1. **Epic observed open on this PC** is a desktop observation. After a successful scan it
+   can remain historical; it does not claim that Epic is still open.
+2. **Scanned while Epic was open** requires the host's in-memory receipt for a successful
+   official metadata scan with matching desktop-launcher observations at both ends. These
+   samples do not prove continuous presence. Provider choice, Mirror Desktop discovery,
+   imported titles and browser storage cannot create this receipt. A failed rescan can show
+   a clearly marked **Previous successful scan (historical)**, never crediting that failure.
+3. **Epic closed: check Private Stream setup** is a current sample, separate from that
+   history. With no selected title it says **Epic is closed; choose a game to check its setup**.
+   The current host reports prerequisite support as unknown, so a selected game is never
+   labelled ready by this implementation. Its Windows setup-folder and runtime checks still
+   run: an unreadable folder, a busy runtime and a sampled absent runtime remain distinct. The checklist cannot confirm sign-in, cloud saves,
+   encoder startup or future launch success. **Polaris checks again when you launch.** A
+   missing checklist receipt does not add an admission restriction to existing launch paths.
+
+Complete, Needs action, Can't check and Checking are text, with a single polite live summary.
+Native buttons and the game picker support keyboard, touch and client controller mapping;
+Escape closes the checklist and returns focus to its entry. Controls stay present while a
+check runs. There is no looping animation. The checklist uses the current theme and respects
+reduced motion and forced colors; Aurora remains the default. Physical controller and TalkBack
+behavior still require owner device checks.
+
+While visible, one passive GET runs at a time. The next read starts five seconds after completion;
+failures back off to at most thirty seconds. The transport deadline is eight seconds, and current
+facts expire within ten seconds of request start (earlier for an already aged host sample).
+Closing/hiding/unmounting, signing out, changing host, scanning, changing provider, or selecting
+another title discards current facts and aborts the read. Returning requires a fresh sample.
+Old requests, retired host epochs and older revisions cannot restore current facts. No scan,
+launch or other mutation is automatically retried; browser storage holds no setup truth flags.
+
+| Checklist cause | What to do |
+| --- | --- |
+| Epic has not been observed / launcher proof required | Open Epic on this PC, select **Rescan Sources**, then quit Epic completely. Repeat after Polaris restarts. |
+| Scan required / no receipt | Scan explicitly with Epic open. Merely selecting a provider or importing a title does not complete the scan row. |
+| Metadata unavailable / latest source scan failed | Finish installs or updates in Epic and check the source warnings, then rescan. Any prior successful scan is historical. |
+| Launcher unobserved or changed during the scan | Open the same desktop Epic launcher and rescan after its update settles. No new receipt was created. |
+| Setup changed / rescan superseded | Wait for the current source/provider change to finish and check again. Old replies are discarded. |
+| Polaris restarted / setup epoch changed | Repeat the open → scan → quit setup on this PC. Receipts are memory-only. |
+| Epic changed or updated / retained proof changed | Open the updated launcher on the desktop, rescan, then quit it. An old receipt cannot validate the new file. |
+| Epic still open | Quit it yourself on the host desktop, then **Check again**. Checks never close a program. |
+| Choose a game | Select an official Epic installation in the checklist's picker. This does not alter import staging. |
+| Selected-game support unknown | Selected-title Windows setup-folder and runtime diagnostics still run. A sampled absent game/runtime is reported separately; this host cannot confirm all Private Stream prerequisites. Use Mirror Desktop or rely on the independent actual-launch checks; no ready claim is made. |
+| Private Stream prerequisites unavailable | Use Mirror Desktop or review the host's explicit labwc Private Stream configuration. |
+| Windows setup folder unknown (N3) | For a first play on this PC, play once in Mirror Desktop, then close the game and Epic. If played before, finish any update and check that the folder is readable. This is not proof the game was never played. |
+| Installation unavailable or changed | Complete the install/update in Epic, rescan and select the current installation again. |
+| Game or its exact runtime still running | Close that game yourself and check again. No process-group or wineserver cleanup is performed by the checklist. |
+| Launcher check unresolved (generic N4) | Retry, or use Mirror Desktop. An unresolved census alone does not identify another AppImage or program; the checklist does not name or terminate one. |
+| Active/changing stream / session-busy rescan | Wait until the stream is idle. Use the existing session controls for an active stream. |
+| Another setup check in progress | Wait briefly and check again. A coalesced read does not mean a stream is active. |
+| Checks paused / stale sample | Return to the visible checklist or **Check again** for a fresh sample. Historical scan evidence is not a live closed/ready badge. |
+| Offline / request timed out / host read failed | Check the connection and host availability, then retry. These outcomes never mean Epic is closed. |
+| Sign-in required (401/403) | Sign in to this PC's Polaris console. Signing out clears visible host facts. |
+| Host sign-in state unavailable | Reconnect to the console and retry when the host can read its credential state. |
+| Live setup unsupported (including an older host's 404) | Follow the static open → scan → quit instructions; live checkmarks are unavailable. |
+| Malformed or unknown-version setup response | Check host/console version compatibility. Missing fields, unknown versions or unknown enum values cannot authorize readiness. |
+
+This UI and its mocked browser checks remain source/software evidence. Native compilation,
+HTTP authentication qualification, installed-host observation and owner device acceptance are
+separate gates; the checklist does not qualify the Private Stream candidate by itself.
+
 ## Mirror Desktop: Disconnect, End and close permission
 
 Games are **unmanaged by default**. Disconnect and Resume in Nova or Moonlight leave the game

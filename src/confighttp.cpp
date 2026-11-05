@@ -1303,6 +1303,15 @@ namespace confighttp {
     };
   }
 
+  // Also used by authenticate's opt-in private read policy; never includes store paths.
+  void write_epic_setup_error(resp_https_t response, SimpleWeb::StatusCode code, const char *error) {
+    const nlohmann::json output {{v1::epic_setup_error::status, false}, {v1::epic_setup_error::error, error}};
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    headers.emplace("Cache-Control", "private, no-store");
+    response->write(code, output.dump(), headers);
+  }
+
   /**
    * @brief Send a 401 Unauthorized response.
    * @param response The HTTP response object.
@@ -1360,12 +1369,13 @@ namespace confighttp {
    * @param request The HTTP request object.
    * @return True if allowed, false otherwise.
    */
-  bool checkIPOrigin(resp_https_t response, req_https_t request) {
+  bool checkIPOrigin(resp_https_t response, req_https_t request, bool private_read = false) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
     auto ip_type = net::from_address(address);
     if (ip_type > http::origin_web_ui_allowed) {
       BOOST_LOG(info) << "Web UI: ["sv << address << "] -- denied"sv;
-      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      if (private_read) write_epic_setup_error(response, SimpleWeb::StatusCode::client_error_forbidden, "authentication_required");
+      else response->write(SimpleWeb::StatusCode::client_error_forbidden);
       return false;
     }
     return true;
@@ -1473,22 +1483,26 @@ namespace confighttp {
       crypto::constant_time_equals(header->second.substr(7), config::sunshine.api_key);
   }
 
-  bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
+  bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false, bool private_read = false) {
     std::lock_guard credential_lock {s_credential_lifecycle_mutex};
-    if (!checkIPOrigin(response, request))
+    if (!checkIPOrigin(response, request, private_read))
       return false;
     if (!s_loaded_credentials_available) {
-      write_session_validation_unavailable(response);
+      if (private_read) write_epic_setup_error(response, SimpleWeb::StatusCode::server_error_service_unavailable, "authentication_unavailable");
+      else write_session_validation_unavailable(response);
       return false;
     }
     // If credentials not set, redirect to welcome.
     if (config::sunshine.username.empty()) {
-      send_redirect(response, request, "/welcome");
+      if (private_read) write_epic_setup_error(response, SimpleWeb::StatusCode::client_error_unauthorized, "authentication_required");
+      else send_redirect(response, request, "/welcome");
       return false;
     }
     // Guard: on failure, redirect if requested.
     auto fg = util::fail_guard([&]() {
-      if (needsRedirect) {
+      if (private_read) {
+        write_epic_setup_error(response, SimpleWeb::StatusCode::client_error_unauthorized, "authentication_required");
+      } else if (needsRedirect) {
         std::string redir_path = "/login?redir=.";
         redir_path += request->path;
         send_redirect(response, request, redir_path.c_str());
@@ -1518,7 +1532,8 @@ namespace confighttp {
     const auto validation = authenticate_web_session_cookie(authCookie);
     if (validation == web_session_store::validation_status_e::io_error) {
       fg.disable();
-      write_session_validation_unavailable(response);
+      if (private_read) write_epic_setup_error(response, SimpleWeb::StatusCode::server_error_service_unavailable, "authentication_unavailable");
+      else write_session_validation_unavailable(response);
       return false;
     }
     if (validation != web_session_store::validation_status_e::valid) {
@@ -3992,10 +4007,151 @@ namespace confighttp {
     send_response(response, static_cast<SimpleWeb::StatusCode>(status), result);
   }
 
+  namespace {
+    template<class E, std::size_t N>
+    const char *epic_setup_enum(E value, const char *const (&names)[N]) {
+      const auto index = static_cast<std::size_t>(value);
+      return index < N ? names[index] : "unknown";
+    }
+
+    const char *epic_setup_scan_state(platf::epic::scan_state_t state) {
+      static constexpr const char *names[] {"required", "checking", "complete", "metadata_unavailable",
+        "launcher_unobserved", "launcher_changed", "superseded", "session_busy", "unsupported"};
+      return epic_setup_enum(state, names);
+    }
+
+    nlohmann::json epic_setup_identity_json(const epic_library::identity_t &title) {
+      return {{v1::epic_setup_title::namespace_id, title.namespace_id}, {v1::epic_setup_title::item_id, title.item_id}, {v1::epic_setup_title::artifact_id, title.artifact_id}};
+    }
+
+    nlohmann::json epic_setup_scan_json(const proc::epic_scan_result_t &scan) {
+      static constexpr const char *capture[] {"captured", "unchanged", "unavailable", "superseded", "unsupported"};
+      return {{v1::epic_setup_scan::version, 1}, {v1::epic_setup_scan::metadata_available, scan.snapshot.available},
+        {v1::epic_setup_scan::capture, epic_setup_enum(scan.capture.state, capture)}, {v1::epic_setup_scan::scan, epic_setup_scan_state(scan.state)},
+        {v1::epic_setup_scan::receipt_revision, std::to_string(scan.receipt_revision)}};
+    }
+
+    nlohmann::json epic_setup_json(const proc::epic_setup_read_t &sample,
+                                 const std::optional<epic_library::identity_t> &title, std::int64_t age) {
+      static constexpr const char *desktop[] {"not_checked", "open", "closed", "unknown"};
+      static constexpr const char *proof[] {"required", "valid", "changed", "unavailable"};
+      static constexpr const char *receipt[] {"required", "complete", "previous", "unknown"};
+      static constexpr const char *runtime[] {"not_checked", "not_selected", "absent", "busy", "unknown"};
+      static constexpr const char *state[] {"busy", "needs_action", "launcher_closed", "ready", "unknown"};
+      // Explicit public vocabulary. Internal exceptions, paths and owner blocker labels never cross.
+      const auto &raw = sample.facts.reason;
+      const char *reason = "check_unresolved";
+      for (const char *allowed : {"session_busy", "check_in_progress", "choose_game", "ready", "epic_open_on_desktop",
+           "launcher_present_unplaced", "epic_launcher_proof_required", "private_mode_unavailable",
+           "epic_game_already_running", "setup_generation_changed", "epic_installation_unavailable", "epic_installation_changed"})
+        if (raw == allowed) reason = allowed;
+      if (raw == "title_prefix_unavailable" || raw == "redirected_title_prefix" || raw == "unsafe_title_prefix") reason = "windows_setup_unknown";
+      if (sample.facts.proof == platf::epic::proof_state_t::changed) reason = "launcher_changed";
+      if (!sample.supported) reason = "unsupported";
+      return {{v1::epic_setup_status::version, 1}, {v1::epic_setup_status::supported, sample.supported}, {v1::epic_setup_status::epoch, sample.epoch},
+        {v1::epic_setup_status::revision, std::to_string(sample.revision)}, {v1::epic_setup_status::sample_age_ms, age},
+        {v1::epic_setup_status::desktop, epic_setup_enum(sample.facts.desktop, desktop)}, {v1::epic_setup_status::proof, epic_setup_enum(sample.facts.proof, proof)},
+        {v1::epic_setup_status::receipt, epic_setup_enum(sample.receipt, receipt)}, {v1::epic_setup_status::receipt_revision, std::to_string(sample.receipt_revision)},
+        {v1::epic_setup_status::last_scan, epic_setup_scan_state(sample.last_scan)}, {v1::epic_setup_status::metadata_available, sample.metadata_available},
+        {v1::epic_setup_status::runtime, epic_setup_enum(sample.facts.runtime, runtime)}, {v1::epic_setup_status::prerequisites, "unknown"},
+        {v1::epic_setup_status::state, epic_setup_enum(sample.facts.state, state)}, {v1::epic_setup_status::reason, reason},
+        {v1::epic_setup_status::selected, title ? epic_setup_identity_json(*title) : nlohmann::json(nullptr)}};
+    }
+
+    void append_epic_setup_scan(nlohmann::json &output, const proc::epic_scan_result_t &scan) {
+      output[v1::epic_setup_scan_envelope::epic_setup] = epic_setup_scan_json(scan);
+    }
+
+    using epic_setup_reader_t = std::function<proc::epic_setup_read_t(const std::optional<epic_library::identity_t> &)>;
+
+    void readEpicSetup(resp_https_t response, req_https_t request, const epic_setup_reader_t &read) {
+      // Owner cookies/configured bearer only, before metadata, native I/O or even query parsing.
+      if (!authenticate(response, request, false, true)) return;
+      const auto started = std::chrono::steady_clock::now();
+      std::optional<epic_library::identity_t> title;
+      bool valid = request->query_string.size() <= 1024;
+      std::map<std::string, std::string> query;
+      std::string_view remaining = request->query_string;
+      // Identity grammar is ASCII: encoded aliases and empty/duplicate query keys confer no authority.
+      while (valid && !remaining.empty()) {
+        const auto separator = remaining.find('&');
+        const auto part = remaining.substr(0, separator);
+        const auto equals = part.find('=');
+        valid = equals != std::string_view::npos && equals > 0 &&
+          query.emplace(std::string(part.substr(0, equals)), std::string(part.substr(equals + 1))).second;
+        if (separator == std::string_view::npos) break;
+        remaining.remove_prefix(separator + 1);
+        if (remaining.empty()) valid = false;
+      }
+      if (!query.empty()) {
+        valid = valid && query.size() == 3;
+        for (const char *key : {"namespace", "item_id", "artifact_id"}) valid = valid && query.count(key) == 1;
+        if (valid) {
+          title = epic_library::identity_t {query.at("namespace"), query.at("item_id"), query.at("artifact_id")};
+          valid = epic_library::valid_identity(*title);
+        }
+      } else valid = valid && request->query_string.empty();
+      if (!valid) {
+        write_epic_setup_error(response, SimpleWeb::StatusCode::client_error_bad_request, "invalid_selection");
+        return;
+      }
+      try {
+        const auto sample = read(title);
+        const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        append_json_security_headers(headers);
+        headers.emplace("Cache-Control", "private, no-store");
+        response->write(SimpleWeb::StatusCode::success_ok, epic_setup_json(sample, title, age).dump(), headers);
+      } catch (const std::exception &) {
+        write_epic_setup_error(response, SimpleWeb::StatusCode::server_error_service_unavailable, "status_unavailable");
+      }
+    }
+  }
+
+  void epicSetup(resp_https_t response, req_https_t request) {
+    // Trusted prerequisite support is intentionally unknown pending a complete passive capability
+    // binding. Default omission cannot yield ready; launch still checks its independent policy.
+    readEpicSetup(response, request, [](const auto &title) { return proc::proc.read_epic_setup(title); });
+  }
+
+#ifdef POLARIS_TESTS
+  // Per-call fixture, shared production auth/validation/projection; no global native override.
+  void epic_setup_http_for_tests(resp_https_t response, req_https_t request, const epic_setup_reader_t &read,
+                                 bool credentials_available = true) {
+    std::lock_guard credential_lock {s_credential_lifecycle_mutex};
+    const auto previous = s_loaded_credentials_available;
+    auto restore = util::fail_guard([&] { s_loaded_credentials_available = previous; });
+    s_loaded_credentials_available = credentials_available;
+    readEpicSetup(response, request, read);
+  }
+
+  // Real production TLS peer verification, owner handler and broader-auth control.
+  void with_epic_setup_tls_for_tests(const std::string &cert, const std::string &key,
+      const epic_setup_reader_t &read, const std::function<void(unsigned short)> &check) {
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    server.config.timeout_request = 5;
+    server.config.timeout_content = 5;
+    server.verify = [](req_https_t request, SSL *ssl) { request->userp = nvhttp::verify_client_cert(ssl, false); };
+    server.resource["^/api/epic/setup$"]["GET"] = [&](auto response, auto request) {
+      epic_setup_http_for_tests(response, request, read);
+    };
+    server.resource["^/api/epic/setup$"]["HEAD"] = [](auto response, auto request) {
+      if (authenticatePolarisSession(response, request)) response->write(SimpleWeb::StatusCode::success_ok);
+    };
+    std::atomic<unsigned short> port {0};
+    std::jthread worker([&] { server.start([&](unsigned short assigned) { port = assigned; }); });
+    auto stop = util::fail_guard([&] { server.stop(); worker.join(); });
+    for (int attempt = 0; attempt < 100 && port == 0; ++attempt)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    check(port.load());
+  }
+#endif
+
   void scanGames(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
-    proc::proc.remember_epic_launcher(); // Original executable proof only; no account data or launch.
 
     nlohmann::json output;
     nlohmann::json steam_games = nlohmann::json::array();
@@ -4357,7 +4513,9 @@ namespace confighttp {
     output["lutris_games"] = lutris_games;
     output["heroic_games"] = heroic_games;
     auto epic_games = nlohmann::json::array();
-    const auto epic_snapshot = epic_library::scan(game_library::library_home_roots());
+    const auto epic_scan = proc::proc.scan_epic_library(game_library::library_home_roots());
+    const auto &epic_snapshot = epic_scan.snapshot;
+    append_epic_setup_scan(output, epic_scan);
     for (const auto &title : epic_snapshot.games) {
       const auto &i = title.identity;
       nlohmann::json row {{"name", title.name}, {"source", "epic_launcher"},
@@ -11441,6 +11599,7 @@ namespace confighttp {
     registerLibraryArtwork(server, library_artwork_fills);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
+    server.resource["^/api/epic/setup$"]["GET"] = epicSetup;
     server.resource["^/api/epic/session$"]["GET"] = epicSession;
     server.resource["^/api/epic/session$"]["POST"] = withCsrf(epicSession);
     server.resource["^/api/apps/([^/]+)/epic-provider$"]["POST"] = withCsrf(setEpicProvider);
