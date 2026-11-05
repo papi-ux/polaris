@@ -23,17 +23,34 @@
  *   A due hold retry or climb waits at most one judged duty window for a new candidate; outside writers own their changes.
  * - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
  *   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link
- *   is in between, so it rechecks and bisects. Loss there that is not clearly heavy: the loss does not depend
- *   on the rate, so the stream goes back to where the episode started, learns that loss as background, and
- *   does not probe again at that level for 1200 reports. Clearly heavy loss there: it halves on to the floor.
+ *   is in between, so it rechecks and bisects. Loss there that is not clearly heavy, or no lighter than at the
+ *   first step: the loss does not depend on the rate. Clearly heavy loss that is lighter there, or over 20%
+ *   whatever the first step lost: it halves on, until halving no longer lightens it.
  *   When reports stop before the first step is judged, perhaps because the link is overloaded, the probe takes
  *   its deep sample after 1.5 s, once, and goes no further until reports return.
+ * - A probe step is judged at the whole rate it would set. A fresh descent's first step, with nothing measured
+ *   above it, takes the floor when it would reach it, as it always did: a request close over its floor steps
+ *   onto it. Within an episode, a probe that would reach the floor stops a climb step above it first, and takes
+ *   the floor only for loss clearly over 20%, or loss that still falls with the rate there: the nearest rate
+ *   above lost significantly more. With no room left for its deep sample, a first step under clearly heavy loss
+ *   samples the floor that way before the rate is judged where it is. A probe step at most a climb step over the
+ *   floor that helped but still loses clearly over 10%, more than background under 3% costs there, samples the
+ *   floor before it can bound a hold, and so does a loss hold there whose own twelve reports do.
+ * - Every judged report since the stream left its request is kept by rate. When a hold that lost at most 3% there,
+ *   over twelve reports or more, starts losing significantly more at the same rate, the link has changed: the
+ *   episode starts again from that hold, keeping only the higher rates that lost significantly more than it now
+ *   does. A rate-independent result goes back to where the episode started, learns that loss as background, and
+ *   does not probe again at that level for 1200 reports, only if no higher rate measured in the episode lost
+ *   significantly more. Otherwise the loss depends on the rate above: the stream holds at the highest measured rate
+ *   that lost no more, under the lowest one that did. Loss over 20% is learned only once the episode has looked
+ *   under it, at the floor or at a rate that lost 20% or less: until then the floor is sampled first. A background
+ *   that has gone is judged only on reports after it was learned.
  * - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
  *   the measured burstiness. An undecided descent test counts as not having helped.
  * - A hold retries the rate above it after 8 reports, then every 20. Loss ceilings climb from there when
  *   clean; queue ceilings use the staircase below. A clean step within 25% under that rate retries it at once.
  *   While a hold's loss is not significantly lower than real loss at the rate above it, the loss is
- *   rate-independent after all.
+ *   rate-independent after all. A hold whose own loss stays clearly over 20% probes under it.
  *   After a hold fails, clean verify/bisect promotions need the existing four-report queue dwell until
  *   a rate at or above that failed hold passes. A higher queue ceiling survives a loss descent from its
  *   lower hold: verifying the lower rate resumes that queue bracket instead of retiring the higher bound.
@@ -65,14 +82,21 @@
  *   Like every loss decision, this counts reports, so RTT and a report pause change nothing. The rate decisions
  *   never read any of it.
  *
- * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second, and
- * tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells pass, and the
- * four that need a congestion signal while reports stop stay named as unmet.
+ * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second, and replays two
+ * RP6 loss runs; tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells
+ * pass, and the four that need a congestion signal while reports stop stay named as unmet. Under its wire layer,
+ * none of 40 seeded 400 s runs at a 25987 kbps request and a 2000 kbps floor reaches the floor, with whole sends
+ * dropped, the pacer off or on, or single packets dropped, at 1, 2 and 2.9%. That holds for those modelled runs,
+ * not for other requests, floors, clients or loss. Over 141 synthetic links close to the floor and the 5111 static
+ * links of a wider search it does no worse than the policy at staging 457eeef9, but for named rows: two tail drops
+ * just over 2450 kbps, whose loss a 1-2% step down to the stop over the floor cannot tell from background, and two
+ * floor holds reached 6 s later, with one retry more in the judged window.
  */
 #pragma once
 
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -223,7 +247,12 @@ namespace live_tuning_policy {
     void set_target(double kbps, std::string_view why, std::int64_t now_ms);
     void to_normal(std::int64_t now_ms, int kbps, std::string_view why);
     void rate_independent(double rate, std::int64_t now_ms, std::string_view why);
+    std::optional<int> lossier_above(int kbps, std::pair<double, double> &above) const;
+    void note_measured(int kbps, double expected, double lost);
+    bool clearly_over(double lost, double frames, double level) const;
+    std::optional<int> loss_step(double kbps, double lost, double frames) const;
     double probe_rate() const;
+    void sample_floor(std::int64_t now_ms, std::pair<double, double> here);
 
     void begin_descent(std::int64_t now_ms, std::string_view why, double l0);
     void descend_result(bool helped, std::int64_t now_ms);
@@ -278,6 +307,8 @@ namespace live_tuning_policy {
     int normal_reports_ = 0;
 
     // Search.
+    // Judged reports by rate since the stream left its request: what the rate-independent verdict must agree with.
+    std::map<int, std::pair<double, double>> measured_;
     int episode_start_;
     int r0_;
     double l0_ = 0.0;
