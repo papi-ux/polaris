@@ -1758,9 +1758,11 @@ TEST(LiveTuningPolicy, ANearFloorProbeSamplesTheFloorBeforeItJudgesHeavyLoss) {
     EXPECT_EQ(policy.ceiling_kbps(), 2213);
     EXPECT_EQ(policy.background_loss(), 0.0);
   }
-  // Later in an episode the stop holds, and clearly heavy loss there samples the floor before any verdict: the request
-  // settles under a 3000 kbps link, which falls to 2200 at 150 s. Judged at 2500, the loss sent the stream back to its
-  // request with 80% learned as background.
+  // Later in an episode the link falls under a settled hold: the request settles under a 3000 kbps link, which falls to
+  // 2200 at 150 s. The hold at 2981 had been clean, so its 80% is a new link: what the episode measured before no
+  // longer counts, the descent takes the floor at once, and the bisect from 2981 settles under 2200. The floor, the
+  // hold and no learned background are the point; the two rates are where that bisect lands. Judged at 2500 on the
+  // earlier measurements, the loss once sent the stream back to its request with 80% learned as background.
   {
     live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
     const auto targets = run_rp6(300, [](int second, int kbps) {
@@ -1768,8 +1770,8 @@ TEST(LiveTuningPolicy, ANearFloorProbeSamplesTheFloorBeforeItJudgesHeavyLoss) {
     }, policy);
     EXPECT_EQ(*std::min_element(targets.begin() + 150, targets.end()), FLOOR);
     EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
-    EXPECT_EQ(policy.target_kbps(), 2114);
-    EXPECT_EQ(policy.ceiling_kbps(), 2236);
+    EXPECT_EQ(policy.target_kbps(), 2101);
+    EXPECT_EQ(policy.ceiling_kbps(), 2209);
     EXPECT_EQ(policy.background_loss(), 0.0);
   }
 }
