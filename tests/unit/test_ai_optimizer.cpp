@@ -1305,11 +1305,8 @@ namespace {
         ASSERT_STREQ(std::getenv("POLARIS_MIGRATE_CONFIG"), "0");
         ASSERT_EQ(platf::appdata(), root_ / "config" / "polaris");
         history_ = platf::appdata() / "ai_session_history.json";
-        // Both public readers have a lazy-load flag. Prime them while no file
-        // exists so a newly recorded entry cannot be imported a second time.
+        // No history file; the clear leaves the history loaded and empty, so init() reads nothing.
         ai_optimizer::clear_history_at(history_);
-        (void) ai_optimizer::get_history_json();
-        (void) ai_optimizer::get_session_history("unlisted-vrr-test-host", "unused");
         ai_optimizer::init(ai_optimizer::config_t {});  // disabled; no provider request
         return;
       }
@@ -1406,8 +1403,9 @@ namespace {
               {"last_sample_confidence", "low"}, {"last_updated_at", timestamp}};
     }
 
+    // Test only: what a fresh process would load from history_. Production never reloads.
     void reload() {
-      ai_optimizer::clear_history_at(root_ / "unused-memory-reset.json");
+      ai_optimizer::reset_history_for_tests();
       ai_optimizer::init(ai_optimizer::config_t {});
     }
 
@@ -1542,5 +1540,114 @@ TEST_F(AiOptimizerCleanHistory, LegacyRepairDoesNotInventAnExplicitCleanVerdict)
   EXPECT_EQ(saved->last_primary_issue, "steady");
   EXPECT_EQ(saved->last_network_risk, "normal");
   EXPECT_EQ(saved->last_issues, std::vector<std::string> {"host_render_limited"});
+}
+
+// #500: init() read the history file and every reader then read it again through a flag of its
+// own, merging each entry into itself, so the next save wrote doubled counts back to disk.
+TEST_F(AiOptimizerCleanHistory, InitThenOneReaderThenSaveKeepsTheCounts) {
+  if (!child_) return;
+  auto entry = raw_entry(90, "host_render_limited", "watch", {"host_render_limited"}, 100);
+  entry["session_count"] = 3;
+  entry["poor_outcome_count"] = 1;
+  write_fixture({{"unlisted-vrr-test-host:Counted game", entry}});
+  reload();
+
+  const auto read = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Counted game");
+  ASSERT_TRUE(read.has_value());
+  EXPECT_EQ(read->session_count, 3);
+  EXPECT_EQ(read->poor_outcome_count, 1);
+
+  ASSERT_EQ(ai_optimizer::save_history_at(history_), ai_optimizer::history_write_e::closed_without_error);
+  const auto disk = read_json(history_).at("unlisted-vrr-test-host:Counted game");
+  EXPECT_EQ(disk.at("session_count"), 3);
+  EXPECT_EQ(disk.at("poor_outcome_count"), 1);
+}
+
+TEST_F(AiOptimizerCleanHistory, TwoDifferentReadersAfterInitDoNotDoubleTheCounts) {
+  if (!child_) return;
+  auto kept = raw_entry(90, "host_render_limited", "watch", {"host_render_limited"}, 100);
+  kept["session_count"] = 4;
+  kept["poor_outcome_count"] = 2;
+  write_fixture({{"unlisted-vrr-test-host:Kept game", kept},
+                 {"unlisted-vrr-test-host:Reset game", raw_entry(120, "steady", "good", {}, 200)}});
+  reload();
+
+  const auto listed = nlohmann::json::parse(ai_optimizer::get_history_json());
+  ASSERT_EQ(listed.size(), 2);
+  const auto listed_kept = std::find_if(listed.begin(), listed.end(), [](const nlohmann::json &item) {
+    return item.at("key") == "unlisted-vrr-test-host:Kept game";
+  });
+  ASSERT_TRUE(listed_kept != listed.end());
+  EXPECT_EQ(listed_kept->at("session_count"), 4);
+  // Resetting one game saves through the production writer; the other entry must reach disk as read.
+  ASSERT_TRUE(ai_optimizer::clear_game_profile("unlisted-vrr-test-host", "Reset game"));
+
+  const auto disk = read_json(history_);
+  ASSERT_EQ(disk.size(), 1);
+  EXPECT_EQ(disk.at("unlisted-vrr-test-host:Kept game").at("session_count"), 4);
+  EXPECT_EQ(disk.at("unlisted-vrr-test-host:Kept game").at("poor_outcome_count"), 2);
+  const auto read = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Kept game");
+  ASSERT_TRUE(read.has_value());
+  EXPECT_EQ(read->session_count, 4);
+  EXPECT_EQ(read->poor_outcome_count, 2);
+}
+
+// NVHTTP can accept a session report before the console thread runs init(). The report must add to
+// the history already on disk, and init() must not read the file again over it.
+TEST_F(AiOptimizerCleanHistory, SessionRecordedBeforeInitSurvivesInitAndSave) {
+  if (!child_) return;
+  auto stored = raw_entry(90, "host_render_limited", "watch", {"host_render_limited"}, 100);
+  stored["session_count"] = 3;
+  write_fixture({{"unlisted-vrr-test-host:Stored game", stored}});
+  ai_optimizer::reset_history_for_tests();  // as a fresh process: nothing loaded, no init() yet
+
+  ai_optimizer::history_writer_observation_t observation;
+  ai_optimizer::record_session("unlisted-vrr-test-host", "Reported game", healthy(), &observation);
+  ASSERT_EQ(observation.merge, ai_optimizer::history_merge_e::merged);
+  ai_optimizer::init(ai_optimizer::config_t {});
+  ASSERT_EQ(ai_optimizer::save_history_at(history_), ai_optimizer::history_write_e::closed_without_error);
+
+  const auto disk = read_json(history_);
+  ASSERT_EQ(disk.size(), 2);
+  EXPECT_EQ(disk.at("unlisted-vrr-test-host:Reported game").at("session_count"), 1);
+  EXPECT_EQ(disk.at("unlisted-vrr-test-host:Stored game").at("session_count"), 3);
+}
+
+// A second init() must neither add the file's counts again nor replace a recorded session whose save
+// has not reached the file. A failed write stands in for a save still pending when init() runs.
+TEST_F(AiOptimizerCleanHistory, SecondInitKeepsTheCountsAndAnUnsavedSession) {
+  if (!child_) return;
+  auto stored = raw_entry(90, "host_render_limited", "watch", {"host_render_limited"}, 100);
+  stored["session_count"] = 3;
+  stored["poor_outcome_count"] = 1;
+  const nlohmann::json snapshot {{"unlisted-vrr-test-host:Stored game", stored}};
+  write_fixture(snapshot);
+  reload();
+
+  // A directory where the history file belongs fails the save at open, whoever runs the test.
+  ASSERT_TRUE(std::filesystem::remove(history_));
+  ASSERT_TRUE(std::filesystem::create_directory(history_));
+  ai_optimizer::history_writer_observation_t observation;
+  ai_optimizer::record_session("unlisted-vrr-test-host", "Unsaved game", healthy(), &observation);
+  ASSERT_EQ(observation.merge, ai_optimizer::history_merge_e::merged);
+  ASSERT_EQ(observation.write, ai_optimizer::history_write_e::open_failed);
+  ASSERT_TRUE(std::filesystem::remove(history_));
+  write_fixture(snapshot);  // the file still holds only what it held before that session
+
+  ai_optimizer::init(ai_optimizer::config_t {});
+  const auto read = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Stored game");
+  ASSERT_TRUE(read.has_value());
+  EXPECT_EQ(read->session_count, 3);
+  EXPECT_EQ(read->poor_outcome_count, 1);
+  const auto unsaved = ai_optimizer::get_session_history("unlisted-vrr-test-host", "Unsaved game");
+  ASSERT_TRUE(unsaved.has_value());
+  EXPECT_EQ(unsaved->session_count, 1);
+
+  ASSERT_EQ(ai_optimizer::save_history_at(history_), ai_optimizer::history_write_e::closed_without_error);
+  const auto disk = read_json(history_);
+  ASSERT_EQ(disk.size(), 2);
+  EXPECT_EQ(disk.at("unlisted-vrr-test-host:Stored game").at("session_count"), 3);
+  EXPECT_EQ(disk.at("unlisted-vrr-test-host:Stored game").at("poor_outcome_count"), 1);
+  EXPECT_EQ(disk.at("unlisted-vrr-test-host:Unsaved game").at("session_count"), 1);
 }
 #endif

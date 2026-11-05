@@ -512,6 +512,14 @@ namespace ai_optimizer {
   history_write_e save_history_at(const std::filesystem::path &history_file);
 
   /**
+   * @brief Test seam: forget the in-memory history and that it was ever loaded.
+   *
+   * The next init() or reader then reads the history file as a fresh process would. Production
+   * loads the file once per process and never calls this.
+   */
+  void reset_history_for_tests();
+
+  /**
    * @brief Get merged cached optimization + session history profiles for one
    * device, or all devices when device_name is empty.
    */

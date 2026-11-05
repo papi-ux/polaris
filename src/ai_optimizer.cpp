@@ -112,7 +112,7 @@ namespace ai_optimizer {
     std::int64_t cached_at = 0;
   };
 
-  static bool load_history();
+  static bool ensure_history_loaded();
   static history_write_e save_history();
 
   struct http_response_t {
@@ -128,6 +128,9 @@ namespace ai_optimizer {
 
   static std::unordered_map<std::string, cache_entry_t> cache;
   static std::unordered_map<std::string, session_history_t> session_history;
+  // Guarded by history_mutex. Set by the first load attempt, whether or not the file existed, or by
+  // a clear. Only reset_history_for_tests() sets it back.
+  static bool history_loaded = false;
   static std::unordered_map<std::string, std::shared_future<std::optional<device_db::optimization_t>>> inflight_requests_by_key;
   static std::unordered_map<std::string, model_catalog_cache_entry_t> model_catalog_cache;
   static provider_runtime_status_t provider_runtime_status;
@@ -3527,7 +3530,9 @@ namespace ai_optimizer {
       ++cfg_generation;
     }
     load_cache();
-    const bool history_repaired = load_history();
+    // If a report or a reader reached the history first, it is already loaded and init() leaves it
+    // alone: reading the file again could only double its counts or drop what is not saved yet.
+    const bool history_repaired = ensure_history_loaded();
     if (history_repaired) {
       save_history();
       BOOST_LOG(info) << "ai_optimizer: Repaired invalid session history values during load"sv;
@@ -4291,8 +4296,15 @@ namespace ai_optimizer {
     return platf::appdata() / "ai_session_history.json";
   }
 
-  static bool load_history() {
+  // The only way history reaches memory from disk. init(), every reader and every writer calls it
+  // before touching session_history, so the first of them reads the file into the still-empty map
+  // and no call reads it again: a second read would merge each entry into itself (#500) or, as a
+  // replacement, drop sessions recorded since. Returns true only to the call that loaded and had to
+  // repair values on the way in.
+  static bool ensure_history_loaded() {
     std::lock_guard<std::mutex> lock(history_mutex);
+    if (history_loaded) return false;
+    history_loaded = true;
     std::ifstream file(history_path());
     if (!file.is_open()) return false;
     bool repaired_history = false;
@@ -4481,6 +4493,7 @@ namespace ai_optimizer {
     bool invalidate_cache = false;
     bool graduated_safe_target = false;
     double graduated_previous_safe_target_fps = 0.0;
+    ensure_history_loaded();  // A report can arrive before init(); it adds to the loaded file.
     {
       std::lock_guard<std::mutex> lock(history_mutex);
       auto &existing = session_history[key];
@@ -4643,8 +4656,7 @@ namespace ai_optimizer {
 
   std::optional<session_history_t> get_session_history(
       const std::string &device_name, const std::string &app_name) {
-    static std::once_flag history_load_flag;
-    std::call_once(history_load_flag, load_history);
+    ensure_history_loaded();
 
     std::lock_guard<std::mutex> lock(history_mutex);
     auto key = history_key(device_name, app_name);
@@ -4659,8 +4671,7 @@ namespace ai_optimizer {
       return false;
     }
 
-    static std::once_flag history_load_flag;
-    std::call_once(history_load_flag, load_history);
+    ensure_history_loaded();
 
     const auto canonical_device = canonical_device_name(device_name);
     const auto session_key = history_key(canonical_device, app_name);
@@ -4704,10 +4715,17 @@ namespace ai_optimizer {
     {
       std::lock_guard<std::mutex> lock(history_mutex);
       session_history.clear();
+      history_loaded = true;  // Emptied is the loaded state; the removed file is never read back.
       std::error_code ec;
       std::filesystem::remove(history_file, ec);
     }
     BOOST_LOG(info) << "ai_optimizer: Session history cleared"sv;
+  }
+
+  void reset_history_for_tests() {
+    std::lock_guard<std::mutex> lock(history_mutex);
+    session_history.clear();
+    history_loaded = false;
   }
 
   void clear_history() {
@@ -4715,8 +4733,7 @@ namespace ai_optimizer {
   }
 
   std::string get_history_json() {
-    static std::once_flag history_load_flag;
-    std::call_once(history_load_flag, load_history);
+    ensure_history_loaded();
 
     nlohmann::json arr = nlohmann::json::array();
     std::lock_guard<std::mutex> lock(history_mutex);
@@ -4774,8 +4791,7 @@ namespace ai_optimizer {
   }
 
   std::string get_profiles_json(const std::string &device_name) {
-    static std::once_flag history_load_flag;
-    std::call_once(history_load_flag, load_history);
+    ensure_history_loaded();
 
     const auto requested_device = canonical_device_name(device_name);
     std::unordered_map<std::string, nlohmann::json> profiles_by_key;
@@ -4900,8 +4916,7 @@ namespace ai_optimizer {
       return false;
     }
 
-    static std::once_flag history_load_flag;
-    std::call_once(history_load_flag, load_history);
+    ensure_history_loaded();
 
     const auto canonical_device = canonical_device_name(device_name);
     bool removed_history = false;
