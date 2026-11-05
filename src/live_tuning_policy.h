@@ -36,13 +36,15 @@
  *   samples the floor that way before the rate is judged where it is. A probe step at most a climb step over the
  *   floor that helped but still loses clearly over 10%, more than background under 3% costs there, samples the
  *   floor before it can bound a hold, and so does a loss hold there whose own twelve reports do.
- * - Every judged report since the stream left its request is kept by rate. A rate-independent result goes back
- *   to where the episode started, learns that loss as background, and does not probe again at that level for
- *   1200 reports, only if no higher rate measured in the episode lost significantly more. Otherwise the loss
- *   depends on the rate above: the stream holds at the highest measured rate that lost no more, under the
- *   lowest one that did. Loss over 20% is learned only once the episode has looked under it, at the floor or at
- *   a rate that lost 20% or less: until then the floor is sampled first. A background that has gone is judged
- *   only on reports after it was learned.
+ * - Every judged report since the stream left its request is kept by rate. When a hold that lost at most 3% there,
+ *   over twelve reports or more, starts losing significantly more at the same rate, the link has changed: the
+ *   episode starts again from that hold, keeping only the higher rates that lost significantly more than it now
+ *   does. A rate-independent result goes back to where the episode started, learns that loss as background, and
+ *   does not probe again at that level for 1200 reports, only if no higher rate measured in the episode lost
+ *   significantly more. Otherwise the loss depends on the rate above: the stream holds at the highest measured rate
+ *   that lost no more, under the lowest one that did. Loss over 20% is learned only once the episode has looked
+ *   under it, at the floor or at a rate that lost 20% or less: until then the floor is sampled first. A background
+ *   that has gone is judged only on reports after it was learned.
  * - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
  *   the measured burstiness. An undecided descent test counts as not having helped.
  * - A hold retries the rate above it after 8 reports, then every 20. Loss ceilings climb from there when
