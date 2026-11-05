@@ -371,6 +371,36 @@ TEST(ConfigValidationTests, PatchMergeClearsASecretOnlyThroughAnExplicitEmptyVal
   EXPECT_FALSE(merged.contains("port"));
 }
 
+TEST(ConfigValidationTests, NativeDownwardOptInCannotBeWrittenThroughGenericSettings) {
+  EXPECT_TRUE(confighttp::validation::is_local_config_key("adaptive_bitrate_native_downward"));
+  for (const auto &value : {nlohmann::json(true), nlohmann::json(false),
+         nlohmann::json("true"), nlohmann::json("false"), nlohmann::json(nullptr), nlohmann::json("")}) {
+    std::string error;
+    EXPECT_FALSE(confighttp::validation::validate_config_payload({
+      {"sunshine_name", "After"}, {"adaptive_bitrate_native_downward", value}
+    }, error));
+  }
+}
+
+TEST(ConfigValidationTests, SettingsSavePreservesTheConfigFileNativeDownwardOptIn) {
+  const nlohmann::json patch {{"sunshine_name", "After"}};
+  std::string error;
+  ASSERT_TRUE(confighttp::validation::validate_config_payload(patch, error)) << error;
+  for (const auto *value : {"true", "false"}) {
+    const std::unordered_map<std::string, std::string> existing {
+      {"sunshine_name", "Before"}, {"adaptive_bitrate_native_downward", value}
+    };
+    // Match write_config_tree: partial merge first, then preserve local keys.
+    auto persisted = confighttp::validation::merge_config_patch(existing, patch);
+    confighttp::validation::preserve_local_config(existing, persisted);
+    EXPECT_EQ(persisted.at("adaptive_bitrate_native_downward"), value);
+    EXPECT_EQ(persisted.at("sunshine_name"), "After");
+  }
+  auto persisted = confighttp::validation::merge_config_patch({}, patch);
+  confighttp::validation::preserve_local_config({}, persisted);
+  EXPECT_FALSE(persisted.contains("adaptive_bitrate_native_downward"));
+}
+
 
 TEST(ConfigValidationTests, AcceptsVaapiSessionControlKeysForPersistence) {
   std::string error;

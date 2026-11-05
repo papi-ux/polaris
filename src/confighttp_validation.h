@@ -15,8 +15,9 @@
 namespace confighttp::validation {
   bool validate_app_payload(const nlohmann::json &payload, std::string &error);
   bool validate_config_payload(const nlohmann::json &payload, std::string &error);
-  // Runtime ownership is configured through its dedicated setup path. Generic
-  // config GET omits these keys; POST/PATCH reject changes and preserve them.
+  // Runtime ownership uses its dedicated setup path; experimental native
+  // downward tuning is config-file-only. Generic config GET omits these keys;
+  // POST/PATCH reject changes and preserve existing values.
   bool is_local_config_key(std::string_view key);
   void preserve_local_config(const std::unordered_map<std::string, std::string> &existing,
     nlohmann::json &payload);

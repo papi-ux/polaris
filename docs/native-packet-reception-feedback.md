@@ -8,8 +8,10 @@ By default no bitrate, FEC, Doctor, action, permission or policy writer consumes
 
 ## Experimental downward-only trial (default off)
 
-`adaptive_bitrate_native_downward=false` is a separate host setting. Live Tuning On alone preserves
-the existing controller. Explicitly enabling this experimental option permits one 15% downward
+`adaptive_bitrate_native_downward=false` is a separate config-file-only host setting. Settings
+omits this option and preserves its existing file value when other settings are saved; the config
+API rejects attempts to change it. Live Tuning On alone preserves the existing controller.
+Explicitly enabling this experimental option permits one 15% downward
 request after a frozen, rate-local four-second native reference and eight standing seconds. Data
 sample elapsed bounds stay separate from ENet RTT; they are not one-way delay, loss or capacity.
 The current exclusive stream, caller, nonce, writers, revisions, actual encoder receipt and accepted

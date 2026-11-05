@@ -464,6 +464,7 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   // Options that are internal/special and shouldn't be in UI/docs
   const std::set<std::string, std::less<>> internalOptions = {
     "adaptive_bitrate_max",  // Retired: still read so existing files load, but a session lifts it to the client's own request, so it limits nothing
+    "adaptive_bitrate_native_downward",  // Experimental config-file-only opt-in; not enabled by Live Tuning On
     "flags",  // Internal config flags, not user-configurable
     "api_key",  // Backend API secret, intentionally not exposed in the config UI
     "benchmark_mode_enabled",  // P0-5 benchmark harness control plane - config-file-only, requires a process restart, not a mainstream user-facing toggle
@@ -519,8 +520,9 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsAreAcceptedByTheConfigApi) {
   std::vector<std::string> rejected;
   for (const auto &option : cppOptions) {
     if (confighttp::validation::is_local_config_key(option)) {
-      // A dedicated setup transaction owns controller activation and paths.
-      // These cannot be changed or cleared through a generic settings save.
+      // Dedicated setup owns local controller settings; the experimental
+      // native downward opt-in is edited only in the config file. Generic
+      // settings saves must not accept either class of key.
       EXPECT_FALSE(allowedKeys.contains(option)) << option;
     } else if (!allowedKeys.contains(option)) {
       rejected.push_back(option);
