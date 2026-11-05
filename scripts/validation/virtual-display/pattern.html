@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual display pattern</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: #fff; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  /* Top right: Moonlight draws its performance overlay over the top left corner. */
+  #panel {
+    position: fixed; right: 2vw; top: 2vh; padding: 1.2vh 1.6vw; background: rgba(0, 0, 0, 0.9);
+    font: 600 2.2vh/1.35 ui-monospace, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  }
+  #role { font-size: 2.6vh; letter-spacing: 0.2em; }
+  #clock { font-size: 16vh; line-height: 1; font-variant-numeric: tabular-nums; }
+  #strip { display: flex; gap: 0.5vw; margin: 1vh 0; }
+  #strip span { width: 2.6vw; height: 2.6vh; background: #333; }
+  #strip span.on { background: #fff; }
+  #info { color: #ccc; }
+  #info.error { color: #f66; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="panel">
+  <div id="role"></div>
+  <div id="clock">--.---</div>
+  <div id="strip"></div>
+  <div id="info"></div>
+</div>
+<script>
+"use strict";
+
+// #pattern (default) animates the whole screen for the encoder and shows the clock as the
+// client sees it. #reference shows only the clock, for the host's own monitor.
+const reference = location.hash === "#reference";
+const role = document.getElementById("role");
+const clock = document.getElementById("clock");
+const strip = document.getElementById("strip");
+const info = document.getElementById("info");
+role.textContent = reference ? "HOST MONITOR" : "STREAM";
+const cells = Array.from({ length: 10 }, () => strip.appendChild(document.createElement("span")));
+
+const vertexSource = `
+attribute vec2 position;
+void main() { gl_Position = vec4(position, 0.0, 1.0); }
+`;
+
+// Everything depends only on time and frame number, so each run shows the same kind of picture:
+// a slow colour field, a fine checker panning at a steady rate, moving discs, and a patch of
+// fresh noise in every frame that the encoder cannot predict.
+const fragmentSource = `
+precision highp float;
+uniform vec2 resolution;
+uniform float time;
+uniform float frame;
+
+float hash(vec2 p) {
+  vec3 q = fract(vec3(p.xyx) * 0.1031);
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
+}
+
+void main() {
+  vec2 px = gl_FragCoord.xy;
+  vec2 uv = px / resolution;
+  vec3 color = 0.5 + 0.35 * cos(6.2831 * (uv.xyx * vec3(0.7, 0.9, 1.1) + time * vec3(0.05, 0.07, 0.09)));
+
+  if (uv.y > 0.30 && uv.y < 0.62) {
+    vec2 p = px + vec2(time * 240.0, 0.0);
+    float checker = mod(floor(p.x / 6.0) + floor(p.y / 6.0), 2.0);
+    color = mix(color, vec3(checker), 0.6);
+  }
+
+  for (int i = 0; i < 8; i++) {
+    float f = float(i);
+    vec2 center = resolution * (0.5 + 0.4 * vec2(sin(time * (0.3 + 0.07 * f) + f), cos(time * (0.4 + 0.05 * f) + 2.0 * f)));
+    if (length(px - center) < resolution.y * (0.04 + 0.01 * f)) {
+      color = mix(color, vec3(fract(f * 0.37), fract(f * 0.61), fract(f * 0.83)), 0.85);
+    }
+  }
+
+  if (uv.x > 0.80 && uv.y < 0.20) {
+    color = vec3(hash(floor(px / 4.0) + vec2(mod(frame, 997.0) * 61.0, mod(frame, 991.0) * 17.0)));
+  }
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
+
+function startScene() {
+  const canvas = document.getElementById("scene");
+  const gl = canvas.getContext("webgl", { alpha: false, antialias: false, depth: false });
+  if (!gl) {
+    throw new Error("WebGL is unavailable, so this page cannot load the encoder");
+  }
+  const compile = (type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(shader));
+    }
+    return shader;
+  };
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const position = gl.getAttribLocation(program, "position");
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+  const uniforms = {
+    resolution: gl.getUniformLocation(program, "resolution"),
+    time: gl.getUniformLocation(program, "time"),
+    frame: gl.getUniformLocation(program, "frame"),
+  };
+
+  return (seconds, frame) => {
+    const width = Math.round(innerWidth * devicePixelRatio);
+    const height = Math.round(innerHeight * devicePixelRatio);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      gl.viewport(0, 0, width, height);
+    }
+    gl.uniform2f(uniforms.resolution, width, height);
+    gl.uniform1f(uniforms.time, seconds);
+    gl.uniform1f(uniforms.frame, frame);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  };
+}
+
+let draw = null;
+let failure = "";
+if (!reference) {
+  try {
+    draw = startScene();
+  } catch (error) {
+    failure = String(error.message || error);
+    info.classList.add("error");
+  }
+}
+
+let start = null;
+let frame = 0;
+const recent = [];
+
+function tick(timestamp) {
+  if (start === null) {
+    start = timestamp;
+  }
+  // The frame's own time, so both windows read one clock even when one of them runs late.
+  const now = performance.timeOrigin + timestamp;
+  clock.textContent = ((now / 1000) % 100).toFixed(3).padStart(6, "0");
+  cells.forEach((cell, index) => cell.classList.toggle("on", index === frame % cells.length));
+
+  recent.push(timestamp);
+  while (recent.length > 1 && timestamp - recent[0] > 1000) {
+    recent.shift();
+  }
+  const hz = recent.length > 1 ? (recent.length - 1) * 1000 / (timestamp - recent[0]) : 0;
+  if (frame % 15 === 0) {
+    // Seconds since the page opened, to time the run and place a stutter or a photo in it.
+    const size = `${screen.width}x${screen.height} @${devicePixelRatio}x`;
+    const open = Math.floor((timestamp - start) / 1000);
+    info.textContent = failure || `${size}  ${hz.toFixed(1)} Hz  frame ${frame}  ${open} s`;
+  }
+
+  if (draw) {
+    draw((timestamp - start) / 1000, frame);
+  }
+  frame += 1;
+  requestAnimationFrame(tick);
+}
+
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
