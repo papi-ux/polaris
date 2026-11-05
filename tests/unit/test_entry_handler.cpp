@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -23,6 +24,7 @@
 
 #ifndef _WIN32
   #include <fcntl.h>
+  #include <poll.h>
   #include <unistd.h>
 #endif
 
@@ -185,9 +187,46 @@ TEST(EntryHandlerTests, VersionDrawsTheConstellationOnATerminal) {
   close(terminal);
 
   EXPECT_EQ(result, 0);
-  std::string shown(4096, '\0');
-  const auto count = read(controller, shown.data(), shown.size());
+  const int flags = fcntl(controller, F_GETFL);
+  ASSERT_GE(flags, 0);
+  ASSERT_EQ(fcntl(controller, F_SETFL, flags | O_NONBLOCK), 0);
+  std::string shown(16 * 1024, '\0');
+  std::size_t count = 0;
+  bool drained = false;
+  int read_error = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  // A PTY read may return only part of the output. With the slave closed,
+  // drain through EOF (or Linux's EIO) before checking the complete text.
+  while (count < shown.size() && std::chrono::steady_clock::now() < deadline) {
+    const auto chunk = read(controller, shown.data() + count, shown.size() - count);
+    if (chunk > 0) {
+      count += static_cast<std::size_t>(chunk);
+      continue;
+    }
+    if (chunk == 0 || errno == EIO) {
+      drained = true;
+      break;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      read_error = errno;
+      break;
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) {
+      break;
+    }
+    pollfd pending {controller, POLLIN, 0};
+    if (poll(&pending, 1, static_cast<int>(remaining)) < 0 && errno != EINTR) {
+      read_error = errno;
+      break;
+    }
+  }
   close(controller);
+  ASSERT_EQ(read_error, 0);
+  ASSERT_TRUE(drained) << "PTY output did not finish within 2 seconds and 16 KiB";
   ASSERT_GT(count, 0);
   shown.resize(static_cast<std::size_t>(count));
   EXPECT_NE(shown.find("(*) Polaris"), std::string::npos);
