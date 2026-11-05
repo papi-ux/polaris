@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -13,12 +14,16 @@
 #include <optional>
 #include <sstream>
 #include <src/confighttp.h>
+#include <src/doctor_v2.h>
 #include <src/process.h>
 #include <src/stream_start_outcome.h>
 #include <src/stream.h>
 #include <src/rtsp.h>
 #include <src/config.h>
 #include <src/stream_stats.h>
+#include <src/game_mode_adaptive_sync.h>
+#include <src/vrr_clock_proof.h>
+#include <src/vrr_pacing_receipt.h>
 #include <src/utility.h>
 #include <string>
 #include <string_view>
@@ -56,6 +61,12 @@ namespace nvhttp {
                                                          const std::string &launch_backend,
                                                          bool session_override,
                                                          std::uint64_t requester_generation);
+  nlohmann::json session_status_vrr_json_for_tests(const stream_stats::stats_t &stats,
+                                                   std::uint64_t requester_generation);
+  nlohmann::json session_status_vrr_readers_for_tests(const stream_stats::stats_t &stats,
+                                                      const std::string &stream_display_mode,
+                                                      std::uint64_t requester_generation,
+                                                      const std::function<void()> &between_readers);
 }
 
 namespace confighttp {
@@ -1256,4 +1267,215 @@ TEST(StreamVrrAdmissionTests, SourceEncodePressureUsesMeasuredWorkRatherThanTheN
   health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
   EXPECT_EQ(health["primary_issue"], "encoder_load");
   EXPECT_EQ(health["doctor"]["traffic_light"], "red");
+}
+
+/**
+ * session/status serves the asking client its own stream's VRR record while Doctor v2 is off, and no
+ * vrr at all when that stream has none: a watcher's, a replaced stream's or no stream's never stands
+ * in, so a Nova client cannot read another stream's record as its own.
+ */
+TEST(NvhttpSessionStatusVrrTests, TheRequesterReadsOnlyItsOwnRecordWhileDoctorIsOff) {
+  stream_stats::update_stream_active(false);
+  const std::string deck = "vrr-status-deck-6d41";
+  const std::string tablet = "vrr-status-tablet-6d42";
+  const char *shadow = std::getenv("POLARIS_DOCTOR_V2_SHADOW");
+  const std::optional<std::string> previous_shadow = shadow ? std::optional<std::string> {shadow} : std::nullopt;
+#ifdef _WIN32
+  _putenv_s("POLARIS_DOCTOR_V2_SHADOW", "");
+#else
+  unsetenv("POLARIS_DOCTOR_V2_SHADOW");
+#endif
+  auto reset = util::fail_guard([&] {
+    stream_stats::stop_session_timing(deck, 551);
+    stream_stats::stop_session_timing(deck, 553);
+    stream_stats::stop_session_timing(tablet, 552);
+    stream_stats::update_stream_active(false);
+#ifdef _WIN32
+    _putenv_s("POLARIS_DOCTOR_V2_SHADOW", previous_shadow ? previous_shadow->c_str() : "");
+#else
+    if (previous_shadow) {
+      setenv("POLARIS_DOCTOR_V2_SHADOW", previous_shadow->c_str(), 1);
+    }
+#endif
+  });
+  ASSERT_FALSE(doctor_v2::shadow_enabled());
+
+  // The Deck owns a stream that asked for VRR; the tablet watches beside it with its own record.
+  stream_stats::add_client("10.0.0.5", "Deck", 551);
+  stream_stats::add_client("10.0.0.6", "Tablet", 552);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_policy::make_record(
+    551, vrr_policy::requested_e::on, vrr_policy::admission_e::launch, false, false)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_policy::make_record(
+    552, vrr_policy::requested_e::off, vrr_policy::admission_e::launch, true, false)));
+  stream_stats::start_session_timing(deck, 551, "deck-launch");
+  stream_stats::start_session_timing(tablet, 552, "tablet-launch");
+
+  auto stats = stream_stats::get_current();
+  const auto deck_generation = nvhttp::requester_session_generation_for_tests(deck);
+  ASSERT_EQ(deck_generation, 551u);
+  const auto owner = nvhttp::session_status_vrr_json_for_tests(stats, deck_generation);
+  ASSERT_TRUE(owner.contains("vrr")) << owner.dump();
+  // The Deck's frozen launch record, field for field: without host permission there is no receipt
+  // and no effective claim, whatever it asked for.
+  EXPECT_EQ(owner.at("vrr"), (nlohmann::json {
+    {"schema", 1}, {"requested", "true"}, {"requested_from", "launch"}, {"host_permission", false},
+    {"effective", false}, {"pacing_mode", "fixed_grid"}, {"fallback_reason", "route_unreported"},
+    {"capture_pacing", "unknown"}, {"session_generation", 551}, {"host_adaptive_sync", nullptr}
+  })) << owner.dump();
+  EXPECT_EQ(owner.at("vrr").at("session_generation"), 551u);
+  EXPECT_EQ(owner.at("vrr").at("requested"), "true");
+  EXPECT_EQ(owner.at("vrr").at("effective"), false);
+  const auto watcher = nvhttp::session_status_vrr_json_for_tests(
+    stats, nvhttp::requester_session_generation_for_tests(tablet));
+  ASSERT_TRUE(watcher.contains("vrr")) << watcher.dump();
+  EXPECT_EQ(watcher.at("vrr").at("session_generation"), 552u);
+  EXPECT_EQ(watcher.at("vrr").at("fallback_reason"), "watch_or_input_only")
+    << "the watcher was answered with the owner's record";
+
+  // A client with no stream here is answered with no vrr, not a default.
+  EXPECT_EQ(nvhttp::session_status_vrr_json_for_tests(
+              stats, nvhttp::requester_session_generation_for_tests("vrr-status-unknown-6d43")),
+            nlohmann::json::object());
+
+  // The Deck reconnects. Its new stream has no record yet, and the stream it replaced, still listed
+  // until teardown, does not stand in for it.
+  stream_stats::add_client("10.0.0.5", "Deck", 553);
+  stream_stats::start_session_timing(deck, 553, "deck-reconnect");
+  stats = stream_stats::get_current();
+  ASSERT_TRUE(stream_stats::vrr_json(stats, 551).is_object()) << "the replaced stream must still have its record";
+  const auto reconnect = nvhttp::requester_session_generation_for_tests(deck);
+  ASSERT_EQ(reconnect, 553u);
+  EXPECT_EQ(nvhttp::session_status_vrr_json_for_tests(stats, reconnect), nlohmann::json::object());
+
+  // Once the resumed stream's own request is admitted, that record is served under its new
+  // generation and says it came from a resume; the replaced launch record still never stands in.
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_policy::make_record(
+    553, vrr_policy::requested_e::on, vrr_policy::admission_e::resume, false, false)));
+  stats = stream_stats::get_current();
+  const auto resumed = nvhttp::session_status_vrr_json_for_tests(
+    stats, nvhttp::requester_session_generation_for_tests(deck));
+  ASSERT_TRUE(resumed.contains("vrr")) << resumed.dump();
+  EXPECT_EQ(resumed.at("vrr").at("session_generation"), 553u);
+  EXPECT_EQ(resumed.at("vrr").at("requested_from"), "resume");
+  EXPECT_EQ(resumed.at("vrr").at("requested"), "true");
+  EXPECT_EQ(resumed.at("vrr").at("effective"), false);
+  EXPECT_EQ(stream_stats::vrr_json(stats, 551).at("requested_from"), "launch")
+    << "the replaced stream keeps its own launch record";
+
+  // Doctor stayed off throughout, and says so for this owner.
+  EXPECT_EQ(doctor_v2::status(deck, "").at("state"), "disabled");
+}
+
+namespace {
+  /**
+   * Admit one accepted, clock-mapped capture frame for `generation` and the source-time receipt the
+   * encode loop records for it, as StreamStatsCaptureTimingTests does: a fresh host source-pacing
+   * receipt through the real admission path. The frame carries `host_adaptive_sync` as its observer.
+   */
+  void record_fresh_source_pacing(std::uint64_t generation,
+                                  const std::shared_ptr<game_mode_adaptive_sync::store_t> &host_adaptive_sync) {
+    platf::image_provenance_t frame;
+    frame.capture_generation_id = 901;
+    frame.capture_epoch_id = 71;
+    frame.source_sequence = 1;
+    frame.route.pacing = platf::capture_pacing_e::source_driven;
+    frame.route.presentation = platf::presentation_clock_e::ext_image_copy_monotonic;
+    frame.presentation.status = vrr_policy::presentation_status_e::valid;
+    vrr_clock::mapping_t mapping;
+    mapping.valid = true;
+    mapping.samples = 8;
+    mapping.uncertainty_ns = 100;
+    frame.clock_proof = std::make_shared<const vrr_clock::proof_t>(vrr_clock::make_proof(
+      71, {vrr_clock::namespace_e::same, "same_dev_and_inode"}, true, "expected_identity", mapping, 0));
+    const std::int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    frame.ready_at = std::chrono::steady_clock::time_point {std::chrono::nanoseconds {now}};
+    frame.presentation.ns = now - 1'000'000;
+    frame.source_time = {vrr_clock::source_time_e::mapped, 0, frame.presentation.ns, 100, now};
+    frame.host_adaptive_sync = host_adaptive_sync;
+    ASSERT_TRUE(stream_stats::record_accepted_capture(generation, frame));
+    vrr_pacing::receipt_t receipt {generation, 901, 71, 1, vrr_pacing::mode_e::source_time,
+      vrr_pacing::event_e::accepted_source, frame.presentation.ns, now};
+    ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt));
+  }
+}  // namespace
+
+/**
+ * A stream with the host's permission and a fresh source-time receipt reads its effective record
+ * through session status, and Doctor v2 is handed that same value rather than a second serialization.
+ * Between the two readers the receipt ages past the two-second limit, as when the request thread
+ * stalls while health is assembled, and the capture's host adaptive-sync observation ends: the served
+ * vrr and Doctor's evidence stay one value, although serializing again at that point would disagree.
+ */
+TEST(NvhttpSessionStatusVrrTests, StatusAndDoctorShareOneRecordForAFreshEffectiveReceipt) {
+  stream_stats::update_stream_active(false);
+  const std::string deck = "vrr-status-deck-6d51";
+  auto reset = util::fail_guard([&] {
+    stream_stats::stop_session_timing(deck, 561);
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::add_client("10.0.0.15", "Deck", 561);
+  auto request = vrr_policy::make_record(
+    561, vrr_policy::requested_e::on, vrr_policy::admission_e::launch, false, false);
+  request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  const auto host_adaptive_sync = std::make_shared<game_mode_adaptive_sync::store_t>();
+  ASSERT_NO_FATAL_FAILURE(record_fresh_source_pacing(561, host_adaptive_sync));
+  stream_stats::start_session_timing(deck, 561, "deck-launch");
+
+  auto stats = stream_stats::get_current();
+  stats.streaming = true;  // Doctor's host evidence describes a live stream only.
+  const auto generation = nvhttp::requester_session_generation_for_tests(deck);
+  ASSERT_EQ(generation, 561u);
+
+  // Through session status: the eligible stream's fresh, effective record.
+  const auto status = nvhttp::session_status_vrr_json_for_tests(stats, generation);
+  ASSERT_TRUE(status.contains("vrr")) << status.dump();
+  const auto &vrr = status.at("vrr");
+  EXPECT_EQ(vrr.at("session_generation"), 561u);
+  EXPECT_EQ(vrr.at("requested"), "true");
+  EXPECT_EQ(vrr.at("requested_from"), "launch");
+  EXPECT_EQ(vrr.at("host_permission"), true);
+  EXPECT_EQ(vrr.at("effective"), true);
+  EXPECT_EQ(vrr.at("pacing_mode"), "source_time");
+  EXPECT_TRUE(vrr.at("fallback_reason").is_null()) << vrr.dump();
+  EXPECT_EQ(vrr.at("capture_pacing"), "source_driven");
+  EXPECT_EQ(vrr.at("host_pacing").at("state"), "source_time");
+  EXPECT_EQ(vrr.at("host_pacing").at("fresh"), true);
+  EXPECT_EQ(vrr.at("host_pacing").at("receiver_presentation_verified"), false);
+  EXPECT_EQ(vrr.at("host_pacing").at("physical_acceptance"), false);
+  EXPECT_EQ(vrr.at("host_pacing").at("receiver_source_cadence_available"), false);
+  EXPECT_EQ(vrr.at("host_adaptive_sync").at("ended"), false);
+
+  // The clock and the shared observation move between session status's two readers.
+  nlohmann::json reserialized;
+  const auto readers = nvhttp::session_status_vrr_readers_for_tests(stats, "virtual", generation, [&] {
+    for (auto &client : stats.clients) {
+      if (client.session_generation == generation && client.vrr_pacing) {
+        client.vrr_pacing->last.observed_steady_ns -= 3'000'000'000;
+      }
+    }
+    host_adaptive_sync->end();
+    reserialized = stream_stats::vrr_json(stats, generation);
+  });
+  ASSERT_TRUE(readers.at("status").contains("vrr")) << readers.dump();
+  ASSERT_TRUE(readers.at("doctor_v2_host_evidence").contains("vrr")) << readers.dump();
+  const auto &served = readers.at("status").at("vrr");
+  EXPECT_EQ(readers.at("doctor_v2_host_evidence").at("vrr"), served)
+    << "Doctor v2 was handed a second serialization of the receipt";
+  EXPECT_EQ(served, vrr) << "the served record is the value computed before the move";
+  // The moves were real: a serialization after them is stale and sees the ended observation.
+  ASSERT_TRUE(reserialized.is_object()) << reserialized.dump();
+  EXPECT_EQ(reserialized.at("effective"), false);
+  EXPECT_EQ(reserialized.at("pacing_mode"), "unverified");
+  EXPECT_EQ(reserialized.at("fallback_reason"), "pacing_evidence_stale");
+  EXPECT_EQ(reserialized.at("host_pacing").at("fresh"), false);
+  EXPECT_EQ(reserialized.at("host_adaptive_sync").at("ended"), true);
+  EXPECT_NE(reserialized, served);
+
+  // Doctor's evidence stays empty while nothing streams; session status serves the record regardless.
+  stats.streaming = false;
+  const auto idle = nvhttp::session_status_vrr_readers_for_tests(stats, "virtual", generation, [] {});
+  EXPECT_TRUE(idle.at("status").contains("vrr")) << idle.dump();
+  EXPECT_EQ(idle.at("doctor_v2_host_evidence"), nlohmann::json::object());
 }

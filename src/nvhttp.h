@@ -654,6 +654,18 @@ namespace nvhttp {
                                                          const std::string &launch_backend,
                                                          bool session_override,
                                                          std::uint64_t requester_generation);
+  /// The session/status object holding only the `vrr` it serves the client whose stream has this
+  /// generation: empty when that stream has no record.
+  nlohmann::json session_status_vrr_json_for_tests(const stream_stats::stats_t &stats,
+                                                   std::uint64_t requester_generation);
+  /// session/status's two readers of the requester's VRR record, in the handler's order: the record
+  /// serialized once, the response's `vrr` written from it, `between_readers()` (the health and Doctor
+  /// work the handler does in between), then Doctor v2's host evidence from that same value. Returns
+  /// {"status": {...}, "doctor_v2_host_evidence": {...}}.
+  nlohmann::json session_status_vrr_readers_for_tests(const stream_stats::stats_t &stats,
+                                                      const std::string &stream_display_mode,
+                                                      std::uint64_t requester_generation,
+                                                      const std::function<void()> &between_readers);
   bool library_desktop_offers_own_screen_for_tests(const std::vector<proc::ctx_t> &apps, bool backend_available);
   nlohmann::json build_launch_mode_contract_for_tests(std::string_view app_launch_as,
                                                       std::string_view app_name,

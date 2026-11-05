@@ -2598,6 +2598,22 @@ namespace nvhttp {
       return timing.session_active ? timing.session_generation : 0;
     }
 
+    /**
+     * Serve the asking stream's own variable-refresh record as session/status `vrr`.
+     *
+     * `requester_vrr` is stream_stats::vrr_json for the requester's generation, computed once for the
+     * response: Doctor v2's host evidence is handed that same value, never a second serialization,
+     * since a receipt's freshness and the host adaptive-sync observation are read at serialization
+     * time and could otherwise differ between the two. It is written whether Doctor is enabled,
+     * still collecting or off. Absent when that stream has no record: another client's, a Watch row's
+     * or an ended session's record never stands in for it, and nothing is defaulted.
+     */
+    void write_requester_vrr(nlohmann::json &output, const nlohmann::json &requester_vrr) {
+      if (!requester_vrr.is_null()) {
+        output["vrr"] = requester_vrr;
+      }
+    }
+
     nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats,
                                           std::uint64_t requester_generation = 0) {
       // Whether the asking client's own stream is PyroWave, not whichever stream sampled last:
@@ -3045,6 +3061,13 @@ namespace nvhttp {
     write_session_encoder_identity(encoder, stats, requested_backend, launch_backend, session_override,
                                    requester_generation);
     return encoder;
+  }
+
+  nlohmann::json session_status_vrr_json_for_tests(const stream_stats::stats_t &stats,
+                                                   std::uint64_t requester_generation) {
+    auto output = nlohmann::json::object();
+    write_requester_vrr(output, stream_stats::vrr_json(stats, requester_generation));
+    return output;
   }
 
   bool library_desktop_offers_own_screen_for_tests(const std::vector<proc::ctx_t> &apps, bool backend_available) {
@@ -6651,10 +6674,16 @@ namespace nvhttp {
     // Session status and POST /polaris/v1/doctor/explanation build the same final Doctor from the same
     // reads, so the finding a client observed on status is the finding the POST rechecks.
 
-    /// doctor_v2's host evidence for the requester's own stream; empty while nothing streams.
+    /**
+     * doctor_v2's host evidence for the requester's own stream; empty while nothing streams.
+     *
+     * `requester_vrr` is the caller's one stream_stats::vrr_json value for the requester's generation
+     * (null when it has none). Session status serves that same value as its `vrr`, so Doctor and the
+     * response always describe one serialization of the receipt.
+     */
     nlohmann::json doctor_v2_host_evidence_json(const stream_stats::stats_t &stats,
                                                 const std::string &stream_display_mode,
-                                                std::uint64_t requester_generation) {
+                                                const nlohmann::json &requester_vrr) {
       nlohmann::json evidence = nlohmann::json::object();
       if (!stats.streaming) {
         return evidence;
@@ -6689,8 +6718,8 @@ namespace nvhttp {
       };
       // Only the requester's own generation: another owner's or a Watch session's record never
       // stands in for it, and no record means no vrr evidence rather than a default.
-      if (auto vrr = stream_stats::vrr_json(stats, requester_generation); !vrr.is_null()) {
-        evidence["vrr"] = std::move(vrr);
+      if (!requester_vrr.is_null()) {
+        evidence["vrr"] = requester_vrr;
       }
       return evidence;
     }
@@ -6842,7 +6871,7 @@ namespace nvhttp {
       const auto shadow = doctor_v2::status(
         named_cert_p->uuid,
         status_snapshot.game_uuid,
-        doctor_v2_host_evidence_json(stats, stream_display_mode, requester_generation)
+        doctor_v2_host_evidence_json(stats, stream_display_mode, stream_stats::vrr_json(stats, requester_generation))
       );
       apply_doctor_v2_overlay(doctor, shadow);
       auto scope = paired_explanation_scope(
@@ -6866,6 +6895,21 @@ namespace nvhttp {
       return scope;
     }
   }  // namespace
+
+#ifdef POLARIS_TESTS
+  nlohmann::json session_status_vrr_readers_for_tests(const stream_stats::stats_t &stats,
+                                                      const std::string &stream_display_mode,
+                                                      std::uint64_t requester_generation,
+                                                      const std::function<void()> &between_readers) {
+    // session/status's order: one value, its `vrr`, the work in between, then Doctor's evidence.
+    auto output = nlohmann::json::object();
+    const auto requester_vrr = stream_stats::vrr_json(stats, requester_generation);
+    write_requester_vrr(output, requester_vrr);
+    between_readers();
+    return {{"status", std::move(output)},
+      {"doctor_v2_host_evidence", doctor_v2_host_evidence_json(stats, stream_display_mode, requester_vrr)}};
+  }
+#endif
 
   /**
    * POST /polaris/v1/doctor/explanation. Authorization and strict body admission happen here; the
@@ -9697,6 +9741,10 @@ namespace nvhttp {
       if (auto timing = stream_stats::capture_timing_json(stats, requester_generation); !timing.is_null()) {
         output["capture_timing"] = std::move(timing);
       }
+      // The asking stream's own VRR record, likewise served whether Doctor is enabled or collecting.
+      // Computed once: Doctor v2's host evidence below is handed this same value.
+      const auto requester_vrr = stream_stats::vrr_json(stats, requester_generation);
+      write_requester_vrr(output, requester_vrr);
       const auto health = build_session_health_json(
         stats,
         status_snapshot.virtual_display,
@@ -9714,7 +9762,7 @@ namespace nvhttp {
         stats.network_sample_revision,
         stats.video_sample_revision
       );
-      const auto doctor_v2_host_evidence = doctor_v2_host_evidence_json(stats, stream_display_mode, requester_generation);
+      const auto doctor_v2_host_evidence = doctor_v2_host_evidence_json(stats, stream_display_mode, requester_vrr);
       const auto doctor_v2_status = doctor_v2::status(
         named_cert_p->uuid,
         status_snapshot.game_uuid,

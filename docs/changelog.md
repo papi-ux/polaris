@@ -957,6 +957,15 @@ starts at `v1.0.0`.
   captures through wlroots, or a Gamescope Stream host with capture unset, which a launch fills
   with the portal, to grant a capability that would change nothing about its stream. The HDR
   recipe in the runtime, troubleshooting and configuration docs says the same.
+- `GET /polaris/v1/session/status` carries the asking client's own stream's VRR record as optional
+  `vrr`: the requester-scoped record Doctor v2 is already handed, with `schema`, `requested`,
+  `requested_from`, `host_permission`, `effective`, `pacing_mode`, `fallback_reason`,
+  `capture_pacing`, `session_generation`, `host_adaptive_sync` and, once the host has recorded a
+  pacing receipt for the stream, `host_pacing`. It is served whether Doctor is enabled, collecting
+  or off, and is absent when that stream has no record: another client's, a Watch row's or an
+  ended session's record never stands in. `docs/nova-contract.json` declares it as `session_vrr`
+  and `session_vrr_host_pacing` for Nova's adaptive presentation readers. Pacing, policy and
+  Doctor grading are unchanged. See `docs/vrr-capture-timing-evidence.md`.
 
 ## v1.4.13 - 2026-09-26
 

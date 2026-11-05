@@ -762,18 +762,18 @@ namespace stream_stats {
                                   const std::optional<vrr_pacing_stats_t> &runtime = std::nullopt) {
       const auto decision = vrr_policy::decide(record, {});
       nlohmann::json j {
-        {"schema", 1}, {"requested", vrr_policy::name(record.requested)},
-        {"requested_from", vrr_policy::name(record.admission)},
-        {"host_permission", record.host_source_pacing},
-        {"effective", decision.effective}, {"pacing_mode", decision.pacing_mode},
-        {"fallback_reason", decision.fallback_reason}, {"capture_pacing", "unknown"},
+        {v1::session_vrr::schema, 1}, {v1::session_vrr::requested, vrr_policy::name(record.requested)},
+        {v1::session_vrr::requested_from, vrr_policy::name(record.admission)},
+        {v1::session_vrr::host_permission, record.host_source_pacing},
+        {v1::session_vrr::effective, decision.effective}, {v1::session_vrr::pacing_mode, decision.pacing_mode},
+        {v1::session_vrr::fallback_reason, decision.fallback_reason}, {v1::session_vrr::capture_pacing, "unknown"},
       };
       j.update(identity);
       if (!record.host_source_pacing) return j;
       if (!runtime) {
         if (record.requested == vrr_policy::requested_e::on && !record.watch_or_input_only) {
-          j["pacing_mode"] = "source_time_pending";
-          j["fallback_reason"] = "source_time_unproven";
+          j[v1::session_vrr::pacing_mode] = "source_time_pending";
+          j[v1::session_vrr::fallback_reason] = "source_time_unproven";
         }
         return j;
       }
@@ -784,27 +784,31 @@ namespace stream_stats {
         now_ns - sample.observed_steady_ns <= 2'000'000'000;
       const bool observed_source = sample.mode == vrr_pacing::mode_e::source_time &&
         !runtime->authority_lost;
-      j["effective"] = observed_source && fresh && !runtime->ended;
-      j["pacing_mode"] = j["effective"] == true ? "source_time" :
+      j[v1::session_vrr::effective] = observed_source && fresh && !runtime->ended;
+      j[v1::session_vrr::pacing_mode] = j[v1::session_vrr::effective] == true ? "source_time" :
         (!runtime->ended && !runtime->authority_lost && sample.mode != vrr_pacing::mode_e::unsupported ?
           (fresh ? "source_time_pending" : "unverified") : "fixed_grid");
-      if (sample.capture_epoch != 0) j["capture_pacing"] = "source_driven";
-      if (j["effective"] == true) j["fallback_reason"] = nullptr;
-      else if (runtime->ended) j["fallback_reason"] = "stream_ended";
-      else if (runtime->authority_lost) j["fallback_reason"] = "authority_lost";
-      else if (sample.mode == vrr_pacing::mode_e::unsupported) j["fallback_reason"] = vrr_pacing::name(sample.event);
-      else if (!fresh) j["fallback_reason"] = "pacing_evidence_stale";
-      else j["fallback_reason"] = "source_time_unproven";
+      if (sample.capture_epoch != 0) j[v1::session_vrr::capture_pacing] = "source_driven";
+      if (j[v1::session_vrr::effective] == true) j[v1::session_vrr::fallback_reason] = nullptr;
+      else if (runtime->ended) j[v1::session_vrr::fallback_reason] = "stream_ended";
+      else if (runtime->authority_lost) j[v1::session_vrr::fallback_reason] = "authority_lost";
+      else if (sample.mode == vrr_pacing::mode_e::unsupported) j[v1::session_vrr::fallback_reason] = vrr_pacing::name(sample.event);
+      else if (!fresh) j[v1::session_vrr::fallback_reason] = "pacing_evidence_stale";
+      else j[v1::session_vrr::fallback_reason] = "source_time_unproven";
       nlohmann::json counts = nlohmann::json::object();
       for (std::size_t i = 0; i < runtime->event_counts.size(); ++i) {
         counts[std::string(vrr_pacing::name(static_cast<vrr_pacing::event_e>(i)))] = runtime->event_counts[i];
       }
-      j["host_pacing"] = {{"state", vrr_pacing::name(sample.mode)}, {"last_event", vrr_pacing::name(sample.event)},
-        {"fresh", fresh && !runtime->ended}, {"event_counts", std::move(counts)},
-        {"receiver_presentation_verified", false}, {"physical_acceptance", false},
-        {"receiver_source_cadence_available", false}};
+      j[v1::session_vrr::host_pacing] = {{v1::session_vrr_host_pacing::state, vrr_pacing::name(sample.mode)},
+        {v1::session_vrr_host_pacing::last_event, vrr_pacing::name(sample.event)},
+        {v1::session_vrr_host_pacing::fresh, fresh && !runtime->ended},
+        {v1::session_vrr_host_pacing::event_counts, std::move(counts)},
+        {v1::session_vrr_host_pacing::receiver_presentation_verified, false},
+        {v1::session_vrr_host_pacing::physical_acceptance, false},
+        {v1::session_vrr_host_pacing::receiver_source_cadence_available, false}};
       if (runtime->trace_accepted_watermark) {
-        j["host_pacing"]["trace_receipts"] = {{"schema_major", vrr_trace::k_schema_major},
+        auto &host_pacing = j[v1::session_vrr::host_pacing];
+        host_pacing[v1::session_vrr_host_pacing::trace_receipts] = {{"schema_major", vrr_trace::k_schema_major},
           {"schema_minor", vrr_trace::k_schema_minor}, {"session_generation", sample.session_generation},
           {"accepted_watermark", *runtime->trace_accepted_watermark}};
       }
@@ -4636,8 +4640,8 @@ namespace stream_stats {
         return candidate.session_generation == session_generation;
       });
     if (client == stats.clients.end() || !client->vrr) return nullptr;
-    auto result = vrr_record_json(*client->vrr, {{"session_generation", session_generation}}, client->vrr_pacing);
-    result["host_adaptive_sync"] = client->capture_timing ? host_adaptive_sync_json(client->capture_timing->last_accepted) : nlohmann::json(nullptr);
+    auto result = vrr_record_json(*client->vrr, {{v1::session_vrr::session_generation, session_generation}}, client->vrr_pacing);
+    result[v1::session_vrr::host_adaptive_sync] = client->capture_timing ? host_adaptive_sync_json(client->capture_timing->last_accepted) : nlohmann::json(nullptr);
     return result;
   }
 
