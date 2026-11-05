@@ -5,7 +5,9 @@
 
 // standard includes
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -99,10 +101,197 @@ namespace adaptive_bitrate {
   static std::weak_ptr<stream_native_reception::scope_t> native_owner;
   static std::string native_launch_nonce;
   static std::weak_ptr<const video::bitrate_provenance::current_setting_t> native_current_setting;
+
+  // Bounded native entry/consumption and reference-interruption diagnostics, written to the existing log
+  // (docs/native-packet-reception-feedback.md). Observational only: no decision, permission, deadline,
+  // threshold, bucket, action, retry or learning reads them. The busy try_lock skip path only increments this
+  // lock-free, process-wide counter: it takes no lock and neither allocates nor logs.
+  static std::atomic<std::uint64_t> native_busy_skips {0};
+  /// Where one entered native report stopped. Permission gates follow update_native_signal's evaluation order.
+  enum class native_entry_e {
+    none, config_disabled, scope_owner, enablement, writer, context_unobserved, operator_revision,
+    action_revision, applied_revision, rate, caller_flags, current_caller, fec, readiness, no_receipt,
+    receipt_not_current, measurement, setting, signal_not_current, caller_changed, policy_not_normal, consumed,
+    pending_wait, count,
+  };
+  static const char *native_entry_name(native_entry_e entry) noexcept {
+    switch (entry) {
+#define NATIVE_ENTRY(x) case native_entry_e::x: return #x
+      NATIVE_ENTRY(none); NATIVE_ENTRY(config_disabled); NATIVE_ENTRY(scope_owner); NATIVE_ENTRY(enablement);
+      NATIVE_ENTRY(writer); NATIVE_ENTRY(context_unobserved); NATIVE_ENTRY(operator_revision);
+      NATIVE_ENTRY(action_revision); NATIVE_ENTRY(applied_revision); NATIVE_ENTRY(rate); NATIVE_ENTRY(caller_flags);
+      NATIVE_ENTRY(current_caller); NATIVE_ENTRY(fec); NATIVE_ENTRY(readiness); NATIVE_ENTRY(no_receipt);
+      NATIVE_ENTRY(receipt_not_current); NATIVE_ENTRY(measurement); NATIVE_ENTRY(setting);
+      NATIVE_ENTRY(signal_not_current); NATIVE_ENTRY(caller_changed); NATIVE_ENTRY(policy_not_normal);
+      NATIVE_ENTRY(consumed); NATIVE_ENTRY(pending_wait); NATIVE_ENTRY(count);
+#undef NATIVE_ENTRY
+    }
+    return "none";
+  }
+  static constexpr std::size_t native_entry_count = static_cast<std::size_t>(native_entry_e::count);
+  static constexpr std::uint32_t native_summary_limit = 64, native_interruption_limit = 16;
+  static constexpr auto native_summary_interval = std::chrono::seconds(10);
+  /// Counts for the current history scope. Guarded by state_mutex; fixed storage and saturating counts.
+  struct native_scope_diagnostic_t {
+    std::uint64_t generation = 0, busy_baseline = 0;
+    std::uint32_t sequence = 0, entered = 0, refused = 0, requests = 0, policy_refused = 0;
+    std::uint32_t retired = 0, retired_owner = 0, retired_window = 0;
+    std::array<std::uint32_t, native_entry_count> outcomes {};
+    native_entry_e first_refusal = native_entry_e::none, last_refusal = native_entry_e::none;
+    // Reference clears of replaced episodes plus the current one, minus what it held when this scope began.
+    std::array<std::uint32_t, live_tuning_native::reference_clear_count> retired_clears {}, episode_base {};
+    std::uint32_t seen_clears = 0;
+    live_tuning_native::reference_clear_e first_clear = live_tuning_native::reference_clear_e::none;
+    live_tuning_native::reference_clear_e last_clear = live_tuning_native::reference_clear_e::none;
+    int lost_closed = 0, lost_reference = 0, lost_standing = 0, max_lost_standing = 0;
+    bool interruption_pending = false;  // A clear other than the routine 60 s restart awaits its line.
+    std::uint32_t summaries = 0, interruptions = 0, suppressed = 0;
+    std::chrono::steady_clock::time_point last_summary {};
+  };
+  static native_scope_diagnostic_t native_diag;
+  /// One diagnostic line, formatted under state_mutex and logged only after the lock is released.
+  struct native_line_t {
+    std::array<char, 1536> text;  // Written only by put(); left uninitialized so the busy return does no work.
+    std::size_t used = 0;
+    bool pending = false;
+    native_line_t() noexcept { text[0] = '\0'; }
+    native_line_t(const native_line_t &) = delete;
+    native_line_t &operator=(const native_line_t &) = delete;
+    void put(std::string_view part) noexcept {
+      const auto n = std::min(part.size(), text.size() - 1 - used);
+      std::copy_n(part.data(), n, text.data() + used);
+      used += n;
+      text[used] = '\0';
+    }
+    void put(std::uint64_t value) noexcept {
+      std::array<char, 24> digits {};
+      const auto end = std::to_chars(digits.data(), digits.data() + digits.size(), value).ptr;
+      put(std::string_view {digits.data(), static_cast<std::size_t>(end - digits.data())});
+    }
+    void put_int(int value) noexcept {
+      if (value < 0) put("-");
+      put(static_cast<std::uint64_t>(value < 0 ? -static_cast<std::int64_t>(value) : value));
+    }
+    ~native_line_t() {
+      if (!pending) return;
+      try {
+        BOOST_LOG(info) << text.data();
+      } catch (...) {
+      }
+    }
+  };
+  static std::uint32_t saturating_sum(std::uint32_t a, std::uint32_t b) noexcept {
+    return b > UINT32_MAX - a ? UINT32_MAX : a + b;
+  }
+  // The current episode's reference clears that belong to this scope. Requires state_mutex.
+  static std::array<std::uint32_t, live_tuning_native::reference_clear_count> native_scope_clears_locked() noexcept {
+    auto clears = native_diag.retired_clears;
+    const auto &current = native_episode.reference_interruptions().clears;
+    for (std::size_t i = 0; i < clears.size(); ++i) {
+      clears[i] = saturating_sum(clears[i], current[i] - std::min(current[i], native_diag.episode_base[i]));
+    }
+    return clears;
+  }
+  // Fold a reference clear the current episode made since the last look into this scope. Every episode mutation
+  // happens inside update_native_signal or a retire, and each of those looks once, so a look sees at most one new
+  // clear and its first/last names are exact. Requires state_mutex.
+  static void absorb_native_clears_locked() noexcept {
+    auto &d = native_diag;
+    const auto &r = native_episode.reference_interruptions();
+    if (r.total == d.seen_clears) return;
+    if (d.first_clear == live_tuning_native::reference_clear_e::none) d.first_clear = d.seen_clears ? r.last : r.first;
+    d.last_clear = r.last;
+    d.lost_closed = r.last_lost_closed; d.lost_reference = r.last_lost_reference; d.lost_standing = r.last_lost_standing;
+    d.max_lost_standing = std::max(d.max_lost_standing, r.last_lost_standing);
+    d.seen_clears = r.total;
+    if (r.last != live_tuning_native::reference_clear_e::reference_expired) d.interruption_pending = true;
+  }
+  // Format the scope's counts as one line of static names and numbers only. Requires state_mutex.
+  static void format_native_line_locked(std::string_view kind, native_line_t &line) noexcept {
+    const auto &d = native_diag;
+    const auto busy = native_busy_skips.load(std::memory_order_relaxed) - d.busy_baseline;
+    const auto clears = native_scope_clears_locked();
+    std::uint32_t clear_total = 0;
+    for (const auto count : clears) clear_total = saturating_sum(clear_total, count);
+    const auto outcome = [&](native_entry_e e) { return d.outcomes[static_cast<std::size_t>(e)]; };
+    line.used = 0;  // One line per buffer, even if formatted again.
+    line.put("Live Tuning native diagnostic "); line.put(kind);
+    line.put(": generation="); line.put(d.generation); line.put(" sequence="); line.put(d.sequence);
+    line.put(" native_downward="); line.put(current_config.native_downward ? "on" : "off");
+    line.put(" entered="); line.put(d.entered); line.put(" busy_skips="); line.put(busy);
+    line.put(" consumed="); line.put(outcome(native_entry_e::consumed));
+    line.put(" pending_waits="); line.put(outcome(native_entry_e::pending_wait));
+    line.put(" requests="); line.put(d.requests); line.put(" policy_refused="); line.put(d.policy_refused);
+    line.put(" refused="); line.put(d.refused);
+    line.put(" first_refusal="); line.put(native_entry_name(d.first_refusal));
+    line.put(" last_refusal="); line.put(native_entry_name(d.last_refusal));
+    line.put(" refusals=[");
+    bool first = true;
+    for (std::size_t i = 0; i < d.outcomes.size(); ++i) {
+      const auto e = static_cast<native_entry_e>(i);
+      if (!d.outcomes[i] || e == native_entry_e::consumed || e == native_entry_e::pending_wait) continue;
+      if (!first) line.put(",");
+      line.put(native_entry_name(e)); line.put(":"); line.put(d.outcomes[i]); first = false;
+    }
+    line.put("] retired="); line.put(d.retired); line.put(" retired_owner="); line.put(d.retired_owner);
+    line.put(" retired_window="); line.put(d.retired_window);
+    line.put(" reference_clears="); line.put(clear_total);
+    line.put(" first_clear="); line.put(live_tuning_native::name(d.first_clear));
+    line.put(" last_clear="); line.put(live_tuning_native::name(d.last_clear));
+    line.put(" clear_counts=[");
+    first = true;
+    for (std::size_t i = 0; i < clears.size(); ++i) {
+      if (!clears[i]) continue;
+      if (!first) line.put(",");
+      line.put(live_tuning_native::name(static_cast<live_tuning_native::reference_clear_e>(i)));
+      line.put(":"); line.put(clears[i]); first = false;
+    }
+    line.put("] last_lost_closed="); line.put_int(d.lost_closed);
+    line.put(" last_lost_reference="); line.put_int(d.lost_reference);
+    line.put(" last_lost_standing="); line.put_int(d.lost_standing);
+    line.put(" max_lost_standing="); line.put_int(d.max_lost_standing);
+    line.put(" summaries="); line.put(d.summaries); line.put("/"); line.put(native_summary_limit);
+    line.put(" interruptions="); line.put(d.interruptions); line.put("/"); line.put(native_interruption_limit);
+    line.put(" suppressed="); line.put(d.suppressed);
+    line.pending = true;
+  }
+  // Start a scope's counts. Busy skips and the current episode's clears before this point stay out of it.
+  static void reset_native_scope_locked() noexcept {
+    native_diag = {};
+    native_diag.busy_baseline = native_busy_skips.load(std::memory_order_relaxed);
+    const auto &current = native_episode.reference_interruptions();
+    native_diag.episode_base = current.clears;
+    native_diag.seen_clears = current.total;
+  }
+  // One final line for a scope that saw any native report, then fresh counts. Requires state_mutex.
+  static void finish_native_scope_locked(native_line_t &line) noexcept {
+    absorb_native_clears_locked();
+    if (native_diag.entered || native_busy_skips.load(std::memory_order_relaxed) != native_diag.busy_baseline) {
+      format_native_line_locked("scope_end", line);
+    }
+    reset_native_scope_locked();
+  }
+  // Diagnostic only: what a replaced episode held, including the reference window the replacement discards.
+  // Requires state_mutex; called immediately before the episode is replaced.
+  static void note_native_retire_locked() noexcept {
+    auto &d = native_diag;
+    live_tuning_native::saturating_increment(d.retired);
+    if (native_episode.reference_window()) live_tuning_native::saturating_increment(d.retired_window);
+    native_episode.note_writer_or_scope_clear();
+    absorb_native_clears_locked();
+    const auto &current = native_episode.reference_interruptions().clears;
+    for (std::size_t i = 0; i < current.size(); ++i) {
+      d.retired_clears[i] = saturating_sum(d.retired_clears[i], current[i] - std::min(current[i], d.episode_base[i]));
+    }
+    d.episode_base = {};
+    d.seen_clears = 0;
+  }
+
   static void record_native_reset_locked(live_tuning_native::diagnostic_t discarded) noexcept;
   static void retire_native_for_writer_locked() {
     const bool spent = native_episode.spent();
     const auto discarded = native_episode.diagnostic();
+    note_native_retire_locked();
     native_episode = {};
     native_owner.reset();
     native_launch_nonce.clear();
@@ -1257,40 +1446,119 @@ namespace adaptive_bitrate {
     return out;
   }
 
+  /// What one entered report did, recorded when update_native_signal returns while still under state_mutex.
+  /// Every field is assigned from a check the entry point already made; nothing is evaluated again for it.
+  struct native_entry_record_t {
+    native_line_t &line;
+    std::uint32_t sequence = 0;
+    native_entry_e outcome = native_entry_e::none;
+    bool retired_owner = false, requested = false, policy_refused = false;
+    native_entry_record_t(native_line_t &line, std::uint32_t sequence) noexcept: line {line}, sequence {sequence} {}
+    native_entry_record_t(const native_entry_record_t &) = delete;
+    native_entry_record_t &operator=(const native_entry_record_t &) = delete;
+    ~native_entry_record_t();
+  };
+  native_entry_record_t::~native_entry_record_t() {
+    using live_tuning_native::saturating_increment;
+    auto &d = native_diag;
+    d.generation = scope_generation;
+    d.sequence = sequence;
+    saturating_increment(d.entered);
+    saturating_increment(d.outcomes[static_cast<std::size_t>(outcome)]);
+    if (outcome != native_entry_e::consumed && outcome != native_entry_e::pending_wait) {
+      saturating_increment(d.refused);
+      if (d.first_refusal == native_entry_e::none) d.first_refusal = outcome;
+      d.last_refusal = outcome;
+    }
+    if (retired_owner) saturating_increment(d.retired_owner);
+    if (requested) saturating_increment(d.requests);
+    if (policy_refused) saturating_increment(d.policy_refused);
+    // A reference clear made by this report or by a retire it caused, if any.
+    absorb_native_clears_locked();
+    // Running lines only while the opt-in is on; every scope still gets one final line (finish_native_scope_locked).
+    if (!current_config.native_downward) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (d.interruption_pending) {
+      d.interruption_pending = false;
+      if (d.interruptions < native_interruption_limit) {
+        saturating_increment(d.interruptions);
+        format_native_line_locked("interruption", line);
+      } else {
+        saturating_increment(d.suppressed);
+      }
+    } else if (!d.summaries || now - d.last_summary >= native_summary_interval) {
+      d.last_summary = now;
+      if (d.summaries < native_summary_limit) {
+        saturating_increment(d.summaries);
+        format_native_line_locked("summary", line);
+      } else {
+        saturating_increment(d.suppressed);
+      }
+    }
+  }
+
   bool update_native_signal(const std::shared_ptr<stream_native_reception::scope_t> &owner,
                             std::string_view app_session, std::string_view launch_nonce,
                             const native_video_signal::signal_t &signal, bool published,
                             const std::function<bool()> &current_caller) {
+    native_line_t line;  // Declared first, so it is logged after the lock below is released.
     std::unique_lock lock {state_mutex, std::try_to_lock};
-    if (!lock.owns_lock() || !current_config.native_downward) return false;
+    if (!lock.owns_lock()) {
+      // Nonblocking as before. Count the skipped report without a lock, allocation, log or retry.
+      native_busy_skips.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    native_entry_record_t entry {line, signal.sequence};  // Recorded on return, still under the lock.
+    if (!current_config.native_downward) {
+      entry.outcome = native_entry_e::config_disabled;
+      return false;
+    }
     // Reconstruct permission from current state. The earlier context only supplies compare values.
     const auto &c = signal.context;
     const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
     const int floor = std::max(current_config.min_bitrate_kbps, runtime_bitrate_floor_kbps);
     const bool pending_native = native_episode.phase() == live_tuning_native::phase_e::awaiting_application;
-    const bool permission = owner && signal.generation && signal.generation == scope_generation &&
-      owner->generation() == scope_generation && scope_exclusive && !app_session.empty() &&
-      app_session == scope_app_session_id && stream_frame_feedback::valid_nonce(launch_nonce) &&
-      current_config.enabled && enabled.load(std::memory_order_relaxed) && !paused_for_stream &&
-      runtime_update_supported.load(std::memory_order_relaxed) && runtime_bitrate_in_place &&
-      !doctor_override_active.load(std::memory_order_relaxed) &&
-      !explicit_live_override_active.load(std::memory_order_relaxed) &&
-      !pending_live_update_active.load(std::memory_order_relaxed) &&
-      c.observed && c.operator_revision == operator_revision && c.action_revision == action_authority_revision &&
-      c.applied_revision == encoder_applied_revision && c.requested_kbps == target && c.floor_kbps == floor &&
-      c.applied_kbps == encoder_applied_bitrate_kbps && encoder_applied_bitrate_kbps > 0 &&
-      encoder_applied_revision && floor > 0 && target >= floor &&
-      target <= base_bitrate_kbps.load(std::memory_order_relaxed) &&
-      signal.caller.running && !signal.caller.watch_or_input_only && signal.caller.negotiated &&
-      signal.caller.control_authenticated && current_caller && current_caller() &&
-      (!fec_actuator.configured() || (!fec_actuator.pending() &&
-        fec_actuator.percentage() == fec_actuator.configured_percentage())) &&
-      (pending_native || (target == encoder_applied_bitrate_kbps &&
-        (signal.inspection_ready || (native_episode.spent() && c.reason == native_video_signal::context_reason_e::at_floor))));
-    if (!permission) {
+    // The same conjuncts, in the same order and with the same short-circuit, as one && chain. Each early return
+    // only names the first group that failed, for the diagnostic; no predicate or callback runs again for it.
+    const auto refused = [&] {
+      if (!(owner && signal.generation && signal.generation == scope_generation &&
+            owner->generation() == scope_generation && scope_exclusive && !app_session.empty() &&
+            app_session == scope_app_session_id && stream_frame_feedback::valid_nonce(launch_nonce)))
+        return native_entry_e::scope_owner;
+      if (!(current_config.enabled && enabled.load(std::memory_order_relaxed) && !paused_for_stream &&
+            runtime_update_supported.load(std::memory_order_relaxed) && runtime_bitrate_in_place))
+        return native_entry_e::enablement;
+      if (!(!doctor_override_active.load(std::memory_order_relaxed) &&
+            !explicit_live_override_active.load(std::memory_order_relaxed) &&
+            !pending_live_update_active.load(std::memory_order_relaxed)))
+        return native_entry_e::writer;
+      if (!c.observed) return native_entry_e::context_unobserved;
+      if (c.operator_revision != operator_revision) return native_entry_e::operator_revision;
+      if (c.action_revision != action_authority_revision) return native_entry_e::action_revision;
+      if (c.applied_revision != encoder_applied_revision) return native_entry_e::applied_revision;
+      if (!(c.requested_kbps == target && c.floor_kbps == floor &&
+            c.applied_kbps == encoder_applied_bitrate_kbps && encoder_applied_bitrate_kbps > 0 &&
+            encoder_applied_revision && floor > 0 && target >= floor &&
+            target <= base_bitrate_kbps.load(std::memory_order_relaxed)))
+        return native_entry_e::rate;
+      if (!(signal.caller.running && !signal.caller.watch_or_input_only && signal.caller.negotiated &&
+            signal.caller.control_authenticated))
+        return native_entry_e::caller_flags;
+      if (!(current_caller && current_caller())) return native_entry_e::current_caller;
+      if (!(!fec_actuator.configured() || (!fec_actuator.pending() &&
+            fec_actuator.percentage() == fec_actuator.configured_percentage())))
+        return native_entry_e::fec;
+      if (!(pending_native || (target == encoder_applied_bitrate_kbps &&
+            (signal.inspection_ready || (native_episode.spent() && c.reason == native_video_signal::context_reason_e::at_floor)))))
+        return native_entry_e::readiness;
+      return native_entry_e::none;
+    }();
+    if (refused != native_entry_e::none) {
+      entry.outcome = refused;
       native_unavailable_locked(live_tuning_native::transition_reason_e::permission); return false;
     }
     if (native_owner.lock() != owner || native_launch_nonce != launch_nonce) {
+      entry.retired_owner = true;
       retire_native_for_writer_locked();
       native_owner = owner; native_launch_nonce = launch_nonce;
     }
@@ -1298,8 +1566,10 @@ namespace adaptive_bitrate {
     bool consumed = false;
     // Diagnostic only: which existing refusal left the report unconsumed.
     auto refusal = live_tuning_native::transition_reason_e::not_consumed_receipt;
+    entry.outcome = receipt_owner ? native_entry_e::receipt_not_current : native_entry_e::no_receipt;
     if (receipt_owner) receipt_owner->with_current([&](const auto &receipt) {
       refusal = live_tuning_native::transition_reason_e::not_consumed_current;
+      entry.outcome = native_entry_e::signal_not_current;
       const stream_frame_feedback::encoder_setting_t actual {
         receipt.scope.encoder_lifetime, receipt.scope.stream_generation, receipt.application_sequence,
         receipt.authority_revision, receipt.configured_encoder_kbps, receipt.origin};
@@ -1308,8 +1578,12 @@ namespace adaptive_bitrate {
           (!published || !signal.measurement_available || !signal.setting || actual != *signal.setting)) {
         // A normal mixed C/D report earns nothing, but cannot shorten/extend the fixed proof window.
         owner->with_current_signal(signal, [&] {
-          if (!current_caller()) return;
+          if (!current_caller()) {
+            entry.outcome = native_entry_e::caller_changed;
+            return;
+          }
           consumed = true;
+          entry.outcome = native_entry_e::pending_wait;
           const auto before = native_episode.phase();
           native_episode.wait_for_application(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -1318,18 +1592,29 @@ namespace adaptive_bitrate {
         return;
       }
       if (!published || !signal.measurement_available) {
-        refusal = live_tuning_native::transition_reason_e::not_consumed_measurement; return;
+        refusal = live_tuning_native::transition_reason_e::not_consumed_measurement;
+        entry.outcome = native_entry_e::measurement;
+        return;
       }
       if (!signal.setting || actual != *signal.setting ||
           actual.configured_encoder_kbps != encoder_applied_bitrate_kbps) {
-        refusal = live_tuning_native::transition_reason_e::not_consumed_setting; return;
+        refusal = live_tuning_native::transition_reason_e::not_consumed_setting;
+        entry.outcome = native_entry_e::setting;
+        return;
       }
       owner->with_current_signal(signal, [&] {
         // Recheck the live session at the last boundary; no SDK call is made under these locks.
-        if (!current_caller()) return;
+        if (!current_caller()) {
+          entry.outcome = native_entry_e::caller_changed;
+          return;
+        }
         auto &policy = policy_locked(policy_now_ms());
-        if (!native_episode.spent() && policy.state() != live_tuning_policy::state_e::normal) return;
+        if (!native_episode.spent() && policy.state() != live_tuning_policy::state_e::normal) {
+          entry.outcome = native_entry_e::policy_not_normal;
+          return;
+        }
         consumed = true;
+        entry.outcome = native_entry_e::consumed;
         const auto before = native_episode.phase();
         const auto buckets = native_episode.diagnostic().buckets;
         native_episode.check_deadline(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1337,7 +1622,9 @@ namespace adaptive_bitrate {
         const auto next = native_episode.observe(signal);
         if (native_episode.diagnostic().buckets != buckets) record_native_bucket_locked();
         if (next) {
+          entry.requested = true;
           if (!policy.native_downward(policy_now_ms(), target, *next)) {
+            entry.policy_refused = true;
             native_unavailable_locked(live_tuning_native::transition_reason_e::policy_refused); return;
           }
           policy_target_kbps = *next; // Exact D in both domains; no hidden encoder-only clamp.
@@ -1430,7 +1717,10 @@ namespace adaptive_bitrate {
 
   void set_session_scope(std::uint64_t generation, const std::string &app_session_id,
                          bool exclusive) {
+    native_line_t line;  // Declared first, so it is logged after the lock below is released.
     std::lock_guard<std::mutex> lock(state_mutex);
+    const bool same_history_scope = history.scoped && generation != 0 && history.session_generation == generation &&
+      history.app_session_id == app_session_id;
     if (generation != scope_generation || app_session_id != scope_app_session_id || !exclusive) {
       retire_fec_for_writer_locked("session_scope_changed");
       fec_actuator.reset();
@@ -1438,6 +1728,8 @@ namespace adaptive_bitrate {
       fec_partial_deficit_at.reset();
       fec_media_at.reset();
     }
+    // The ending scope's single final diagnostic line, if it saw a report, including the retire just above.
+    if (!same_history_scope) finish_native_scope_locked(line);
     scope_generation = generation;
     scope_app_session_id = app_session_id;
     scope_exclusive = exclusive;
@@ -1825,8 +2117,10 @@ namespace adaptive_bitrate {
   }
 
   void reset() {
+    native_line_t line;  // Declared first, so it is logged after the lock below is released.
     std::lock_guard<std::mutex> lock(state_mutex);
     retire_native_for_writer_locked();
+    finish_native_scope_locked(line);  // The ending scope's single final diagnostic line, if it saw a report.
     native_current_setting.reset();
     fec_actuator.reset();
     runtime_bitrate_in_place = false;

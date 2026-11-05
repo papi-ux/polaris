@@ -68,6 +68,43 @@ namespace live_tuning_native {
     bucket_fact_t bucket;      // The latest response bucket fact.
     std::uint32_t buckets = 0; // Response bucket facts so far, so a reader can tell a new one apart.
   };
+  /// Why a reference/standing window that already held observations was discarded before any cut.
+  /// Diagnostic only: never serialized and never read by a decision. Reference-phase clears change no phase,
+  /// so they leave no history row; this record is the only place they are counted.
+  enum class reference_clear_e {
+    none, gap, order, median_unavailable, bucket_coverage, bucket_second_skipped, bucket_overflow,
+    source_changed, action_revision_changed, floor_changed, reference_expired,
+    permission, not_consumed_receipt, not_consumed_measurement, not_consumed_setting, not_consumed_current,
+    policy_refused, writer_or_scope, other,
+  };
+  inline constexpr std::size_t reference_clear_count = static_cast<std::size_t>(reference_clear_e::other) + 1;
+  inline const char *name(reference_clear_e clear) noexcept {
+    switch (clear) {
+#define NATIVE_REFERENCE_CLEAR(x) case reference_clear_e::x: return #x
+      NATIVE_REFERENCE_CLEAR(none); NATIVE_REFERENCE_CLEAR(gap); NATIVE_REFERENCE_CLEAR(order);
+      NATIVE_REFERENCE_CLEAR(median_unavailable); NATIVE_REFERENCE_CLEAR(bucket_coverage);
+      NATIVE_REFERENCE_CLEAR(bucket_second_skipped); NATIVE_REFERENCE_CLEAR(bucket_overflow);
+      NATIVE_REFERENCE_CLEAR(source_changed); NATIVE_REFERENCE_CLEAR(action_revision_changed);
+      NATIVE_REFERENCE_CLEAR(floor_changed); NATIVE_REFERENCE_CLEAR(reference_expired);
+      NATIVE_REFERENCE_CLEAR(permission); NATIVE_REFERENCE_CLEAR(not_consumed_receipt);
+      NATIVE_REFERENCE_CLEAR(not_consumed_measurement); NATIVE_REFERENCE_CLEAR(not_consumed_setting);
+      NATIVE_REFERENCE_CLEAR(not_consumed_current); NATIVE_REFERENCE_CLEAR(policy_refused);
+      NATIVE_REFERENCE_CLEAR(writer_or_scope); NATIVE_REFERENCE_CLEAR(other);
+#undef NATIVE_REFERENCE_CLEAR
+    }
+    return "other";
+  }
+  inline void saturating_increment(std::uint32_t &value) noexcept {
+    if (value != UINT32_MAX) ++value;
+  }
+  /// Reference-phase interruptions of one episode. Fixed storage and saturating counts; diagnostic only.
+  struct reference_interruptions_t {
+    std::array<std::uint32_t, reference_clear_count> clears {}; // Windows discarded while holding observations.
+    std::uint32_t total = 0;
+    reference_clear_e first = reference_clear_e::none, last = reference_clear_e::none;
+    // What the latest clear discarded: closed buckets, reference buckets (<= 4) and consecutive standing buckets.
+    int last_lost_closed = 0, last_lost_reference = 0, last_lost_standing = 0, max_lost_standing = 0;
+  };
   struct evidence_t {
     setting_t source;
     std::optional<setting_t> applied;
@@ -82,12 +119,19 @@ namespace live_tuning_native {
     const evidence_t &evidence() const noexcept { return evidence_; }
     const diagnostic_t &diagnostic() const noexcept { return diagnostic_; }
     bool spent() const noexcept { return phase_ != phase_e::reference; }
+    /// Reference-phase clears so far. Diagnostic only; no decision reads it.
+    const reference_interruptions_t &reference_interruptions() const noexcept { return interruptions_; }
+    /// True while a reference/standing window holds observations that a clear would discard.
+    bool reference_window() const noexcept { return phase_ == phase_e::reference && source_.has_value(); }
+    /// Diagnostic only, for an owner about to replace this episode for a writer or scope: name the window that
+    /// the replacement discards. It touches only the interruption record; every decision field is unchanged.
+    void note_writer_or_scope_clear() noexcept { note_reference_clear(reference_clear_e::writer_or_scope); }
 
     // Missing/unavailable telemetry only destroys an observation window. It cannot undo a cut.
     void unavailable(transition_reason_e reason = transition_reason_e::unavailable) noexcept {
       if (phase_ == phase_e::awaiting_application || phase_ == phase_e::response)
         enter(phase_e::unassessed, reason);
-      else if (phase_ == phase_e::reference) clear_reference();
+      else if (phase_ == phase_e::reference) { note_reference_clear(clear_of(reason)); clear_reference(); }
     }
     void accepted_application(std::uint64_t revision) noexcept {
       if (phase_ == phase_e::awaiting_application) evidence_.accepted_revision = revision;
@@ -163,8 +207,14 @@ namespace live_tuning_native {
           return std::nullopt;
         }
       } else {
-        if (!source_ || *source_ != *signal.setting || action_revision_ != signal.context.action_revision ||
-            floor_ != signal.context.floor_kbps || now - reference_started_ns_ > 60 * second_ns) {
+        // The same five window-restart conditions, in order; naming the first that holds is diagnostic only.
+        const auto restart = !source_ ? reference_clear_e::none :
+          *source_ != *signal.setting ? reference_clear_e::source_changed :
+          action_revision_ != signal.context.action_revision ? reference_clear_e::action_revision_changed :
+          floor_ != signal.context.floor_kbps ? reference_clear_e::floor_changed :
+          now - reference_started_ns_ > 60 * second_ns ? reference_clear_e::reference_expired : reference_clear_e::none;
+        if (!source_ || restart != reference_clear_e::none) {
+          note_reference_clear(restart);
           clear_reference(); source_ = signal.setting; action_revision_ = signal.context.action_revision;
           floor_ = signal.context.floor_kbps; reference_started_ns_ = now;
         }
@@ -232,6 +282,36 @@ namespace live_tuning_native {
       return std::pair {lower[count / 2], upper[count / 2]};
     }
     void enter(phase_e phase, transition_reason_e reason) noexcept { phase_ = phase; diagnostic_.reason = reason; }
+    static reference_clear_e clear_of(transition_reason_e reason) noexcept {
+      switch (reason) {
+        case transition_reason_e::gap: return reference_clear_e::gap;
+        case transition_reason_e::order: return reference_clear_e::order;
+        case transition_reason_e::median_unavailable: return reference_clear_e::median_unavailable;
+        case transition_reason_e::bucket_coverage: return reference_clear_e::bucket_coverage;
+        case transition_reason_e::bucket_second_skipped: return reference_clear_e::bucket_second_skipped;
+        case transition_reason_e::bucket_overflow: return reference_clear_e::bucket_overflow;
+        case transition_reason_e::permission: return reference_clear_e::permission;
+        case transition_reason_e::not_consumed_receipt: return reference_clear_e::not_consumed_receipt;
+        case transition_reason_e::not_consumed_measurement: return reference_clear_e::not_consumed_measurement;
+        case transition_reason_e::not_consumed_setting: return reference_clear_e::not_consumed_setting;
+        case transition_reason_e::not_consumed_current: return reference_clear_e::not_consumed_current;
+        case transition_reason_e::policy_refused: return reference_clear_e::policy_refused;
+        default: return reference_clear_e::other;
+      }
+    }
+    // Diagnostic only: count a reference/standing window discarded while it held observations, before the clear.
+    void note_reference_clear(reference_clear_e why) noexcept {
+      if (phase_ != phase_e::reference || !source_ || why == reference_clear_e::none) return;
+      auto &r = interruptions_;
+      saturating_increment(r.clears[static_cast<std::size_t>(why)]);
+      saturating_increment(r.total);
+      if (r.first == reference_clear_e::none) r.first = why;
+      r.last = why;
+      r.last_lost_closed = static_cast<int>(std::min<std::size_t>(prior_count_, 1'000'000));
+      r.last_lost_reference = reference_buckets_;
+      r.last_lost_standing = standing_buckets_;
+      r.max_lost_standing = std::max(r.max_lost_standing, standing_buckets_);
+    }
     void note_bucket(bucket_disposition_e disposition, std::int64_t lower, std::int64_t upper) noexcept {
       diagnostic_.bucket = {disposition, bucket_count_, bucket_count_ ? bucket_last_ns_ - bucket_first_ns_ : 0,
                             lower, upper, evidence_.trigger_lower_ns, response_buckets_};
@@ -281,6 +361,7 @@ namespace live_tuning_native {
     phase_e phase_ = phase_e::reference;
     evidence_t evidence_;
     diagnostic_t diagnostic_;
+    reference_interruptions_t interruptions_;
     bool response_initial_bucket_ = false;
     std::optional<setting_t> source_;
     std::uint64_t action_revision_ = 0;

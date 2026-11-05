@@ -41,6 +41,49 @@ response bucket adds a `native_diagnostic_bucket` entry naming its disposition. 
 history entries in the existing open kind/cause fields, not native actions or response credit, and add
 no serialized field.
 
+### Reference-phase interruption diagnostic (host log only)
+
+Before a cut, the episode's reference and standing window can be discarded without any phase change,
+so without any history entry. That happens on a gap, disorder, unavailable data, a short, skipped or
+overflowing bucket, a changed tuple, action revision or floor, the 60-second reference age, a refused
+or unconsumed report, or a writer or scope that replaces the episode. The host counts these clears and
+what each report did at the entry point. It writes bounded lines to the existing host log at info
+level. It adds no history entry, trace row, wire or API field, or schema:
+
+```
+Live Tuning native diagnostic <summary|interruption|scope_end>: generation=<n> sequence=<n>
+  native_downward=<on|off> entered=<n> busy_skips=<n> consumed=<n> pending_waits=<n> requests=<n>
+  policy_refused=<n> refused=<n> first_refusal=<name> last_refusal=<name> refusals=[<name>:<n>,...]
+  retired=<n> retired_owner=<n> retired_window=<n> reference_clears=<n> first_clear=<name>
+  last_clear=<name> clear_counts=[<name>:<n>,...] last_lost_closed=<n> last_lost_reference=<n>
+  last_lost_standing=<n> max_lost_standing=<n> summaries=<n>/64 interruptions=<n>/16 suppressed=<n>
+```
+
+(One line in the log; wrapped here.)
+
+- **Refusals** are named in the entry point's own evaluation order:
+  - `config_disabled`;
+  - the permission groups `scope_owner`, `enablement`, `writer`, `context_unobserved`, `operator_revision`, `action_revision`, `applied_revision`, `rate`, `caller_flags`, `current_caller`, `fec` and `readiness`;
+  - the receipt and consumption stages `no_receipt`, `receipt_not_current`, `signal_not_current`, `measurement`, `setting`, `caller_changed` and `policy_not_normal`.
+
+  Each name comes from the check that already decided; no predicate or caller callback runs again for it. `consumed` and `pending_wait` are not refusals.
+- **Clears** are named `gap`, `order`, `median_unavailable`, `bucket_coverage`, `bucket_second_skipped`, `bucket_overflow`, `source_changed`, `action_revision_changed`, `floor_changed`, `reference_expired`, `permission`, `not_consumed_receipt`, `not_consumed_measurement`, `not_consumed_setting`, `not_consumed_current`, `policy_refused` or `writer_or_scope`.
+  - A clear is counted only when the window held observations.
+  - `last_lost_*` gives how many closed, reference and consecutive standing buckets the latest clear discarded.
+  - A window usually starts inside a second, so a short first bucket is a counted `bucket_coverage` clear with `last_lost_closed=0`.
+- **A busy skip is not a clear.** A report that finds the state lock busy never enters. It returns as before and only increments a lock-free, process-wide counter. Its line reports the difference since the scope began as `busy_skips`.
+  - Reports that never reach the entry point are outside these counts.
+- **Bounds.** Each scope writes:
+  - at most 64 `summary` lines: one at its first entered report, then at most one every 10 s;
+  - at most 16 `interruption` lines, one per clear other than the routine `reference_expired`;
+  - one `scope_end` line when the scope ends or resets, if it entered or skipped any report.
+
+  Anything over a limit only increments `suppressed`. Running lines appear only while the opt-in is on. A disabled scope still ends with one `scope_end` line naming `config_disabled`, which shows whether reports arrived. Lines stay under 1536 bytes, and counts saturate at 2^32−1.
+- **Privacy.** Lines carry only static names and numbers. `generation` and `sequence` are the existing opaque scope generation and report sequence. No app or session string, nonce, token, address or free text appears.
+- **No authority.** No decision, permission, deadline, threshold, bucket, action, retry or learning reads these counts. Lines are formatted under the state lock and written after it is released.
+
+To collect them for a case window: `journalctl --user -u polaris --since "<case start>" --no-pager | grep 'Live Tuning native diagnostic'`. For a desktop-launched instance, search that unit or the Polaris log file instead.
+
 ## Passive native signal and controller inspection (private trace 2.5)
 
 Each native control callback now projects the newly admitted value copy into a stateless typed

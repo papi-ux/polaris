@@ -1254,6 +1254,144 @@ TEST(NativeDownwardEpisode, ResponseStartingExactlyOnASecondBoundaryKeepsTheFour
   EXPECT_EQ(late.phase(), ltn::phase_e::responded);
 }
 
+namespace {
+  // The standing fixture (3 ms for seconds 0-3, then 30 ms) fed to end_ms, with mutate() applied to every report
+  // from 10000 ms and the reports in (skip_from, skip_to] left out. Returns every request the episode made.
+  template<class Mutate>
+  std::vector<int> native_interrupted_feed(live_tuning_native::episode_t &episode, int end_ms, Mutate mutate,
+                                           int skip_from = -1, int skip_to = -1) {
+    std::vector<int> requests;
+    for (int ms = 0; ms < end_ms; ms += 100) {
+      if (ms > skip_from && ms <= skip_to) continue;
+      auto s = native_trial_signal(ms, ms < 4000 ? 3000 : 30000, ms < 4000 ? 3100 : 30100);
+      if (ms >= 10000) mutate(ms, s);
+      if (const auto next = episode.observe(s)) requests.push_back(*next);
+    }
+    return requests;
+  }
+}
+
+TEST(NativeDownwardEpisode, SilentReferenceClearsAreNamedWithWhatTheyDiscardedAndDecideNothing) {
+  namespace ltn = live_tuning_native;
+  using clear = ltn::reference_clear_e;
+  struct case_t { clear why; int closed, standing; };
+  // Every clear is decided by the 10000 ms report before it closes second 9: buckets 0-8 closed, 4-8 standing.
+  const auto run = [](int variant, ltn::episode_t &episode) {
+    return native_interrupted_feed(episode, 12000, [variant](int ms, native_video_signal::signal_t &s) {
+      if (variant == 0) ++s.setting->application_sequence;
+      if (variant == 1) ++s.context.action_revision;
+      if (variant == 2) ++s.context.floor_kbps;
+      if (variant == 3 && ms == 10000) s.samples[0].parity = true;
+      if (variant == 4 && ms == 10000) s.samples[0].elapsed_lower_ns = -1;
+    }, variant == 5 ? 9400 : -1, variant == 5 ? 9900 : -1);
+  };
+  const std::array<case_t, 6> cases {{{clear::source_changed, 9, 5}, {clear::action_revision_changed, 9, 5},
+    {clear::floor_changed, 9, 5}, {clear::median_unavailable, 9, 5}, {clear::median_unavailable, 9, 5},
+    {clear::gap, 9, 5}}};
+  for (int variant = 0; variant < static_cast<int>(cases.size()); ++variant) {
+    SCOPED_TRACE(variant);
+    ltn::episode_t episode;
+    EXPECT_TRUE(run(variant, episode).empty()); // The decisions these interruptions already caused: no request.
+    EXPECT_EQ(episode.phase(), ltn::phase_e::reference);
+    EXPECT_EQ(episode.diagnostic().reason, ltn::transition_reason_e::none); // Still no phase transition.
+    const auto &r = episode.reference_interruptions();
+    EXPECT_EQ(r.total, 1u);
+    EXPECT_EQ(r.first, cases[variant].why); EXPECT_EQ(r.last, cases[variant].why);
+    EXPECT_EQ(r.clears[static_cast<std::size_t>(cases[variant].why)], 1u);
+    EXPECT_EQ(r.last_lost_closed, cases[variant].closed);
+    EXPECT_EQ(r.last_lost_reference, 4);
+    EXPECT_EQ(r.last_lost_standing, cases[variant].standing);
+    EXPECT_EQ(r.max_lost_standing, cases[variant].standing);
+    EXPECT_TRUE(episode.reference_window()); // The next report started a fresh window.
+  }
+  // A gap ending inside a second restarts the window there, so its short first bucket is honestly a second clear.
+  ltn::episode_t midsecond;
+  EXPECT_TRUE(native_interrupted_feed(midsecond, 12000, [](int, native_video_signal::signal_t &) {}, 10000, 10500)
+                .empty());
+  const auto &m = midsecond.reference_interruptions();
+  EXPECT_EQ(m.total, 2u); EXPECT_EQ(m.first, clear::gap); EXPECT_EQ(m.last, clear::bucket_coverage);
+  EXPECT_EQ(m.clears[static_cast<std::size_t>(clear::gap)], 1u);
+  EXPECT_EQ(m.clears[static_cast<std::size_t>(clear::bucket_coverage)], 1u);
+  EXPECT_EQ(m.last_lost_closed, 0); EXPECT_EQ(m.last_lost_standing, 0); EXPECT_EQ(m.max_lost_standing, 6);
+  // A caller's refusal while standing is named with the caller's reason.
+  ltn::episode_t refused;
+  EXPECT_TRUE(native_interrupted_feed(refused, 10100, [](int, native_video_signal::signal_t &) {}).empty());
+  refused.unavailable(ltn::transition_reason_e::not_consumed_current);
+  EXPECT_EQ(refused.reference_interruptions().last, clear::not_consumed_current);
+  EXPECT_EQ(refused.reference_interruptions().last_lost_standing, 6);
+  EXPECT_FALSE(refused.reference_window());
+  // An underpopulated second: three reports 450 ms apart, then the next second closes it short.
+  ltn::episode_t sparse;
+  for (const int ms : {0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600,
+                       1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900, 3000, 3100,
+                       3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200, 4300, 4400, 4500, 4600,
+                       4700, 4800, 4900, 5000, 5450, 5900, 6000}) {
+    EXPECT_FALSE(sparse.observe(native_trial_signal(ms, ms < 4000 ? 3000 : 30000, ms < 4000 ? 3100 : 30100)));
+  }
+  EXPECT_EQ(sparse.reference_interruptions().last, clear::bucket_coverage);
+  EXPECT_EQ(sparse.reference_interruptions().last_lost_closed, 5);
+  EXPECT_EQ(sparse.reference_interruptions().last_lost_standing, 1);
+  // The 60 s reference age is a routine restart, named separately.
+  ltn::episode_t aged;
+  EXPECT_TRUE(native_trial_feed(aged, 61, [](int) { return 3000; }).empty());
+  EXPECT_EQ(aged.reference_interruptions().total, 1u);
+  EXPECT_EQ(aged.reference_interruptions().last, clear::reference_expired);
+  EXPECT_EQ(aged.reference_interruptions().last_lost_closed, 60);
+  EXPECT_EQ(aged.reference_interruptions().last_lost_standing, 0);
+}
+
+TEST(NativeDownwardEpisode, UninterruptedTrialAndPostCutRefusalsCountNoReferenceClear) {
+  namespace ltn = live_tuning_native;
+  ltn::episode_t empty;
+  empty.unavailable(ltn::transition_reason_e::permission); // No window yet: nothing was discarded.
+  EXPECT_EQ(empty.reference_interruptions().total, 0u);
+  EXPECT_FALSE(empty.reference_window());
+  ltn::episode_t clean;
+  EXPECT_EQ(native_trial_feed(clean, 12, [](int s) { return s < 4 ? 3000 : 30000; }), std::vector<int> {17000});
+  EXPECT_EQ(clean.reference_interruptions().total, 0u);
+  EXPECT_FALSE(clean.reference_window()); // Spent: the reference window is over.
+  clean.unavailable(ltn::transition_reason_e::permission); // A post-cut refusal is a transition, not a clear.
+  EXPECT_EQ(clean.phase(), ltn::phase_e::unassessed);
+  EXPECT_EQ(clean.reference_interruptions().total, 0u);
+  clean.note_writer_or_scope_clear(); // A writer replacing a spent episode discards no reference window.
+  EXPECT_EQ(clean.reference_interruptions().total, 0u);
+}
+
+TEST(NativeDownwardEpisode, WriterOrScopeReplacementNamesTheWindowItDiscardsAndChangesNoDecisionField) {
+  namespace ltn = live_tuning_native;
+  ltn::episode_t standing, control;
+  const auto fixture = [](int, native_video_signal::signal_t &) {};
+  EXPECT_TRUE(native_interrupted_feed(standing, 10100, fixture).empty());
+  EXPECT_TRUE(native_interrupted_feed(control, 10100, fixture).empty());
+  standing.note_writer_or_scope_clear(); // The owner replaces the episode right after this.
+  const auto &r = standing.reference_interruptions();
+  EXPECT_EQ(r.total, 1u); EXPECT_EQ(r.last, ltn::reference_clear_e::writer_or_scope);
+  EXPECT_EQ(r.last_lost_closed, 10); EXPECT_EQ(r.last_lost_reference, 4); EXPECT_EQ(r.last_lost_standing, 6);
+  // Diagnostic only: the noted episode still decides exactly as an unnoted one would.
+  EXPECT_TRUE(standing.reference_window());
+  for (int ms = 10100; ms <= 12000; ms += 100) {
+    const auto s = native_trial_signal(ms, 30000, 30100);
+    EXPECT_EQ(standing.observe(s), control.observe(s)) << ms;
+  }
+  EXPECT_EQ(standing.phase(), control.phase()); EXPECT_EQ(standing.phase(), ltn::phase_e::awaiting_application);
+  EXPECT_EQ(standing.evidence().requested_kbps, 17000);
+  EXPECT_EQ(standing.evidence().trigger_lower_ns, control.evidence().trigger_lower_ns);
+}
+
+TEST(NativeDownwardEpisode, ReferenceClearNamesAreStaticAndCountsSaturate) {
+  namespace ltn = live_tuning_native;
+  std::set<std::string> names;
+  for (std::size_t i = 0; i < ltn::reference_clear_count; ++i) {
+    const std::string n = ltn::name(static_cast<ltn::reference_clear_e>(i));
+    EXPECT_TRUE(names.insert(n).second) << n;
+    EXPECT_EQ(n.find_first_not_of("abcdefghijklmnopqrstuvwxyz_"), std::string::npos) << n;
+  }
+  EXPECT_EQ(names.size(), 19u);
+  std::uint32_t count = UINT32_MAX - 1;
+  ltn::saturating_increment(count); EXPECT_EQ(count, UINT32_MAX);
+  ltn::saturating_increment(count); EXPECT_EQ(count, UINT32_MAX);
+}
+
 TEST_F(NativeReception, RecentDifferentFramesKeepBothActualReport35CollisionKeys) {
   // These genuine sender keys collided before the actual trace had sent 6333 datagrams.
   frame(297);frame(298);frame(299);

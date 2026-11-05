@@ -7,6 +7,7 @@
 #include "src/config.h"
 #include "src/live_tuning_fec.h"
 #include "src/video_bitrate.h"
+#include "../tests_log_capture.h"
 
 #include <gtest/gtest.h>
 
@@ -16,6 +17,8 @@
 #include <cmath>
 #include <initializer_list>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -2626,4 +2629,179 @@ TEST_F(NativeDownwardHandoff, BusyEncoderHandoffReturnsWithoutWaiting) {
   const auto ready = observing.wait_for(2s);
   release.set_value();
   EXPECT_EQ(ready, std::future_status::ready); EXPECT_FALSE(observing.get()); EXPECT_TRUE(applying.get());
+}
+
+namespace {
+  // The native diagnostic lines a capture holds, oldest first, optionally of one kind (summary, interruption,
+  // scope_end), each starting at its fixed prefix.
+  std::vector<std::string> native_lines(const test_log_capture_t &log, std::string_view kind = {}) {
+    static constexpr std::string_view mark = "Live Tuning native diagnostic ";
+    std::vector<std::string> out;
+    std::istringstream in {log.text()};
+    for (std::string line; std::getline(in, line);) {
+      const auto at = line.find(mark);
+      if (at == std::string::npos) continue;
+      const auto rest = std::string_view {line}.substr(at + mark.size());
+      if (!kind.empty() && (rest.substr(0, kind.size()) != kind || rest.substr(kind.size(), 1) != ":")) continue;
+      out.push_back(line.substr(at));
+    }
+    return out;
+  }
+  // The value of one " name=value" field of a diagnostic line.
+  std::string native_field(const std::string &line, std::string_view name) {
+    const auto key = " " + std::string {name} + "=";
+    const auto at = line.find(key);
+    if (at == std::string::npos) return "<missing>";
+    const auto from = at + key.size();
+    return line.substr(from, line.find(' ', from) - from);
+  }
+}
+
+TEST_F(NativeDownwardHandoff, SilentReferenceRefusalIsNamedInOneLogLineAndAddsNoHistoryRow) {
+  test_log_capture_t log;
+  EXPECT_TRUE(consume(fresh())); // The reference window now holds one observation.
+  const auto before = adaptive_bitrate::get_state_with_history().history;
+  auto stale = fresh(); adaptive_bitrate::note_network_evidence_arrival(false);
+  EXPECT_FALSE(consume(stale)); // Refused exactly as before; the window it discards was silent until now.
+  const auto after = adaptive_bitrate::get_state_with_history().history;
+  EXPECT_EQ(after.entries.size(), before.entries.size()); EXPECT_EQ(after.dropped, before.dropped);
+  const auto summary = native_lines(log, "summary");
+  ASSERT_EQ(summary.size(), 1u);
+  EXPECT_EQ(native_field(summary[0], "entered"), "1"); EXPECT_EQ(native_field(summary[0], "consumed"), "1");
+  EXPECT_EQ(native_field(summary[0], "reference_clears"), "0");
+  const auto lines = native_lines(log, "interruption");
+  ASSERT_EQ(lines.size(), 1u);
+  const auto &line = lines[0];
+  EXPECT_EQ(native_field(line, "generation"), "620");
+  EXPECT_EQ(native_field(line, "sequence"), std::to_string(stale.sequence));
+  EXPECT_EQ(native_field(line, "native_downward"), "on");
+  EXPECT_EQ(native_field(line, "entered"), "2"); EXPECT_EQ(native_field(line, "consumed"), "1");
+  EXPECT_EQ(native_field(line, "busy_skips"), "0");
+  EXPECT_EQ(native_field(line, "refused"), "1");
+  EXPECT_EQ(native_field(line, "first_refusal"), "operator_revision");
+  EXPECT_EQ(native_field(line, "refusals"), "[operator_revision:1]");
+  EXPECT_EQ(native_field(line, "reference_clears"), "1");
+  EXPECT_EQ(native_field(line, "first_clear"), "permission"); EXPECT_EQ(native_field(line, "last_clear"), "permission");
+  EXPECT_EQ(native_field(line, "clear_counts"), "[permission:1]");
+  EXPECT_EQ(native_field(line, "last_lost_closed"), "0"); EXPECT_EQ(native_field(line, "interruptions"), "1/16");
+}
+
+TEST_F(NativeDownwardHandoff, BusySkipIsCountedWithoutEnteringAndApartFromAnyReferenceClear) {
+  test_log_capture_t log;
+  const auto signal = fresh(); EXPECT_TRUE(consume(signal));
+  const auto request = adaptive_bitrate::get_live_bitrate_request(); ASSERT_TRUE(request);
+  std::promise<void> entered, release; auto go = release.get_future(); auto started = entered.get_future();
+  auto applying = std::async(std::launch::async, [&] {
+    return adaptive_bitrate::apply_live_bitrate_request(*request, [&] {
+      entered.set_value(); go.wait(); return true;
+    });
+  });
+  const auto entered_status = started.wait_for(2s);
+  if (entered_status != std::future_status::ready) { release.set_value(); applying.wait(); }
+  ASSERT_EQ(entered_status, std::future_status::ready);
+  const auto lines_while_busy = native_lines(log).size();
+  auto observing = std::async(std::launch::async, [&] { return consume(signal); });
+  const auto ready = observing.wait_for(2s);
+  const auto lines_after_skip = native_lines(log).size();
+  release.set_value();
+  EXPECT_EQ(ready, std::future_status::ready); EXPECT_FALSE(observing.get()); EXPECT_TRUE(applying.get());
+  EXPECT_EQ(lines_after_skip, lines_while_busy); // The skipped path logs nothing.
+  adaptive_bitrate::reset(); // Ends the scope: its one final line, after the reset discarded the live window.
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "busy_skips"), "1");
+  EXPECT_EQ(native_field(end[0], "entered"), "1"); EXPECT_EQ(native_field(end[0], "refused"), "0");
+  EXPECT_EQ(native_field(end[0], "retired_window"), "1");
+  // The only clear is the reset's own retire of the one-observation window; the skip cleared nothing.
+  EXPECT_EQ(native_field(end[0], "clear_counts"), "[writer_or_scope:1]");
+  EXPECT_TRUE(native_lines(log, "interruption").empty());
+}
+
+TEST_F(NativeDownwardHandoff, DisabledOptInStillRefusesAndLeavesOnlyOneFinalLine) {
+  config::video.adaptive_bitrate.native_downward = false; adaptive_bitrate::load_config();
+  test_log_capture_t log;
+  for (int i = 0; i < 3; ++i) EXPECT_FALSE(consume(fresh()));
+  EXPECT_TRUE(native_lines(log).empty()); // No running lines while the opt-in is off.
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+  adaptive_bitrate::reset();
+  const auto lines = native_lines(log);
+  ASSERT_EQ(lines.size(), 1u);
+  ASSERT_EQ(native_lines(log, "scope_end").size(), 1u);
+  EXPECT_EQ(native_field(lines[0], "native_downward"), "off");
+  EXPECT_EQ(native_field(lines[0], "entered"), "3"); EXPECT_EQ(native_field(lines[0], "consumed"), "0");
+  EXPECT_EQ(native_field(lines[0], "refusals"), "[config_disabled:3]");
+  EXPECT_EQ(native_field(lines[0], "reference_clears"), "0");
+}
+
+TEST_F(NativeDownwardHandoff, DiagnosticsKeepEveryCallerCallbackAndRefusal) {
+  test_log_capture_t log;
+  int calls = 0;
+  const auto counted = [&](const native_video_signal::signal_t &signal, std::string_view app, bool current) {
+    return adaptive_bitrate::update_native_signal(native, app, nonce, signal, true, [&calls, current] {
+      ++calls; return current;
+    });
+  };
+  EXPECT_TRUE(counted(fresh(), "native-controller-test", true));
+  EXPECT_EQ(calls, 2); // Once in permission and once at the last boundary, as before.
+  EXPECT_FALSE(counted(fresh(), "foreign-app", true));
+  EXPECT_EQ(calls, 2); // The scope refused first; the caller is never asked.
+  EXPECT_FALSE(counted(fresh(), "native-controller-test", false));
+  EXPECT_EQ(calls, 3); // Asked once in permission, refused, never asked again for the diagnostic.
+  adaptive_bitrate::reset();
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "entered"), "3"); EXPECT_EQ(native_field(end[0], "consumed"), "1");
+  EXPECT_EQ(native_field(end[0], "first_refusal"), "scope_owner");
+  EXPECT_EQ(native_field(end[0], "last_refusal"), "current_caller");
+  EXPECT_EQ(native_field(end[0], "refusals"), "[scope_owner:1,current_caller:1]");
+  // Only the first refusal found a window to discard; the second found it already empty.
+  EXPECT_EQ(native_field(end[0], "clear_counts"), "[permission:1]");
+}
+
+TEST_F(NativeDownwardHandoff, ReceiptAndSettingRefusalsAreNamedAfterPermissionAndStayRefused) {
+  test_log_capture_t log;
+  const std::set<std::string> receipt_stage {"no_receipt", "receipt_not_current", "signal_not_current", "measurement",
+                                             "setting"};
+  EXPECT_TRUE(consume(fresh()));
+  const auto historical = fresh();
+  { auto failed = producer.begin_native_update(video::bitrate_application::origin_t {999, 17000}); }
+  EXPECT_FALSE(consume(historical));
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000, true); // No producer witness after reopen.
+  EXPECT_FALSE(consume(fresh()));
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 20000);
+  adaptive_bitrate::reset();
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "consumed"), "1"); EXPECT_EQ(native_field(end[0], "refused"), "2");
+  EXPECT_TRUE(receipt_stage.count(native_field(end[0], "first_refusal"))) << end[0];
+  EXPECT_TRUE(receipt_stage.count(native_field(end[0], "last_refusal"))) << end[0];
+}
+
+TEST_F(NativeDownwardHandoff, DiagnosticLinesAreBoundedPrivateAndLeaveHistoryHeadroom) {
+  test_log_capture_t log;
+  const auto before = adaptive_bitrate::get_state_with_history().history;
+  for (int i = 0; i < 40; ++i) {
+    EXPECT_TRUE(consume(fresh()));
+    auto stale = fresh(); adaptive_bitrate::note_network_evidence_arrival(false);
+    EXPECT_FALSE(consume(stale));
+  }
+  const auto after = adaptive_bitrate::get_state_with_history().history;
+  EXPECT_EQ(after.entries.size(), before.entries.size()); EXPECT_EQ(after.dropped, 0u);
+  EXPECT_EQ(after.capacity, adaptive_bitrate::HISTORY_CAPACITY);
+  EXPECT_EQ(native_lines(log, "summary").size(), 1u); // The next summary is due only after 10 s.
+  EXPECT_EQ(native_lines(log, "interruption").size(), 16u);
+  adaptive_bitrate::reset();
+  const auto end = native_lines(log, "scope_end");
+  ASSERT_EQ(end.size(), 1u);
+  EXPECT_EQ(native_field(end[0], "entered"), "80"); EXPECT_EQ(native_field(end[0], "consumed"), "40");
+  EXPECT_EQ(native_field(end[0], "clear_counts"), "[permission:40]");
+  EXPECT_EQ(native_field(end[0], "interruptions"), "16/16"); EXPECT_EQ(native_field(end[0], "suppressed"), "24");
+  const auto all = native_lines(log);
+  EXPECT_EQ(all.size(), 18u);
+  for (const auto &line : all) {
+    EXPECT_LT(line.size(), 1536u);
+    EXPECT_EQ(line.find("native-controller-test"), std::string::npos) << line;
+    EXPECT_EQ(line.find(nonce), std::string::npos) << line;
+    EXPECT_EQ(line.find_first_not_of("abcdefghijklmnopqrstuvwxyzLTN0123456789_ =:,/[]"), std::string::npos) << line;
+  }
 }
