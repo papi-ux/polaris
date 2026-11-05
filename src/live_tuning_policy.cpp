@@ -393,7 +393,7 @@ namespace live_tuning_policy {
         const double prior_lost = held->second.second - run_lost;
         const double dispersion = std::max(2.0, disp());
         if (prior_frames >= HOLD_CHECK_REPORTS * (run_frames / std::max<std::size_t>(run_.size(), 1)) &&
-            prior_lost / prior_frames <= background_ + LOSSY_MIN &&
+            prior_lost / prior_frames <= LOSSY_MIN &&
             z_lower(prior_lost, prior_frames, run_lost, run_frames, dispersion) >= 2.0) {
           std::map<int, std::pair<double, double>> kept;
           for (auto it = measured_.upper_bound(target_); it != measured_.end(); ++it) {
