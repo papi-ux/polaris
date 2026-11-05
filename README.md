@@ -137,8 +137,8 @@ play.
   a client asks for it. Browser Stream (experimental) plays in a web browser on
   your local network, best tested in Chromium-family browsers.
   [Recording](docs/configuration.md#recording-tab) (video only, no audio) and
-  [source-paced VRR](docs/configuration.md#audio-and-video-tab) (experimental,
-  not yet requested by Nova) are off by default.
+  [source-paced VRR](docs/configuration.md#audio-and-video-tab) (experimental;
+  Nova for Linux can ask for it) are off by default.
 
 ## Learn more
 

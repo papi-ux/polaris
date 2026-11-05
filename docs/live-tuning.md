@@ -8,9 +8,10 @@ into `polaris.conf` on every settings save, so the first start of 1.5.0 turns a
 saved Off on once and records that in `settings_migrations.json` beside it.
 Turn it off after that and it stays off.
 
-Adaptive parity becomes active with Live Tuning on eligible Nova Linux NVENC
-streams. It can adjust FEC during the stream while lowering the encoder rate to
-keep video plus parity within the client's request; other streams keep configured FEC.
+With Live Tuning on, the default, adaptive parity is active for a Nova stream on
+a Linux host using NVENC when Nova reports partly lost frames. It can adjust FEC
+during the stream while lowering the encoder rate to keep video plus parity
+within the client's request; other streams keep configured FEC.
 
 The switch in Quick Controls and Audio/Video settings saves immediately. Nova's
 Command Center uses the same preference. Its HUD shows tuning separately from
