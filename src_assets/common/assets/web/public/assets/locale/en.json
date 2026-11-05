@@ -256,7 +256,7 @@
     "address_family_desc": "Set the address family used by Polaris",
     "address_family_ipv4": "IPv4 only",
     "adaptive_bitrate_enabled": "Adaptive Bitrate Recovery",
-    "adaptive_bitrate_enabled_desc": "Allow deterministic live bitrate recovery from measured loss and RTT evidence.",
+    "adaptive_bitrate_enabled_desc": "Allow deterministic live bitrate recovery from measured loss and RTT evidence. On by default from 1.5.0; existing hosts get it once on upgrade. Turn it off afterwards and it stays off.",
     "adaptive_bitrate_min": "Adaptive Bitrate Floor",
     "adaptive_bitrate_min_desc": "Minimum bitrate in Kbps for evidence-backed live reduction.",
     "ai_api_key": "AI Provider API Key",
@@ -1634,7 +1634,7 @@
       },
       "adaptive_bitrate_enabled": {
         "label": "Auto Quality Bitrate Recovery",
-        "desc": "Controlled by the Auto Quality toggle."
+        "desc": "On by default from 1.5.0; existing hosts get it once on upgrade. Turn it off afterwards and it stays off."
       },
       "ai_enabled": {
         "label": "Auto Quality",

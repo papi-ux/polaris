@@ -3,6 +3,16 @@
 Live Tuning is the host's adaptive bitrate preference. It does not require an AI
 provider or a subscription. Doctor explanations remain a separate feature.
 
+Live Tuning is on by default from 1.5.0. Older releases wrote the old Off default
+into `polaris.conf` on every settings save, so the first start of 1.5.0 turns a
+saved Off on once and records that in `settings_migrations.json` beside it.
+Turn it off after that and it stays off.
+
+With Live Tuning on, the default, adaptive parity is active for a Nova stream on
+a Linux host using NVENC when Nova reports partly lost frames. It can adjust FEC
+during the stream while lowering the encoder rate to keep video plus parity
+within the client's request; other streams keep configured FEC.
+
 The switch in Quick Controls and Audio/Video settings saves immediately. Nova's
 Command Center uses the same preference. Its HUD shows tuning separately from
 stream health. A saved On preference can be waiting for a stream, measuring,

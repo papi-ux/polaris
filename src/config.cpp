@@ -20,6 +20,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include <nlohmann/json.hpp>
 
 // local includes
 #include "config.h"
@@ -30,6 +31,7 @@
 #include "logging.h"
 #include "nvhttp.h"
 #include "platform/common.h"
+#include "private_state_file.h"
 #include "rtsp.h"
 #include "video.h"
 #include "utility.h"
@@ -641,7 +643,7 @@ namespace config {
     },  // display_device
 
     {
-      false,   // adaptive_bitrate.enabled
+      true,    // adaptive_bitrate.enabled (on from 1.5.0; migrate_live_tuning_default covers older files)
       2000,    // adaptive_bitrate.min_bitrate_kbps (2 Mbps floor)
       100000,  // adaptive_bitrate.max_bitrate_kbps (read, but never cuts a client's own bitrate)
     },  // adaptive_bitrate
@@ -1457,6 +1459,49 @@ namespace config {
     return private_stream_available ? "linux_stream_mode = headless_stream\n" : std::string {};
   }
 
+  live_tuning_default_migration_e migrate_live_tuning_default(const std::string &config_file, const fs::path &record) {
+    const std::string migration = "live_tuning_on_by_default";
+    auto state = nlohmann::json::object();
+    const auto previous = private_state_file::read_secure(record, 64 * 1024);
+    if (previous.status != private_state_file::read_status_e::missing) {
+      if (!previous) {
+        return live_tuning_default_migration_e::failed;
+      }
+      state = nlohmann::json::parse(previous.payload, nullptr, false);
+      if (!state.is_object() || (state.contains("applied") && !state["applied"].is_array())) {
+        return live_tuning_default_migration_e::failed;
+      }
+    }
+    auto applied = state.value("applied", nlohmann::json::array());
+    if (std::any_of(applied.begin(), applied.end(), [&](const nlohmann::json &entry) {
+          return entry.is_string() && entry.get<std::string>() == migration;
+        })) {
+      return live_tuning_default_migration_e::already_applied;
+    }
+
+    const auto snapshot = configuration_store::read(config_file);
+    if (!snapshot) {
+      return live_tuning_default_migration_e::failed;
+    }
+    // Read the value the way bool_f does at startup, so a file this turns on is one that runs with it off.
+    const auto vars = parse_config(snapshot->contents);
+    const auto option = vars.find("adaptive_bitrate_enabled");
+    auto saved = option == vars.end() ? std::string {} : option->second;
+    const bool turn_on = !saved.empty() && !to_bool(saved);
+    if (turn_on && configuration_store::patch(config_file, {{"adaptive_bitrate_enabled", "enabled"}}, snapshot->revision) !=
+                     configuration_store::result::committed) {
+      return live_tuning_default_migration_e::failed;
+    }
+
+    // Without this record the next start would see a host turned off since as the old default.
+    applied.push_back(migration);
+    state["applied"] = std::move(applied);
+    if (!private_state_file::write_atomic(record, state.dump())) {
+      return live_tuning_default_migration_e::failed;
+    }
+    return turn_on ? live_tuning_default_migration_e::turned_on : live_tuning_default_migration_e::left_as_is;
+  }
+
   std::optional<std::unordered_map<std::string, std::string>> loaded_config_file_vars() {
     std::lock_guard<std::mutex> lock(loaded_config_file_mutex);
     return loaded_config_file;
@@ -2018,6 +2063,24 @@ namespace config {
       // Older versions created files through the umask. Restrict those files
       // before reading secrets or admitting settings saves.
       restrict_config_file_mode(sunshine.config_file);
+
+      // Live Tuning is on by default from 1.5.0, and older saves wrote the old default into the file.
+      // Turn it on there once, before the read below, so this start already streams with it.
+      const auto migrations_record = fs::path(sunshine.config_file).parent_path() / "settings_migrations.json";
+      switch (migrate_live_tuning_default(sunshine.config_file, migrations_record)) {
+        case live_tuning_default_migration_e::turned_on:
+          BOOST_LOG(info) << "Live Tuning is on by default from 1.5.0, so ["sv << sunshine.config_file
+                          << "] now has it on. Turn it off in Quick Controls or Audio/Video settings and it stays off."sv;
+          break;
+        case live_tuning_default_migration_e::failed:
+          BOOST_LOG(warning) << "Could not finish applying Live Tuning's 1.5.0 default to ["sv << sunshine.config_file
+                             << "] and recording it in ["sv << migrations_record.string()
+                             << "]; the next start tries again."sv;
+          break;
+        case live_tuning_default_migration_e::already_applied:
+        case live_tuning_default_migration_e::left_as_is:
+          break;
+      }
 
       // Read config file
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
