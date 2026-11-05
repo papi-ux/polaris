@@ -251,4 +251,28 @@ namespace epic_library {
     if (!valid_absolute_path(launcher)) throw std::invalid_argument("Invalid Epic launcher path");
     return quote(launcher.string()) + ' ' + quote(launch_uri(i));
   }
+  std::string appimage_stage_command(const std::filesystem::path &image, const std::filesystem::path &install_dir,
+    const identity_t &i, const std::function<std::string(const std::string &)> &isolate) {
+    if (!valid_absolute_path(image) || !valid_absolute_path(install_dir)) throw std::invalid_argument("Invalid Epic AppImage or installation path");
+    const auto runtime = quote(image.string());
+    const auto to_install = "cd -- " + quote(install_dir.string());
+    // Fd 9: 3, 4 and 5 are the startup diagnostics and the identity channel. Ten seconds, since the
+    // game's birth window is 30 from before this starts. The runtime exports these same variables
+    // when it runs AppRun itself, which it does not get to do here.
+    return to_install + " || exit 127\n"
+      "exec 9< <(exec " + runtime + " --appimage-mount)\n"
+      "holder=$!\n"
+      "if ! IFS= read -r -t 10 APPDIR <&9 || [ ! -x \"$APPDIR/AppRun\" ]; then\n"
+      "  echo 'polaris: the Epic AppImage did not mount' >&2\n"
+      "  kill \"$holder\" 2>/dev/null\n"
+      "  exit 127\n"
+      "fi\n"
+      "exec 9<&-\n"
+      "export APPDIR APPIMAGE=" + runtime + " ARGV0=" + runtime + " OWD=\"$PWD\"\n" +
+      isolate(to_install + " && exec \"$APPDIR/AppRun\" " + quote(launch_uri(i))) + "\n"
+      "status=$?\n"
+      "echo \"polaris: Epic launcher returned status=$status\" >&2\n"
+      "wait \"$holder\"\n"
+      "exit \"$status\"\n";
+  }
 }

@@ -565,7 +565,10 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 5000);
+  // The whole function: a private Epic End's game-first close precedes the Steam/cage stop.
+  const auto end = source.find("\n  bool proc_t::reload_configuration_from_file(", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto steam = body.find("terminate_session_owned_steam_before_cage_stop(");
   const auto gen = body.find("terminate_isolated_session_generation(");
@@ -576,6 +579,123 @@ TEST(SessionStopContractTests, PortalReleaseRunsBeforeNestedCompositorKill) {
   EXPECT_LT(prepare, gen);
   // Double portal release is forbidden — only session_media may release.
   EXPECT_EQ(body.find("portal::release_global_capture("), std::string::npos);
+}
+
+TEST(EpicPrivateSessionContractTests, EveryTeardownSweepOfAPrivateEpicSessionCarriesItsCgroupFence) {
+  // #582 finding 1: the private app stop, the exact sweep after the compositor stop and the next
+  // launch's re-validation of a retained generation all fence a private Epic session's token by
+  // its own cgroup. No other session's call changes.
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto body_of = [&](const char *signature, const char *next) {
+    const auto start = source.find(signature);
+    const auto end = start == std::string::npos ? std::string::npos : source.find(next, start + 1);
+    return start == std::string::npos || end == std::string::npos ? std::string {} : source.substr(start, end - start);
+  };
+  const std::string fence = "_epic_private_requested ? std::make_optional(epic_private_session_cgroup()) : std::nullopt";
+  const auto stop_apps = body_of("void proc_t::stop_private_session_apps_before_compositor(", "\n  void proc_t::finalize_isolated_session_runtime(");
+  ASSERT_FALSE(stop_apps.empty());
+  const auto guard = stop_apps.find("if (_epic_private_requested) {");
+  ASSERT_NE(guard, std::string::npos);
+  EXPECT_NE(stop_apps.find("request.session_cgroup = epic_private_session_cgroup();", guard), std::string::npos);
+  const auto generation = body_of("void proc_t::terminate_isolated_session_generation(", "\n  void proc_t::finish_isolated_session_generation_cleanup(");
+  ASSERT_FALSE(generation.empty());
+  EXPECT_NE(generation.find("&sweep,\n      " + fence), std::string::npos);
+  const auto revalidate = source.find("\"re-validated at next launch\"sv");
+  ASSERT_NE(revalidate, std::string::npos);
+  EXPECT_NE(source.substr(revalidate, 400).find(fence), std::string::npos);
+  // Both classifications of the app stop take the request's fence.
+  EXPECT_EQ(std::string::npos, source.find("classify(facts, request.supervisor, token, instances, getuid());"));
+  EXPECT_EQ(std::string::npos, source.find("classify(read_process_facts(reader), request.supervisor, token, instances, getuid());"));
+}
+
+TEST(EpicPrivateSessionContractTests, AnAppImageMountIsHeldForEveryPrivateEpicSessionAndEndedInTheAppStopPhase) {
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto body_of = [&](const char *signature, const char *next) {
+    const auto start = source.find(signature);
+    const auto end = start == std::string::npos ? std::string::npos : source.find(next, start + 1);
+    return start == std::string::npos || end == std::string::npos ? std::string {} : source.substr(start, end - start);
+  };
+  // Recorded for an AppImage whether or not it is isolated: the runtime's own daemon has the same race.
+  const auto recorded = source.find("if (_epic_launcher_proof->appimage()) _epic_private_held_image = _epic_launcher_proof->path();");
+  ASSERT_NE(recorded, std::string::npos);
+  EXPECT_LT(source.rfind("if (_epic_private_requested) {", recorded), recorded);
+  const auto stop_apps = body_of("void proc_t::stop_private_session_apps_before_compositor(", "\n  void proc_t::finalize_isolated_session_runtime(");
+  const auto guard = stop_apps.find("if (_epic_private_requested) {");
+  ASSERT_NE(guard, std::string::npos);
+  EXPECT_NE(stop_apps.find("request.held_image = _epic_private_held_image;", guard), std::string::npos);
+  // The phase holds it through both classifications, ends it after the launcher, and never with a kill.
+  const auto phase = body_of("private_app_stop_report_t stop_private_session_apps(", "bool terminate_session_owned_steam_app_lineage(");
+  ASSERT_FALSE(phase.empty());
+  EXPECT_NE(phase.find("classify(facts, request.supervisor, token, instances, getuid(), request.session_cgroup, held_view)"), std::string::npos);
+  EXPECT_NE(phase.find("classify(read_process_facts(reader, request.held_image), request.supervisor, token, instances, getuid(), request.session_cgroup, held_view);"), std::string::npos);
+  const auto ran = phase.find("private_app_stop::run(plan, actions, timings)");
+  const auto first = phase.find("send_pidfd_signal(mount.front(), SIGTERM)");
+  ASSERT_NE(ran, std::string::npos);
+  ASSERT_NE(first, std::string::npos);
+  EXPECT_LT(ran, first);
+  const auto mount_phase = phase.substr(first);
+  EXPECT_EQ(mount_phase.find("SIGKILL"), std::string::npos);
+  // An earlier generation's image never carries into the next launch, or past the teardown.
+  EXPECT_NE(source.find("_epic_private_grant_retired = false;\n    _epic_private_held_image.reset();"), std::string::npos);
+  const auto generation = source.find("terminate_isolated_session_generation();\n    _epic_private_session.reset();");
+  ASSERT_NE(generation, std::string::npos);
+  EXPECT_NE(source.substr(generation, 300).find("_epic_private_held_image.reset();"), std::string::npos);
+}
+
+#ifdef __linux__
+TEST(EpicPrivateSessionContractTests, OnlyAnAppImageUnderStrictIsolationGetsTheMountStage) {
+  const epic_library::installation_t title {{"sandbox", "catalog", "artifact"}, "install1", "Alan Wake 2", "bin/Game.exe", "1", "/games/Alan Wake's 2", "/fixture/epic", "Windows"};
+  const std::string game_cmd = "'/fixture/Epic.AppImage' 'com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true'";
+  const auto isolate = [](const std::string &inner) { return "ISOLATE(" + inner + ")"; };
+  // Every other case keeps today's bytes: an ELF launcher under isolation, or either with no strict plan.
+  const auto quote = [](const std::string &text) {
+    std::string quoted = "'";
+    for (const char c : text) {
+      quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    }
+    return quoted + "'";
+  };
+  const std::string today = "ISOLATE(/bin/sh -c " + quote("cd -- " + quote(title.install_dir.string()) + " && exec " + game_cmd) + ")";
+  EXPECT_EQ(proc::epic_private_startup_command_for_tests("/fixture/Epic.AppImage", title, game_cmd, false, isolate), today);
+  const auto stage = proc::epic_private_startup_command_for_tests("/fixture/Epic.AppImage", title, game_cmd, true, isolate);
+  EXPECT_NE(stage.find("exec '/fixture/Epic.AppImage' --appimage-mount)"), std::string::npos);
+  EXPECT_NE(stage.find("ISOLATE(cd -- '/games/Alan Wake'\\''s 2' && exec \"$APPDIR/AppRun\" '"), std::string::npos);
+
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto site = source.find("const bool appimage_under_isolation = gamepad_isolation_plan.strict_applied() && _epic_launcher_proof->appimage();");
+  ASSERT_NE(site, std::string::npos);
+  // Decided after admission and before the request's window opens, so a refusal starts nothing.
+  EXPECT_LT(source.rfind("admit_private_epic(*_epic_title", site), site);
+  const auto refusal = source.find("\"epic_appimage_mount_unavailable\"", site);
+  const auto window = source.find("epic_request_birth_window();", site);
+  const auto startup = source.find("epic_private_startup_command(_epic_launcher_proof->path(), *_epic_title, game_cmd, appimage_under_isolation, command_with_gamepad_isolation)", site);
+  ASSERT_NE(refusal, std::string::npos);
+  ASSERT_NE(window, std::string::npos);
+  ASSERT_NE(startup, std::string::npos);
+  EXPECT_LT(refusal, window);
+  EXPECT_LT(window, startup);
+  // The refusal says what to do and that nothing was requested.
+  const auto refused = source.substr(refusal, source.find(");", refusal) - refusal);
+  EXPECT_NE(refused.find("headless_gamepad_isolation"), std::string::npos) << refused;
+  EXPECT_NE(refused.find("Mirror Desktop"), std::string::npos) << refused;
+  EXPECT_NE(refused.find("No private request was sent."), std::string::npos) << refused;
+}
+#endif
+
+TEST(EpicPrivateSessionContractTests, AMissingOrUnreadablePrefixIsStatedWithoutClaimingTheGameWasNeverPlayed) {
+  // #582 finding 6: title_prefix_unavailable covers a missing prefix and an unreadable one alike.
+  const auto source = read_source_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto refusal = source.find("\"epic_first_play_in_mirror\"");
+  ASSERT_NE(refusal, std::string::npos);
+  const auto text = source.substr(refusal, source.find(");", refusal) - refusal);
+  EXPECT_NE(text.find("Wine prefix is missing or can't be read"), std::string::npos) << text;
+  EXPECT_NE(text.find("play it once in Mirror Desktop"), std::string::npos) << text;
+  EXPECT_EQ(text.find("hasn't been played"), std::string::npos) << text;
+  EXPECT_EQ(source.find("This game hasn't been played on this host yet"), std::string::npos);
 }
 
 TEST(SessionStopContractTests, UnclassifiedNestedLaunchHasNoNumericGroupKillFallback) {

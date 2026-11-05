@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 #include "../tests_paths.h"
 #include <src/epic_library.h>
+#include <src/launch_failure.h>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <nlohmann/json.hpp>
 #ifndef _WIN32
   #include <sys/stat.h>
@@ -43,6 +45,83 @@ TEST(EpicLibraryTests, CompletedInstallUsesExactTripleAndDirectoryNameWithoutAcc
   EXPECT_EQ(s.games[0].name, "Alan Wake 2");
   EXPECT_EQ(s.games[0].platform, "Windows");
 }
+TEST(EpicLibraryTests, OwnerBlockerMessageNeverChangesTheGenericRefusalOrAction) {
+  const std::string generic = "Another AppImage app is running on the host, and Polaris can't tell it apart from Epic.";
+  const std::string action = "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.";
+  const std::string owner = "Orca (an AppImage) is running; quit it to use Private Stream.";
+  launch_failure::clear();
+  EXPECT_EQ(launch_failure::refuse(503, "epic_other_appimage_running", generic, action, owner), 503);
+  const auto refusal = launch_failure::take();
+  ASSERT_TRUE(refusal);
+  EXPECT_EQ(refusal->status, 503);
+  EXPECT_EQ(refusal->code, "epic_other_appimage_running");
+  EXPECT_EQ(refusal->message, generic);
+  EXPECT_EQ(refusal->action, action);
+  EXPECT_EQ(launch_failure::status_message(*refusal), generic + " " + action);
+  EXPECT_EQ(launch_failure::authenticated_owner_status_message(*refusal), owner + " " + action);
+  EXPECT_EQ(launch_failure::status_message(*refusal).find("Orca"), std::string::npos);
+  EXPECT_FALSE(launch_failure::take());
+  launch_failure::refuse(503, "unknown", generic, action);
+  EXPECT_EQ(launch_failure::authenticated_owner_status_message(*launch_failure::take()), generic + " " + action);
+  launch_failure::refuse(503, "unknown", generic, action, "");
+  EXPECT_EQ(launch_failure::authenticated_owner_status_message(*launch_failure::take()), generic + " " + action);
+}
+
+TEST(EpicLibraryTests, OwnerBlockerMessageIsAttemptLocalAndCannotSurviveReplacementOrAThreadBoundary) {
+  launch_failure::refuse(503, "epic_other_appimage_running", "Generic", "", "Orca");
+  std::thread other([] {
+    EXPECT_FALSE(launch_failure::take());
+    launch_failure::refuse(503, "unknown", "Other attempt");
+    EXPECT_EQ(launch_failure::authenticated_owner_status_message(*launch_failure::take()), "Other attempt");
+  });
+  other.join();
+  ASSERT_TRUE(launch_failure::pending);
+  EXPECT_EQ(launch_failure::authenticated_owner_status_message(*launch_failure::pending), "Orca");
+  launch_failure::refuse_if_unexplained(503, "wrapper", "Generic wrapper");
+  EXPECT_EQ(launch_failure::authenticated_owner_status_message(*launch_failure::take()), "Orca");
+  launch_failure::refuse(503, "epic_other_appimage_running", "Generic", "", "Orca");
+  launch_failure::refuse(409, "new_attempt", "Generic new attempt");
+  EXPECT_EQ(launch_failure::authenticated_owner_status_message(*launch_failure::take()), "Generic new attempt");
+  launch_failure::clear();
+}
+
+TEST(EpicLibraryTests, OwnerBlockerAccessorRejectsUnboundedControlOrMarkupText) {
+  for (const auto &owner : {std::string(161, 'a'), std::string("Orca\nInjected"), std::string("Orca\033[31m"),
+         std::string("<b>Orca</b>"), std::string("Orca & other"), std::string("\"Orca\""), std::string("Orca\302\240")}) {
+    launch_failure::refuse(503, "epic_other_appimage_running", "Generic", "Same action", owner);
+    const auto refusal = launch_failure::take();
+    ASSERT_TRUE(refusal);
+    EXPECT_EQ(launch_failure::authenticated_owner_status_message(*refusal), "Generic Same action");
+    EXPECT_EQ(launch_failure::status_message(*refusal), "Generic Same action");
+  }
+}
+
+TEST(EpicLibraryTests, OwnerBlockerAccessorStaysBehindTheConsoleGuardAndOutOfGenericConsumers) {
+  const auto source = [](const char *file) {
+    std::ifstream stream(std::filesystem::path(POLARIS_SOURCE_DIR) / file);
+    EXPECT_TRUE(stream.good()) << file;
+    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+  };
+  const auto console = source("src/confighttp.cpp");
+  const auto launch = console.find("void launchApp(");
+  ASSERT_NE(launch, std::string::npos);
+  const auto next_handler = console.find("void disconnect", launch);
+  ASSERT_NE(next_handler, std::string::npos);
+  const auto guard = console.find("!authenticate(response, request)) {\n      return;", launch);
+  const auto owner_read = console.find("launch_failure::authenticated_owner_status_message(*refusal)");
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(owner_read, std::string::npos);
+  EXPECT_LT(guard, owner_read);
+  EXPECT_LT(owner_read, next_handler);
+  EXPECT_EQ(console.find("launch_failure::authenticated_owner_status_message", owner_read + 1), std::string::npos);
+  for (const auto *file : {"src/nvhttp.cpp", "src/rtsp.cpp", "src/browser_stream.cpp", "src/process.cpp", "src/codec_support_readout.h"}) {
+    const auto consumer = source(file);
+    EXPECT_EQ(consumer.find("authenticated_owner_status_message"), std::string::npos) << file;
+    EXPECT_EQ(consumer.find("->owner_message"), std::string::npos) << file;
+    EXPECT_EQ(consumer.find(".owner_message"), std::string::npos) << file;
+  }
+}
+
 TEST(EpicLibraryTests, OwnerControlRequiresExactConfirmationAndSessionRevision) {
   const auto request = epic_library::parse_control_request(R"({"action":"adopt","session_id":"session","revision":"revision","confirm":true})");
   ASSERT_TRUE(request); EXPECT_TRUE(request->confirmed); EXPECT_EQ(request->session_id, "session");
@@ -112,6 +191,33 @@ TEST(EpicLibraryTests, UriEncodesSeparatorsAndRejectsInjectedIdentifiers) {
   EXPECT_EQ(epic_library::launch_command("/fixture/player/Epic's App.AppImage", title),
     "'/fixture/player/Epic'\\''s App.AppImage' 'com.epicgames.launcher://apps/sandbox%3Acatalog%3Aartifact?action=launch&silent=true'");
 }
+TEST(EpicLibraryTests, TheAppImageStageNeverGivesTheRequestToTheMountStep) {
+  const auto uri = epic_library::launch_uri(title);
+  std::string isolated;
+  const auto stage = epic_library::appimage_stage_command("/fixture/My Desk's/Epic.AppImage", "/games/Alan Wake's 2", title, [&](const std::string &inner) {
+    isolated = inner;
+    return "ISOLATE(" + inner + ")";
+  });
+  // The request appears once, inside the isolated command and nowhere else.
+  EXPECT_EQ(stage.find(uri), stage.rfind(uri));
+  EXPECT_EQ(isolated, "cd -- '/games/Alan Wake'\\''s 2' && exec \"$APPDIR/AppRun\" '" + uri + "'");
+  EXPECT_LT(stage.find("ISOLATE("), stage.find(uri));
+  // The mount step takes no request, and quotes the path whatever it holds.
+  const auto mount = stage.substr(0, stage.find('\n', stage.find("--appimage-mount")));
+  EXPECT_EQ(mount.find(uri), std::string::npos);
+  EXPECT_NE(mount.find("exec '/fixture/My Desk'\\''s/Epic.AppImage' --appimage-mount)"), std::string::npos);
+  EXPECT_NE(stage.find("cd -- '/games/Alan Wake'\\''s 2' || exit 127\n"), std::string::npos);
+  EXPECT_NE(stage.find("export APPDIR APPIMAGE='/fixture/My Desk'\\''s/Epic.AppImage' ARGV0='/fixture/My Desk'\\''s/Epic.AppImage' OWD=\"$PWD\"\n"), std::string::npos);
+  // Fd 9 stays clear of the diagnostics pipes and the identity channel, and the wait stays inside the 30 s birth window.
+  EXPECT_NE(stage.find("exec 9< <("), std::string::npos);
+  EXPECT_NE(stage.find("read -r -t 10 APPDIR <&9"), std::string::npos);
+  const auto keep = [](const std::string &) { return std::string {"bwrap"}; };
+  EXPECT_THROW(epic_library::appimage_stage_command("relative.AppImage", "/games/a", title, keep), std::invalid_argument);
+  EXPECT_THROW(epic_library::appimage_stage_command("/fixture/a\nb.AppImage", "/games/a", title, keep), std::invalid_argument);
+  EXPECT_THROW(epic_library::appimage_stage_command("/fixture/a.AppImage", "relative", title, keep), std::invalid_argument);
+  EXPECT_THROW(epic_library::appimage_stage_command("/fixture/a.AppImage", "/games/a", {"bad id", "b", "c"}, keep), std::invalid_argument);
+}
+
 TEST(EpicLibraryTests, CatalogMatchesAllThreeIdentifiersNeverNameAlone) {
   // Legendary's actual file wraps the catalog record in metadata; app_name is its artifact.
   json catalog {{"app_name", "artifact"}, {"metadata", {{"namespace", "sandbox"}, {"id", "catalog"}, {"title", "Actual title"}}}};

@@ -69,6 +69,11 @@ namespace private_app_stop {
 
   }  // namespace
 
+  timings_t with_mount_phase(timings_t timings) {
+    timings.budget -= timings.mount_first_wait + timings.mount_last_wait;
+    return timings;
+  }
+
   std::chrono::milliseconds close_wait(std::chrono::seconds exit_timeout, const timings_t &timings) {
     const auto own = std::min<std::chrono::milliseconds>(std::max(0s, exit_timeout), timings.exit_timeout_ceiling);
     return std::max(timings.close_wait_floor, own);
@@ -226,12 +231,19 @@ namespace private_app_stop {
     return outcome;
   }
 
+  bool in_session_cgroup(std::string_view cgroup, std::string_view session_cgroup) {
+    return !session_cgroup.empty() && cgroup.starts_with(session_cgroup) &&
+           (cgroup.size() == session_cgroup.size() || cgroup[session_cgroup.size()] == '/' || session_cgroup.back() == '/');
+  }
+
   session_processes_t classify(
     const std::vector<process_facts_t> &facts,
     const fsi::process_t &supervisor,
     std::string_view token,
     const fsi::instances_t &instances,
-    uid_t uid
+    uid_t uid,
+    std::optional<std::string_view> session_cgroup,
+    std::optional<std::string_view> held_image
   ) {
     session_processes_t result;
     std::map<pid_t, const process_facts_t *> by_pid;
@@ -337,7 +349,8 @@ namespace private_app_stop {
           fact.comm == "Xwayland") {
         continue;
       }
-      const bool carries_token = fact.environ && fsi::environ_carries_token(*fact.environ, token);
+      const bool carries_token = fact.environ && fsi::environ_carries_token(*fact.environ, token) &&
+                                 (!session_cgroup || in_session_cgroup(fact.cgroup, *session_cgroup));
       if (!carries_token && !descends_from_supervisor(fact)) {
         continue;
       }
@@ -348,6 +361,11 @@ namespace private_app_stop {
       const bool flatpak_bwrap = fsi::is_instance_bwrap(fact.process, records);
       const bool anonymous_bwrap = fact.comm == "bwrap" && fact.environ && fact.environ->empty();
       if (other_user || in_sandbox_namespace || in_flatpak_scope || flatpak_bwrap || anonymous_bwrap) {
+        continue;
+      }
+      const std::string_view cmdline {fact.cmdline};
+      if (held_image && cmdline.substr(0, cmdline.find('\0')) == *held_image && descends_from_supervisor(fact)) {
+        result.held_appimage.push_back(fact.process);
         continue;
       }
       result.session.push_back(fact.process);

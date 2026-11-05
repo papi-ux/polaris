@@ -29,6 +29,27 @@ const posts = m => m.mock.calls.filter(c => c[1]?.method === 'POST')
 const lastPost = m => { const p = posts(m); return p.length ? JSON.parse(p[p.length - 1][1].body) : null }
 
 describe('useEpicSession', () => {
+  it('keeps private game status and refuses both consent actions, then clears it on End', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(reply(active({
+        state: 'session_managed', game_state: 'waiting', code: 'game_not_observed',
+        can_adopt: true, can_release: true, message: 'End closes this private session, including Epic.',
+      })))
+      .mockResolvedValueOnce(reply({ available: false }))
+    vi.stubGlobal('fetch', fetchMock)
+    host()
+    await wrapper.vm.load()
+    expect(wrapper.vm.state).toMatchObject({
+      state: 'session_managed', game_state: 'waiting', code: 'game_not_observed',
+      can_adopt: false, can_release: false,
+    })
+    expect(await wrapper.vm.adopt()).toBe(false)
+    expect(await wrapper.vm.release()).toBe(false)
+    expect(posts(fetchMock)).toHaveLength(0)
+    await wrapper.vm.load()
+    expect(wrapper.vm.state).toMatchObject({ available: false, game_state: '', code: '' })
+  })
+
   it('retains the disclosed inspection count and clears it when the session ends', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(reply(active({ uninspected_process_count: 3 })))

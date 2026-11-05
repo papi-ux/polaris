@@ -135,3 +135,37 @@ describe('Doctor host findings before a stream, through the production view', ()
     expect(cards().length).toBeGreaterThanOrEqual(6)
   })
 })
+
+describe('Doctor names an NVENC to CPU encoder fallback before a stream', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}), text: async () => '' })))
+  })
+  afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
+
+  const reason = 'Preferred encoder [nvenc] did not satisfy this runtime; selected [software] instead.'
+  const cpuFallback = { mode: 'auto', gpu_driver: 'nvidia', policy: 'nvidia_nvenc', preferred_encoder: 'nvenc',
+    fallback_encoder: 'next_available', selected_encoder: 'software', exact_live_probe_required: false, fallback_used: true, reason }
+  const withSelection = (selection) => ({ ...idle([]), doctor: { ...waiting, advanced_evidence: { encoder_selection: selection } } })
+  const card = () => wrapper.find('[data-doctor-encoder-fallback]')
+
+  it('shows what happened, what to check and the host reason, from the current report only', async () => {
+    await mountView(withSelection(cpuFallback))
+    expect(diagnosis().text()).toContain('troubleshooting.doctor_waiting_title')
+    expect(card().exists()).toBe(true)
+    for (const key of ['title', 'detail', 'action']) expect(card().text()).toContain(`troubleshooting.nvenc_cpu_fallback_${key}`)
+    expect(card().text()).toContain('troubleshooting.fix_my_stream_status_warning')
+    expect(card().text()).toContain(`troubleshooting.doctor_selection_reason: ${reason}`)
+
+    await receive(withSelection(cpuFallback), false)
+    expect(card().exists()).toBe(false)
+  })
+
+  it('shows nothing when NVENC started or the fallback was to another hardware encoder', async () => {
+    await mountView(withSelection({ ...cpuFallback, selected_encoder: 'nvenc', fallback_used: false }))
+    expect(card().exists()).toBe(false)
+    await receive(withSelection({ ...cpuFallback, selected_encoder: 'vulkan' }))
+    expect(card().exists()).toBe(false)
+    await receive(withSelection(cpuFallback))
+    expect(card().exists()).toBe(true)
+  })
+})

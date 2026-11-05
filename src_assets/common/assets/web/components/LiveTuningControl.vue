@@ -21,7 +21,7 @@ const bitrate = computed(() => state.value?.applied_bitrate_kbps > 0
           :style="{ transform: state?.enabled ? 'translateX(18px)' : 'translateX(2px)' }" />
       </span>
     </button>
-    <p v-if="!compact" class="mt-2 text-xs leading-relaxed text-storm">Automatically adjust stream bitrate within your quality limit. This setting applies to the host.</p>
+    <p v-if="!compact" class="mt-2 text-xs leading-relaxed text-storm">Automatically adjust stream bitrate within your quality limit. On by default from 1.5.0; existing hosts get it once on upgrade. Turn it off afterwards and it stays off. This setting applies to the host.</p>
     <p v-if="confirmed && bitrate" class="mt-2 text-xs text-silver">{{ bitrate }}<span v-if="state.pending"> · Applying requested bitrate</span></p>
     <p v-if="confirmed && state?.enabled && state?.state === 'unavailable'" class="mt-2 text-xs text-storm">{{ state.reason?.replaceAll('_', ' ') }}</p>
     <p v-if="error" role="alert" class="mt-2 text-xs text-warning-bright">{{ error }}</p>

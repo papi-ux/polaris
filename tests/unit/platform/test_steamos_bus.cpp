@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -23,6 +24,7 @@
 #include <future>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -110,6 +112,11 @@ namespace {
       std::vector<std::string> bound_by;
       std::vector<std::string> requisite_of;
       std::vector<std::string> propagates_stop_to;
+      /// What a unit's definition looks like to the manager; Transient is left out when unset.
+      std::string load_state = "loaded";
+      std::optional<bool> transient = true;
+      std::string fragment_path;
+      std::vector<std::string> drop_in_paths;
     };
 
     /// A bus name's owner: its unique name, account and process.
@@ -270,9 +277,14 @@ namespace {
       return g_variant_new_strv(pointers.data(), static_cast<gssize>(pointers.size()));
     }
 
-    static GVariant *unit_props(const host_script_t::unit_t &unit) {
+    static GVariant *unit_props(const std::string &name, const host_script_t::unit_t &unit) {
       GVariantBuilder builder;
       g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
+      g_variant_builder_add(&builder, "{sv}", "Id", g_variant_new_string(name.c_str()));
+      g_variant_builder_add(&builder, "{sv}", "LoadState", g_variant_new_string(unit.load_state.c_str()));
+      if (unit.transient) g_variant_builder_add(&builder, "{sv}", "Transient", g_variant_new_boolean(*unit.transient));
+      g_variant_builder_add(&builder, "{sv}", "FragmentPath", g_variant_new_string(unit.fragment_path.c_str()));
+      g_variant_builder_add(&builder, "{sv}", "DropInPaths", strv(unit.drop_in_paths));
       g_variant_builder_add(&builder, "{sv}", "ActiveState", g_variant_new_string(unit.active_state.c_str()));
       g_variant_builder_add(&builder, "{sv}", "InvocationID",
         g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, unit.invocation.data(), unit.invocation.size(), 1));
@@ -359,7 +371,7 @@ namespace {
             g_variant_builder_add(&builder, "{sv}", "ControlGroup", g_variant_new_string(unit.control_group.c_str()));
             return g_variant_new("(a{sv})", &builder);
           }
-          return unit_props(unit);
+          return unit_props(name, unit);
         }
         error_name = "org.freedesktop.DBus.Error.UnknownObject";
         return nullptr;
@@ -1283,6 +1295,105 @@ TEST(SteamosBusTests, AStalledBusCostsOneReadinessBudgetPerAppListAndIsNeverHeal
   EXPECT_FALSE(rig.coordinator->readiness(true).ready) << "the unknown is not replaced by a remembered positive";
 }
 
+TEST(SteamosBusTests, AUserUnitIsReadFromTheBoundUserManagerWithoutLoadingIt) {
+  const std::string group = "/user.slice/user-1000.slice/user@1000.service/app.slice/ssh-agent.service";
+  const auto vendor = [&](host_script_t &s) {
+    auto &agent = s.units["ssh-agent.service"];
+    agent.control_group = group;
+    agent.transient = false;
+    agent.fragment_path = "/usr/lib/systemd/user/ssh-agent.service";
+    agent.drop_in_paths = {"/usr/lib/systemd/user/service.d/10-timeout-abort.conf"};
+  };
+  world_t world;
+  world.fake->edit(vendor);
+  bus::user_unit_t unit;
+  ASSERT_TRUE(bus::read_user_unit(world.sources, world.budget(), "ssh-agent.service", unit).ok());
+  EXPECT_TRUE(unit.loaded);
+  EXPECT_EQ(unit.id, "ssh-agent.service");
+  EXPECT_EQ(unit.load_state, "loaded");
+  EXPECT_FALSE(unit.transient);
+  EXPECT_EQ(unit.fragment_path, "/usr/lib/systemd/user/ssh-agent.service");
+  EXPECT_EQ(unit.drop_in_paths, std::vector<std::string> {"/usr/lib/systemd/user/service.d/10-timeout-abort.conf"});
+  EXPECT_EQ(unit.control_group, group);
+  // GetUnit never loads: a unit the manager has not loaded reads as not loaded, and nothing starts.
+  ASSERT_TRUE(bus::read_user_unit(world.sources, world.budget(), "mylauncher.service", unit).ok());
+  EXPECT_FALSE(unit.loaded);
+  const auto methods = world.fake->methods();
+  EXPECT_EQ(std::count(methods.begin(), methods.end(), "LoadUnit"), 0);
+  EXPECT_TRUE(world.fake->all_no_auto_start());
+
+  // Another account's or an ordinary service's systemd1 name, a reply without Transient and a
+  // stalled manager are refusals, never a guessed unit.
+  const std::vector<std::pair<std::string, std::function<void(world_t &)>>> refusals {
+    {"prelaunch_session_identity_unavailable", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.systemd.uid = 1001; }); }},
+    {"prelaunch_session_identity_unavailable", [](world_t &w) {
+       w.scratch.write("proc/22/cgroup", "0::/user.slice/user-1000.slice/user@1000.service/app.slice/impostor.service\n");
+     }},
+    {"prelaunch_session_record_malformed", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.units["ssh-agent.service"].transient.reset(); }); }},
+    {"prelaunch_session_read_timeout", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.stalled = {"GetUnit"}; }); }},
+  };
+  for (const auto &[code, change] : refusals) {
+    world_t refused;
+    refused.fake->edit(vendor);
+    change(refused);
+    const auto verdict = bus::read_user_unit(refused.sources, refused.budget(300ms), "ssh-agent.service", unit);
+    EXPECT_EQ(verdict.code, code) << verdict.reason;
+    EXPECT_FALSE(unit.loaded);
+  }
+}
+
+TEST(SteamosBusTests, AUserUnitIsStillReadWhenTheManagersCgroupListsAV1Hierarchy) {
+  // pc-papi, as read on 2026-10-30: Mullvad's split tunnelling puts this line in every cgroup file.
+  const std::string v1 = "1:net_cls:/\n";
+  const std::string manager = "/user.slice/user-1000.slice/user@1000.service";
+  const std::string group = manager + "/app.slice/ssh-agent.service";
+  const auto vendor = [&](host_script_t &s) {
+    auto &agent = s.units["ssh-agent.service"];
+    agent.control_group = group;
+    agent.transient = false;
+    agent.fragment_path = "/usr/lib/systemd/user/ssh-agent.service";
+    agent.drop_in_paths = {};
+  };
+  world_t world;
+  world.fake->edit(vendor);
+  world.scratch.write("proc/22/cgroup", v1 + "0::" + manager + "/init.scope\n");
+  bus::user_unit_t unit;
+  const auto read = bus::read_user_unit(world.sources, world.budget(), "ssh-agent.service", unit);
+  ASSERT_TRUE(read.ok()) << read.code << ": " << read.reason;
+  EXPECT_TRUE(unit.loaded);
+  EXPECT_EQ(unit.id, "ssh-agent.service");
+  EXPECT_EQ(unit.control_group, group);
+
+  // The line is ignored, not trusted: the same refusals still hold beside it.
+  for (const auto &cgroup : {
+         v1 + "0::" + manager + "/app.slice/impostor.service\n",
+         v1 + "0::" + manager + "/init.scope\n0::" + manager + "/init.scope\n",
+         "1:net_cls\n0::" + manager + "/init.scope\n",
+         "1:name=systemd:/x\n0::" + manager + "/init.scope\n",
+         v1,
+       }) {
+    world_t refused;
+    refused.fake->edit(vendor);
+    refused.scratch.write("proc/22/cgroup", cgroup);
+    const auto verdict = bus::read_user_unit(refused.sources, refused.budget(), "ssh-agent.service", unit);
+    EXPECT_EQ(verdict.code, "prelaunch_session_identity_unavailable") << cgroup << ": " << verdict.reason;
+    EXPECT_FALSE(unit.loaded) << cgroup;
+  }
+
+  // The SteamOS readers bind logind, the manager and this process through the same parser.
+  world_t session;
+  session.scratch.write("proc/11/cgroup", v1 + "0::/system.slice/systemd-logind.service\n");
+  session.scratch.write("proc/22/cgroup", v1 + "0::" + manager + "/init.scope\n");
+  session.scratch.write("proc/4242/cgroup", v1 + "0::" + manager + "/app.slice/steamos-manager.service\n");
+  session.scratch.write("self_cgroup", v1 + "0::" + std::string {k_polaris_cgroup} + "\n");
+  steamos::snapshot_t snapshot;
+  const auto snapshot_read = bus::read_snapshot(session.sources, session.budget(), snapshot);
+  ASSERT_TRUE(snapshot_read.ok()) << snapshot_read.code << ": " << snapshot_read.reason;
+  EXPECT_EQ(steamos::cgroup_v2_path(snapshot.self_cgroup), std::string {k_polaris_cgroup});
+  const auto probed = bus::probe_support(session.sources, session.budget());
+  EXPECT_TRUE(probed.ok()) << probed.code << ": " << probed.reason;
+}
+
 TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
   const std::set<std::string> expected {
     "ATypedSnapshotBindsTheGameModeSessionWithoutStartingAnyService",
@@ -1311,6 +1422,8 @@ TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
     "TheModeDecisionComesOnlyFromTheTypedRecords",
     "AKeptReadinessAnswerFollowsAnInPlaceEditOfThePackageRecord",
     "AStalledBusCostsOneReadinessBudgetPerAppListAndIsNeverHealth",
+    "AUserUnitIsReadFromTheBoundUserManagerWithoutLoadingIt",
+    "AUserUnitIsStillReadWhenTheManagersCgroupListsAV1Hierarchy",
     "RegisteredCasesAreFrozen",
   };
   std::set<std::string> registered;

@@ -535,6 +535,8 @@ namespace proc {
     std::chrono::milliseconds elapsed {};
     std::vector<pid_t> sigterm;  ///< every pid it sent SIGTERM
     std::vector<pid_t> sigkill;  ///< every pid it sent SIGKILL
+    std::optional<pid_t> mount_first;  ///< the one pid of the mount it sent SIGTERM first
+    std::vector<pid_t> mount_rest;  ///< the pids of the mount it sent SIGTERM after that wait
   };
 
   /**
@@ -544,6 +546,7 @@ namespace proc {
    * @param timing_divisor Every wait of the phase is divided by it.
    * @param request_close Stands in for the X close request: it is given the test for a host pid
    *        whose window would be asked, and returns how many it asked.
+   * @param held_image The retained AppImage whose mount is held out, as for an Epic private session.
    */
   private_app_stop_test_result_t stop_private_session_apps_for_tests(
     std::string_view session_instance_id,
@@ -551,7 +554,8 @@ namespace proc {
     const std::filesystem::path &runtime_dir,
     bool immediate,
     int timing_divisor,
-    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close
+    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close,
+    const std::optional<std::filesystem::path> &held_image = std::nullopt
   );
   bool steam_launch_cmdline_matches_appid_for_tests(
     std::string_view cmdline,
@@ -604,6 +608,32 @@ namespace proc {
   );
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id);
   bool terminate_exact_generation_processes_for_tests(std::string_view session_instance_id, std::chrono::milliseconds graceful_timeout);
+  // The exact sweep with an Epic private session's cgroup fence (#582), and that fence for this process.
+  bool terminate_fenced_exact_generation_processes_for_tests(
+    std::string_view session_instance_id,
+    const std::optional<std::string> &session_cgroup
+  );
+  std::string epic_private_session_cgroup_for_tests();
+  std::string epic_private_startup_command_for_tests(const std::filesystem::path &launcher, const epic_library::installation_t &title,
+    const std::string &game_cmd, bool appimage_under_isolation, const std::function<std::string(const std::string &)> &isolate);
+
+  /// What one exact sweep returned, and what its report counted.
+  struct exact_generation_sweep_test_result_t {
+    bool complete = false;  ///< the sweep's own result
+    bool capture_complete = false;
+    bool sandboxes_remained = false;
+    int outside_session_cgroup = 0;  ///< token bearers it left running outside the fence, each once
+  };
+
+  /// The exact sweep, fenced on @p session_cgroup if it has one (#582), with @p session_member_pid
+  /// counted inside that fence and @p recorded_flatpak_sandboxes taken as the bwraps of a live
+  /// Flatpak instance.
+  exact_generation_sweep_test_result_t exact_generation_sweep_for_tests(
+    std::string_view session_instance_id,
+    const std::optional<std::string> &session_cgroup,
+    pid_t session_member_pid = -1,
+    const std::set<pid_t> &recorded_flatpak_sandboxes = {}
+  );
   bool exact_generation_transient_capture_failure_retries_for_tests(
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid
@@ -1122,6 +1152,8 @@ namespace proc {
     // Called only by the authenticated host web console. No paired-client mutation route.
     std::pair<int, nlohmann::json> epic_session_control(const std::string &action = {},
       const std::string &session_id = {}, const std::string &revision = {}, bool confirmed = false);
+    // Best-effort, in-memory original-file proof from authenticated official-provider discovery.
+    void remember_epic_launcher();
     std::pair<int, nlohmann::json> desktop_steam_control(const std::string &unique_id, bool can_launch,
       const std::string &action = {}, const std::string &revision = {}, bool confirm_game_quit = false);
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
@@ -1424,6 +1456,14 @@ namespace proc {
     std::optional<epic_library::installation_t> _epic_title;
     std::unique_ptr<platf::epic::adopted_game_t> _epic_grant;
     std::string _epic_grant_revision;
+    std::optional<platf::epic::launcher_proof_t> _epic_launcher_proof;
+    std::optional<platf::epic::private_session_t> _epic_private_session;
+    std::uint64_t _epic_private_request_ticks = 0;
+    std::uint64_t _epic_private_birth_upper_ticks = 0;
+    bool _epic_private_requested = false;
+    bool _epic_private_grant_retired = false;
+    std::optional<std::filesystem::path> _epic_private_held_image;
+    platf::epic::observation_t retain_epic_private_game(); // Caller holds the lifecycle mutex.
     std::vector<pidfd_handle_t> _detached_child_pidfds;
     bool _detached_child_authority_complete = true;
     bool _session_used_cage_compositor = false;

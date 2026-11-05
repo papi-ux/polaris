@@ -32,7 +32,7 @@ const defaults = {
   headless_mode: 'disabled',
   linux_use_cage_compositor: 'disabled',
   linux_prefer_gpu_native_capture: 'disabled',
-  adaptive_bitrate_enabled: 'disabled',
+  adaptive_bitrate_enabled: 'enabled',
   ai_enabled: 'disabled',
   stream_audio: 'enabled',
   enable_discovery: 'enabled',

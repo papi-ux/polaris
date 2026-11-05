@@ -237,7 +237,8 @@ namespace prelaunch::steamos {
    * graphical-session.target that does not contain it. An unwalked or oversized closure is unproven.
    */
   verdict_t polaris_independent_of_session(const snapshot_t &snapshot);
-  /// The path of a cgroup v2 /proc/<pid>/cgroup text ("0::<path>", one line), or empty.
+  /// The path of the one "0::<path>" line of a /proc/<pid>/cgroup text, or empty. Other well-formed
+  /// v1 hierarchy lines are ignored; a malformed line, or one naming name=systemd, leaves it empty.
   std::string cgroup_v2_path(std::string_view cgroup);
   /// The system bus's logind: systemd-logind.service in the system slice.
   bool cgroup_is_logind(std::string_view cgroup);

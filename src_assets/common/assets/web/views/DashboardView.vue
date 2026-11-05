@@ -303,6 +303,13 @@
                 Troubleshoot
               </router-link>
             </div>
+            <div v-if="encoderFallback" class="dashboard-degraded-state" data-dashboard-encoder-fallback>
+              <div class="min-w-0">
+                <div class="text-sm font-semibold text-warning-bright">{{ encoderFallback.title }}</div>
+                <div class="mt-1 text-sm leading-relaxed text-support">{{ encoderFallback.action }}</div>
+              </div>
+              <router-link to="/troubleshooting" class="focus-ring dashboard-degraded-action">{{ $t('navbar.troubleshoot') }}</router-link>
+            </div>
           </template>
 
           <!-- One disclosure for the dense detail; opening it is the viewer's choice and survives updates. -->
@@ -362,6 +369,7 @@
                   <div v-for="row in gpuRows" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ row.value }}</dd></div>
                 </dl>
                 <p v-else class="text-sm text-support">Host telemetry is warming up. GPU temperature, encoder load, and VRAM gauges will appear after the host reports system stats.</p>
+                <p v-if="encoderFallback" class="mt-2 text-sm text-warning-bright" data-dashboard-encoder-fallback>{{ encoderFallback.title }} {{ encoderFallback.action }}</p>
               </section>
 
               <section v-if="stageMode === 'idle' || stageMode === 'spaces' || stageMode === 'unavailable'" class="mc-diag-wide min-w-0">
@@ -481,6 +489,7 @@
 
 <script setup>
 import { ref, shallowRef, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
+import { sourceLabel } from '../library-source-names'
 import { useLiveTuning } from '../composables/useLiveTuning'
 import { useStreamStats } from '../composables/useStreamStats'
 import { useSystemStats } from '../composables/useSystemStats'
@@ -510,6 +519,7 @@ import { frameIntervalReadout } from '../stream-pacing-readout.js'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { doctorIsWaitingForStream } from '../doctor-observation.js'
+import { nvencCpuFallbackNotice } from '../encoder-fallback-notice.js'
 import { buildReadyCheckDisplay, isIdleVirtualDisplayCheck } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import { readConfigOrNull } from '../config-cache.js'
@@ -1507,14 +1517,16 @@ async function launchRecentApp(app) {
       method: 'POST',
       body: JSON.stringify({ uuid: app.uuid }),
     })
-    const result = response.ok ? await response.json() : { status: false, error: `HTTP ${response.status}` }
-    if (result.status === true) {
+    let result
+    try { result = await response.json() } catch { /* A proxy/auth failure may have no JSON body. */ }
+    if (response.ok && result?.status === true) {
       showToast(t('dashboard.launched', { name: app.name }), 'success')
       // The stage moves once, to the title that just launched.
       selectedFeaturedUuid.value = ''
       refreshApps()
     } else {
-      showToast(t('dashboard.launch_failed') + (result.error || ''), 'error')
+      const message = typeof result?.error === 'string' && result.error ? result.error : `HTTP ${response.status}`
+      showToast(t('dashboard.launch_failed') + message, 'error')
     }
   } catch (e) {
     showToast(t('dashboard.launch_failed') + e.message, 'error')
@@ -1737,6 +1749,9 @@ const stageMode = computed(() => missionStageMode({
   streaming: Boolean(stats.value?.streaming),
   spacesActive: dashboardSpaces.value.hasActivity,
 }))
+// The host's completed encoder probe, from a current report only: the unavailable stage shows no old values.
+const encoderFallback = computed(() => (stageMode.value === 'idle' || stageMode.value === 'live')
+  ? nvencCpuFallbackNotice(doctor.value?.advanced_evidence?.encoder_selection, t) : null)
 
 // ── Director greeting ──
 const activeTheme = ref(typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') || 'polaris' : 'polaris')
@@ -2006,7 +2021,7 @@ const stageView = computed(() => {
       timecode: '',
       kicker: t('mission_control.now_streaming'),
       title: currentAppName.value || liveSessionTitle.value,
-      meta: [app?.source && app.source !== 'manual' ? app.source : '', runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '', viewerCountLabel.value],
+      meta: [app?.source && app.source !== 'manual' ? sourceLabel(app.source) : '', runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '', viewerCountLabel.value],
       note: showPreview.value ? '' : (artSrc ? t('mission_control.art_note') : t('mission_control.capture_note')),
       noteTone: '', artSrc, heroSrc: appArtworkSrc(app, 'hero'), logoSrc: appArtworkSrc(app, 'logo'),
     }
@@ -2018,7 +2033,7 @@ const stageView = computed(() => {
     timecode: '',
     kicker: featured ? (featured.chosen || featured.launchedAt ? t('mission_control.next_up') : t('mission_control.from_library')) : t('dashboard.stream_readiness'),
     title: featured ? featured.app.name : t('dashboard.no_games'),
-    meta: featured ? [featured.app.source && featured.app.source !== 'manual' ? featured.app.source : '',
+    meta: featured ? [featured.app.source && featured.app.source !== 'manual' ? sourceLabel(featured.app.source) : '',
       featured.launchedAt ? t('mission_control.last_launched', { when: relativeDay(featured.launchedAt, nowMs.value) }) : ''] : [],
     note: idleNote.value,
     noteTone: display.attention > 0 ? 'text-warning-bright' : '',

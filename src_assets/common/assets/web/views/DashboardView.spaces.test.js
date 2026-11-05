@@ -4,6 +4,8 @@ import { createI18n } from 'vue-i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import DashboardView from './DashboardView.vue'
+import Toast from '../components/Toast.vue'
+import { useToast } from '../composables/useToast.js'
 import { followClientLink, initClientEmbed } from '../client-embed.js'
 
 const shared = vi.hoisted(() => ({ stats: null, gpu: null, connected: undefined, receivedAt: undefined }))
@@ -21,7 +23,7 @@ const snapshot = extra => ({ enabled: true, available: true, changing: false, fa
   profiles: [{ id: 'a', name: 'Gaming Space', clients: ['device'], family: 'steam' }], activity: [], ...extra })
 const active = state => snapshot({ activity: [{ profile_id: 'a', client_id: 'device', state }] })
 const reply = data => ({ ok: true, json: async () => data })
-let wrapper, spaces, platform, appPayload, pairedCerts
+let wrapper, toastWrapper, spaces, platform, appPayload, pairedCerts
 beforeEach(() => {
   vi.useFakeTimers()
   shared.stats = ref(null)
@@ -41,7 +43,11 @@ beforeEach(() => {
     return reply([])
   }))
 })
-afterEach(() => { wrapper?.unmount(); wrapper = null; vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers() })
+afterEach(() => {
+  wrapper?.unmount(); wrapper = null; toastWrapper?.unmount(); toastWrapper = null
+  useToast().toasts.value = []
+  vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers()
+})
 async function render(streaming = true, { attach = false, dialogs = false, stats = {} } = {}) {
   const i18n = createI18n({ legacy: false, locale: 'en', messages: { en: messages } })
   wrapper = mount(DashboardView, { attachTo: attach ? document.body : undefined, global: { plugins: [i18n], provide: { i18n: i18n.global },
@@ -57,6 +63,38 @@ async function render(streaming = true, { attach = false, dialogs = false, stats
 const spaceReads = () => fetch.mock.calls.filter(([url]) => url === './api/multiseat/profiles')
 
 describe('Mission Control with Space sessions', () => {
+  it.each([
+    [400, 'Orca (an AppImage) is running; quit it to use Private Stream.'],
+    [503, 'Orca (an AppImage) is running; quit it to use Private Stream.'],
+    [503, 'Another AppImage app is running on the host.'],
+    [401, 'Sign in to launch an app.'],
+    [400, '<img src=x onerror=alert(1)> & "Orca"'],
+  ])('renders the actual console launch refusal as escaped alert text for HTTP %s', async (status, message) => {
+    appPayload = { apps: [{ uuid: 'epic', name: 'Epic game', source: 'epic_launcher' }], current_app: '' }
+    await render(false)
+    toastWrapper = mount(Toast, { attachTo: document.body })
+    fetch.mockResolvedValueOnce({ ok: false, status, json: async () => ({ status: false, error: message, error_code: 'epic_other_appimage_running' }) })
+    await wrapper.get('[data-dashboard-launch-app="epic"]').trigger('click')
+    await flushPromises()
+    const alert = document.body.querySelector('[role="alert"]')
+    expect(alert?.textContent).toContain(message)
+    expect(alert?.querySelector('img')).toBeNull()
+    expect(alert?.querySelector('button')?.getAttribute('aria-label')).toBe('Dismiss notification')
+    expect(fetch.mock.calls.filter(([url]) => url === './api/apps/launch')).toHaveLength(1)
+    expect(fetch.mock.calls.filter(([url]) => url === './api/epic/session')).toHaveLength(0)
+  })
+
+  it('keeps an honest HTTP fallback for a non-JSON launch failure and allows a fresh attempt', async () => {
+    appPayload = { apps: [{ uuid: 'epic', name: 'Epic game', source: 'epic_launcher' }], current_app: '' }
+    await render(false)
+    toastWrapper = mount(Toast, { attachTo: document.body })
+    fetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => { throw new Error('not JSON') } })
+    await wrapper.get('[data-dashboard-launch-app="epic"]').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain('HTTP 503')
+    expect(wrapper.get('[data-dashboard-launch-app="epic"]').attributes('disabled')).toBeUndefined()
+  })
+
   it('does not load or poll Epic controls for idle or other-provider sessions', async () => {
     appPayload = { apps: [{ uuid: 'game', name: 'Control', source: 'steam', cmd: 'game' }], current_app: 'game' }
     await render()
@@ -73,6 +111,9 @@ describe('Mission Control with Space sessions', () => {
     await vi.waitFor(() => {
       expect(fetch.mock.calls.some(([url]) => url === './api/epic/session')).toBe(true)
     }, { timeout: 2000, interval: 20 })
+    // The stage names the source as the Library does, while live and while featured.
+    expect(wrapper.text()).toContain('Epic')
+    expect(wrapper.text()).not.toContain('epic_launcher')
   })
 
   it('puts idle launches before collapsible vitals, preserving zero and unknown readings', async () => {

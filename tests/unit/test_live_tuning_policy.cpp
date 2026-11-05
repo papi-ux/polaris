@@ -3,7 +3,8 @@
  * @brief Replays of Live Tuning's loss and queue policy against its replay bench.
  *
  * The golden replays come from tools/tests/live_tuning_policy_reference.py. The scenario tests below say what
- * each replay is for, and the statistical ones run seeds the reference never saw.
+ * each replay is for, and the statistical ones run seeds the reference never saw. The RP6 replays read the client
+ * reports two loss runs recorded on 2026-10-29, from tests/fixtures.
  */
 
 #include "src/live_tuning_policy.h"
@@ -18,10 +19,12 @@
 #include <functional>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1594,4 +1597,560 @@ TEST(LiveTuningPolicyNative, RefusesWrongCurrentFloorUpwardAndExistingLossFamily
   const auto ceiling = policy.ceiling_kbps();
   EXPECT_FALSE(policy.native_downward(2, 18000, 15300));
   EXPECT_EQ(policy.target_kbps(), 18000); EXPECT_EQ(policy.ceiling_kbps(), ceiling);
+}
+
+namespace {
+
+  constexpr int RP6_BASE = 25987;
+
+  struct recorded_report_t {
+    std::int64_t at_ms;  ///< arrival, from the loss rule's install
+    double expected;
+    double lost;
+  };
+
+  /// A recorded RP6 run from tests/fixtures: every client media interval the host accepted, and its frames.
+  std::vector<recorded_report_t> rp6_trace(const std::string &name) {
+    std::ifstream input(std::filesystem::path(POLARIS_SOURCE_DIR) / "tests/fixtures" / name);
+    std::vector<recorded_report_t> reports;
+    for (std::string line; std::getline(input, line);) {
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
+      std::istringstream fields(line);
+      recorded_report_t report {};
+      fields >> report.at_ms >> report.expected >> report.lost;
+      reports.push_back(report);
+    }
+    return reports;
+  }
+
+  struct replayed_t {
+    std::vector<std::pair<std::int64_t, int>> targets;  ///< every 100 ms
+    std::vector<std::pair<std::int64_t, int>> changes;
+    int last = 0;  ///< after the final report replayed
+    live_tuning_policy::state_e state = live_tuning_policy::state_e::normal;  ///< likewise
+    std::optional<int> ceiling;
+    bool ceiling_is_queue = false;
+  };
+
+  /// Open loop: each recorded report at its arrival, and the run's 3 ms ENet RTT every 100 ms, up to and including
+  /// the report at until_ms if given.
+  replayed_t replay_rp6(const std::vector<recorded_report_t> &reports, std::optional<std::int64_t> until_ms = std::nullopt) {
+    live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+    replayed_t out;
+    std::size_t next = 0;
+    int last = policy.target_kbps();
+    const std::int64_t first = reports.front().at_ms - 1000;
+    for (std::int64_t now = first; now <= until_ms.value_or(reports.back().at_ms); ++now) {
+      const bool poll = (now - first) % 100 == 0;
+      if (poll) {
+        policy.rtt(now, 3.0);
+      }
+      for (; next < reports.size() && reports[next].at_ms == now; ++next) {
+        policy.report(now, reports[next].expected, reports[next].lost);
+      }
+      if (policy.target_kbps() != last) {
+        last = policy.target_kbps();
+        out.changes.emplace_back(now, last);
+      }
+      if (poll) {
+        out.targets.emplace_back(now, last);
+      }
+    }
+    out.last = last;
+    out.state = policy.state();
+    out.ceiling = policy.ceiling_kbps();
+    out.ceiling_is_queue = policy.ceiling_is_queue();
+    return out;
+  }
+
+  /// A second at a time from t=0: the share of the frames (124, the RP6's, unless given) each rate loses, carried so it
+  /// loses exactly that, in a report at 500 ms, and a 3 ms RTT every 100 ms. Returns the target each second.
+  std::vector<int> run_rp6(int seconds, const std::function<double(int second, int target)> &share,
+                           live_tuning_policy::policy_t &policy, double frames = 124.0) {
+    std::vector<int> targets;
+    double carry = 0.0;
+    for (int i = 0; i < seconds; ++i) {
+      const std::int64_t t0 = std::int64_t {i} * 1000;
+      const double owed = frames * share(i, policy.target_kbps()) + carry;
+      const double lost = std::floor(owed);
+      carry = owed - lost;
+      for (int k = 0; k < 10; ++k) {
+        if (k == 5) {
+          policy.report(t0 + 500, frames, lost);
+        }
+        policy.rtt(t0 + 100 * k + 50, 3.0);
+      }
+      targets.push_back(policy.target_kbps());
+    }
+    return targets;
+  }
+
+}  // namespace
+
+TEST(LiveTuningPolicyReplays, Rp6PacerOffLossKeepsTheRequestAfterOneDeepSample) {
+  // 26CE arm B, Live Tuning on with the pacer off, under 1 in 50 skbs dropped: the device took the floor at +6.2 s on
+  // one deep-sample report (18 of 126 frames) and stayed under half its request until +49.4 s. Its loss does not
+  // depend on the rate, and arm A's reports are the same loss at the request with Live Tuning off.
+  for (const std::string name : {"live-tuning-rp6-26ce-arm-b.txt", "live-tuning-rp6-26ce-arm-a.txt"}) {
+    SCOPED_TRACE(name);
+    const auto replayed = replay_rp6(rp6_trace(name));
+    int at_floor = 0;
+    int below_half = 0;
+    std::optional<int> at_10s;
+    for (const auto &[at, kbps] : replayed.targets) {
+      at_floor += kbps <= FLOOR;
+      below_half += at >= 0 && at < 180000 && kbps < RP6_BASE / 2.0;
+      if (!at_10s && at >= 10000) {
+        at_10s = kbps;
+      }
+    }
+    EXPECT_EQ(at_floor, 0);
+    // No more than 1% of the bench's 400 s run below half.
+    EXPECT_LE(below_half, 40);
+    if (name.find("arm-b") != std::string::npos) {
+      // The device was back at its request only at +49.4 s.
+      EXPECT_EQ(at_10s, RP6_BASE);
+    }
+  }
+}
+
+TEST(LiveTuningPolicyReplays, Rp6PacerOnLossDoesNotTakeItsDeepSampleToTheFloor) {
+  // B464 arm D, Live Tuning on with the pacer on: the loss grows with the rate, so a recorded report holds only at the
+  // rate it was recorded at. The replay makes the device's first two decisions on the same reports, then its deep
+  // sample at 4000 kbps (55 of 741 frames, 7.4%, against 12.7% at 15592 and 17.6% at the request) must lead neither
+  // to the floor, where the device went, nor back to the request. The replay stops at that decision, +12.55 s: it is
+  // the last on reports recorded at the rate the policy chose, and later behaviour is the pacer-on wire model's.
+  constexpr std::int64_t deep_decision_ms = 12549;
+  const auto reports = rp6_trace("live-tuning-rp6-b464-arm-d.txt");
+  ASSERT_TRUE(std::any_of(reports.begin(), reports.end(), [](const recorded_report_t &r) {
+    return r.at_ms == deep_decision_ms;
+  }));
+  const auto replayed = replay_rp6(reports, deep_decision_ms);
+  ASSERT_GE(replayed.changes.size(), 2u);
+  EXPECT_EQ(replayed.changes[0].second, 15592);
+  EXPECT_NEAR(static_cast<double>(replayed.changes[0].first), 1510.0, 50.0);
+  EXPECT_EQ(replayed.changes[1].second, 4000);
+  EXPECT_NEAR(static_cast<double>(replayed.changes[1].first), 5540.0, 50.0);
+  // It holds the deep sample, under the first step's rate, which lost significantly more.
+  EXPECT_EQ(replayed.changes.size(), 2u);
+  EXPECT_EQ(replayed.last, 4000);
+  EXPECT_EQ(replayed.state, live_tuning_policy::state_e::hold);
+  EXPECT_EQ(replayed.ceiling, 15592);
+  EXPECT_FALSE(replayed.ceiling_is_queue);
+}
+
+TEST(LiveTuningPolicy, LossThatFallsWithTheRateStaysUnderTheRatesThatLostMore) {
+  // Arm D's loss by rate, from its reports: 17.6% at its request, 12.7% at 15592, 7.4% at 4000 and about 5% at the
+  // floor. A rate-independent result there jumps back to the request, which lost the most.
+  const auto share = [](int second, int kbps) {
+    if (second < 30) {
+      return 0.0;
+    }
+    return kbps >= 20000 ? 0.176 : kbps >= 10000 ? 0.127 : kbps > 2500 ? 0.0742 : 0.05;
+  };
+  live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+  const auto targets = run_rp6(210, share, policy);
+  const auto cut = std::find_if(targets.begin(), targets.end(), [](int t) {
+    return t < RP6_BASE;
+  });
+  ASSERT_NE(cut, targets.end());
+  EXPECT_EQ(std::count(cut, targets.end(), RP6_BASE), 0);
+  EXPECT_EQ(std::count_if(targets.begin(), targets.end(), [](int t) {
+    return t <= FLOOR;
+  }), 0);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, ABackgroundLearnedUnderLossIsJudgedOnTheReportsAfterIt) {
+  // 6% lost at every rate from second 30. The 30 clean reports before it are not evidence that it has gone.
+  live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+  double lowest = 1.0;
+  bool learned = false;
+  run_rp6(400, [&](int second, int) {
+    learned = learned || policy.background_loss() > 0.0;
+    if (learned) {
+      lowest = std::min(lowest, policy.background_loss());
+    }
+    return second < 30 ? 0.0 : 0.06;
+  }, policy);
+  ASSERT_TRUE(learned);
+  EXPECT_GE(lowest, 0.055);
+  EXPECT_EQ(policy.target_kbps(), RP6_BASE);
+}
+
+TEST(LiveTuningPolicy, ANearFloorProbeSamplesTheFloorBeforeItJudgesHeavyLoss) {
+  // #575 review: 3000 kbps over a 2200 kbps link that loses 96 of 120 frames above it, with the floor at 2000. The first
+  // step stopped a climb step above the floor, at 2500, had no room for a deep sample under it, and judged the 80% there
+  // rate-independent: back to 3000, losing it as background. A fresh first step lands on the floor, as at 457eeef9.
+  {
+    live_tuning_policy::policy_t policy {3000, FLOOR};
+    const auto targets = run_rp6(300, [](int second, int kbps) {
+      return second >= 30 && kbps > 2200 ? 0.8 : 0.0;
+    }, policy, 120.0);
+    EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_EQ(policy.target_kbps(), 2103);
+    EXPECT_EQ(policy.ceiling_kbps(), 2213);
+    EXPECT_EQ(policy.background_loss(), 0.0);
+  }
+  // Later in an episode the link falls under a settled hold: the request settles under a 3000 kbps link, which falls to
+  // 2200 at 150 s. The hold at 2981 had been clean, so its 80% is a new link: what the episode measured before no
+  // longer counts, the descent takes the floor at once, and the bisect from 2981 settles under 2200. The floor, the
+  // hold and no learned background are the point; the two rates are where that bisect lands. Judged at 2500 on the
+  // earlier measurements, the loss once sent the stream back to its request with 80% learned as background.
+  {
+    live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+    const auto targets = run_rp6(300, [](int second, int kbps) {
+      return second >= 30 && kbps > (second < 150 ? 3000 : 2200) ? 0.8 : 0.0;
+    }, policy);
+    EXPECT_EQ(*std::min_element(targets.begin() + 150, targets.end()), FLOOR);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_EQ(policy.target_kbps(), 2101);
+    EXPECT_EQ(policy.ceiling_kbps(), 2209);
+    EXPECT_EQ(policy.background_loss(), 0.0);
+  }
+}
+
+TEST(LiveTuningPolicy, AHalvingThatTruncatesOntoTheFloorStopsAboveItFirst) {
+  // #575 review: the floor step was judged before truncation, so 2000.5 kbps passed as above the floor and became it.
+  // From a 32008 kbps request the deep sample is 4001, and heavy loss there halves it to 2000.5; from 32016, to 2001.
+  const auto share = [](int second, int kbps) {
+    return second < 30 ? 0.0 : kbps > 10000 ? 0.5 : kbps > 2500 ? 0.4 : 0.0;
+  };
+  for (const auto &[request, deep, halved] : std::vector<std::tuple<int, int, int>> {{32008, 4001, 2500}, {32016, 4002, 2001}}) {
+    SCOPED_TRACE(request);
+    live_tuning_policy::policy_t policy {request, FLOOR};
+    auto targets = run_rp6(40, share, policy);
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+    ASSERT_GE(targets.size(), 4u);
+    EXPECT_EQ(targets[2], deep);
+    EXPECT_EQ(targets[3], halved);
+  }
+  // A fresh first step from 3334 kbps, 2000.4, still lands on the floor: nothing above it has been measured, as at
+  // 457eeef9, where a request this close to its floor always stepped onto it.
+  live_tuning_policy::policy_t policy {3334, FLOOR};
+  auto targets = run_rp6(40, [](int second, int) {
+    return second < 30 ? 0.0 : 0.05;
+  }, policy, 120.0);
+  targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+  ASSERT_GE(targets.size(), 2u);
+  EXPECT_EQ(targets[1], FLOOR);
+}
+
+TEST(LiveTuningPolicy, HalvingStopsWhereItNoLongerLightensTheLoss) {
+  // From #575's review: half the frames lost from 100000 kbps up, 32% from 30000 and 20.5% under it. The deep sample
+  // at 33623 halves on to 16811 and 8405, and 8405 loses no less than 16811: under 16811 the loss does not depend on
+  // the rate, and the stream holds there, under the rates that lost more, rather than halving on towards the floor.
+  live_tuning_policy::policy_t policy {BASE, FLOOR};
+  const auto targets = run(40, [](int i, int target) {
+    const double share = target >= 100000 ? 0.5 : target >= 30000 ? 0.32 : 0.205;
+    return std::pair<double, double> {1200, i < 30 ? 0.0 : 1200 * share};
+  }, {}, {}, &policy);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), 8405);
+  EXPECT_EQ(policy.target_kbps(), 8405);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_EQ(policy.ceiling_kbps(), 16811);
+  EXPECT_FALSE(policy.ceiling_is_queue());
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, AHoldNoBetterThanTheRateAboveSettlesUnderTheRatesThatLostMore) {
+  // 18% lost above 12000 kbps, 7.5% down to 6000 and 5% under it. The search holds 11096 under 11577, which retried
+  // lossy, and at 91 s the hold's twelve reports are no better than 11577's: rate-independent, once a jump back to the
+  // request, where the episode had measured 18%. The rates above lost more, so the stream settles there again: the
+  // same hold and ceiling, its retry wait started afresh, and no background learned.
+  live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+  const auto targets = run_rp6(111, [](int second, int kbps) {
+    return second < 30 ? 0.0 : kbps > 12000 ? 0.18 : kbps > 6000 ? 0.075 : 0.05;
+  }, policy);
+  EXPECT_EQ(targets[78], 11096);
+  // Without the settlement the hold would retry 11577 at 99 s, twenty reports after it began.
+  EXPECT_TRUE(std::all_of(targets.begin() + 78, targets.end(), [](int t) {
+    return t == 11096;
+  }));
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_EQ(policy.ceiling_kbps(), 11577);
+  EXPECT_FALSE(policy.ceiling_is_queue());
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, ANoRoomHeavySampleDoesNotReplaceAUsableHoldWithAPersistentlyLossyOne) {
+  // #575 review 2: 5400 kbps over a tail drop at 2025 kbps (and at 2000), losing 1 - link/rate of the frames over it,
+  // with the floor clean. The first step's 37.5% had no room for a deep sample, so the probe sampled as far as it
+  // may, the stop at 2500 over the floor. That lost 19%, much less, and was judged helped: 2500 became the hold's
+  // lower bound at 19-21% for the whole run, and the floor under it was never tried. Its helped sample, still losing
+  // clearly over 10%, takes the floor at once, at 41 s, not twelve hold reports later.
+  for (const int link : {2025, 2000}) {
+    SCOPED_TRACE(link);
+    live_tuning_policy::policy_t policy {5400, FLOOR};
+    double lost = 0;  // seconds 100-299, to within the carried fraction of a frame
+    const auto targets = run_rp6(2000, [&](int second, int kbps) {
+      const double share = second < 30 ? 0.0 : std::max(0.0, 1.0 - static_cast<double>(link) / kbps);
+      if (second >= 100 && second < 300) {
+        lost += 120.0 * share;
+      }
+      return share;
+    }, policy, 120.0);
+    EXPECT_EQ(*std::min_element(targets.begin(), targets.begin() + 45), FLOOR);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+    EXPECT_LE(policy.target_kbps(), link * 1.06);
+    EXPECT_LE(lost, 0.05 * 24000);
+    EXPECT_EQ(policy.background_loss(), 0.0);
+  }
+}
+
+TEST(LiveTuningPolicy, HeavyLossAtTheRequestDoesNotLearnAnUntestedCleanFloorAsBackground) {
+  // #575 review 2: 8000 kbps losing 42 of 120 frames above a 2200 kbps link, 35% at every rate the probe tried. The
+  // deep sample's one report at 4000 was no lighter than the first step's and not clearly over 20% on its own, so the
+  // loss was learned as background and the stream stayed at its request, losing 35%, with the floor clean. 457eeef9
+  // took the floor and held 2180.
+  live_tuning_policy::policy_t policy {8000, FLOOR};
+  double lost = 0;  // seconds 100-299
+  const auto targets = run_rp6(2000, [&](int second, int kbps) {
+    const double share = second >= 30 && kbps > 2200 ? 0.35 : 0.0;
+    if (second >= 100 && second < 300) {
+      lost += 120.0 * share;
+    }
+    return share;
+  }, policy, 120.0);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_LE(policy.target_kbps(), 2200 * 1.06);
+  EXPECT_LE(lost, 0.05 * 24000);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, AHoldByTheFloorThatKeepsLosingHeavilySamplesTheFloor) {
+  // 6500 kbps over a tail drop at the floor. The first step's sample at 2500, the stop over the floor, helped but
+  // still lost 20% on too few frames to call that more than background, and became the hold's lower bound: the stream
+  // held about 2640, losing 21%, over a clean floor. Twelve reports of the hold losing clearly over 10% sample it.
+  live_tuning_policy::policy_t policy {6500, FLOOR};
+  double lost = 0;  // seconds 100-299
+  const auto targets = run_rp6(300, [&](int second, int kbps) {
+    const double share = second < 30 ? 0.0 : std::max(0.0, 1.0 - static_cast<double>(FLOOR) / kbps);
+    if (second >= 100) {
+      lost += 120.0 * share;
+    }
+    return share;
+  }, policy, 120.0);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_LE(policy.target_kbps(), FLOOR * 1.06);
+  EXPECT_LE(lost, 0.01 * 24000);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, WhatBackgroundCostsByTheFloorDoesNotTakeTheStreamThere) {
+  // 9% lost at and under 2400 kbps, what background under 3% on the wire costs this close to the floor, and 17% above
+  // it. The first step from 4000 to 2400 helps after four reports, and its hold keeps losing 9%, but no more than the
+  // floor would: it holds there, retrying 2477, and never samples the floor. Loss clearly over 10% there would.
+  live_tuning_policy::policy_t policy {4000, FLOOR};
+  const auto targets = run_rp6(300, [](int second, int kbps) {
+    return second < 30 ? 0.0 : kbps > 2400 ? 0.17 : 0.09;
+  }, policy, 120.0);
+  EXPECT_GT(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_TRUE(std::all_of(targets.begin() + 60, targets.end(), [](int t) {
+    return t == 2400 || t == 2477;
+  }));
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, HeavyLossInShortReportsIsNotLearnedBeforeTheFloorEither) {
+  // 30 frames a report, 35% of them lost above a 2100 kbps link. Every rate the probe tries loses 35%, but on so few
+  // frames that the loss is not clearly over 20%: it must still not be learned as background before the floor has
+  // been sampled. 457eeef9 learned it too and stayed at its request.
+  live_tuning_policy::policy_t policy {3800, FLOOR};
+  const auto targets = run_rp6(300, [](int second, int kbps) {
+    return second >= 30 && kbps > 2100 ? 0.35 : 0.0;
+  }, policy, 30.0);
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), FLOOR);
+  EXPECT_EQ(policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_LE(policy.target_kbps(), 2100);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+namespace {
+
+  /// What one changing-link run leaves: its final state, the lowest target from a given second, and what the last 1200
+  /// reports lost.
+  struct link_change_run_t {
+    int final = 0;
+    int lowest_from = 0;
+    double background = 0.0;
+    double late_lost = 0.0;
+  };
+
+  /// A second at a time from t=0, as run_rp6() does, the share of each report's frames that the rate loses carried so
+  /// the report loses exactly that. Like the reviewers' search harness, the carry is rounded with 1e-10 of slack, so
+  /// these runs are that harness's rows exactly.
+  link_change_run_t run_link_change(
+    int request,
+    int floor,
+    double frames,
+    int seconds,
+    int lowest_from,
+    const std::function<double(int second, int target)> &share
+  ) {
+    live_tuning_policy::policy_t policy {request, floor};
+    link_change_run_t out;
+    out.lowest_from = request;
+    double carry = 0.0;
+    for (int second = 0; second < seconds; ++second) {
+      const double owed = frames * share(second, policy.target_kbps()) + carry;
+      const double lost = std::floor(owed + 1e-10);
+      carry = owed - lost;
+      for (int k = 0; k < 10; ++k) {
+        if (k == 5) {
+          policy.report(std::int64_t {second} * 1000 + 500, frames, lost);
+        }
+        policy.rtt(std::int64_t {second} * 1000 + 100 * k + 50, 3.0);
+      }
+      if (second >= lowest_from) {
+        out.lowest_from = std::min(out.lowest_from, policy.target_kbps());
+      }
+      if (second >= seconds - 1200) {
+        out.late_lost += lost;
+      }
+    }
+    out.final = policy.target_kbps();
+    out.background = policy.background_loss();
+    return out;
+  }
+
+  /// #575 review 3's link decline: 8000 kbps over a 5000 kbps floor, a 6320 kbps link that falls to the floor at the
+  /// given second, losing the share of the frames over it. 5630 s from the fall.
+  link_change_run_t link_decline(double frames, int decline) {
+    return run_link_change(8000, 5000, frames, decline + 5630, decline, [decline](int second, int target) {
+      const int link = second < decline ? 6320 : 5000;
+      return second < 30 ? 0.0 : std::max(0.0, 1.0 - static_cast<double>(link) / target);
+    });
+  }
+
+  /// #575 review 3's time-varying loss: the share of the frames over the link, its amplitude swinging from 0.35 to 1.65
+  /// times that over about 90 s, at most 90%, from 30 s. 6000 s.
+  link_change_run_t swinging_loss(int floor, int request, int link, double frames) {
+    return run_link_change(request, floor, frames, 6000, 0, [link](int second, int target) {
+      if (second < 30) {
+        return 0.0;
+      }
+      const double over = std::max(0.0, 1.0 - static_cast<double>(link) / target);
+      return std::min(0.9, over * (0.35 + 0.65 * (1.0 + std::sin(second * 0.07))));
+    });
+  }
+
+}  // namespace
+
+TEST(LiveTuningPolicy, AFloorSampleBeforeALinkDeclineDoesNotPreventANewSampleUnderHeavyLoss) {
+  // #575 review 3, 97 frames a report. The hold under 6320 had sampled the floor at 31 s. After the fall at 370 s its
+  // probe stopped a climb step over the floor, at 6250, which barely helps, and that and the samples from before the
+  // fall judged 20% rate-independent: back at 8000 with 20.6% learned, losing 37.5% for the rest of the run. A hold
+  // that was clean and now loses significantly more at the same rate is on a new link, and samples the floor again.
+  const auto run = link_decline(97, 370);
+  EXPECT_EQ(run.lowest_from, 5000);
+  EXPECT_LE(run.final, 5000 * 1.06);
+  EXPECT_EQ(run.background, 0.0);
+  EXPECT_LT(run.late_lost, 1200 * 97 * 0.05);
+}
+
+TEST(LiveTuningPolicy, AnOldFloorSampleDoesNotAuthorizeThe120FrameDeclineVerdict) {
+  // The same fall in 120-frame reports. The one report at 6250 loses exactly 20%, not over the heavy-loss line, and the
+  // floor sample from 31 s let it be learned: back at 8000 with 20% background.
+  const auto run = link_decline(120, 370);
+  EXPECT_EQ(run.lowest_from, 5000);
+  EXPECT_LE(run.final, 5300);
+  EXPECT_EQ(run.background, 0.0);
+  EXPECT_LT(run.late_lost, 1200 * 120 * 0.05);
+}
+
+TEST(LiveTuningPolicy, MoreOldCleanHistoryDoesNotOutvoteAFresh97FrameDecline) {
+  // The fall at 2370 s instead: 2000 s more of clean reports under 6320 before it, which pooled with the reports after
+  // it hid that the rates above now lose more.
+  const auto run = link_decline(97, 2370);
+  EXPECT_EQ(run.lowest_from, 5000);
+  EXPECT_LE(run.final, 5300);
+  EXPECT_EQ(run.background, 0.0);
+  EXPECT_LT(run.late_lost, 1200 * 97 * 0.05);
+}
+
+TEST(LiveTuningPolicy, ALossyHoldWhoseLossSwingsHigherKeepsItsEpisode) {
+  // Review 3's time-varying loss, 4750 kbps over a 1000 kbps link and floor in 13-frame reports. A hold that was
+  // already losing more than its background is not on a new link when its loss swings higher, and its episode's
+  // measurements stay. Starting the episode again there too learned 44% as background and stayed at the request, losing
+  // 65%.
+  const auto run = swinging_loss(1000, 4750, 1000, 13);
+  EXPECT_FALSE(run.final == 4750 && run.background >= 0.1);
+  EXPECT_LT(run.late_lost, 1200 * 13 * 0.05);
+}
+
+TEST(LiveTuningPolicy, ARestartedEpisodeKeepsTheHigherRatesThatLostMore) {
+  // 1900 kbps over a 1030 kbps link and a 1000 kbps floor, 61 frames a report, the same swinging loss. When a clean
+  // hold turns lossy, a higher rate that lost significantly more than it does now still bounds it: a worse link cannot
+  // make that rate better. Dropping those too learned 24% as background at the request.
+  const auto run = swinging_loss(1000, 1900, 1030, 61);
+  EXPECT_FALSE(run.final == 1900 && run.background >= 0.1);
+}
+
+TEST(LiveTuningPolicy, ARestartedEpisodeStartsFromTheHeldRate) {
+  // 2300 kbps over a 1140 kbps link and a 1000 kbps floor, 13 frames a report, the same swinging loss. A
+  // rate-independent result after a clean hold turned lossy goes back to that hold's rate, not to the request the
+  // earlier episode started from: going back there learned 32% as background at the request and lost about half the
+  // frames.
+  const auto run = swinging_loss(1000, 2300, 1140, 13);
+  EXPECT_FALSE(run.final == 2300 && run.background >= 0.1);
+}
+
+TEST(LiveTuningPolicy, StableRateIndependentBackgroundKeepsItsRequest) {
+  // 6% lost at every rate from 30 s: learned as background at the request, without a visit to the floor.
+  live_tuning_policy::policy_t policy {RP6_BASE, FLOOR};
+  int lowest = RP6_BASE;
+  for (int second = 0; second < 400; ++second) {
+    for (int k = 0; k < 10; ++k) {
+      if (k == 5) {
+        policy.report(std::int64_t {second} * 1000 + 500, 120, second < 30 ? 0 : 7.2);
+      }
+      policy.rtt(std::int64_t {second} * 1000 + 100 * k + 50, 3.0);
+    }
+    lowest = std::min(lowest, policy.target_kbps());
+  }
+  EXPECT_EQ(policy.target_kbps(), RP6_BASE);
+  EXPECT_GT(lowest, FLOOR);
+  EXPECT_GE(policy.background_loss(), 0.055);
+  EXPECT_LE(policy.background_loss(), 0.065);
+}
+
+TEST(LiveTuningPolicy, AdoptionMixedAndGapReportsDoNotBecomeADeteriorationRun) {
+  live_tuning_policy::policy_t policy {8000, 5000};
+  policy.adopt(0, 6500);
+  policy.report(500, 120, 120);  // The first report after an outside cut covers the old rate.
+  EXPECT_EQ(policy.target_kbps(), 6500);
+  policy.report(1500, 120, 0);
+  policy.report(10000, 120, 120);  // After a gap: nothing observed at the new rate.
+  EXPECT_EQ(policy.target_kbps(), 6500);
+  policy.report(11000, 120, 0);
+  EXPECT_EQ(policy.target_kbps(), 6500);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+  for (int second = 12; second < 100; ++second) {
+    policy.report(std::int64_t {second} * 1000, 120, 0);
+  }
+  EXPECT_EQ(policy.target_kbps(), 8000);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, ARebasedFloorClampSkipsThePreviousRatesReportAndRecovers) {
+  live_tuning_policy::policy_t policy {8000, 5000};
+  policy.adopt(0, 6000);
+  policy.report(500, 120, 0);
+  policy.report(1500, 120, 0);
+  policy.rebase(9000, 6500);  // Clamps the held rate up; the next report still covers 6000.
+  ASSERT_EQ(policy.target_kbps(), 6500);
+  policy.report(2500, 120, 120);
+  EXPECT_EQ(policy.target_kbps(), 6500);
+  EXPECT_EQ(policy.background_loss(), 0.0);
+  for (int second = 4; second < 100; ++second) {
+    policy.report(std::int64_t {second} * 1000, 120, 0);
+  }
+  EXPECT_EQ(policy.target_kbps(), 9000);
+  EXPECT_EQ(policy.background_loss(), 0.0);
 }

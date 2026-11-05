@@ -574,6 +574,76 @@ TEST(PrivateAppStopTests, ACloseRequestWaitsForWhatItAskedNotForTheSessionsHelpe
   EXPECT_EQ(session.count_of("sigkill_app"), 0u);
 }
 
+TEST(PrivateAppStopTests, ClassifyHoldsAnAppImagesRuntimeAndDaemonOutOfTheSession) {
+  // The stage's holder under its shell, the daemon the supervisor adopted, and the launcher whose
+  // task name is the same first 15 bytes, all carrying the token. Only argv[0] tells them apart.
+  const fsi::process_t supervisor {345544, 21200000};
+  const std::string image = "/fixture/My Desk/EpicGamesLauncher-x86_64.appimage";
+  std::vector<pas::process_facts_t> facts {
+    fact(982284, 1, 1000, "systemd", "HOME=/var/empty\0"s),
+    fact(3231794, 982284, 21100000, "polaris-kms", "HOME=/var/empty\0"s),
+    fact(345544, 3231794, 21200000, "polaris-kms", with_token()),
+    fact(345580, 345544, 21200010, "labwc", with_token()),
+    fact(346000, 345580, 21205000, "bash", with_token()),
+    fact(346010, 346000, 21205010, "EpicGamesLaunch", with_token()),  // the holder
+    fact(346020, 345544, 21205020, "EpicGamesLaunch", with_token()),  // the daemon, adopted
+    fact(346100, 346000, 21205030, "bwrap", with_token()),
+    fact(346200, 346100, 21205040, "EpicGamesLaunch", with_token()),  // the launcher, on the mount
+    fact(346300, 346200, 21205050, "EpicGamesLaunch", with_token()),  // the image's path as an argument
+    fact(700000, 982284, 21300000, "EpicGamesLaunch", "HOME=/var/empty\0"s),  // the same claim, on the desktop
+  };
+  facts[5].cmdline = image + "\0--appimage-mount\0"s;
+  facts[6].cmdline = image + "\0--appimage-mount\0"s;
+  facts[8].cmdline = "/tmp/.mount_EpicXXX/AppRun\0com.epicgames.launcher://x\0"s;
+  facts[9].cmdline = "/usr/bin/helper\0"s + image + "\0"s;
+  facts[10].cmdline = image + "\0--appimage-mount\0"s;
+
+  const auto held = pas::classify(facts, supervisor, token, {}, 1000, std::nullopt, image);
+  EXPECT_EQ(pids_of(held.held_appimage), (std::set<pid_t> {346010, 346020}));
+  EXPECT_EQ(pids_of(held.session), (std::set<pid_t> {346000, 346100, 346200, 346300}));
+
+  // Naming no image, or another one, changes nothing: both are ordinary processes of the session.
+  const std::set<pid_t> everything {346000, 346010, 346020, 346100, 346200, 346300};
+  const auto unnamed = pas::classify(facts, supervisor, token, {}, 1000);
+  EXPECT_TRUE(unnamed.held_appimage.empty());
+  EXPECT_EQ(pids_of(unnamed.session), everything);
+  const auto other = pas::classify(facts, supervisor, token, {}, 1000, std::nullopt, std::string_view {"/fixture/Other.appimage"});
+  EXPECT_TRUE(other.held_appimage.empty());
+  EXPECT_EQ(pids_of(other.session), everything);
+
+  // Token alone does not hold: with its lineage lost, the claimant is the session's by its token.
+  facts[6].parent = 982284;
+  const auto orphan = pas::classify(facts, supervisor, token, {}, 1000, std::nullopt, image);
+  EXPECT_EQ(pids_of(orphan.held_appimage), (std::set<pid_t> {346010}));
+  EXPECT_TRUE(pids_of(orphan.session).contains(346020));
+}
+
+TEST(PrivateAppStopTests, AHeldMountSpendsItsEndOutOfThePhasesBudget) {
+  const pas::timings_t defaults;
+  const auto timings = pas::with_mount_phase(defaults);
+  EXPECT_EQ(timings.mount_first_wait, 250ms);
+  EXPECT_EQ(timings.mount_last_wait, 1s);
+  EXPECT_EQ(timings.budget + timings.mount_first_wait + timings.mount_last_wait, defaults.budget);
+  for (const bool immediate : {false, true}) {
+    fake_session_t session;
+    session.ask_takes = 1s;
+    session.closes_after.reset();
+    session.exits_after_sigterm.reset();
+    session.dies_after_sigkill.reset();
+    session.launcher_running = {true, true};
+    session.launcher_quits_after_sigterm.reset();
+    session.launcher_dies_after_sigkill.reset();
+    session.settle_takes = 1h;
+    pas::plan_t plan = heroic_plan(immediate);
+    plan.exit_timeout = 30s;
+    plan.launchers.push_back("net.lutris.Lutris");
+    const auto outcome = pas::run(plan, session.actions(), timings);
+    EXPECT_LE(outcome.elapsed + timings.mount_first_wait + timings.mount_last_wait, 30s) << (immediate ? "immediate" : "normal");
+    EXPECT_EQ(session.count_of("sigterm_launcher:0"), 1u);
+    EXPECT_EQ(session.count_of("sigkill_launcher_init:1"), 1u);
+  }
+}
+
 TEST(PrivateAppStopTests, ClassifyLeavesWhatTheCompositorRunsForItselfToTheCompositor) {
   // labwc's startup client when the app is Polaris's own child, and the background the generated
   // autostart paints, carry the token and never exit on their own: they are the compositor's. A
@@ -597,6 +667,41 @@ TEST(PrivateAppStopTests, ClassifyLeavesWhatTheCompositorRunsForItselfToTheCompo
   const auto session = pas::classify(facts, supervisor, token, {}, 1000);
   EXPECT_EQ(pids_of(session.compositor), (std::set<pid_t> {345544, 345580, 345590, 345600, 345610}));
   EXPECT_EQ(pids_of(session.session), (std::set<pid_t> {345620, 700100, 700110}));
+}
+
+TEST(PrivateAppStopTests, AnEpicSessionCgroupFenceKeepsAnOutsiderHandedTheTokenOutOfTheSession) {
+  // #582 finding 1: an unrelated desktop service given this session's token, as
+  // `systemd-run --user --unit=desktop-app --slice=app.slice --setenv=POLARIS_SESSION_INSTANCE_ID=...`
+  // can, never descends from the supervisor and lives in another cgroup.
+  const fsi::process_t supervisor {345544, 21200000};
+  const std::string polaris = "/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service";
+  const std::string outside = "/user.slice/user-1000.slice/user@1000.service/app.slice/desktop-app.service";
+  std::vector<pas::process_facts_t> facts {
+    fact(982284, 1, 1000, "systemd", "HOME=/var/empty\0"s, "/user.slice/user-1000.slice/user@1000.service/init.scope"),
+    fact(3231794, 982284, 21100000, "polaris-kms", "HOME=/var/empty\0"s, polaris),
+    fact(345544, 3231794, 21200000, "polaris-kms", with_token(), polaris),
+    fact(345580, 345544, 21200010, "labwc", with_token(), polaris),
+    fact(350000, 345580, 21212000, "EpicGamesLaunch", with_token(), polaris),  // the startup client
+    fact(350010, 345544, 21212010, "wineserver", with_token(), polaris),  // daemonized, adopted by the subreaper
+    fact(350020, 350000, 21212020, "helper", with_token(), "/user.slice/user-1000.slice/user@1000.service/app.slice/app-x-1.scope"),  // moved, still descended
+    fact(700100, 3231794, 21300100, "prep", with_token(), polaris),  // Polaris's own token-bearing child
+    fact(800000, 982284, 21400000, "desktop-app", with_token(), outside),  // the outsider
+    fact(800010, 982284, 21400010, "other", "HOME=/var/empty\0POLARIS_SESSION_INSTANCE_ID=other\0"s, outside),  // another token
+  };
+  // Every other session keeps token membership as it was: the outsider is taken.
+  const auto unfenced = pas::classify(facts, supervisor, token, {}, 1000);
+  EXPECT_EQ(pids_of(unfenced.session), (std::set<pid_t> {350000, 350010, 350020, 700100, 800000}));
+  // Fenced, the token counts only inside the session's cgroup; descent still counts anywhere.
+  const auto fenced = pas::classify(facts, supervisor, token, {}, 1000, polaris);
+  EXPECT_EQ(pids_of(fenced.session), (std::set<pid_t> {350000, 350010, 350020, 700100}));
+  // A fence that could not be read contains nothing: only descent remains.
+  const auto unread = pas::classify(facts, supervisor, token, {}, 1000, std::string_view {});
+  EXPECT_EQ(pids_of(unread.session), (std::set<pid_t> {350000, 350010, 350020}));
+  EXPECT_TRUE(pas::in_session_cgroup(polaris, polaris));
+  EXPECT_TRUE(pas::in_session_cgroup(polaris + "/sub", polaris));
+  EXPECT_FALSE(pas::in_session_cgroup(polaris + "-other", polaris));
+  EXPECT_FALSE(pas::in_session_cgroup(outside, polaris));
+  EXPECT_FALSE(pas::in_session_cgroup(polaris, ""));
 }
 
 TEST(PrivateAppStopTests, WindowOwnerTestNotesTheHostPidsItAsked) {

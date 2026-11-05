@@ -3919,6 +3919,8 @@ namespace confighttp {
         bad_request(response, request, "Choose a provider for an exact Epic title identity.");
         return;
       }
+      // Native proof capture runs before either the lifecycle snapshot or apps-file lock.
+      if (provider == "official") proc::proc.remember_epic_launcher();
       auto guard = proc::proc.try_session_status_guard();
       if (!guard.owns_snapshot()) { fail("A session is changing. Try the provider change when it is idle."); return; }
       const auto uuid = request->path_match[1].str();
@@ -3993,6 +3995,7 @@ namespace confighttp {
   void scanGames(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request)) return;
     print_req(request);
+    proc::proc.remember_epic_launcher(); // Original executable proof only; no account data or launch.
 
     nlohmann::json output;
     nlohmann::json steam_games = nlohmann::json::array();
@@ -9093,7 +9096,9 @@ namespace confighttp {
               "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
               "Failed to start the specified application";
             if (const auto refusal = launch_failure::take()) {
-              error_tree["error"] = launch_failure::status_message(*refusal);
+              // launchApp has passed authenticate(): only the signed-in host console may see
+              // attempt-local blocker labels. Paired clients and logs keep the generic message.
+              error_tree["error"] = launch_failure::authenticated_owner_status_message(*refusal);
               error_tree["error_code"] = refusal->code;
             }
 #ifdef __linux__

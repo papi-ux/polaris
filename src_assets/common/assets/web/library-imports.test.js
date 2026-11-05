@@ -1,5 +1,38 @@
 import { describe, expect, it } from 'vitest'
-import { filterImportGames, summarizeImportGames } from './library-imports'
+import { epicPlatformChip, epicProviderLabel, filterImportGames, summarizeImportGames } from './library-imports'
+import { sourceLabel } from './library-source-names'
+
+describe('Library source names', () => {
+  it('names every source properly and leaves an unknown one as it came', () => {
+    expect(['steam', 'lutris', 'heroic', 'emulator', 'epic_launcher'].map((source) => sourceLabel(source)))
+      .toEqual(['Steam', 'Lutris', 'Heroic', 'Emulator', 'Epic'])
+    expect(sourceLabel('manual')).toBe('manual')
+    expect(sourceLabel()).toBe('Unknown')
+  })
+
+  it('names who provides an Epic title, and nothing for a value it does not know', () => {
+    expect(epicProviderLabel('official')).toBe('Epic')
+    expect(epicProviderLabel('heroic')).toBe('Heroic')
+    expect(epicProviderLabel('')).toBe('')
+    expect(epicProviderLabel('other')).toBe('')
+  })
+
+  it('reads platform and runtime as one chip', () => {
+    // What the host sends for an official Epic title and what Heroic records.
+    expect(epicPlatformChip({ installed_platform: 'windows', runtime: 'proton' })).toBe('Windows via Proton')
+    expect(epicPlatformChip({ installed_platform: 'windows', runtime: 'wine' })).toBe('Windows via Wine')
+    expect(epicPlatformChip({ installed_platform: 'linux', runtime: 'native' })).toBe('Linux')
+    expect(epicPlatformChip({ installed_platform: 'mac', runtime: 'native' })).toBe('macOS')
+    // Only one known, or neither.
+    expect(epicPlatformChip({ installed_platform: 'windows' })).toBe('Windows')
+    expect(epicPlatformChip({ runtime: 'proton' })).toBe('Proton')
+    expect(epicPlatformChip({ runtime: 'native' })).toBe('Native')
+    expect(epicPlatformChip({})).toBe('')
+    // Case the host did not settle, and a value it has not sent before, still read as names.
+    expect(epicPlatformChip({ installed_platform: 'Windows', runtime: 'PROTON' })).toBe('Windows via Proton')
+    expect(epicPlatformChip({ installed_platform: 'windows', runtime: 'crossover' })).toBe('Windows via Crossover')
+  })
+})
 
 describe('Library import filtering', () => {
   const games = [

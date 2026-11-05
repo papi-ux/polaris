@@ -227,9 +227,14 @@ describe('v1.5.0 release contract', () => {
     expect(notes).toContain('never past 300 Mbps or your `max_bitrate`')
     // Live Tuning lifts a request below adaptive_bitrate_min to that floor, so Doctor is not the only lift.
     expect(notes).toContain('Live Tuning lifting a request below `adaptive_bitrate_min` (2 Mbps by default) to that floor')
-    // Live Tuning is opt-in; while it is on Doctor's PyroWave finding is advice
+    // Live Tuning is on by default; while it is on Doctor's PyroWave finding is advice
     // to set a bitrate, not the one tap raise.
-    expect(notes).toContain("With Live Tuning on (it's off unless you turn it on), Doctor says what to set instead.")
+    expect(notes).toContain('With Live Tuning on (the default from 1.5.0), Doctor says what to set instead.')
+    expect(notes).toContain('existing hosts get it once on upgrade.')
+    // Adaptive parity is a Linux NVENC host feature for any Nova that reports partly lost frames, not a
+    // Nova for Linux feature, and with Live Tuning on by default it is on by default too.
+    expect(notes).toContain('With Live Tuning on, a Linux host using NVENC can raise FEC for a Nova stream that reports partly lost frames')
+    expect(notes).toContain('Now that Live Tuning is on by default, so is this; other streams keep the FEC you configured.')
     // A tunnel that carries Ethernet, ZeroTier or an OpenVPN tap, still reports its own MAC.
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
@@ -256,12 +261,18 @@ describe('v1.5.0 release contract', () => {
     expect(notes).not.toContain("Live Tuning's own loss handling is unchanged in this release.")
     // Live Tuning acts on the loss in each media report by the rule src/live_tuning_policy.h states, and
     // cuts for a queue, not for one high round trip reading.
-    const loss = section(currentNotes(), '**New since beta.2: Live Tuning acts on video frame loss**', '**Fixed since beta.2**')
+    const loss = section(currentNotes(), "**New since beta.2: Live Tuning acts on video frame loss, and it's on**", '**Fixed since beta.2**')
     expect(loss).toContain('in two of three reports, each losing 3% of its frames or more')
     expect(loss).toContain('Live Tuning treats a sustained rise in round trip time as queue evidence and lowers the bitrate while checking whether it drains.')
     expect(loss).toContain('Doctor takes no bitrate step of its own for sustained loss.')
-    // The RP6 stream checks now cover the loss-handling limit; the pause limit remains.
-    expect(notes).toContain('dropped to its 2 Mbps floor within seconds and took about 45 seconds to return to the requested rate with the wire pacer off, while loss continued')
+    // The round 5 controller's own results stand: its policy tests with the RP6 replays and the
+    // adaptive bitrate tests built on their own. Device runs before round 5 don't count for this build,
+    // so the notes say this build's device runs haven't been done.
+    expect(notes).toContain('On this build its 70 Live Tuning policy tests pass, including replays of Retroid Pocket 6 streams')
+    expect(notes).toContain("Runs with this build on a Retroid Pocket 6 and a Steam Deck haven't been done yet.")
+    expect(notes).not.toContain('Retroid Pocket 6 and Steam Deck streams under a capped link')
+    // A receipt placeholder left in the notes would reach the release page as written.
+    expect(notes).not.toContain('[[')
     expect(notes).toContain("A link that shrinks while the client's media reports pause can go unnoticed without fresh congestion evidence")
   })
 })

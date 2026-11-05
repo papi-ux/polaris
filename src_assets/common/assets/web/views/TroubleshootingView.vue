@@ -108,6 +108,17 @@
           </div>
         </div>
       </div>
+      <div v-if="encoderFallback" class="surface-subtle border p-4" :class="statusTone('warning').card" data-doctor-encoder-fallback>
+        <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          <div class="text-sm font-semibold text-silver">{{ encoderFallback.title }}</div>
+          <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone('warning').badge">
+            {{ fixMyStreamStatusLabel('warning') }}
+          </span>
+        </div>
+        <p class="mt-2 text-sm leading-relaxed text-storm">{{ encoderFallback.detail }}</p>
+        <p class="mt-3 text-xs leading-relaxed text-ice">{{ encoderFallback.action }}</p>
+        <p v-if="encoderFallback.evidence" class="mt-2 text-xs leading-relaxed text-storm">{{ $t('troubleshooting.doctor_selection_reason') }}: {{ encoderFallback.evidence }}</p>
+      </div>
       <div v-if="visibleChecklist.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist>
         <div
           v-for="item in visibleChecklist"
@@ -547,6 +558,7 @@ import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
 import { doctorIsWaitingForStream, idleHostFindings } from '../doctor-observation.js'
+import { nvencCpuFallbackNotice } from '../encoder-fallback-notice.js'
 import StreamPacingReadout from '../components/StreamPacingReadout.vue'
 import TailscaleConnectionReadout from '../components/TailscaleConnectionReadout.vue'
 import { normalizeTailscalePeer } from '../tailscale-connection-readout.js'
@@ -686,6 +698,11 @@ const doctorDiagnosisIdle = computed(() => doctorIsWaitingForStream(doctorPayloa
 const visibleChecklist = computed(() => doctorDiagnosisIdle.value
   ? (streamStatsConnected.value ? idleHostFindings(fixMyStreamChecklist.value) : [])
   : fixMyStreamChecklist.value)
+// From the host's current report only, like the idle host findings: a payload kept from a dropped
+// connection says nothing about the encoder the host holds now.
+const encoderFallback = computed(() => streamStatsConnected.value
+  ? nvencCpuFallbackNotice(doctorPayload.value?.advanced_evidence?.encoder_selection, (key) => i18n.t(key))
+  : null)
 const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doctor_categories_prefix')} ${AI_DOCTOR_EXPLANATION_CATEGORIES.join(', ')}`)
 const doctorPlainDiagnosis = computed(() => {
   if (doctorIsWaitingForStream(doctorPayload.value, streamStats.value)) return {

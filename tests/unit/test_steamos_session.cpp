@@ -470,6 +470,84 @@ TEST(SteamosSessionTests, BusOwnersMustSitInTheCgroupsSystemdGaveThem) {
   EXPECT_EQ(steamos::cgroup_v2_path("0::/a\n0::/b\n"), "");
 }
 
+TEST(SteamosSessionTests, AV1HierarchyBesideTheUnifiedLineIsIgnoredAndAnythingElseRefused) {
+  // pc-papi, as read on 2026-10-30: Mullvad's split tunnelling mounts a v1 net_cls hierarchy.
+  EXPECT_EQ(steamos::cgroup_v2_path("1:net_cls:/\n0::/a/b\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("1:net_cls:/mullvad-exclusions\n0::/a/b\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("4:cpu,cpuacct:/\n0::/a/b\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("12:pids:/x\n5:cpu,cpuacct:/y\n2:name=other:/z\n1:net_cls:/\n0::/a/b\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("2:name=systemd-other:/z\n0::/a/b\n"), "/a/b") << "another named hierarchy";
+  EXPECT_EQ(steamos::cgroup_v2_path("0::/a/b\n1:net_cls:/\n"), "/a/b") << "the kernel's order is not the rule";
+  EXPECT_EQ(steamos::cgroup_v2_path("1:net_cls:/\n0::/a:b\n"), "/a:b") << "a path may hold a colon";
+  EXPECT_EQ(steamos::cgroup_v2_path("1:net_cls:/\n0::/\n"), "/");
+  // The trailing CR and LF the single line already tolerated, on each line.
+  EXPECT_EQ(steamos::cgroup_v2_path("0::/a/b"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("0::/a/b\r\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("0::/a/b\n\r\n\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("1:net_cls:/\r\n0::/a/b\r\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("0::/a/b\r\n1:net_cls:/\r\n"), "/a/b");
+
+  for (const char *refused : {
+         // No unified line, or a second one, even when both agree.
+         "",
+         "\n",
+         "\r\n",
+         "1:net_cls:/\n",
+         "12:pids:/x\n1:net_cls:/\n",
+         "0::/a\n0::/b\n",
+         "0::/a\n0::/a\n",
+         "0::/a\n1:net_cls:/\n0::/b\n",
+         "1:net_cls:/\n0::/a\n0::/a\n",
+         // A malformed unified line, whatever is beside it.
+         "1:net_cls:/\n0::\n",
+         "1:net_cls:/\n0::relative\n",
+         "0::relative\n1:net_cls:/\n",
+         "1:net_cls:/\n0:net_cls:/a\n",
+         "1:net_cls:/\n00::/a\n",
+         // A malformed line beside a good unified one.
+         "garbage\n0::/a\n",
+         "0::/a\ngarbage\n",
+         "1:net_cls\n0::/a\n",
+         ":net_cls:/\n0::/a\n",
+         "x:net_cls:/\n0::/a\n",
+         "-1:net_cls:/\n0::/a\n",
+         "01:net_cls:/\n0::/a\n",
+         "1::/\n0::/a\n",
+         "1:net_cls:\n0::/a\n",
+         "1:net_cls:relative\n0::/a\n",
+         "1:net_cls:/\n\n0::/a\n",
+         "\n0::/a\n",
+         // systemd itself in a v1 hierarchy: the unified path is not where it placed the process.
+         "1:name=systemd:/x\n0::/a\n",
+         "0::/a\n1:name=systemd:/x\n",
+         "12:pids:/x\n2:name=systemd:/a\n1:net_cls:/\n0::/a\n",
+         "1:cpu,name=systemd:/x\n0::/a\n",
+         "1:name=systemd,cpu:/x\n0::/a\n",
+         "1:cpu,name=systemd,pids:/x\n0::/a\n",
+       }) {
+    EXPECT_EQ(steamos::cgroup_v2_path(refused), "") << refused;
+  }
+
+  const std::string v1 = "1:net_cls:/\n";
+  const std::string manager = "/user.slice/user-1000.slice/user@1000.service";
+  EXPECT_TRUE(steamos::cgroup_is_logind(v1 + "0::/system.slice/systemd-logind.service\n"));
+  EXPECT_FALSE(steamos::cgroup_is_logind(v1 + "0::/system.slice/other.service\n"));
+  EXPECT_TRUE(steamos::cgroup_is_user_manager(v1 + "0::" + manager + "/init.scope\n", 1000));
+  EXPECT_FALSE(steamos::cgroup_is_user_manager(v1 + "0::" + manager + "/init.scope\n", 1001));
+  EXPECT_FALSE(steamos::cgroup_is_user_manager(v1 + "0::" + manager + "/app.slice/fake.service\n", 1000));
+  EXPECT_FALSE(steamos::cgroup_is_user_manager("0::" + manager + "/init.scope\n0::" + manager + "/init.scope\n", 1000));
+  EXPECT_TRUE(steamos::cgroup_is_manager_unit(v1 + "0::" + manager + "/app.slice/steamos-manager.service\n", 1000));
+  EXPECT_FALSE(steamos::cgroup_is_manager_unit(v1 + "0::/user.slice/user-1000.slice/session-2.scope\n", 1000));
+
+  auto snapshot = game_mode_snapshot();
+  snapshot.polaris.control_group = manager + "/app.slice/polaris.service";
+  snapshot.stop_closure = {true, {"gamescope-session.service", "graphical-session.target", "steam.service"}};
+  snapshot.self_cgroup = v1 + "0::" + manager + "/app.slice/polaris.service\n";
+  EXPECT_TRUE(steamos::polaris_independent_of_session(snapshot).ok());
+  snapshot.self_cgroup = v1 + "0::/user.slice/user-1000.slice/session-2.scope\n";
+  EXPECT_EQ(steamos::polaris_independent_of_session(snapshot).code, "prelaunch_service_not_independent");
+}
+
 TEST(SteamosSessionTests, TheManagerProcessMustBeThisAccountsUnitBySystemdsCgroup) {
   EXPECT_TRUE(steamos::cgroup_is_manager_unit("0::/user.slice/user-1000.slice/user@1000.service/app.slice/steamos-manager.service\n", 1000));
   EXPECT_FALSE(steamos::cgroup_is_manager_unit("0::/user.slice/user-1001.slice/user@1001.service/app.slice/steamos-manager.service\n", 1000));
@@ -518,6 +596,7 @@ TEST(SteamosSessionTests, RegisteredCasesAreFrozen) {
     "PolarisSurvivesOnlyAsThisActiveUnitOutsideTheProvenStopClosure",
     "GameModeIsReadFromItsUnitAndAnythingInBetweenIsTransitional",
     "BusOwnersMustSitInTheCgroupsSystemdGaveThem",
+    "AV1HierarchyBesideTheUnifiedLineIsIgnoredAndAnythingElseRefused",
     "TheManagerProcessMustBeThisAccountsUnitBySystemdsCgroup",
     "InvocationIdsAndProcessStartTimesAreReadExactly",
     "RegisteredCasesAreFrozen",
