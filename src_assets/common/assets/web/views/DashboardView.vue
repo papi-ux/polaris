@@ -506,7 +506,6 @@ import { useDeviceJoinedToast } from '../composables/useDeviceJoinedToast.js'
 import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync, resolveStreamDisplayMode } from '../client-settings-sync'
 import { captureStatusTone } from '../capture-status-tone.js'
-import StreamPacingReadout from '../components/StreamPacingReadout.vue'
 import { frameIntervalReadout } from '../stream-pacing-readout.js'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
@@ -603,6 +602,9 @@ async function refreshApps() {
 const EpicSessionControls = defineAsyncComponent(() => import('../components/EpicSessionControls.vue'))
 const LiveSessionCard = defineAsyncComponent(() => import('../components/LiveSessionCard.vue'))
 const DoctorDetails = defineAsyncComponent(() => import('../components/DoctorDetails.vue'))
+// The per-client pacing readout sits in the diagnostics disclosure, so it loads on demand like
+// Doctor's details and keeps the startup bundle inside the web budget.
+const StreamPacingReadout = defineAsyncComponent(() => import('../components/StreamPacingReadout.vue'))
 const currentAppUuid = ref('')
 const currentAppAvailable = ref(false)
 const allAppsById = ref({})
