@@ -2,6 +2,7 @@
 #include "../tests_paths.h"
 #include <src/epic_library.h>
 #include <src/launch_failure.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -50,9 +51,16 @@ TEST(EpicLibraryTests, SetupSnapshotBindingUsesAvailableExactMetadataIndependent
   auto second = row();
   second["artifactId"] = "other";
   second["installationId"] = "install2";
+  second["dir"] = "/games/Other"; // Shared directories make both installations ambiguous.
   const auto first = parse({row(), second});
   ASSERT_TRUE(first.available);
+  ASSERT_EQ(first.games.size(), 2);
+  ASSERT_TRUE(first.warnings.empty());
   EXPECT_TRUE(epic_library::same_snapshot(first, parse({second, row()})));
+  // Parsing orders by installation ID, so also reverse the snapshot entries themselves.
+  auto reversed = first;
+  std::reverse(reversed.games.begin(), reversed.games.end());
+  EXPECT_TRUE(epic_library::same_snapshot(first, reversed));
   EXPECT_FALSE(epic_library::same_snapshot(first, parse({row()})));
   EXPECT_TRUE(epic_library::same_snapshot({true, {}, {}}, {true, {}, {}}));
   EXPECT_FALSE(epic_library::same_snapshot({false, {}, {}}, {true, {}, {}}));
