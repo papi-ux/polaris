@@ -1,6 +1,7 @@
 #include "../tests_common.h"
 #include "src/config.h"
 #include "src/crypto.h"
+#include "src/nvhttp.h"
 #include "src/private_state_file.h"
 #include "src/process.h"
 #include <Simple-Web-Server/server_https.hpp>
@@ -13,6 +14,9 @@ namespace confighttp {
   void epicSetup(std::shared_ptr<setup_server_t::Response>, std::shared_ptr<setup_server_t::Request>);
   void epic_setup_http_for_tests(std::shared_ptr<setup_server_t::Response>, std::shared_ptr<setup_server_t::Request>,
     const std::function<proc::epic_setup_read_t(const std::optional<epic_library::identity_t> &)> &, bool);
+  void with_epic_setup_tls_for_tests(const std::string &, const std::string &,
+    const std::function<proc::epic_setup_read_t(const std::optional<epic_library::identity_t> &)> &,
+    const std::function<void(unsigned short)> &);
   void with_web_session_for_tests(const std::filesystem::path &, const std::string &,
     const std::function<void(const std::string &)> &);
   void with_web_session_store_for_tests(const std::filesystem::path &, const std::function<void()> &);
@@ -47,7 +51,7 @@ namespace {
       config::sunshine = previous;
       std::filesystem::remove_all(directory);
     }
-    void run(const std::function<void(client_t &, const std::string &)> &check, bool certificate = false) {
+    void run(const std::function<void(client_t &, const std::string &)> &check) {
       confighttp::with_web_session_for_tests(directory / "sessions.json", "setup-csrf", [&](const std::string &cookie) {
         confighttp::setup_server_t server((directory / "cert.pem").string(), (directory / "key.pem").string());
         server.config.address = "127.0.0.1";
@@ -55,8 +59,6 @@ namespace {
         server.config.timeout_request = 5;
         server.config.timeout_content = 5;
         server.resource["^/api/epic/setup$"]["GET"] = [&](auto response, auto request) {
-          // Model an already authenticated paired TLS peer. Owner auth must ignore this authority.
-          if (certificate) request->userp = std::make_shared<crypto::named_cert_t>();
           confighttp::epic_setup_http_for_tests(response, request, reader, credentials_available);
         };
         std::atomic<unsigned short> port {0};
@@ -100,7 +102,33 @@ TEST_F(EpicSetupHttp, AnonymousInvalidCookieAndInvalidBearerNeverCallNative) {
   });
 }
 TEST_F(EpicSetupHttp, PairedCertificateAloneIsNotOwnerAuthentication) {
-  run([&](auto &client, const auto &) { get(client, "", 401, {}); EXPECT_EQ(calls, 0); }, true);
+  const auto credentials = crypto::gen_creds("paired-setup-client", 2048);
+  ASSERT_TRUE(private_state_file::write_atomic(directory / "paired.pem", credentials.x509));
+  ASSERT_TRUE(private_state_file::write_atomic(directory / "paired-key.pem", credentials.pkey));
+  nvhttp::with_authorized_clients_for_tests([&] {
+    auto paired = std::make_shared<crypto::named_cert_t>();
+    paired->cert = credentials.x509;
+    paired->uuid = "paired-setup-client";
+    paired->name = "paired-setup-client";
+    paired->temporary_authorization = true; // Real live pairing authority, isolated from disk.
+    ASSERT_TRUE(nvhttp::add_authorized_client_for_tests(paired, crypto::PERM::_game_control));
+    ASSERT_TRUE(nvhttp::resolve_authorized_client(paired, "/api/epic/setup"));
+    confighttp::with_web_session_for_tests(directory / "sessions.json", "setup-csrf", [&](const auto &) {
+      confighttp::with_epic_setup_tls_for_tests((directory / "cert.pem").string(), (directory / "key.pem").string(), reader,
+        [&](unsigned short port) {
+          ASSERT_NE(port, 0);
+          client_t client("127.0.0.1:" + std::to_string(port), false,
+            (directory / "paired.pem").string(), (directory / "paired-key.pem").string());
+          client.config.timeout = 5;
+          // Same TLS certificate and exact path pass broader session authority with no owner
+          // cookie/bearer. Replacing owner auth on GET with that authority must fail below.
+          EXPECT_EQ(std::stoi(client.request("HEAD", "/api/epic/setup")->status_code), 200);
+          const auto refused = get(client, "", 401, {});
+          EXPECT_EQ(calls, 0);
+          EXPECT_EQ(refused.at("error"), "authentication_required");
+        });
+    });
+  });
 }
 TEST_F(EpicSetupHttp, OwnerCookieAndConfiguredBearerReachPassiveReader) {
   run([&](auto &client, const auto &cookie) {

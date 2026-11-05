@@ -4124,6 +4124,29 @@ namespace confighttp {
     s_loaded_credentials_available = credentials_available;
     readEpicSetup(response, request, read);
   }
+
+  // Real production TLS peer verification, owner handler and broader-auth control.
+  void with_epic_setup_tls_for_tests(const std::string &cert, const std::string &key,
+      const epic_setup_reader_t &read, const std::function<void(unsigned short)> &check) {
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    server.config.timeout_request = 5;
+    server.config.timeout_content = 5;
+    server.verify = [](req_https_t request, SSL *ssl) { request->userp = nvhttp::verify_client_cert(ssl, false); };
+    server.resource["^/api/epic/setup$"]["GET"] = [&](auto response, auto request) {
+      epic_setup_http_for_tests(response, request, read);
+    };
+    server.resource["^/api/epic/setup$"]["HEAD"] = [](auto response, auto request) {
+      if (authenticatePolarisSession(response, request)) response->write(SimpleWeb::StatusCode::success_ok);
+    };
+    std::atomic<unsigned short> port {0};
+    std::jthread worker([&] { server.start([&](unsigned short assigned) { port = assigned; }); });
+    auto stop = util::fail_guard([&] { server.stop(); worker.join(); });
+    for (int attempt = 0; attempt < 100 && port == 0; ++attempt)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    check(port.load());
+  }
 #endif
 
   void scanGames(resp_https_t response, req_https_t request) {
