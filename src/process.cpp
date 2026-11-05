@@ -11967,7 +11967,7 @@ namespace proc {
       out.receipt_revision = _epic_setup.receipt_revision();
     }
 #else
-    (void) homes;
+    out.snapshot = epic_library::scan(homes);
     out.capture = {platf::epic::capture_state_t::unsupported, 0, "epic_linux_only"};
     out.state = platf::epic::scan_state_t::unsupported;
 #endif
