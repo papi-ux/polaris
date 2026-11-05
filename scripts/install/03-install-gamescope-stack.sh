@@ -76,6 +76,7 @@ EOF
 log "example conf: $SEED"
 
 # --- helper scripts ---
+install_user_or_sudo "$INSTALL_DIR/lib/polaris-seed-config.sh" "$BIN_DIR/polaris-seed-config.sh"
 install_user_or_sudo "$REPO_ROOT/nix/modules/polaris-gamescope-runtime-lib.sh" "$BIN_DIR/polaris-gamescope-runtime-lib.sh"
 install_user_or_sudo "$INSTALL_DIR/lib/polaris-gamescope-idle.sh" "$BIN_DIR/polaris-gamescope-idle"
 install_user_or_sudo "$INSTALL_DIR/lib/polaris-wait-gamescope.sh" "$BIN_DIR/polaris-wait-gamescope"
@@ -97,10 +98,19 @@ HDR
 install_user_or_sudo "$SESSION_OUT" "$BIN_DIR/polaris-gamescope-session"
 rm -f "$SESSION_OUT"
 
-# polaris-start from template
+# Shell-quote paths before substituting them as words in the Bash template.
+template_path() {
+  local quoted
+  printf -v quoted '%q' "$1"
+  # Protect the shell-quoted word from sed's replacement syntax as well.
+  quoted="${quoted//\\/\\\\}"
+  quoted="${quoted//&/\\&}"
+  quoted="${quoted//|/\\|}"
+  printf '%s' "$quoted"
+}
 START_OUT="$(mktemp)"
-sed -e "s|@POLARIS_BIN@|$POLARIS_BIN|g" \
-    -e "s|@CONF_SEED@|$SEED|g" \
+sed -e "s|@POLARIS_BIN@|$(template_path "$POLARIS_BIN")|g" \
+    -e "s|@CONF_SEED@|$(template_path "$SEED")|g" \
     "$INSTALL_DIR/lib/polaris-start.sh.in" >"$START_OUT"
 install_user_or_sudo "$START_OUT" "$BIN_DIR/polaris-start"
 rm -f "$START_OUT"
