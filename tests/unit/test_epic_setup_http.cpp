@@ -160,13 +160,13 @@ TEST_F(EpicSetupHttp, RawBackendReasonsAndLabelsNeverSerialize) {
     ++calls;
     proc::epic_setup_read_t out;
     out.supported = true;
-    out.facts.reason = "/home/private/game pid=123 cgroup=secret Orca.AppImage";
+    out.facts.reason = "/example/game pid=123 cgroup=secret Example.AppImage";
     return out;
   };
   run([&](auto &client, const auto &) {
     const auto body = get(client, "", 200, bearer);
     EXPECT_EQ(body.at("reason"), "check_unresolved");
-    for (const auto *secret : {"/home", "pid=", "cgroup", "Orca"}) EXPECT_EQ(body.dump().find(secret), std::string::npos);
+    for (const auto *secret : {"/example", "pid=", "cgroup", "Example.AppImage"}) EXPECT_EQ(body.dump().find(secret), std::string::npos);
   });
 }
 TEST_F(EpicSetupHttp, BusyUnavailableMetadataAndSuccessfulEmptyScanRemainDistinct) {
