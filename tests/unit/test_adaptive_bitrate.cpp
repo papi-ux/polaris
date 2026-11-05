@@ -6,6 +6,7 @@
 #include "src/adaptive_bitrate.h"
 #include "src/config.h"
 #include "src/live_tuning_fec.h"
+#include "src/video_bitrate.h"
 
 #include <gtest/gtest.h>
 
@@ -245,6 +246,10 @@ TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
 }
 
 TEST(AdaptiveBitrateFecScope, ARealPolicyEpisodePublishesAfterAckAndRetiresBeforeAnOutsideWriter) {
+  struct encoder_t {
+    enum class bitrate_update_e { rejected, applied, recreate_session };
+    bitrate_update_e update_bitrate(int) { return bitrate_update_e::applied; }
+  } encoder;
   const auto budget = fec_budget();
   enable_controller(budget.encoder_kbps);
   adaptive_bitrate::set_session_scope(4933, "fec-transaction", true);
@@ -261,13 +266,10 @@ TEST(AdaptiveBitrateFecScope, ARealPolicyEpisodePublishesAfterAckAndRetiresBefor
     const auto request = adaptive_bitrate::get_live_bitrate_request();
     ASSERT_TRUE(request);
     const std::int64_t next_frame = 200 + i;
-    if (request->target_bitrate_kbps != actual_encoder) {
-      ASSERT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*request,
-        [] { return true; }, nullptr, next_frame));
-      actual_encoder = request->target_bitrate_kbps;
-    } else {
-      adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, actual_encoder, next_frame);
-    }
+    const auto result = video::bitrate::apply_after_encode(request, encoder, actual_encoder,
+      next_frame, false, [](const auto &...) {});
+    ASSERT_TRUE(result.result == video::bitrate::result_e::applied ||
+                result.result == video::bitrate::result_e::unchanged);
     last_request = request;
     if (adaptive_bitrate::get_state().current_fec_percentage == 15) publication_frame = next_frame;
   }

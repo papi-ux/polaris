@@ -4513,7 +4513,7 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   stats.latency_ms = 8.0;
   const nlohmann::json pressure {{"primary_issue", "network_jitter"}, {"grade", "degraded"}};
 
-  // Sustained frame loss while Live Tuning searches for the link.
+  // Sustained frame loss while Live Tuning holds below the ceiling it found.
   stats.adaptive_bitrate_state = "network_pressure";
   stats.adaptive_bitrate_reason = "holding_under_the_link";
   stats.adaptive_ceiling_bitrate_kbps = 18400;
@@ -4526,7 +4526,8 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   EXPECT_EQ(recheck.at("rollback"), "This check does not change bitrate or stream settings. While Live Tuning is on, it stays the only live bitrate controller.");
   EXPECT_EQ(recheck.at("verification").at("success_when").at(0), "Live Tuning stays the live bitrate owner");
   const auto body = holding.at("recommendation").at("body").get<std::string>();
-  EXPECT_NE(body.find("Live Tuning is lowering the bitrate to what the link carries, and holds under about 19 Mbps, where it found loss"), std::string::npos) << body;
+  EXPECT_NE(body.find("Live Tuning is holding the bitrate under about 19 Mbps, where it found loss"), std::string::npos) << body;
+  EXPECT_EQ(body.find("is lowering the bitrate"), std::string::npos) << body;
   EXPECT_NE(body.find("Doctor measures again instead of changing the bitrate as well"), std::string::npos) << body;
   EXPECT_EQ(holding.at("recommendation").at("next_step_label"), "Recheck Live Tuning");
   EXPECT_EQ(holding.dump().find("turns Live Tuning off"), std::string::npos);
@@ -4544,7 +4545,7 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   const auto cutting = judged_doctor(stats, pressure);
   EXPECT_EQ(cutting.at("safe_recovery_action").at("id"), "recheck_network");
   const auto cutting_body = cutting.at("recommendation").at("body").get<std::string>();
-  EXPECT_NE(cutting_body.find("Live Tuning is lowering the bitrate to what the link carries. Doctor measures again"), std::string::npos) << cutting_body;
+  EXPECT_NE(cutting_body.find("Live Tuning is checking whether a lower bitrate helps. Doctor measures again"), std::string::npos) << cutting_body;
 
   // Live Tuning keeps the bitrate: Doctor's window calls this loss pressure, but it has not risen enough for
   // Live Tuning to cut. Doctor says so rather than that Live Tuning is lowering it, and still takes no step.
@@ -4600,6 +4601,85 @@ TEST(StreamStatsDoctorTests, LiveTuningActsOnNetworkPressureAndDoctorSaysWhatItF
   EXPECT_NE(frozen.at("safe_recovery_action").at("id"), "recheck_network");
   const auto frozen_body = frozen.at("recommendation").at("body").get<std::string>();
   EXPECT_NE(frozen_body.find("this encoder cannot change bitrate during a live stream"), std::string::npos) << frozen_body;
+}
+
+TEST(StreamStatsDoctorTests, LiveTuningNetworkCopyRequiresTheReportedStateAndReason) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.adaptive_target_bitrate_kbps = 16000;
+  stats.adaptive_bitrate_enabled = true;
+  stats.adaptive_bitrate_active = true;
+  stats.adaptive_runtime_update_supported = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 2.0;
+  stats.network_risk = true;
+  stats.packet_loss = 3.4;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
+  stats.latency_ms = 8.0;
+
+  const struct {
+    const char *state;
+    const char *reason;
+    int ceiling_kbps;
+    bool ceiling_is_queue;
+    const char *explanation;
+  } cases[] {
+    // The RP6 observation: ownership and frame timing variation do not establish a cut.
+    {"frame_pacing_observed", "frame_pacing", 0, false, "Live Tuning observed frame timing variation"},
+    {"frame_pacing_observed", "frame_pacing", 18400, false, "Live Tuning observed frame timing variation"},
+    {"network_pressure", "holding_under_the_link", 18400, false, "Live Tuning is holding the bitrate under about 19 Mbps, where it found loss"},
+    {"network_pressure", "holding_under_a_queue", 18400, true, "Live Tuning is holding the bitrate under about 19 Mbps, where it found a queue"},
+    {"network_pressure", "holding_under_the_link", 0, false, "Live Tuning is holding the bitrate. Doctor measures again"},
+    {"network_pressure", "packet_loss", 0, false, "Live Tuning is checking whether a lower bitrate helps"},
+    {"network_pressure", "standing_queue", 18400, true, "Live Tuning is checking whether a lower bitrate helps"},
+    // Bisection can move either way; a ceiling alone does not establish a hold or a cut.
+    {"network_pressure", "finding_the_link", 18400, false, "Live Tuning is checking what bitrate the link carries"},
+    {"recovering", "waiting_to_climb", 0, false, "Live Tuning controls the live bitrate"},
+    {"recovering", "testing_a_step_up", 18400, false, "Live Tuning controls the live bitrate"},
+    {"recovering", "climbing", 0, false, "Live Tuning controls the live bitrate"},
+    {"encoder_pressure", "encode_load", 0, false, "Live Tuning controls the live bitrate"},
+    {"recreating_encoder", "packet_loss", 18400, false, "Live Tuning controls the live bitrate"},
+    {"doctor_override", "holding_under_the_link", 18400, false, "Live Tuning controls the live bitrate"},
+    {"explicit_live_target", "frame_pacing", 0, false, "Live Tuning controls the live bitrate"},
+    {"rollback_pending", "unknown", 0, false, "Live Tuning controls the live bitrate"},
+    {"unknown", "packet_loss", 18400, false, "Live Tuning controls the live bitrate"},
+    {"network_pressure", "unknown", 18400, false, "Live Tuning controls the live bitrate"},
+    {"", "", 0, false, "Live Tuning controls the live bitrate"},
+  };
+
+  for (const auto &item : cases) {
+    SCOPED_TRACE(std::string {item.state} + "/" + item.reason);
+    stats.adaptive_bitrate_state = item.state;
+    stats.adaptive_bitrate_reason = item.reason;
+    stats.adaptive_ceiling_bitrate_kbps = item.ceiling_kbps;
+    stats.adaptive_ceiling_is_queue = item.ceiling_is_queue;
+    const auto doctor = judged_doctor(stats, {{"primary_issue", "network_jitter"}, {"grade", "degraded"}});
+    ASSERT_EQ(doctor.at("primary_issue"), "network_jitter");
+    const auto &recommendation = doctor.at("recommendation");
+    const auto body = recommendation.at("body").get<std::string>();
+    EXPECT_NE(body.find(item.explanation), std::string::npos) << body;
+    EXPECT_EQ(body.find("is lowering the bitrate"), std::string::npos) << body;
+    EXPECT_NE(body.find("Doctor measures again instead of changing the bitrate as well"), std::string::npos) << body;
+    EXPECT_EQ(recommendation.at("next_step_label"), "Recheck Live Tuning");
+    EXPECT_EQ(recommendation.at("expected_effect"),
+              "Doctor will measure video frame loss and round trip time again while Live Tuning controls the bitrate.");
+    const auto &action = doctor.at("safe_recovery_action");
+    EXPECT_EQ(action.at("id"), "recheck_network");
+    EXPECT_EQ(action.at("capability"), "recheck");
+    EXPECT_FALSE(action.at("undo").at("supported").get<bool>());
+    const auto *owner = find_evidence_row(doctor, "live_bitrate_owner");
+    ASSERT_NE(owner, nullptr);
+    EXPECT_EQ(owner->at("value"), "auto_safe");
+  }
 }
 
 TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuatorStates) {
