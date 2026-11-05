@@ -45,6 +45,7 @@ export function useGameScanner() {
         epicGames.value = staged(data.epic_games)
         epicWarnings.value = Array.isArray(data.epic_warnings) ? data.epic_warnings.filter(w => typeof w === 'string') : []
         librarySources.value = data.library_sources || []
+        return data
       } else {
         error.value = 'Failed to scan for games'
       }

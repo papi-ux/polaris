@@ -80,6 +80,26 @@ describe('cross-cutting accessibility and mobile polish', () => {
     }
   })
 
+  it('keeps Epic setup ordered, named, textual and lazy with reachable nonmoving controls', () => {
+    const setup = webSource('components/EpicSetupChecklist.vue')
+    const state = webSource('epic-setup-state.js')
+    const apps = webSource('views/AppsView.vue')
+    expect(apps).toContain("defineAsyncComponent(() => import('../components/EpicSetupChecklist.vue'))")
+    expect(apps).not.toContain('epic-setup-contract')
+    expect(setup).toContain('role="region" aria-labelledby="epic-setup-title"')
+    expect(setup).toContain('<ol>')
+    expect(setup).toContain(':key="row.id"')
+    expect(setup).toContain('role="status" aria-live="polite" aria-atomic="true"')
+    expect(setup.match(/aria-live=/g)).toHaveLength(1)
+    for (const text of ['Complete', 'Needs action', "Can't check", 'Checking']) expect(state).toContain(text)
+    expect(setup).toContain('aria-hidden="true"')
+    expect(setup).toContain('min-height: 44px; min-width: 44px')
+    expect(setup).toContain('prefers-reduced-motion: reduce')
+    expect(setup).toContain('forced-colors: active')
+    expect(setup).not.toMatch(/v-html|animate-spin|setInterval|autofocus/)
+    expect(setup).toContain('<style scoped>')
+  })
+
   it('keeps sticky review bars from covering content on handheld widths', () => {
     const css = webSource('app.css')
 

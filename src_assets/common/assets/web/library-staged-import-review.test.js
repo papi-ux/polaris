@@ -1,4 +1,4 @@
-import { shallowMount } from '@vue/test-utils'
+import { shallowMount, flushPromises } from '@vue/test-utils'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -6,6 +6,8 @@ import { nextTick, ref } from 'vue'
 
 import { forgetInstallJobs } from './composables/useRomSources'
 import AppsView from './views/AppsView.vue'
+import { markWebUiAuthenticated, markWebUiUnauthenticated } from './auth-state'
+import { epicReply, epicSample } from './epic-setup-fixtures'
 
 const scannerState = {
   scanning: ref(false),
@@ -50,7 +52,7 @@ function flushAppsViewLoad() {
   return Promise.resolve().then(() => Promise.resolve()).then(() => nextTick())
 }
 
-function mountAppsView(route = () => null) {
+function mountAppsView(route = () => null, realSetup = false) {
   global.fetch = vi.fn((url, options) => {
     const routed = route(String(url), options)
     if (routed) return routed
@@ -74,6 +76,7 @@ function mountAppsView(route = () => null) {
       provide: { i18n },
       mocks: { $t: i18n.t.bind(i18n) },
       stubs: {
+        EpicSetupChecklist: realSetup ? false : true,
         Button: { props: ['disabled'], emits: ['click'], template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>' },
         InfoHint: { template: '<span><slot /></span>' },
         Checkbox: { template: '<label />' },
@@ -101,34 +104,51 @@ function resetScannerState() {
 
 describe('AppsView staged import review', () => {
   afterEach(() => {
+    markWebUiUnauthenticated()
     vi.restoreAllMocks()
     delete global.fetch
     document.body.innerHTML = ''
   })
 
-  it('explains the Epic Private Stream setup steps only when Epic titles are listed', async () => {
+  it('mounts the Linux zero-title setup entry only in visible Import without scanning or changing staging', async () => {
     resetScannerState()
     scannerState.epicGames.value = []
-    let wrapper = mountAppsView()
-    await flushAppsViewLoad()
+    markWebUiAuthenticated({ platform: 'linux' })
+    const wrapper = mountAppsView(url => url.includes('/api/epic/setup') ? Promise.resolve(epicReply(epicSample())) : null, true)
+    await flushPromises()
+    expect(wrapper.find('[data-epic-private-setup]').exists()).toBe(false)
     await wrapper.find('button').trigger('click')
-    await nextTick()
+    await flushPromises()
+    await vi.dynamicImportSettled()
+    await flushPromises()
+    const setup = wrapper.find('[data-epic-private-setup]')
+    expect(setup.find('summary').text()).toBe('Epic Private Stream setup')
+    expect(scannerState.scan).not.toHaveBeenCalled()
+    expect(global.fetch.mock.calls.filter(([url]) => String(url).includes('/api/epic/setup'))).toHaveLength(0)
+    const staged = scannerState.steamGames.value[0]
+    setup.element.open = true
+    await setup.trigger('toggle'); await flushPromises()
+    expect(setup.text()).toContain('choose a game to check its setup')
+    expect(setup.text()).toContain('after Polaris restarts or Epic updates')
+    expect(scannerState.steamGames.value[0]).toBe(staged)
+    expect(staged.selected).toBe(true)
+    expect(scannerState.scan).not.toHaveBeenCalled()
+    wrapper.vm.showImport = false
+    await flushPromises()
     expect(wrapper.find('[data-epic-private-setup]').exists()).toBe(false)
     wrapper.unmount()
+  })
 
-    scannerState.epicGames.value = [
-      { name: 'Alan Wake 2', source: 'epic_launcher', provider: 'official', namespace: 'n', item_id: 'i', artifact_id: 'a', selected: false, already_imported: true },
-    ]
-    wrapper = mountAppsView()
-    await flushAppsViewLoad()
+  it('keeps the setup entry off non-Linux hosts', async () => {
+    resetScannerState()
+    const wrapper = mountAppsView(url => url.includes('./api/config')
+      ? Promise.resolve({ json: async () => ({ platform: 'windows' }) }) : null, true)
+    await flushPromises()
     await wrapper.find('button').trigger('click')
-    await nextTick()
-    const setup = wrapper.find('[data-epic-private-setup]')
-    expect(setup.exists()).toBe(true)
-    expect(setup.text()).toContain('open Epic once on the host desktop while you scan here, then quit it')
-    expect(setup.text()).toContain('after Polaris restarts or Epic updates')
-    expect(setup.text()).toContain('Play each game once in Mirror Desktop before its first Private Stream')
-    scannerState.epicGames.value = []
+    await vi.dynamicImportSettled(); await flushPromises()
+    expect(wrapper.find('[data-epic-private-setup]').exists()).toBe(false)
+    expect(scannerState.scan).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('names an Epic title in the import card and the review row as the other sources are named', async () => {

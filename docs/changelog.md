@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The Linux Library import panel has an opt-in **Epic Private Stream setup** checklist, even when no Epic games were found. It separates historical desktop observation and a host-owned successful-scan receipt from current launcher and selected-game checks. Unknown prerequisites remain **Can't check**, and launch checks still run independently. Checks pause when the panel or tab closes and expire instead of keeping stale green states.
+
 - Mission Control can save **Allow source-paced VRR (experimental)** without an "Unsupported config key" error.
 - Spaces is no longer a preview. The console drops its Preview labels and the docs drop the preview wording. The section is now **Current limits**, and `spaces.md#preview-limits` links become `#current-limits`. The limit shown on the Spaces page no longer says there is no runtime download, because Host Setup has one. One Space at a time still holds.
 - Mission Control shows a live session card first while a stream runs: the game and its cover, the device playing it, how long the stream has run, **Disconnect Client** and **End**. Its actions move below the details at phone width. A connection chip appears only when the host confirms it from its own Tailscale peer status (direct, DERP relay or peer relay), so a local stream has none. The stream status adds `session_elapsed_s`, the host's own count, so a page opened mid-stream shows the time too. See `docs/mission-control.md`.
