@@ -13282,6 +13282,21 @@ namespace nvhttp {
     return pairing_unique_id_valid(unique_id);
   }
 
+  void with_authorized_clients_for_tests(const std::function<void()> &check) {
+    std::vector<p_named_cert_t> previous;
+    {
+      std::lock_guard lock(client_state_mutex);
+      previous.swap(client_root.named_devices);
+      rebuild_cert_chain_locked();
+    }
+    auto restore = util::fail_guard([&] {
+      std::lock_guard lock(client_state_mutex);
+      client_root.named_devices = std::move(previous);
+      rebuild_cert_chain_locked();
+    });
+    check();
+  }
+
   void reset_pairing_state_for_tests() {
     std::lock_guard lock(client_state_mutex);
     map_id_sess.clear();

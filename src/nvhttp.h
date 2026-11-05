@@ -754,6 +754,8 @@ namespace nvhttp {
     std::unique_ptr<impl_t> impl;
   };
 #endif
+  // Isolate the live authorized-client registry and restore it after a TLS fixture.
+  void with_authorized_clients_for_tests(const std::function<void()> &);
   void reset_pairing_state_for_tests();
   otp_claim_t claim_one_time_pin_for_tests(const std::string &salt, std::string_view presented_hash);
   void add_legacy_authorized_client_for_tests(const crypto::p_named_cert_t &named_cert_p);

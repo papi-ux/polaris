@@ -240,6 +240,18 @@ def javascript_definitions(source: str) -> dict[str, str]:
     return result
 
 
+def web_definitions(generator, manifest: dict, source) -> dict[str, str]:
+    # Read every declared committed output, including restricted lazy features.
+    # A missing module remains unavailable evidence, never a handwritten fallback.
+    result = {}
+    for declaration in generator.js_outputs(manifest).values():
+        definitions = javascript_definitions(source(declaration['file']))
+        if result.keys() & definitions.keys():
+            raise ReaderUnavailableError('duplicate generated JS reader key')
+        result.update(definitions)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--nova', required=True, type=Path, help='path to a Nova source repository')
@@ -259,6 +271,7 @@ def main() -> int:
             generator.validate(manifest)
             definitions = generator.generated_values((args.polaris / generator.CPP).read_text())
             generator.audit_emitters(args.polaris, manifest, definitions)
+            generator.audit_js_imports(args.polaris, manifest)
         except (OSError, ValueError, KeyError, TypeError) as error:
             print('DRIFT  actual migrated emitter/schema check: ' + str(error))
             new_findings += 1
@@ -287,7 +300,7 @@ def main() -> int:
 
     def definitions_for(kind: str) -> dict[str, str]:
         if kind == 'polaris_web':
-            return javascript_definitions(source(generator.JS, host=True))
+            return web_definitions(generator, manifest, lambda file: source(file, host=True))
         # Future S1b reader constants must resolve to real vendored definitions;
         # their use is not inferred from a name or from a Polaris-generated list.
         if kind == 'nova_deck':

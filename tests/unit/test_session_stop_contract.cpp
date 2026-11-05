@@ -1963,6 +1963,78 @@ TEST(SessionRoleContractTests, ViewerOnlySessionsAggregateToViewer) {
 }
 
 
+TEST(SessionLifecycleGateTests, EpicSetupIdleSampleDoesNotReserveOrWaitForTheHost) {
+  proc::session_lifecycle_gate_t gate;
+  const auto generation = gate.try_idle_generation();
+  ASSERT_TRUE(generation);
+  // A read did not reserve admission; a launch and an RTSP setup can still enter normally.
+  ASSERT_TRUE(gate.try_begin_rtsp_launch(*generation));
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_launch();
+  ASSERT_TRUE(gate.try_begin_rtsp_setup(*generation));
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_rtsp_setup();
+  ASSERT_TRUE(gate.try_begin_snapshot_now());
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_snapshot();
+  ASSERT_TRUE(gate.try_fence_restore());
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.release_restore_fence();
+  ASSERT_TRUE(gate.begin_stop());
+  EXPECT_FALSE(gate.try_idle_generation());
+  gate.finish_stop();
+  EXPECT_NE(gate.try_idle_generation(), generation);
+  EXPECT_TRUE(gate.try_idle_generation());
+}
+
+#ifdef __linux__
+namespace {
+  void epic_setup_metadata_does_not_hold_lifecycle(bool scan) {
+    using namespace std::chrono_literals;
+    proc::proc_t subject {boost::process::v1::environment {}, {}};
+    std::promise<void> metadata_entered, release_metadata;
+    auto entered = metadata_entered.get_future();
+    const auto release = release_metadata.get_future().share();
+    subject.set_epic_setup_metadata_for_tests(
+      [](const auto &) { return epic_library::snapshot_t {true, {}, {}}; },
+      [&] { metadata_entered.set_value(); release.wait(); });
+    proc::epic_scan_result_t scanned;
+    proc::epic_setup_read_t read;
+    auto preparation = std::async(std::launch::async, [&] {
+      if (scan) scanned = subject.scan_epic_library({});
+      else read = subject.read_epic_setup();
+    });
+    // Release even if a deadline fails, before async future destruction can join.
+    auto unblock = util::fail_guard([&] { release_metadata.set_value(); });
+    ASSERT_EQ(entered.wait_for(5s), std::future_status::ready);
+    auto lifecycle = std::async(std::launch::async, [&] {
+      subject.with_session_lifecycle_lock_for_tests([&] {
+        EXPECT_TRUE(subject.begin_session_stop_for_tests());
+        subject.finish_session_stop_for_tests(true);
+      });
+    });
+    const auto acquired = lifecycle.wait_for(1s);
+    // Do not ASSERT before releasing the blocked metadata worker: that would deadlock
+    // the test's future destructors precisely when the lock-contention regression exists.
+    release_metadata.set_value();
+    unblock.disable();
+    lifecycle.get();
+    preparation.get();
+    EXPECT_EQ(acquired, std::future_status::ready);
+    if (scan) EXPECT_EQ(scanned.state, platf::epic::scan_state_t::session_busy);
+    else EXPECT_EQ(read.facts.reason, "setup_generation_changed");
+  }
+}
+
+TEST(SessionLifecycleGateTests, EpicSetupReceiptComparisonDoesNotHoldLifecycleMutex) {
+  epic_setup_metadata_does_not_hold_lifecycle(false);
+}
+
+TEST(SessionLifecycleGateTests, EpicSetupScanPreparationDoesNotHoldLifecycleMutex) {
+  epic_setup_metadata_does_not_hold_lifecycle(true);
+}
+#endif
+
 TEST(SessionLifecycleGateTests, StopWaitsForAdmittedLaunchAndBlocksPendingReplacement) {
   using namespace std::chrono_literals;
 

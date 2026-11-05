@@ -6,6 +6,18 @@ describe('Game scanner import contract', () => {
     vi.unstubAllGlobals()
   })
 
+  it('returns the exact successful scan envelope additively and preserves lists on transport failure', async () => {
+    const data = { status: true, epic_games: [], epic_setup: { version: 1, scan: 'metadata_unavailable' } }
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => data }).mockRejectedValueOnce(Error('offline'))
+    vi.stubGlobal('fetch', fetchMock)
+    const scanner = useGameScanner()
+    expect(await scanner.scan()).toBe(data)
+    const before = scanner.epicGames.value
+    expect(await scanner.scan()).toBeUndefined()
+    expect(scanner.epicGames.value).toBe(before)
+    expect(scanner.error.value).toBe('Scanner not available')
+  })
+
   it('round-trips validated Heroic identity metadata to the import endpoint', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({

@@ -14,4 +14,5 @@ export const mockedFrontendSpecs = [
   '**/doctor-idle-host-findings.spec.js',
   // Mission Control's stage states, preview opt-in and phone/tablet matrix (issue #408).
   '**/mission-control.spec.js',
+  '**/epic-setup-checklist.spec.js',
 ]

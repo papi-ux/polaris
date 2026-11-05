@@ -18,6 +18,7 @@ namespace epic_library {
     std::string installation_id, name, launch_executable, version;
     std::filesystem::path install_dir, data_root;
     std::string platform;
+    bool operator==(const installation_t &) const = default;
   };
   struct snapshot_t {
     bool available = false;
@@ -33,6 +34,8 @@ namespace epic_library {
   snapshot_t parse_installations(std::string_view bytes, const std::filesystem::path &data_root);
   snapshot_t read_installations(const std::filesystem::path &data_root);
   snapshot_t scan(const std::vector<std::filesystem::path> &homes);
+  // Exact available metadata content, independent of discovery order. Not a wire identifier.
+  bool same_snapshot(const snapshot_t &, const snapshot_t &);
   std::optional<installation_t> find(const snapshot_t &, const identity_t &);
   // A catalog is only a title/identity hint. It never authorizes launch or termination.
   bool matches_heroic_catalog(const identity_t &, std::string_view bytes, std::string *name = nullptr);

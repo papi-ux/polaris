@@ -1905,7 +1905,10 @@ namespace platf::epic {
     };
 
     std::shared_ptr<backend_t> production_backend() {
-      return std::make_shared<linux_backend_t>();
+      // Stateless I/O adapter. Identity separates production from inert fixture contexts;
+      // per-read budgets, census state and handles live in reader_t/the retained grant.
+      static const auto backend = std::make_shared<linux_backend_t>();
+      return backend;
     }
 
     struct appimage_keeper_t {
@@ -2021,6 +2024,9 @@ namespace platf::epic {
       fs::path path;
       file_t file;
       bool appimage;
+      process_t desktop;
+      std::string boot, own_group, mount;
+      fs::path group_namespace;
     };
 
     launcher_image_t launcher_path(backend_t &backend) {
@@ -2074,7 +2080,7 @@ namespace platf::epic {
                 (!keeper || unchanged_keeper(read, *keeper, *launcher, mount)) &&
                 same_image(executable_file, read.stat(executable)) &&
                 image_mount(read.read(proc / "mountinfo", mount_limit), launcher->exe).identity == mount.identity, "desktop_launcher_changed");
-      return {executable, executable_file, appimage};
+      return {executable, executable_file, appimage, *launcher, boot, own_group, mount.identity, read.group_namespace};
     }
   }  // namespace
 
@@ -2359,6 +2365,109 @@ namespace platf::epic {
         return false;
       }
 
+      static bool same_launcher_file(const launcher_proof_t &a, const launcher_proof_t &b) {
+        if (!a.state_ || !b.state_) return false;
+        const auto &x = *a.state_, &y = *b.state_;
+        return x.backend == y.backend && x.owner == y.owner && x.image.boot == y.image.boot &&
+               x.image.group_namespace == y.image.group_namespace && x.image.own_group == y.image.own_group && x.image.path == y.image.path &&
+               x.image.appimage == y.image.appimage && same_image(x.image.file, y.image.file);
+      }
+
+      static bool same_launcher_observation(const launcher_proof_t &a, const launcher_proof_t &b) {
+        if (!same_launcher_file(a, b)) return false;
+        const auto &x = a.state_->image, &y = b.state_->image;
+        return x.boot == y.boot && x.own_group == y.own_group && x.mount == y.mount && x.group_namespace == y.group_namespace &&
+               x.desktop.stat.pid == y.desktop.stat.pid && x.desktop.stat.start == y.desktop.stat.start &&
+               x.desktop.stat.parent == y.desktop.stat.parent && x.desktop.exe == y.desktop.exe && x.desktop.cwd == y.desktop.cwd &&
+               x.desktop.group == y.desktop.group && same_image(x.desktop.image, y.desktop.image);
+      }
+
+      static bool setup_context_current(const launcher_proof_t &proof) {
+        try {
+          const auto &state = *proof.state_;
+          reader_t read {*state.backend};
+          return state.owner == state.backend->owner_uid() && state.image.boot == read.boot() &&
+                 state.backend->link("/proc/self/ns/cgroup") == state.image.group_namespace &&
+                 cgroup(read.read("/proc/self/cgroup")) == state.image.own_group;
+        } catch (const std::exception &) { return false; }
+      }
+
+      static setup_readiness_t evaluate_setup(const launcher_proof_t *proof, const title_t *title, bool host_idle,
+                                             prerequisite_state_t prerequisites, std::shared_ptr<backend_t> backend) {
+        setup_readiness_t out;
+        if (!host_idle) {
+          out.state = readiness_state_t::busy;
+          out.reason = "session_busy";
+          return out;
+        }
+        if (!backend || (proof && (!proof->state_ || proof->state_->backend != backend))) {
+          out.reason = "inspection_context_changed";
+          return out;
+        }
+        std::string reason;
+        const auto desktop = prove_launcher(reason, backend); // Observe, without publishing a new proof.
+        out.desktop = desktop ? desktop_state_t::open : desktop_state_t::unknown;
+        if (proof) {
+          if (verify_launcher(*proof, reason) && setup_context_current(*proof)) out.proof = proof_state_t::valid;
+          else {
+            if (reason.empty()) reason = "inspection_context_changed";
+            out.proof = reason == "launcher_file_changed" || reason == "unknown_launcher_executable" || reason == "launcher_owner_changed" ?
+              proof_state_t::changed : proof_state_t::unavailable;
+            out.reason = reason;
+          }
+        }
+        const auto count = launcher_instances(reason, backend, out.proof == proof_state_t::valid ? proof : nullptr, nullptr);
+        if (!count) {
+          out.reason = reason; // Generic: unresolved also includes an unreadable header, not just AppImages.
+          return out;
+        }
+        if (*count != 0) {
+          out.state = readiness_state_t::needs_action;
+          out.reason = desktop ? "epic_open_on_desktop" : "launcher_present_unplaced";
+          return out;
+        }
+        out.desktop = desktop_state_t::closed; // Only a complete census establishes closed.
+        if (out.proof != proof_state_t::valid) {
+          out.state = out.proof == proof_state_t::unavailable ? readiness_state_t::unknown : readiness_state_t::needs_action;
+          if (out.reason.empty()) out.reason = "epic_launcher_proof_required";
+          return out;
+        }
+        if (!title) {
+          out.runtime = runtime_state_t::not_selected;
+          out.state = readiness_state_t::launcher_closed;
+          out.reason = "choose_game";
+        } else {
+          // Selected-title diagnostics are independent of prerequisite support. An unknown
+          // capability must not hide an unreadable Windows prefix or an exact busy runtime.
+          const auto absent = runtime_absent(*title, reason, *backend);
+          if (!absent) {
+            out.runtime = runtime_state_t::unknown;
+            out.reason = reason;
+          } else {
+            out.runtime = *absent ? runtime_state_t::absent : runtime_state_t::busy;
+            if (!*absent) {
+              out.state = readiness_state_t::needs_action;
+              out.reason = "epic_game_already_running";
+            } else if (prerequisites != prerequisite_state_t::available) {
+              out.state = prerequisites == prerequisite_state_t::unavailable ? readiness_state_t::needs_action : readiness_state_t::unknown;
+              out.reason = "private_mode_unavailable";
+            } else {
+              out.state = readiness_state_t::ready;
+              out.reason = "ready";
+            }
+          }
+        }
+        // The slow census/runtime reads may have crossed a launcher update or permission change.
+        if (!verify_launcher(*proof, reason) || !setup_context_current(*proof)) {
+          if (reason.empty()) reason = "inspection_context_changed";
+          out.proof = reason == "launcher_file_changed" || reason == "unknown_launcher_executable" || reason == "launcher_owner_changed" ?
+            proof_state_t::changed : proof_state_t::unavailable;
+          out.state = readiness_state_t::unknown;
+          out.reason = reason;
+        }
+        return out;
+      }
+
       static bool appimage_mounts_itself(const launcher_proof_t &proof) {
         if (!proof.state_ || !proof.state_->image.appimage) {
           return false;
@@ -2481,6 +2590,85 @@ namespace platf::epic {
     return detail::engine_t::verify_launcher(proof, reason);
   }
 
+  bool same_launcher_file(const launcher_proof_t &a, const launcher_proof_t &b) {
+    return detail::engine_t::same_launcher_file(a, b);
+  }
+
+  bool same_launcher_observation(const launcher_proof_t &a, const launcher_proof_t &b) {
+    return detail::engine_t::same_launcher_observation(a, b);
+  }
+
+  setup_readiness_t evaluate_setup(const launcher_proof_t *proof, const title_t *title, bool idle, prerequisite_state_t prerequisites) {
+    return detail::engine_t::evaluate_setup(proof, title, idle, prerequisites, production_backend());
+  }
+
+  capture_result_t setup_history_t::capture(const launcher_proof_t &proof, capture_origin_t origin) {
+    const bool same = proof_ && same_launcher_file(*proof_, proof);
+    if (!same) {
+      invalidate_receipt();
+    }
+    proof_ = proof;
+    origin_ = origin;
+    return {same ? capture_state_t::unchanged : capture_state_t::captured, generation_, {}};
+  }
+
+  void setup_history_t::invalidate_receipt() {
+    ++generation_;
+    snapshot_.reset();
+    receipt_revision_ = 0;
+    last_scan_ = scan_state_t::required;
+    ++revision_;
+  }
+
+  setup_history_t::scan_ticket_t setup_history_t::begin_scan() {
+    scan_ticket_t ticket;
+    ticket.sequence = ++sequence_;
+    ticket.generation = generation_;
+    ticket.epoch = epoch_;
+    last_scan_ = scan_state_t::checking;
+    ++revision_;
+    return ticket;
+  }
+
+  bool setup_history_t::current(const scan_ticket_t &ticket) const {
+    return ticket.epoch == epoch_ && ticket.sequence == sequence_ && ticket.generation == generation_;
+  }
+
+  capture_result_t setup_history_t::observe_scan(scan_ticket_t &ticket, const launcher_proof_t &proof) {
+    if (!current(ticket)) return {capture_state_t::superseded, generation_, "setup_generation_changed"};
+    auto result = capture(proof, capture_origin_t::scan);
+    ticket.generation = generation_;
+    ticket.before = proof;
+    last_scan_ = scan_state_t::checking;
+    return result;
+  }
+
+  scan_state_t setup_history_t::finish_scan(const scan_ticket_t &ticket, const epic_library::snapshot_t &metadata,
+                                           const launcher_proof_t *after, bool idle_same_session) {
+    if (!current(ticket)) return scan_state_t::superseded; // A late result never writes over a newer scan.
+    ++revision_;
+    if (!idle_same_session) return last_scan_ = scan_state_t::session_busy;
+#ifdef POLARIS_TESTS
+    if (metadata_observer_) metadata_observer_();
+#endif
+    if (!metadata.available) return last_scan_ = scan_state_t::metadata_unavailable;
+    if (!ticket.before) return last_scan_ = scan_state_t::launcher_unobserved;
+    if (!after || !same_launcher_observation(*ticket.before, *after)) return last_scan_ = scan_state_t::launcher_changed;
+    snapshot_ = std::make_shared<const epic_library::snapshot_t>(metadata); // Empty, available metadata is still a successful scan.
+    receipt_revision_ = revision_;
+    return last_scan_ = scan_state_t::complete;
+  }
+
+  receipt_state_t setup_history_t::receipt(const epic_library::snapshot_t &metadata, bool proof_valid) const {
+#ifdef POLARIS_TESTS
+    if (metadata_observer_) metadata_observer_();
+#endif
+    if (!snapshot_) return receipt_state_t::required;
+    if (!proof_valid || !metadata.available) return receipt_state_t::unknown;
+    return last_scan_ == scan_state_t::complete && epic_library::same_snapshot(*snapshot_, metadata) ?
+      receipt_state_t::complete : receipt_state_t::previous;
+  }
+
   bool appimage_mounts_itself(const launcher_proof_t &proof) {
     return detail::engine_t::appimage_mounts_itself(proof);
   }
@@ -2554,6 +2742,11 @@ namespace platf::epic {
 
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
       return detail::engine_t::prove_launcher(reason, std::move(backend));
+    }
+
+    setup_readiness_t evaluate_setup(const launcher_proof_t *proof, const title_t *title, bool idle,
+                                     prerequisite_state_t prerequisites, std::shared_ptr<backend_t> backend) {
+      return detail::engine_t::evaluate_setup(proof, title, idle, prerequisites, std::move(backend));
     }
 
     std::optional<bool> title_runtime_absent(const title_t &title, std::string &reason, std::shared_ptr<backend_t> backend) {

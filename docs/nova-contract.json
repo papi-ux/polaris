@@ -14,9 +14,21 @@
     "Drift found when this manifest was introduced, on 2026-08-06, is recorded under",
     "known_drift so it is tracked rather than rediscovered.",
     "",
-    "Schema format 2 is additive: ordered fields and legacy nova_reader entries remain. Only generated:true objects use generated names in S1a; wire object versions are unchanged."
+    "Schema format 2 is additive: ordered fields and legacy nova_reader entries remain. Only generated:true objects use generated names in S1a; wire object versions are unchanged.",
+    "js_outputs declares generated browser modules by name; an object defaults to default and may select js_output. Output paths stay under web/generated. Restricted outputs list their only allowed direct importers; other feature code uses those audited readers. Splitting outputs keeps lazy feature keys out of the initial shared module."
   ],
   "version": 2,
+  "js_outputs": {
+    "default": {
+      "file": "src_assets/common/assets/web/generated/polarisV1Contract.js"
+    },
+    "epic_setup": {
+      "file": "src_assets/common/assets/web/generated/polarisV1EpicSetupContract.js",
+      "importers": [
+        "src_assets/common/assets/web/epic-setup-contract.js"
+      ]
+    }
+  },
   "objects": {
     "video_queue": {
       "$comment": [
@@ -4385,6 +4397,373 @@
         "configured_encoder_kbps": "integer",
         "receipt_origin": "string"
       }
+    },
+    "epic_setup_status": {
+      "$comment": [
+        "Owner-console passive Epic setup v1; no launch/adoption authority or identifying native details.",
+        "Source-wide launcher_closed is not selected-title ready. Prerequisites remain typed unknown until a complete trusted passive support binding exists; omission never implies support. Sampled preflight is checked again at launch. Receipt is historical same-launcher scan bookends, not continuous presence."
+      ],
+      "fields": [
+        "version",
+        "supported",
+        "epoch",
+        "revision",
+        "sample_age_ms",
+        "desktop",
+        "proof",
+        "receipt",
+        "receipt_revision",
+        "last_scan",
+        "metadata_available",
+        "runtime",
+        "prerequisites",
+        "state",
+        "reason",
+        "selected"
+      ],
+      "types": {
+        "version": "integer",
+        "supported": "boolean",
+        "epoch": "string",
+        "revision": "string",
+        "sample_age_ms": "integer",
+        "desktop": "string",
+        "proof": "string",
+        "receipt": "string",
+        "receipt_revision": "string",
+        "last_scan": "string",
+        "metadata_available": "boolean",
+        "runtime": "string",
+        "prerequisites": "string",
+        "state": "string",
+        "reason": "string",
+        "selected": "object"
+      },
+      "required_present": [
+        "version",
+        "supported",
+        "epoch",
+        "revision",
+        "sample_age_ms",
+        "desktop",
+        "proof",
+        "receipt",
+        "receipt_revision",
+        "last_scan",
+        "metadata_available",
+        "runtime",
+        "prerequisites",
+        "state",
+        "reason",
+        "selected"
+      ],
+      "generated": true,
+      "polaris_emitter": {
+        "file": "src/confighttp.cpp",
+        "function": "epic_setup_json",
+        "style": "initializer_list",
+        "declaration": "return {"
+      },
+      "consumers": {
+        "polaris_web": {
+          "file": "src_assets/common/assets/web/epic-setup-contract.js",
+          "function": "readEpicSetup",
+          "receiver": "wire",
+          "style": "javascript",
+          "reads": [
+            "version",
+            "supported",
+            "epoch",
+            "revision",
+            "sample_age_ms",
+            "desktop",
+            "proof",
+            "receipt",
+            "receipt_revision",
+            "last_scan",
+            "metadata_available",
+            "runtime",
+            "prerequisites",
+            "state",
+            "reason",
+            "selected"
+          ]
+        }
+      },
+      "nullable": [
+        "selected"
+      ],
+      "bounds": {
+        "version": 1,
+        "epoch": "opaque process epoch, at most 64 ASCII characters; empty when no idle sample is available",
+        "revision": "uint64 decimal string",
+        "receipt_revision": "uint64 decimal string",
+        "sample_age_ms": "nonnegative elapsed time from request start; no session or launcher duration",
+        "selected": "null or epic_setup_title"
+      },
+      "enums": {
+        "desktop": [
+          "not_checked",
+          "open",
+          "closed",
+          "unknown"
+        ],
+        "proof": [
+          "required",
+          "valid",
+          "changed",
+          "unavailable"
+        ],
+        "receipt": [
+          "required",
+          "complete",
+          "previous",
+          "unknown"
+        ],
+        "runtime": [
+          "not_checked",
+          "not_selected",
+          "absent",
+          "busy",
+          "unknown"
+        ],
+        "prerequisites": [
+          "available",
+          "unavailable",
+          "unknown"
+        ],
+        "state": [
+          "busy",
+          "needs_action",
+          "launcher_closed",
+          "ready",
+          "unknown"
+        ],
+        "last_scan": [
+          "required",
+          "checking",
+          "complete",
+          "metadata_unavailable",
+          "launcher_unobserved",
+          "launcher_changed",
+          "superseded",
+          "session_busy",
+          "unsupported"
+        ],
+        "reason": [
+          "check_unresolved",
+          "session_busy",
+          "check_in_progress",
+          "choose_game",
+          "ready",
+          "epic_open_on_desktop",
+          "launcher_present_unplaced",
+          "epic_launcher_proof_required",
+          "private_mode_unavailable",
+          "epic_game_already_running",
+          "setup_generation_changed",
+          "epic_installation_unavailable",
+          "epic_installation_changed",
+          "windows_setup_unknown",
+          "launcher_changed",
+          "unsupported"
+        ]
+      },
+      "js_output": "epic_setup"
+    },
+    "epic_setup_title": {
+      "$comment": [
+        "Owner-console passive Epic setup v1; no launch/adoption authority or identifying native details."
+      ],
+      "fields": [
+        "namespace_id",
+        "item_id",
+        "artifact_id"
+      ],
+      "types": {
+        "namespace_id": "string",
+        "item_id": "string",
+        "artifact_id": "string"
+      },
+      "required_present": [
+        "namespace_id",
+        "item_id",
+        "artifact_id"
+      ],
+      "generated": true,
+      "polaris_emitter": {
+        "file": "src/confighttp.cpp",
+        "function": "epic_setup_identity_json",
+        "style": "initializer_list",
+        "declaration": "return {"
+      },
+      "consumers": {
+        "polaris_web": {
+          "file": "src_assets/common/assets/web/epic-setup-contract.js",
+          "function": "readEpicTitle",
+          "receiver": "wire",
+          "style": "javascript",
+          "reads": [
+            "namespace_id",
+            "item_id",
+            "artifact_id"
+          ]
+        }
+      },
+      "js_output": "epic_setup"
+    },
+    "epic_setup_scan": {
+      "$comment": [
+        "Owner-console passive Epic setup v1; no launch/adoption authority or identifying native details."
+      ],
+      "fields": [
+        "version",
+        "metadata_available",
+        "capture",
+        "scan",
+        "receipt_revision"
+      ],
+      "types": {
+        "version": "integer",
+        "metadata_available": "boolean",
+        "capture": "string",
+        "scan": "string",
+        "receipt_revision": "string"
+      },
+      "required_present": [
+        "version",
+        "metadata_available",
+        "capture",
+        "scan",
+        "receipt_revision"
+      ],
+      "generated": true,
+      "polaris_emitter": {
+        "file": "src/confighttp.cpp",
+        "function": "epic_setup_scan_json",
+        "style": "initializer_list",
+        "declaration": "return {"
+      },
+      "consumers": {
+        "polaris_web": {
+          "file": "src_assets/common/assets/web/epic-setup-contract.js",
+          "function": "readEpicScan",
+          "receiver": "wire",
+          "style": "javascript",
+          "reads": [
+            "version",
+            "metadata_available",
+            "capture",
+            "scan",
+            "receipt_revision"
+          ]
+        }
+      },
+      "enums": {
+        "version": [
+          1
+        ],
+        "capture": [
+          "captured",
+          "unchanged",
+          "unavailable",
+          "superseded",
+          "unsupported"
+        ],
+        "scan": [
+          "required",
+          "checking",
+          "complete",
+          "metadata_unavailable",
+          "launcher_unobserved",
+          "launcher_changed",
+          "superseded",
+          "session_busy",
+          "unsupported"
+        ]
+      },
+      "js_output": "epic_setup"
+    },
+    "epic_setup_scan_envelope": {
+      "$comment": [
+        "Additive fragment of the existing games scan envelope; legacy game lists, warnings and status retain their existing semantics."
+      ],
+      "fields": [
+        "epic_setup"
+      ],
+      "types": {
+        "epic_setup": "object"
+      },
+      "required_present": [
+        "epic_setup"
+      ],
+      "generated": true,
+      "polaris_emitter": {
+        "file": "src/confighttp.cpp",
+        "function": "append_epic_setup_scan",
+        "style": "subscript",
+        "variable": "output"
+      },
+      "consumers": {
+        "polaris_web": {
+          "file": "src_assets/common/assets/web/epic-setup-contract.js",
+          "function": "readEpicScanEnvelope",
+          "receiver": "wire",
+          "style": "javascript",
+          "reads": [
+            "epic_setup"
+          ]
+        }
+      },
+      "js_output": "epic_setup"
+    },
+    "epic_setup_error": {
+      "$comment": [
+        "Owner-console passive Epic setup v1; no launch/adoption authority or identifying native details."
+      ],
+      "fields": [
+        "status",
+        "error"
+      ],
+      "types": {
+        "status": "boolean",
+        "error": "string"
+      },
+      "required_present": [
+        "status",
+        "error"
+      ],
+      "generated": true,
+      "polaris_emitter": {
+        "file": "src/confighttp.cpp",
+        "function": "write_epic_setup_error",
+        "style": "initializer_list",
+        "declaration": "const nlohmann::json output {"
+      },
+      "consumers": {
+        "polaris_web": {
+          "file": "src_assets/common/assets/web/epic-setup-contract.js",
+          "function": "readEpicSetupError",
+          "receiver": "wire",
+          "style": "javascript",
+          "reads": [
+            "status",
+            "error"
+          ]
+        }
+      },
+      "enums": {
+        "status": [
+          false
+        ],
+        "error": [
+          "authentication_required",
+          "authentication_unavailable",
+          "invalid_selection",
+          "status_unavailable"
+        ]
+      },
+      "js_output": "epic_setup"
     }
   },
   "known_drift": {
