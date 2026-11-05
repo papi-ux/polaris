@@ -67,18 +67,20 @@ Live Tuning native diagnostic <summary|interruption|scope_end>: generation=<n> s
   - the receipt and consumption stages `no_receipt`, `receipt_not_current`, `signal_not_current`, `measurement`, `setting`, `caller_changed` and `policy_not_normal`.
 
   Each name comes from the check that already decided; no predicate or caller callback runs again for it. `consumed` and `pending_wait` are not refusals.
+- **Requests** counts only cuts the policy accepted, the ones that set the target and add a `native_downward_requested` entry. A proposed cut the policy refuses counts in `policy_refused` instead.
 - **Clears** are named `gap`, `order`, `median_unavailable`, `bucket_coverage`, `bucket_second_skipped`, `bucket_overflow`, `source_changed`, `action_revision_changed`, `floor_changed`, `reference_expired`, `permission`, `not_consumed_receipt`, `not_consumed_measurement`, `not_consumed_setting`, `not_consumed_current`, `policy_refused` or `writer_or_scope`.
   - A clear is counted only when the window held observations.
   - `last_lost_*` gives how many closed, reference and consecutive standing buckets the latest clear discarded.
   - A window usually starts inside a second, so a short first bucket is a counted `bucket_coverage` clear with `last_lost_closed=0`.
 - **A busy skip is not a clear.** A report that finds the state lock busy never enters. It returns as before and only increments a lock-free, process-wide counter. Its line reports the difference since the scope began as `busy_skips`.
   - Reports that never reach the entry point are outside these counts.
+  - Where a 64-bit atomic is not always lock-free, busy-skip counting is compiled out, the busy return is the original immediate one, and lines show `busy_skips=unavailable`. A scope there that only skipped reports writes no `scope_end` line.
 - **Bounds.** Each scope writes:
   - at most 64 `summary` lines: one at its first entered report, then at most one every 10 s;
   - at most 16 `interruption` lines, one per clear other than the routine `reference_expired`;
   - one `scope_end` line when the scope ends or resets, if it entered or skipped any report.
 
-  Anything over a limit only increments `suppressed`. Running lines appear only while the opt-in is on. A disabled scope still ends with one `scope_end` line naming `config_disabled`, which shows whether reports arrived. Lines stay under 1536 bytes, and counts saturate at 2^32−1.
+  Anything over a limit only increments `suppressed`. Running lines appear only while the opt-in is on. A disabled scope still ends with one `scope_end` line naming `config_disabled`, which shows whether reports arrived. Counts saturate at 2^32−1. The longest possible line is 1742 bytes, with every count at its maximum and every refusal and clear slot nonzero; the fixed buffer holds 2048. A line that ever outgrew it would end in ` truncated` rather than being cut silently.
 - **Privacy.** Lines carry only static names and numbers. `generation` and `sequence` are the existing opaque scope generation and report sequence. No app or session string, nonce, token, address or free text appears.
 - **No authority.** No decision, permission, deadline, threshold, bucket, action, retry or learning reads these counts. Lines are formatted under the state lock and written after it is released.
 

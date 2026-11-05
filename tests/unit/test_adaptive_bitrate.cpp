@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <initializer_list>
@@ -2647,6 +2648,8 @@ namespace {
     }
     return out;
   }
+  // busy_skips at zero, or its label where a 64-bit atomic is not always lock-free and the counter is compiled out.
+  const std::string native_no_busy_skips = std::atomic<std::uint64_t>::is_always_lock_free ? "0" : "unavailable";
   // The value of one " name=value" field of a diagnostic line.
   std::string native_field(const std::string &line, std::string_view name) {
     const auto key = " " + std::string {name} + "=";
@@ -2676,7 +2679,7 @@ TEST_F(NativeDownwardHandoff, SilentReferenceRefusalIsNamedInOneLogLineAndAddsNo
   EXPECT_EQ(native_field(line, "sequence"), std::to_string(stale.sequence));
   EXPECT_EQ(native_field(line, "native_downward"), "on");
   EXPECT_EQ(native_field(line, "entered"), "2"); EXPECT_EQ(native_field(line, "consumed"), "1");
-  EXPECT_EQ(native_field(line, "busy_skips"), "0");
+  EXPECT_EQ(native_field(line, "busy_skips"), native_no_busy_skips);
   EXPECT_EQ(native_field(line, "refused"), "1");
   EXPECT_EQ(native_field(line, "first_refusal"), "operator_revision");
   EXPECT_EQ(native_field(line, "refusals"), "[operator_revision:1]");
@@ -2709,7 +2712,8 @@ TEST_F(NativeDownwardHandoff, BusySkipIsCountedWithoutEnteringAndApartFromAnyRef
   adaptive_bitrate::reset(); // Ends the scope: its one final line, after the reset discarded the live window.
   const auto end = native_lines(log, "scope_end");
   ASSERT_EQ(end.size(), 1u);
-  EXPECT_EQ(native_field(end[0], "busy_skips"), "1");
+  EXPECT_EQ(native_field(end[0], "busy_skips"),
+            std::atomic<std::uint64_t>::is_always_lock_free ? "1" : "unavailable");
   EXPECT_EQ(native_field(end[0], "entered"), "1"); EXPECT_EQ(native_field(end[0], "refused"), "0");
   EXPECT_EQ(native_field(end[0], "retired_window"), "1");
   // The only clear is the reset's own retire of the one-observation window; the skip cleared nothing.
@@ -2799,7 +2803,8 @@ TEST_F(NativeDownwardHandoff, DiagnosticLinesAreBoundedPrivateAndLeaveHistoryHea
   const auto all = native_lines(log);
   EXPECT_EQ(all.size(), 18u);
   for (const auto &line : all) {
-    EXPECT_LT(line.size(), 1536u);
+    EXPECT_LT(line.size(), 2048u);
+    EXPECT_EQ(line.find(" truncated"), std::string::npos) << line;
     EXPECT_EQ(line.find("native-controller-test"), std::string::npos) << line;
     EXPECT_EQ(line.find(nonce), std::string::npos) << line;
     EXPECT_EQ(line.find_first_not_of("abcdefghijklmnopqrstuvwxyzLTN0123456789_ =:,/[]"), std::string::npos) << line;
