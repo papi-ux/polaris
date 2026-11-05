@@ -5,8 +5,12 @@ provider or a subscription. Doctor explanations remain a separate feature.
 
 Live Tuning is on by default from 1.5.0. Older releases wrote the old Off default
 into `polaris.conf` on every settings save, so the first start of 1.5.0 turns a
-saved Off on once and records that in `settings_migrations.json` beside it.
-Turn it off after that and it stays off.
+saved Off on once and records `live_tuning_on_by_default` in
+`settings_migrations.json` beside the settings file. This includes a host that
+chose Off deliberately before 1.5.0. Turn it off after the upgrade and it stays
+off. An already enabled setting stays on. An unreadable migration record changes
+nothing, and a settings file the store refuses is tried again at the next start.
+Live Tuning still adjusts only encoders that accept a bitrate change mid-stream.
 
 With Live Tuning on, the default, adaptive parity is active for a Nova stream on
 a Linux host using NVENC when Nova reports partly lost frames. It can adjust FEC
