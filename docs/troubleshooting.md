@@ -557,6 +557,25 @@ If Polaris cannot hold the preferred hardware path, open Mission Control or Trou
 check the active runtime path. Polaris surfaces when capture or encode falls back so you do not
 need to guess from a black-box client session.
 
+When the host's encoder check could not start NVENC and selected the CPU encoder instead,
+Mission Control and Doctor & Support say so before a stream: **NVENC is unavailable on this GPU
+with this build, so video is encoded on the CPU.** Streams still start, with the CPU doing the
+encoding. The notice comes from the completed check, the `encoder_selection` evidence with
+`preferred_encoder` `nvenc`, `selected_encoder` `software` and `fallback_used` true, and the
+host's own **Selection reason** stays beside it. A host that has not run the check yet, or that
+fell back to another hardware encoder, shows no notice. Encoder selection itself is unchanged.
+
+Check three things:
+
+- **Driver.** An NVIDIA driver older than the NVENC API the linked FFmpeg needs cannot start
+  the encoder; the libav error before the `encoder_auto:` line names both versions.
+- **GPU generation.** A CUDA build carries kernels only for the GPU architectures its compiler
+  was given, so an older GPU can be left out. The host log then shows
+  `cudaErrorNoKernelImageForDevice`. Which generations a package covers depends on the CUDA
+  version it was built with, so check the log rather than the GPU's age.
+- **Package variant.** `polaris --version` prints `Build features: cuda=enabled` or
+  `cuda=disabled`, which says which kind of package is installed.
+
 ## Linux HDR or Main10 has wrong colors
 
 If the log says `stream_hdr_enabled=false`, treat that stream as SDR. A client HDR request or
