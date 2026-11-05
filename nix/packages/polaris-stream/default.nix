@@ -253,6 +253,7 @@ stdenv'.mkDerivation (finalAttrs: {
     libgbm
     amf-headers
     svt-av1
+    vulkan-headers
     vulkan-loader
     pipewire
     libappindicator
@@ -261,7 +262,6 @@ stdenv'.mkDerivation (finalAttrs: {
   ++ lib.optionals cudaSupport [
     cudaPackages.cudatoolkit
     cudaPackages.cuda_cudart
-    vulkan-headers
   ];
 
   runtimeDependencies = [
@@ -356,9 +356,7 @@ stdenv'.mkDerivation (finalAttrs: {
           xdg-utils
         ]
       } \
-      ${lib.optionalString cudaSupport "--prefix LD_LIBRARY_PATH : ${
-        lib.makeLibraryPath [ vulkan-loader ]
-      }"}
+      --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ vulkan-loader ]}
   '';
 
   meta = {
