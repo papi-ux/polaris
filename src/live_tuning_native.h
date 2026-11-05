@@ -16,6 +16,58 @@ namespace live_tuning_native {
   inline constexpr std::int64_t proof_ns = 6 * second_ns, response_ns = 6 * second_ns;
 
   enum class phase_e { reference, awaiting_application, response, responded, ineffective, unassessed };
+  /// Why the episode last changed phase. Static and sanitized; diagnostic only, never read by a decision.
+  enum class transition_reason_e {
+    none, standing_trigger, backend_tuple_confirmed, four_buckets_below_trigger,
+    proof_deadline, wrong_application, response_deadline, setting_changed,
+    median_unavailable, order, gap, bucket_second_skipped, bucket_coverage, bucket_overflow,
+    permission, not_consumed_receipt, not_consumed_measurement, not_consumed_setting, not_consumed_current,
+    policy_refused, reset_by_writer_or_scope, unavailable,
+  };
+  /// What happened to one closed response bucket. Diagnostic only; a fact is never response credit by itself.
+  enum class bucket_disposition_e {
+    none, initial_partial_discarded, below_trigger, not_below_trigger, coverage_short, second_skipped, overflow,
+  };
+  inline const char *name(transition_reason_e reason) noexcept {
+    switch (reason) {
+#define NATIVE_TRANSITION_REASON(x) case transition_reason_e::x: return #x
+      NATIVE_TRANSITION_REASON(none); NATIVE_TRANSITION_REASON(standing_trigger);
+      NATIVE_TRANSITION_REASON(backend_tuple_confirmed); NATIVE_TRANSITION_REASON(four_buckets_below_trigger);
+      NATIVE_TRANSITION_REASON(proof_deadline); NATIVE_TRANSITION_REASON(wrong_application);
+      NATIVE_TRANSITION_REASON(response_deadline); NATIVE_TRANSITION_REASON(setting_changed);
+      NATIVE_TRANSITION_REASON(median_unavailable); NATIVE_TRANSITION_REASON(order); NATIVE_TRANSITION_REASON(gap);
+      NATIVE_TRANSITION_REASON(bucket_second_skipped); NATIVE_TRANSITION_REASON(bucket_coverage);
+      NATIVE_TRANSITION_REASON(bucket_overflow); NATIVE_TRANSITION_REASON(permission);
+      NATIVE_TRANSITION_REASON(not_consumed_receipt); NATIVE_TRANSITION_REASON(not_consumed_measurement);
+      NATIVE_TRANSITION_REASON(not_consumed_setting); NATIVE_TRANSITION_REASON(not_consumed_current);
+      NATIVE_TRANSITION_REASON(policy_refused); NATIVE_TRANSITION_REASON(reset_by_writer_or_scope);
+      NATIVE_TRANSITION_REASON(unavailable);
+#undef NATIVE_TRANSITION_REASON
+    }
+    return "unavailable";
+  }
+  inline const char *name(bucket_disposition_e disposition) noexcept {
+    switch (disposition) {
+#define NATIVE_BUCKET_DISPOSITION(x) case bucket_disposition_e::x: return #x
+      NATIVE_BUCKET_DISPOSITION(none); NATIVE_BUCKET_DISPOSITION(initial_partial_discarded);
+      NATIVE_BUCKET_DISPOSITION(below_trigger); NATIVE_BUCKET_DISPOSITION(not_below_trigger);
+      NATIVE_BUCKET_DISPOSITION(coverage_short); NATIVE_BUCKET_DISPOSITION(second_skipped);
+      NATIVE_BUCKET_DISPOSITION(overflow);
+#undef NATIVE_BUCKET_DISPOSITION
+    }
+    return "none";
+  }
+  struct bucket_fact_t {
+    bucket_disposition_e disposition = bucket_disposition_e::none;
+    std::size_t count = 0;
+    std::int64_t span_ns = 0, median_lower_ns = 0, median_upper_ns = 0, trigger_lower_ns = 0;
+    int consecutive_below = 0; // Consecutive sub-trigger response buckets after this one.
+  };
+  struct diagnostic_t {
+    transition_reason_e reason = transition_reason_e::none;
+    bucket_fact_t bucket;      // The latest response bucket fact.
+    std::uint32_t buckets = 0; // Response bucket facts so far, so a reader can tell a new one apart.
+  };
   struct evidence_t {
     setting_t source;
     std::optional<setting_t> applied;
@@ -28,12 +80,13 @@ namespace live_tuning_native {
   public:
     phase_e phase() const noexcept { return phase_; }
     const evidence_t &evidence() const noexcept { return evidence_; }
+    const diagnostic_t &diagnostic() const noexcept { return diagnostic_; }
     bool spent() const noexcept { return phase_ != phase_e::reference; }
 
     // Missing/unavailable telemetry only destroys an observation window. It cannot undo a cut.
-    void unavailable() noexcept {
+    void unavailable(transition_reason_e reason = transition_reason_e::unavailable) noexcept {
       if (phase_ == phase_e::awaiting_application || phase_ == phase_e::response)
-        phase_ = phase_e::unassessed;
+        enter(phase_e::unassessed, reason);
       else if (phase_ == phase_e::reference) clear_reference();
     }
     void accepted_application(std::uint64_t revision) noexcept {
@@ -46,13 +99,13 @@ namespace live_tuning_native {
       // Transition telemetry is not clean, loss, response or permission. It cannot move this deadline.
       if (phase_ == phase_e::awaiting_application &&
           (now_ns < evidence_.dispatched_ns || now_ns - evidence_.dispatched_ns > proof_ns))
-        phase_ = phase_e::unassessed;
+        enter(phase_e::unassessed, transition_reason_e::proof_deadline);
     }
     void check_deadline(std::int64_t now_ns) noexcept {
       wait_for_application(now_ns);
       if (phase_ == phase_e::response &&
           (now_ns < response_started_ns_ || now_ns - response_started_ns_ > response_ns))
-        phase_ = phase_e::ineffective;
+        enter(phase_e::ineffective, transition_reason_e::response_deadline);
     }
     bool pending_setting_matches(const setting_t &s) const noexcept {
       return s == evidence_.source || (evidence_.accepted_revision &&
@@ -71,19 +124,20 @@ namespace live_tuning_native {
       if (!point || !signal.setting || signal.received_steady_ns < 0 || !signal.sequence) {
         if (phase_ == phase_e::awaiting_application && signal.admitted && signal.received_steady_ns >= 0)
           wait_for_application(signal.received_steady_ns);
-        else unavailable();
+        else unavailable(transition_reason_e::median_unavailable);
         return std::nullopt;
       }
       const auto now = signal.received_steady_ns;
       if (last_ns_ >= 0 && (now <= last_ns_ || signal.sequence <= last_sequence_ ||
           (phase_ != phase_e::awaiting_application && now - last_ns_ > gap_ns))) {
-        unavailable();
+        unavailable(now <= last_ns_ || signal.sequence <= last_sequence_ ?
+          transition_reason_e::order : transition_reason_e::gap);
         if (spent()) return std::nullopt;
       }
       last_ns_ = now; last_sequence_ = signal.sequence;
       if (phase_ == phase_e::awaiting_application) {
         if (now < evidence_.dispatched_ns || now - evidence_.dispatched_ns > proof_ns) {
-          phase_ = phase_e::unassessed; return std::nullopt;
+          enter(phase_e::unassessed, transition_reason_e::proof_deadline); return std::nullopt;
         }
         const auto &s = *signal.setting;
         if (s == evidence_.source) return std::nullopt; // Old in-flight frames earn no response.
@@ -93,17 +147,20 @@ namespace live_tuning_native {
             s.configured_encoder_kbps != evidence_.requested_kbps ||
             s.origin_revision != evidence_.accepted_revision ||
             s.receipt_origin != video::bitrate_provenance::receipt_origin_e::backend_reconfiguration) {
-          phase_ = phase_e::unassessed; return std::nullopt;
+          enter(phase_e::unassessed, transition_reason_e::wrong_application); return std::nullopt;
         }
         evidence_.applied = s;
-        phase_ = phase_e::response;
+        enter(phase_e::response, transition_reason_e::backend_tuple_confirmed);
         response_started_ns_ = now;
         clear_bucket(); response_buckets_ = 0;
+        response_initial_bucket_ = true;
       }
       if (phase_ == phase_e::response) {
         if (*signal.setting != *evidence_.applied || now < response_started_ns_ ||
             now - response_started_ns_ > response_ns) {
-          phase_ = phase_e::ineffective; return std::nullopt;
+          enter(phase_e::ineffective, *signal.setting != *evidence_.applied ?
+            transition_reason_e::setting_changed : transition_reason_e::response_deadline);
+          return std::nullopt;
         }
       } else {
         if (!source_ || *source_ != *signal.setting || action_revision_ != signal.context.action_revision ||
@@ -115,8 +172,21 @@ namespace live_tuning_native {
       const auto second = now / second_ns;
       std::optional<int> request;
       if (bucket_second_ >= 0 && second != bucket_second_) {
-        if (second != bucket_second_ + 1 || bucket_count_ < 4 || bucket_last_ns_ - bucket_first_ns_ < gap_ns) {
-          unavailable();
+        const bool adjacent = second == bucket_second_ + 1;
+        const bool covered = adjacent && bucket_count_ >= 4 && bucket_last_ns_ - bucket_first_ns_ >= gap_ns;
+        const bool initial = phase_ == phase_e::response && response_initial_bucket_;
+        if (phase_ == phase_e::response) response_initial_bucket_ = false;
+        if (initial && adjacent && !covered) {
+          // Source behavior correction: the first response bucket starts at the response itself, inside an absolute
+          // steady second, so it covers only the rest of that second. If short, discard it with no qualifying or
+          // response credit; its reports still passed every gap, order, median, tuple and deadline check above.
+          // The six-second deadline, absolute grouping and the rule for every later bucket are unchanged, and a
+          // covered first bucket keeps its original credit below.
+          note_bucket(bucket_disposition_e::initial_partial_discarded, 0, 0);
+        } else if (!covered) {
+          if (phase_ == phase_e::response)
+            note_bucket(adjacent ? bucket_disposition_e::coverage_short : bucket_disposition_e::second_skipped, 0, 0);
+          unavailable(adjacent ? transition_reason_e::bucket_coverage : transition_reason_e::bucket_second_skipped);
           if (spent()) return std::nullopt;
           source_ = signal.setting; action_revision_ = signal.context.action_revision;
           floor_ = signal.context.floor_kbps; reference_started_ns_ = now;
@@ -130,7 +200,10 @@ namespace live_tuning_native {
         clear_bucket();
       }
       bucket_second_ = second;
-      if (bucket_count_ == lower_.size()) { unavailable(); return std::nullopt; }
+      if (bucket_count_ == lower_.size()) {
+        if (phase_ == phase_e::response) note_bucket(bucket_disposition_e::overflow, 0, 0);
+        unavailable(transition_reason_e::bucket_overflow); return std::nullopt;
+      }
       if (!bucket_count_) bucket_first_ns_ = now;
       bucket_last_ns_ = now;
       lower_[bucket_count_] = point->first; upper_[bucket_count_++] = point->second;
@@ -155,6 +228,12 @@ namespace live_tuning_native {
       std::sort(lower.begin(), lower.begin() + count); std::sort(upper.begin(), upper.begin() + count);
       return std::pair {lower[count / 2], upper[count / 2]};
     }
+    void enter(phase_e phase, transition_reason_e reason) noexcept { phase_ = phase; diagnostic_.reason = reason; }
+    void note_bucket(bucket_disposition_e disposition, std::int64_t lower, std::int64_t upper) noexcept {
+      diagnostic_.bucket = {disposition, bucket_count_, bucket_count_ ? bucket_last_ns_ - bucket_first_ns_ : 0,
+                            lower, upper, evidence_.trigger_lower_ns, response_buckets_};
+      ++diagnostic_.buckets;
+    }
     void clear_bucket() noexcept { bucket_second_ = -1; bucket_count_ = 0; }
     void clear_reference() noexcept {
       source_.reset(); reference_buckets_ = standing_buckets_ = prior_count_ = 0;
@@ -165,7 +244,9 @@ namespace live_tuning_native {
                                     std::int64_t first_ns, const native_video_signal::signal_t &signal) noexcept {
       if (phase_ == phase_e::response) {
         response_buckets_ = upper < evidence_.trigger_lower_ns ? response_buckets_ + 1 : 0;
-        if (response_buckets_ >= 4) phase_ = phase_e::responded;
+        note_bucket(upper < evidence_.trigger_lower_ns ? bucket_disposition_e::below_trigger :
+                    bucket_disposition_e::not_below_trigger, lower, upper);
+        if (response_buckets_ >= 4) enter(phase_e::responded, transition_reason_e::four_buckets_below_trigger);
         return std::nullopt;
       }
       const bool have_prior = prior_count_ >= 3;
@@ -190,12 +271,14 @@ namespace live_tuning_native {
       if (floor_ <= 0 || next >= from) return std::nullopt;
       evidence_ = {*source_, std::nullopt, signal.sequence, reference_upper_ns_, trigger_lower_ns_,
                    signal.received_steady_ns, next, 0};
-      phase_ = phase_e::awaiting_application;
+      enter(phase_e::awaiting_application, transition_reason_e::standing_trigger);
       clear_bucket();
       return next;
     }
     phase_e phase_ = phase_e::reference;
     evidence_t evidence_;
+    diagnostic_t diagnostic_;
+    bool response_initial_bucket_ = false;
     std::optional<setting_t> source_;
     std::uint64_t action_revision_ = 0;
     std::uint32_t last_sequence_ = 0;

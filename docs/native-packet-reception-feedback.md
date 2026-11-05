@@ -23,6 +23,22 @@ response observation has its own six-second bound. An explicit writer with a dif
 request/floor, or a new stream, is needed to resume adaptation. A same-value writer retains the
 conservative hold. This option is a source candidate, not automatic-device or physical qualification.
 
+The response window groups data-sample elapsed bounds by absolute steady second, as the reference
+does. A sampled response needs four consecutive buckets, each with at least four reports spanning
+500 ms, whose median upper bound is below the trigger's lower bound, all within six seconds of the
+first report from the backend-applied tuple. That first report can arrive anywhere inside a second, so
+the response's first bucket covers only the rest of it. If that one bucket is short it is discarded
+with no credit; a first bucket that already meets the coverage rule counts as before. Every report
+still passes the gap, order, data-sample, tuple and deadline checks. Any later short or skipped bucket,
+a report gap, disorder, overflow or unavailable data still ends the trial unassessed, a changed tuple
+or the six-second deadline ends it ineffective, and nothing restores the rate or makes another cut.
+
+Each episode transition, including refusals that did not previously leave a history entry, adds a
+`native_diagnostic_transition` entry whose cause names its static reason; each closed or discarded
+response bucket adds a `native_diagnostic_bucket` entry naming its disposition. They are diagnostic
+history entries in the existing open kind/cause fields, not native actions or response credit, and add
+no serialized field.
+
 ## Passive native signal and controller inspection (private trace 2.5)
 
 Each native control callback now projects the newly admitted value copy into a stateless typed

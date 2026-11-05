@@ -81,7 +81,12 @@ namespace adaptive_bitrate {
    * - fec_target, fec_published: an allocation request, or its actual frame-boundary publication;
    * - fec_retired, fec_cancelled: an actual percentage retirement, or cancellation without one;
    * - fec_restored: the encoder confirmed the higher rate after F0 was already published;
-   * - fec_refused, fec_deferred, fec_unavailable: existing transaction/evidence diagnostics.
+   * - fec_refused, fec_deferred, fec_unavailable: existing transaction/evidence diagnostics;
+   * - native_diagnostic_transition: the static live_tuning_native::transition_reason_e name (cause) of the
+   *   native episode transition recorded just before it, including refusals that earlier left no row, or
+   *   reset_by_writer_or_scope when a writer or scope change discarded a spent episode;
+   * - native_diagnostic_bucket: the static bucket_disposition_e name (cause) of one closed or discarded
+   *   response bucket. Diagnostic only: it is neither a native action nor response credit.
    * Typed fec_transition evidence, when present, distinguishes allocation changes from requests and
    * confirmations. Absence means unavailable, never a configured or published percentage of zero.
    */
@@ -116,6 +121,9 @@ namespace adaptive_bitrate {
     std::optional<fec_transition_t> fec_transition;
     /// Experimental native evidence; separate from RTT/loss and never a restore capability.
     std::optional<live_tuning_native::evidence_t> native_transition;
+    /// Typed reason and latest response-bucket fact on native diagnostic entries. Internal: the serialized entry
+    /// carries only its open kind/cause strings, and no decision reads this.
+    std::optional<live_tuning_native::diagnostic_t> native_diagnostic;
   };
 
   /** A bounded, oldest-first copy of one stream scope's history. */

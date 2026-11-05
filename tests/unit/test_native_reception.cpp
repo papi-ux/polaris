@@ -1007,6 +1007,218 @@ TEST(NativeDownwardEpisode, ExpiredReferenceAndDelayedConsumptionCannotExtendEit
   EXPECT_FALSE(pending.observe(old)); EXPECT_EQ(pending.phase(), live_tuning_native::phase_e::unassessed);
 }
 
+namespace {
+  // A report of the accepted 17000 kbps backend application at revision 41, in the trial fixture's units.
+  native_video_signal::signal_t native_d_signal(int ms, int lower_us, int upper_us, std::uint32_t sequence = 0) {
+    auto s = native_trial_signal(ms, lower_us, upper_us, sequence);
+    s.setting->application_sequence = 2; s.setting->origin_revision = 41;
+    s.setting->configured_encoder_kbps = 17000; s.setting->receipt_origin = bp::receipt_origin_e::backend_reconfiguration;
+    return s;
+  }
+  // The existing standing fixture: one request at 12000 ms (trigger lower 30 ms), then backend acceptance at 41.
+  void native_d_pending(live_tuning_native::episode_t &episode) {
+    ASSERT_EQ(native_trial_feed(episode, 12, [](int s) { return s < 4 ? 3000 : 30000; }), std::vector<int> {17000});
+    episode.accepted_application(41);
+  }
+}
+
+TEST(NativeDownwardEpisode, LateResponseStartDiscardsOnlyItsPartialFirstSecondWithoutCredit) {
+  // The retained N87E3 HISTORY-R1 shape: the first D report lands 602 ms into an absolute steady second, so that
+  // second can hold only four response reports spanning 300 ms. That is not telemetry loss, and it earns nothing.
+  live_tuning_native::episode_t episode;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(episode));
+  for (int ms = 12602; ms < 17000; ms += 100) {
+    EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(episode.phase(), live_tuning_native::phase_e::response) << ms;
+  }
+  // Only the four full sub-trigger seconds 13..16 count. A credited partial second would have responded at 16002 ms.
+  EXPECT_FALSE(episode.observe(native_d_signal(17002, 3500, 3600)));
+  EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::responded);
+  EXPECT_EQ(episode.evidence().requested_kbps, 17000);
+}
+
+TEST(NativeDownwardEpisode, JitterBoundaryFirstBucketIsDiscardedWhileACoveredFirstBucketStillCounts) {
+  // 402 ms into the second, ordinary report jitter leaves six reports spanning 499 ms: one millisecond short.
+  live_tuning_native::episode_t jitter;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(jitter));
+  for (const int ms : {12402, 12498, 12599, 12699, 12799, 12901, 13001}) {
+    EXPECT_FALSE(jitter.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(jitter.phase(), live_tuning_native::phase_e::response) << ms;
+  }
+  for (int ms = 13101; ms < 17000; ms += 100) {
+    EXPECT_FALSE(jitter.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(jitter.phase(), live_tuning_native::phase_e::response) << ms;
+  }
+  EXPECT_FALSE(jitter.observe(native_d_signal(17001, 3500, 3600)));
+  EXPECT_EQ(jitter.phase(), live_tuning_native::phase_e::responded);
+  // A first bucket that already holds four reports over 500 ms keeps its original credit: responded one second earlier.
+  live_tuning_native::episode_t covered;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(covered));
+  for (int ms = 12450; ms < 16000; ms += 100) {
+    EXPECT_FALSE(covered.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(covered.phase(), live_tuning_native::phase_e::response) << ms;
+  }
+  EXPECT_FALSE(covered.observe(native_d_signal(16050, 3500, 3600)));
+  EXPECT_EQ(covered.phase(), live_tuning_native::phase_e::responded);
+}
+
+TEST(NativeDownwardEpisode, SlowDrainAfterALateStartStillEndsIneffectiveAtTheOriginalSixSeconds) {
+  // The retained case's geometry: sub-trigger seconds begin too late for four of them to close inside six seconds.
+  live_tuning_native::episode_t episode;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(episode));
+  for (int ms = 12602; ms <= 18602; ms += 100) {
+    const int lower = ms < 15000 ? 50000 : 3500;
+    EXPECT_FALSE(episode.observe(native_d_signal(ms, lower, lower + 100)));
+    ASSERT_EQ(episode.phase(), live_tuning_native::phase_e::response) << ms;
+  }
+  EXPECT_FALSE(episode.observe(native_d_signal(18702, 3500, 3600)));
+  EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::ineffective);
+  for (int ms = 18802; ms < 40000; ms += 100) EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+  EXPECT_EQ(episode.phase(), live_tuning_native::phase_e::ineffective);
+  EXPECT_EQ(episode.evidence().requested_kbps, 17000);
+}
+
+TEST(NativeDownwardEpisode, TypedFactsShowTheDiscardedPartialAndEveryQualifyingResponseBucket) {
+  namespace ltn = live_tuning_native;
+  ltn::episode_t episode;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(episode));
+  EXPECT_EQ(episode.diagnostic().reason, ltn::transition_reason_e::standing_trigger);
+  for (int ms = 12602; ms < 13000; ms += 100) EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+  EXPECT_EQ(episode.diagnostic().reason, ltn::transition_reason_e::backend_tuple_confirmed);
+  EXPECT_EQ(episode.diagnostic().buckets, 0u);
+  EXPECT_FALSE(episode.observe(native_d_signal(13002, 3500, 3600)));
+  auto fact = episode.diagnostic().bucket;
+  EXPECT_EQ(episode.diagnostic().buckets, 1u);
+  EXPECT_EQ(fact.disposition, ltn::bucket_disposition_e::initial_partial_discarded);
+  EXPECT_EQ(fact.count, 4u); EXPECT_EQ(fact.span_ns, 300'000'000); EXPECT_EQ(fact.consecutive_below, 0);
+  EXPECT_EQ(fact.trigger_lower_ns, 30'000'000);
+  for (int ms = 13102; ms <= 14002; ms += 100) EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+  fact = episode.diagnostic().bucket;
+  EXPECT_EQ(episode.diagnostic().buckets, 2u);
+  EXPECT_EQ(fact.disposition, ltn::bucket_disposition_e::below_trigger);
+  EXPECT_EQ(fact.count, 10u); EXPECT_EQ(fact.span_ns, 900'000'000); EXPECT_EQ(fact.consecutive_below, 1);
+  EXPECT_EQ(fact.median_lower_ns, 3'500'000); EXPECT_EQ(fact.median_upper_ns, 3'600'000);
+  for (int ms = 14102; ms <= 17002; ms += 100) EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+  EXPECT_EQ(episode.phase(), ltn::phase_e::responded);
+  EXPECT_EQ(episode.diagnostic().reason, ltn::transition_reason_e::four_buckets_below_trigger);
+  EXPECT_EQ(episode.diagnostic().bucket.consecutive_below, 4);
+  EXPECT_EQ(episode.diagnostic().buckets, 5u);
+}
+
+TEST(NativeDownwardEpisode, LaterBucketsKeepEveryOriginalRefusalAfterTheDiscardedPartial) {
+  namespace ltn = live_tuning_native;
+  using reason = ltn::transition_reason_e;
+  struct refusal_t { const char *name; ltn::phase_e phase; reason why; };
+  const std::vector<refusal_t> refusals {
+    {"short later bucket", ltn::phase_e::unassessed, reason::bucket_coverage},
+    {"gap", ltn::phase_e::unassessed, reason::gap},
+    {"order", ltn::phase_e::unassessed, reason::order},
+    {"wrong setting", ltn::phase_e::ineffective, reason::setting_changed},
+    {"expired deadline", ltn::phase_e::ineffective, reason::response_deadline},
+    {"data unavailable", ltn::phase_e::unassessed, reason::median_unavailable},
+    {"bucket overflow", ltn::phase_e::unassessed, reason::bucket_overflow},
+  };
+  for (std::size_t i = 0; i < refusals.size(); ++i) {
+    SCOPED_TRACE(refusals[i].name);
+    ltn::episode_t episode;
+    ASSERT_NO_FATAL_FAILURE(native_d_pending(episode));
+    for (int ms = 12602; ms <= 13002; ms += 100) EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+    ASSERT_EQ(episode.phase(), ltn::phase_e::response);
+    ASSERT_EQ(episode.diagnostic().bucket.disposition, ltn::bucket_disposition_e::initial_partial_discarded);
+    if (i == 0) {
+      for (const int ms : {13402, 13802, 14002}) EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+      EXPECT_EQ(episode.diagnostic().bucket.disposition, ltn::bucket_disposition_e::coverage_short);
+      EXPECT_EQ(episode.diagnostic().bucket.count, 3u);
+    } else if (i == 1) {
+      EXPECT_FALSE(episode.observe(native_d_signal(13603, 3500, 3600)));
+    } else if (i == 2) {
+      EXPECT_FALSE(episode.observe(native_d_signal(13102, 3500, 3600, 13003)));
+    } else if (i == 3) {
+      auto s = native_d_signal(13102, 3500, 3600); s.setting->origin_revision = 42;
+      EXPECT_FALSE(episode.observe(s));
+    } else if (i == 4) {
+      episode.check_deadline(18'602'000'001);
+    } else if (i == 5) {
+      auto s = native_d_signal(13102, 3500, 3600); s.samples[0].reason = native_video_signal::reason_e::invalid_time;
+      EXPECT_FALSE(episode.observe(s));
+    } else {
+      for (int ms = 13012; ms < 13400; ms += 10) EXPECT_FALSE(episode.observe(native_d_signal(ms, 3500, 3600)));
+      EXPECT_EQ(episode.diagnostic().bucket.disposition, ltn::bucket_disposition_e::overflow);
+      EXPECT_EQ(episode.diagnostic().bucket.count, 32u);
+    }
+    EXPECT_EQ(episode.phase(), refusals[i].phase);
+    EXPECT_EQ(episode.diagnostic().reason, refusals[i].why);
+    // Terminal outcomes stay put: no response credit, restore or second cut from any later report.
+    const auto terminal = episode.diagnostic();
+    for (int ms = 20000; ms < 50000; ms += 100) {
+      EXPECT_FALSE(episode.observe(native_d_signal(ms, ms < 35000 ? 3500 : 30000, ms < 35000 ? 3600 : 30100)));
+      EXPECT_FALSE(episode.observe(native_trial_signal(ms + 50, 30000, 30100)));
+    }
+    episode.unavailable(reason::permission);
+    EXPECT_EQ(episode.phase(), refusals[i].phase);
+    EXPECT_EQ(episode.diagnostic().reason, terminal.reason);
+    EXPECT_EQ(episode.diagnostic().buckets, terminal.buckets);
+    EXPECT_EQ(episode.evidence().requested_kbps, 17000);
+  }
+}
+
+TEST(NativeDownwardEpisode, PresentlySilentRefusalsCarryTypedReasonsWithoutChangingTheirOutcome) {
+  namespace ltn = live_tuning_native;
+  using reason = ltn::transition_reason_e;
+  ltn::episode_t reference;
+  reference.unavailable(reason::permission);
+  EXPECT_EQ(reference.phase(), ltn::phase_e::reference);
+  EXPECT_EQ(reference.diagnostic().reason, reason::none);
+  for (const auto why : {reason::permission, reason::not_consumed_receipt, reason::not_consumed_measurement,
+                         reason::not_consumed_setting, reason::not_consumed_current, reason::policy_refused}) {
+    ltn::episode_t pending;
+    ASSERT_NO_FATAL_FAILURE(native_d_pending(pending));
+    pending.unavailable(why);
+    EXPECT_EQ(pending.phase(), ltn::phase_e::unassessed);
+    EXPECT_EQ(pending.diagnostic().reason, why);
+    ltn::episode_t response;
+    ASSERT_NO_FATAL_FAILURE(native_d_pending(response));
+    EXPECT_FALSE(response.observe(native_d_signal(12602, 3500, 3600)));
+    ASSERT_EQ(response.phase(), ltn::phase_e::response);
+    response.unavailable(why);
+    EXPECT_EQ(response.phase(), ltn::phase_e::unassessed);
+    EXPECT_EQ(response.diagnostic().reason, why);
+  }
+  ltn::episode_t legacy;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(legacy));
+  legacy.unavailable();
+  EXPECT_EQ(legacy.diagnostic().reason, reason::unavailable);
+  ltn::episode_t wrong;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(wrong));
+  auto other = native_d_signal(12602, 3500, 3600); other.setting->origin_revision = 8;
+  EXPECT_FALSE(wrong.observe(other));
+  EXPECT_EQ(wrong.phase(), ltn::phase_e::unassessed);
+  EXPECT_EQ(wrong.diagnostic().reason, reason::wrong_application);
+  ltn::episode_t late;
+  ASSERT_NO_FATAL_FAILURE(native_d_pending(late));
+  late.wait_for_application(18'000'000'001);
+  EXPECT_EQ(late.phase(), ltn::phase_e::unassessed);
+  EXPECT_EQ(late.diagnostic().reason, reason::proof_deadline);
+}
+
+TEST(NativeDownwardEpisode, TransitionAndBucketNamesAreStaticDistinctIdentifiers) {
+  namespace ltn = live_tuning_native;
+  std::set<std::string> names;
+  for (int i = 0; i <= static_cast<int>(ltn::transition_reason_e::unavailable); ++i) {
+    const std::string n = ltn::name(static_cast<ltn::transition_reason_e>(i));
+    EXPECT_TRUE(names.insert(n).second) << n;
+    EXPECT_EQ(n.find_first_not_of("abcdefghijklmnopqrstuvwxyz_"), std::string::npos) << n;
+  }
+  EXPECT_EQ(names.size(), 22u);
+  std::set<std::string> dispositions;
+  for (int i = 0; i <= static_cast<int>(ltn::bucket_disposition_e::overflow); ++i) {
+    const std::string n = ltn::name(static_cast<ltn::bucket_disposition_e>(i));
+    EXPECT_TRUE(dispositions.insert(n).second) << n;
+    EXPECT_EQ(n.find_first_not_of("abcdefghijklmnopqrstuvwxyz_"), std::string::npos) << n;
+  }
+  EXPECT_EQ(dispositions.size(), 7u);
+}
+
 TEST_F(NativeReception, RecentDifferentFramesKeepBothActualReport35CollisionKeys) {
   // These genuine sender keys collided before the actual trace had sent 6333 datagrams.
   frame(297);frame(298);frame(299);

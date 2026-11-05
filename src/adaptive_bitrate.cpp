@@ -99,10 +99,14 @@ namespace adaptive_bitrate {
   static std::weak_ptr<stream_native_reception::scope_t> native_owner;
   static std::string native_launch_nonce;
   static std::weak_ptr<const video::bitrate_provenance::current_setting_t> native_current_setting;
+  static void record_native_reset_locked(live_tuning_native::diagnostic_t discarded) noexcept;
   static void retire_native_for_writer_locked() {
+    const bool spent = native_episode.spent();
+    const auto discarded = native_episode.diagnostic();
     native_episode = {};
     native_owner.reset();
     native_launch_nonce.clear();
+    if (spent) record_native_reset_locked(discarded);
   }
   static live_tuning_fec::actuator_t fec_actuator;
   static bool runtime_bitrate_in_place = false;
@@ -201,6 +205,7 @@ namespace adaptive_bitrate {
 
   static bool folds_into(const history_entry_t &last, const history_entry_t &next) {
     if (last.fec_transition || next.fec_transition || last.native_transition || next.native_transition ||
+        last.native_diagnostic || next.native_diagnostic ||
         last.kind != next.kind || next.kind == "decision" || next.kind == "scope_started") {
       return false;
     }
@@ -271,6 +276,56 @@ namespace adaptive_bitrate {
       append_history_locked(std::move(entry));
     } catch (...) {
     }
+  }
+
+  // Native episode diagnostics. Requires state_mutex. Observational only: no decision reads these entries, they
+  // take no other lock, and a failure to record one never reaches the caller. Causes are static enum names.
+  static void record_native_diagnostic_locked(const char *kind, const char *cause,
+                                              const live_tuning_native::diagnostic_t &diagnostic) noexcept {
+    try {
+      history_entry_t entry;
+      entry.kind = kind;
+      entry.cause = cause;
+      entry.native_diagnostic = diagnostic;
+      append_history_locked(std::move(entry));
+    } catch (...) {
+    }
+  }
+
+  static void record_native_bucket_locked() noexcept {
+    const auto diagnostic = native_episode.diagnostic();
+    record_native_diagnostic_locked("native_diagnostic_bucket", live_tuning_native::name(diagnostic.bucket.disposition),
+                                    diagnostic);
+  }
+
+  // The existing observed entry for the episode's new phase, unchanged, then the typed reason for that transition.
+  static void record_native_transition_locked() noexcept {
+    try {
+      history_entry_t entry;
+      entry.kind = "native_downward_observed";
+      const auto phase = native_episode.phase();
+      entry.cause = phase == live_tuning_native::phase_e::response ? "native_backend_tuple_confirmed" :
+        phase == live_tuning_native::phase_e::responded ? "native_sampled_response" :
+        phase == live_tuning_native::phase_e::ineffective ? "native_trial_ineffective" : "native_trial_unassessed";
+      entry.native_transition = native_episode.evidence();
+      append_history_locked(std::move(entry));
+    } catch (...) {
+    }
+    const auto diagnostic = native_episode.diagnostic();
+    record_native_diagnostic_locked("native_diagnostic_transition", live_tuning_native::name(diagnostic.reason), diagnostic);
+  }
+
+  // A refused or unconsumed report destroys an observation window, as before. Record the transition that causes,
+  // which earlier left no entry; the episode decision itself is the unchanged unavailable().
+  static void native_unavailable_locked(live_tuning_native::transition_reason_e reason) noexcept {
+    const auto before = native_episode.phase();
+    native_episode.unavailable(reason);
+    if (before != native_episode.phase()) record_native_transition_locked();
+  }
+
+  static void record_native_reset_locked(live_tuning_native::diagnostic_t discarded) noexcept {
+    discarded.reason = live_tuning_native::transition_reason_e::reset_by_writer_or_scope;
+    record_native_diagnostic_locked("native_diagnostic_transition", live_tuning_native::name(discarded.reason), discarded);
   }
 
   // Scalar-only snapshots are captured under state_mutex without allocating before an actuator operation.
@@ -1233,7 +1288,7 @@ namespace adaptive_bitrate {
       (pending_native || (target == encoder_applied_bitrate_kbps &&
         (signal.inspection_ready || (native_episode.spent() && c.reason == native_video_signal::context_reason_e::at_floor))));
     if (!permission) {
-      native_episode.unavailable(); return false;
+      native_unavailable_locked(live_tuning_native::transition_reason_e::permission); return false;
     }
     if (native_owner.lock() != owner || native_launch_nonce != launch_nonce) {
       retire_native_for_writer_locked();
@@ -1241,7 +1296,10 @@ namespace adaptive_bitrate {
     }
     const auto receipt_owner = native_current_setting.lock();
     bool consumed = false;
+    // Diagnostic only: which existing refusal left the report unconsumed.
+    auto refusal = live_tuning_native::transition_reason_e::not_consumed_receipt;
     if (receipt_owner) receipt_owner->with_current([&](const auto &receipt) {
+      refusal = live_tuning_native::transition_reason_e::not_consumed_current;
       const stream_frame_feedback::encoder_setting_t actual {
         receipt.scope.encoder_lifetime, receipt.scope.stream_generation, receipt.application_sequence,
         receipt.authority_revision, receipt.configured_encoder_kbps, receipt.origin};
@@ -1252,14 +1310,20 @@ namespace adaptive_bitrate {
         owner->with_current_signal(signal, [&] {
           if (!current_caller()) return;
           consumed = true;
+          const auto before = native_episode.phase();
           native_episode.wait_for_application(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+          if (before != native_episode.phase()) record_native_transition_locked();
         }, false);
         return;
       }
-      if (!published || !signal.measurement_available) return;
+      if (!published || !signal.measurement_available) {
+        refusal = live_tuning_native::transition_reason_e::not_consumed_measurement; return;
+      }
       if (!signal.setting || actual != *signal.setting ||
-          actual.configured_encoder_kbps != encoder_applied_bitrate_kbps) return;
+          actual.configured_encoder_kbps != encoder_applied_bitrate_kbps) {
+        refusal = live_tuning_native::transition_reason_e::not_consumed_setting; return;
+      }
       owner->with_current_signal(signal, [&] {
         // Recheck the live session at the last boundary; no SDK call is made under these locks.
         if (!current_caller()) return;
@@ -1267,12 +1331,14 @@ namespace adaptive_bitrate {
         if (!native_episode.spent() && policy.state() != live_tuning_policy::state_e::normal) return;
         consumed = true;
         const auto before = native_episode.phase();
+        const auto buckets = native_episode.diagnostic().buckets;
         native_episode.check_deadline(std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count());
         const auto next = native_episode.observe(signal);
+        if (native_episode.diagnostic().buckets != buckets) record_native_bucket_locked();
         if (next) {
           if (!policy.native_downward(policy_now_ms(), target, *next)) {
-            native_episode.unavailable(); return;
+            native_unavailable_locked(live_tuning_native::transition_reason_e::policy_refused); return;
           }
           policy_target_kbps = *next; // Exact D in both domains; no hidden encoder-only clamp.
           target_bitrate_kbps.store(*next, std::memory_order_relaxed);
@@ -1284,21 +1350,16 @@ namespace adaptive_bitrate {
           entry.kind = "native_downward_requested"; entry.cause = "native_elapsed_standing";
           entry.native_transition = native_episode.evidence();
           append_history_locked(std::move(entry));
+          record_native_diagnostic_locked("native_diagnostic_transition",
+            live_tuning_native::name(native_episode.diagnostic().reason), native_episode.diagnostic());
           note_decision_locked("native_elapsed_standing");
           state_changed.notify_all();
         } else if (before != native_episode.phase()) {
-          history_entry_t entry;
-          entry.kind = "native_downward_observed";
-          const auto phase = native_episode.phase();
-          entry.cause = phase == live_tuning_native::phase_e::response ? "native_backend_tuple_confirmed" :
-            phase == live_tuning_native::phase_e::responded ? "native_sampled_response" :
-            phase == live_tuning_native::phase_e::ineffective ? "native_trial_ineffective" : "native_trial_unassessed";
-          entry.native_transition = native_episode.evidence();
-          append_history_locked(std::move(entry));
+          record_native_transition_locked();
         }
       });
     });
-    if (!consumed) native_episode.unavailable();
+    if (!consumed) native_unavailable_locked(refusal);
     return consumed;
   }
 
