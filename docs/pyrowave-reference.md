@@ -594,6 +594,10 @@ with no flag to add. It needs two pinned submodules that a plain clone does not 
 git submodule update --init --recursive third-party/pyrowave third-party/Granite
 ```
 
+For existing checkouts, follow the [URL synchronization steps](building.md#submodules) first:
+`git submodule sync --recursive`, update Granite, then sync again before the recursive update.
+This also refreshes Granite's nested SPIRV-Tools remote.
+
 With the option on and either submodule empty, configuration stops with an error that prints this
 command. Pass `-DPOLARIS_ENABLE_PYROWAVE=OFF` to leave the encoder out, which builds exactly as the
 tree did before the codec existed. [Building](building.md) covers the rest of a source build.

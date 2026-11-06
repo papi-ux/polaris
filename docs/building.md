@@ -88,6 +88,8 @@ those less-turnkey paths.
 
 Automated source install + **gamescope_stream** user units (idle gamescope, session helper, systemd):
 
+For an existing checkout, [synchronize submodule URLs](#submodules) first.
+
 ```bash
 git submodule update --init --recursive
 ./scripts/install/install.sh --from-source          # or --from-source --cuda
@@ -98,6 +100,21 @@ git submodule update --init --recursive
 See [`scripts/install/README.md`](../scripts/install/README.md) for steps, PREFIX, and labwc-only mode.
 
 ## Source Build
+
+### Submodules
+
+For an existing checkout, refresh saved URLs before updating: Granite now comes from the papi-ux
+fork so its SPIRV-Tools pin stays fetchable.
+
+```bash
+git submodule sync --recursive
+git submodule update --init third-party/Granite
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+Update Granite between syncs so the second sync reads its new metadata and refreshes the nested
+SPIRV-Tools remote too.
 
 ### Requirements
 

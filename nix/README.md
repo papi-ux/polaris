@@ -164,6 +164,9 @@ Minimal user config is just `services.polaris.enable = true`.
 
 ## Build
 
+For an existing local checkout, [synchronize submodule URLs](../docs/building.md#submodules) before
+building so Granite and its nested SPIRV-Tools checkout use the current remotes.
+
 ```bash
 # third-party/* are git submodules — required for cmake
 nix build '.?submodules=1#polaris-stream'
