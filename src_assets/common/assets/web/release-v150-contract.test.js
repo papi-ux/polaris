@@ -205,13 +205,13 @@ describe('v1.5.0 release contract', () => {
 
   // The native downward trial merged with PR 621, so its config key may be named now; the notes and
   // the changelog have to keep saying it is off by default, set only in the config file, and not yet
-  // confirmed on a device. Current Nova builds still request no VRR.
+  // qualified on devices. Current Nova builds still request no VRR.
   it('keeps the native trial a config-file opt-in and client VRR requests out of the shipped scope', () => {
     const notes = currentNotes()
     const unreleased = read('docs/changelog.md').split('## Unreleased')[1].split('\n## ')[0]
-    expect(notes).toContain('turned on only by `adaptive_bitrate_native_downward` in `polaris.conf`')
-    expect(notes).toContain("It hasn't been confirmed on a device yet")
-    expect(unreleased).toContain('`adaptive_bitrate_native_downward = enabled` is a config-file-only host setting')
+    expect(notes).toContain('off by default and turned on only by `adaptive_bitrate_native_downward` in `polaris.conf`')
+    expect(notes).toContain('full device qualification and any delivery-quality benefit remain unconfirmed')
+    expect(unreleased).toContain('off by default: `adaptive_bitrate_native_downward = enabled` is a config-file-only host setting')
     expect(notes).toContain('Current Nova builds do not request VRR.')
     expect(notes).toContain("The host's separate **Allow source-paced VRR (experimental)** opt-in")
     expect(notes).toContain('does not request source-paced VRR from Polaris')
