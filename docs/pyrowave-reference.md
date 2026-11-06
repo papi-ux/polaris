@@ -601,8 +601,10 @@ tree did before the codec existed. [Building](building.md) covers the rest of a 
 ### Transport and profile tokens
 
 Polaris pins PyroWave revision `186f0393b77f7755953b5ecde994bb1cec2e4155` (C API 0.6.0) and Granite
-revision `b6cffd5ce81f540f0855e6778428483e14763d9b`. Keep client and host pins and the profile token
-in agreement; the C API version alone does not establish bitstream compatibility. A Nova for Linux
+revision `c3722ee61b93867da89bfbf3e61f63d6e1bfcb69` from [papi-ux/Granite](https://github.com/papi-ux/Granite).
+That is upstream `b6cffd5ce81f540f0855e6778428483e14763d9b` with only the SPIRV-Tools submodule
+URL corrected; the Granite code and all dependency source pins are unchanged. Keep client and host
+pins and the profile token in agreement; the C API version alone does not establish bitstream compatibility. A Nova for Linux
 build from a Nova tag later than `v1.4.13-beta.3` works with a Polaris 1.4.13 host only while its
 `clients/deck/pyrowave/protocol.h` still names `pyrowave-186f0393-sdr420-v1`.
 

@@ -52,8 +52,8 @@
 	branch = master
 [submodule "third-party/Granite"]
 	path = third-party/Granite
-	url = https://github.com/Themaister/Granite
-	branch = master
+	url = https://github.com/papi-ux/Granite.git
+	branch = polaris-1.5.0
 [submodule "third-party/pyrowave"]
 	path = third-party/pyrowave
 	url = https://github.com/Themaister/pyrowave
