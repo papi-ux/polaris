@@ -5,7 +5,7 @@ Host Virtual Display on a KWin virtual output against Hermes with Hermes-KMS 0.4
 one AMD/KDE machine with one client and the same stream settings. The first round is
 HEVC SDR at a fixed bitrate, at 1440p120 and 4K60.
 
-The scripts only read the machine. Installing Hermes and Hermes-KMS, changing either
+The sampler reads system and stream measurements and writes a private receipt; the launcher opens the pattern in a separate Firefox profile. The scripts do not change Polaris settings. Installing Hermes and Hermes-KMS, changing either
 host's settings and switching between the hosts are manual steps, and so is putting
 the machine back afterwards.
 
