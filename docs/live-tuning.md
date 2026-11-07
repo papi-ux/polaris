@@ -74,6 +74,31 @@ the policy to a 26-cell acceptance bench. It passes 22. The 4 it misses are a li
 just as the client's reports pause, which needs a congestion signal that keeps arriving while
 reports are missing.
 
+## Experimental native step-down trial
+
+`adaptive_bitrate_native_downward` is a separate host option, off by default. To
+opt in, set this in `polaris.conf` before starting Polaris:
+
+```ini
+adaptive_bitrate_native_downward = enabled
+```
+
+Use `disabled` to leave the trial off. Settings does not expose this option and
+preserves its file value when other settings are saved; the configuration API
+refuses changes to it. Turning ordinary Live Tuning on does not enable the trial.
+
+With Live Tuning on, matched Nova native packet reports and current stream,
+writer and encoder checks can permit one floor-clamped 15% downward request after
+a four-second reference and eight standing seconds. The lower target is then held:
+those reports cannot start another cut or automatically raise it. A live bitrate
+writer with a different target, a changed request or floor, or a new stream is
+needed to resume ordinary tuning. The reports do not establish loss, a clean link
+or capacity. See [native packet feedback](native-packet-reception-feedback.md#experimental-downward-only-trial-default-off)
+for the eligibility checks and hold behavior.
+
+One downward response was observed in a scoped RP6 test; full device qualification
+and any delivery-quality benefit remain unconfirmed.
+
 ## Range
 
 Live Tuning lowers the bitrate on measured loss, latency or encoder load, and recovers

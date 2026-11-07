@@ -89,6 +89,7 @@ refuses that request with `app_launch_mode_pinned`. Also, `headless_mode = enabl
 | `encoder` | `nvenc` / `vaapi` / `vulkan` / `software` | Primary encoder backend; `vulkan` is experimental and strict when selected explicitly |
 | `nvenc_split_encode_mode` | `disabled` | Experimental Linux/FFmpeg NVENC split-frame encoding for HEVC/AV1 |
 | `adaptive_bitrate_enabled` | `enabled` | Allow mid-stream bitrate adjustment (Live Tuning). On by default from 1.5.0; existing hosts get it once on upgrade. Turning it off afterwards keeps it off |
+| `adaptive_bitrate_native_downward` | `disabled` | Experimental native step-down trial, off by default and set only in `polaris.conf`. Live Tuning On does not enable it; Settings preserves it and the configuration API refuses changes. See [trial limits](live-tuning.md#experimental-native-step-down-trial) |
 | `disconnect_resume_timeout_seconds` | `300` | Seconds to keep an app paused after client disconnect for resume |
 | `max_sessions` | `2` | Number of simultaneous sessions or viewers |
 | `enable_pairing` | `enabled` | Accept new clients |
