@@ -120,4 +120,22 @@ describe('ConfirmActionDialog', () => {
     await wrapper.vm.$nextTick()
     expect(document.activeElement).toBe(cancel)
   })
+
+  it('keeps keyboard focus in a pending dialog and returns it to Cancel after refusal', async () => {
+    const wrapper = mountDialog()
+    await wrapper.vm.$nextTick()
+    bodyGet('[data-confirm-confirm]').focus()
+
+    await wrapper.setProps({ pending: true })
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement).toBe(bodyGet('[role="dialog"]'))
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(wrapper.emitted('cancel')).toBeUndefined()
+
+    await wrapper.setProps({ pending: false })
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement).toBe(bodyGet('[data-confirm-cancel]'))
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(wrapper.emitted('cancel')).toHaveLength(1)
+  })
 })

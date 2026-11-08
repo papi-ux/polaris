@@ -98,7 +98,8 @@ const descriptionId = `confirm-action-desc-${Math.random().toString(36).slice(2)
 let previousFocus = null
 
 function focusCancel() {
-  dialogEl.value?.querySelector('[data-confirm-cancel]')?.focus()
+  if (props.pending) dialogEl.value?.focus()
+  else dialogEl.value?.querySelector('[data-confirm-cancel]')?.focus()
 }
 
 function getFocusableControls() {
@@ -155,6 +156,17 @@ watch(() => props.modelValue, async (open) => {
     await nextTick()
     restoreFocus()
   }
+})
+
+// Disabling the focused button can send keyboard focus to the page body. Keep Escape/Tab
+// inside the pending dialog, then return to Cancel if the action leaves it open.
+watch(() => props.pending, async () => {
+  if (!props.modelValue) return
+  await nextTick()
+  if (!props.modelValue) return
+  const active = document.activeElement
+  if (active === document.body || active === dialogEl.value ||
+      (dialogEl.value?.contains(active) && active.matches(':disabled'))) focusCancel()
 })
 
 onMounted(async () => {

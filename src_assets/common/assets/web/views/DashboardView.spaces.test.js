@@ -612,6 +612,20 @@ describe('Mission Control live session card', () => {
     expect(card().find('[data-end-session]').exists()).toBe(false)
   })
 
+  it('retires an End confirmation when the host replaces the app with an identically named entry', async () => {
+    appPayload = running
+    await render(true, { attach: true, dialogs: true, stats: live })
+    await card().get('[data-end-session]').trigger('click'); await flushPromises()
+    expect(document.querySelector('[data-confirm-confirm]')).not.toBeNull()
+
+    appPayload = { apps: [{ ...running.apps[0], uuid: 'replacement' }], current_app: 'replacement' }
+    await wrapper.vm.refreshApps(); await flushPromises()
+
+    expect(card().get('[data-session-title]').text()).toBe('Hades')
+    expect(document.querySelector('[data-confirm-confirm]')).toBeNull()
+    expect(fetch.mock.calls.filter(([url]) => url === './api/apps/close')).toHaveLength(0)
+  })
+
   it('names every device watching, without claiming a client type for the group', async () => {
     appPayload = running
     await render(true, { stats: { ...live, clients: [{ name: 'Handheld' }, { name: 'Tablet' }] } })

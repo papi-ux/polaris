@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createI18n } from 'vue-i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LiveSessionCard from './LiveSessionCard.vue'
+import ConfirmActionDialog from './ConfirmActionDialog.vue'
 import { connectionChip, sessionElapsedLabel } from '../live-session.js'
 
 const messages = JSON.parse(readFileSync('src_assets/common/assets/web/public/assets/locale/en.json', 'utf8'))
@@ -19,7 +20,7 @@ let network
 async function card(props = {}, options = {}) {
   const view = mount(LiveSessionCard, {
     attachTo: options.attach ? document.body : undefined,
-    props: { title: 'Hades', artSrc: './api/covers/image?name=Hades', device: 'RP6 · Nova', stats: live, canDisconnect: true, canEnd: true, ...props },
+    props: { title: 'Hades', appId: 'hades', artSrc: './api/covers/image?name=Hades', device: 'RP6 · Nova', stats: live, canDisconnect: true, canEnd: true, ...props },
     global: { plugins: [i18n], stubs: { ConfirmActionDialog: !options.attach } },
   })
   views.push(view)
@@ -148,6 +149,48 @@ describe('LiveSessionCard', () => {
     const view = await card({}, { attach: true })
     await view.get('[data-end-session]').trigger('click'); await flushPromises()
     await view.setProps({ canEnd: false }); await flushPromises()
+    expect(document.querySelector('[data-confirm-confirm]')).toBeNull()
+    expect(closes()).toHaveLength(0)
+  })
+
+  it('retires confirmation for a replacement app even when its name and stream stay the same', async () => {
+    const view = await card({}, { attach: true })
+    await view.get('[data-end-session]').trigger('click'); await flushPromises()
+    await view.setProps({ appId: 'replacement-hades' }); await flushPromises()
+    expect(document.querySelector('[data-confirm-confirm]')).toBeNull()
+    expect(closes()).toHaveLength(0)
+  })
+
+  it('ignores a queued confirmation after its stream was replaced', async () => {
+    const view = await card({}, { attach: true })
+    await view.get('[data-end-session]').trigger('click'); await flushPromises()
+    const dialog = view.getComponent(ConfirmActionDialog)
+    await view.setProps({ stats: { ...live, stream_instance_id: 'replacement' } })
+    dialog.vm.$emit('confirm'); await flushPromises()
+    expect(closes()).toHaveLength(0)
+  })
+
+  it('keeps a same-session confirmation across telemetry updates and requires a fresh intent after Cancel', async () => {
+    const view = await card({}, { attach: true })
+    await view.get('[data-end-session]').trigger('click'); await flushPromises()
+    await view.setProps({ stats: { ...live, fps: 59, session_elapsed_s: 721 } }); await flushPromises()
+    expect(document.querySelector('[data-confirm-confirm]')).not.toBeNull()
+    document.querySelector('[data-confirm-cancel]').click(); await flushPromises()
+    view.getComponent(ConfirmActionDialog).vm.$emit('confirm'); await flushPromises()
+    expect(closes()).toHaveLength(0)
+    await view.get('[data-end-session]').trigger('click'); await flushPromises()
+    await confirm()
+    expect(closes()).toHaveLength(1)
+  })
+
+  it('retires End confirmation when another stream replaces the displayed session', async () => {
+    const view = await card({}, { attach: true })
+    await view.get('[data-end-session]').trigger('click'); await flushPromises()
+    expect(document.querySelector('[data-confirm-confirm]')).not.toBeNull()
+
+    await view.setProps({ stats: { ...live, stream_instance_id: 'stream-2' } })
+    await flushPromises()
+
     expect(document.querySelector('[data-confirm-confirm]')).toBeNull()
     expect(closes()).toHaveLength(0)
   })

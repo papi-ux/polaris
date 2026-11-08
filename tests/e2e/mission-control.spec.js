@@ -51,8 +51,8 @@ const spacesState = extra => ({ enabled: true, available: true, changing: false,
 const spacesOff = { enabled: false, available: true, changing: false, failed: false, profiles: [], activity: [] }
 
 async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uuid: 'device', name: 'Fixture handheld', client_family: 'nova', last_seen_at: 0 }],
-  currentApp = '', systemGpu = gpu, history = [], spaces = spacesOff } = {}) {
-  const host = { stats, spaces, streamDown: false, systemDown: false, requests: [], writes: [] }
+  currentApp = '', currentAppAvailable = true, systemGpu = gpu, history = [], spaces = spacesOff } = {}) {
+  const host = { stats, spaces, currentApp, currentAppAvailable, streamDown: false, systemDown: false, requests: [], writes: [] }
   await page.addInitScript(({ skin, initial }) => {
     localStorage.setItem('polaris-theme', skin)
     window.__mockStats = initial
@@ -85,7 +85,7 @@ async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uui
     if (path === '/api/configLocale') return route.fulfill({ json: { locale: 'en' } })
     if (path === '/api/config') return route.fulfill({ json: config })
     if (path === '/api/settings/metadata') return route.fulfill({ status: 404, json: { status: false } })
-    if (path === '/api/apps') return route.fulfill({ json: { status: true, apps: catalog, current_app: currentApp, host_name: 'Fixture Host', host_uuid: 'fixture' } })
+    if (path === '/api/apps') return route.fulfill({ json: { status: true, apps: catalog, current_app: host.currentApp, current_app_available: host.currentAppAvailable, host_name: 'Fixture Host', host_uuid: 'fixture' } })
     if (path === '/api/stats/system') {
       if (host.systemDown || !systemGpu) return route.fulfill({ status: 503, json: { status: false, error: 'unavailable' } })
       return route.fulfill({ json: { gpu: systemGpu, displays: [{ name: 'HEADLESS-1' }], audio: { sink: 'alsa_output.usb-Fixture_DAC-00.analog-stereo' }, session_type: 'wayland' } })
@@ -945,4 +945,189 @@ test.describe('Mission Control on phones and tablets', () => {
       })
     }
   }
+})
+
+// #589: run the real card and action dialog in a browser; every endpoint remains mocked.
+test.describe('Mission Control session card acceptance #589', () => {
+  const session = { ...live, stream_instance_id: 'card-stream-1', session_elapsed_s: 720 }
+  const card = page => page.locator('[data-live-session-card]')
+
+  test('retires End confirmation when a new stream replaces it', async ({ page }, testInfo) => {
+    const host = await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control' })
+    await page.goto('/#/')
+    const end = card(page).locator('[data-end-session]')
+    await expect(end).toBeVisible()
+    await end.press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'End this session?', exact: true })
+    await expect(dialog).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('before-stream-change.png') })
+
+    await host.setStats({ ...session, stream_instance_id: 'card-stream-2' })
+    await expect(dialog).toHaveCount(0)
+    expect(host.writes).toEqual([])
+  })
+
+  for (const [width, height] of [[320, 568], [568, 320], [390, 844], [844, 390], [768, 1024], [1024, 768]]) {
+    for (const fontSize of [16, 32]) {
+      test(`card at ${width}x${height}, ${fontSize}px text and reduced motion`, async ({ page }, testInfo) => {
+        await page.setViewportSize({ width, height })
+        await page.emulateMedia({ reducedMotion: 'reduce' })
+        if (fontSize === 32) await page.addInitScript(() => document.addEventListener('DOMContentLoaded', () => { document.documentElement.style.fontSize = '32px' }))
+        const host = await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control' })
+        await page.route('**/api/network/connection', route => route.fulfill({ json: {
+          schema_version: 1, status: 'tailscale', stream_instance_id: session.stream_instance_id,
+          tailscale: { scope: 'peer_status', confirmed: true, source: 'tailscaled_localapi', transport: 'direct',
+            observed_at_ms: Date.now(), max_age_ms: 10000, reason: 'observed' },
+        } }))
+        await page.goto('/#/')
+        await expect(card(page)).toBeVisible()
+        await expect(card(page).locator('[data-session-title]')).toHaveText('Control Ultimate Edition')
+        await expect(card(page).locator('[data-session-device]')).toContainText('Fixture handheld')
+        await expect(card(page).locator('[data-session-connection]')).toContainText('Tailscale · direct')
+        await expect(card(page).locator('[data-session-elapsed] dd')).toHaveText('12 min')
+        expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe(`${fontSize}px`)
+        await noSidewaysPage(page, `session card ${width}x${height}/${fontSize}`)
+        await card(page).locator('[data-session-title]').scrollIntoViewIfNeeded()
+        await page.screenshot({ path: testInfo.outputPath('session-card-title-viewport.png') })
+        for (const selector of ['[data-disconnect-client]', '[data-end-session]']) {
+          const action = card(page).locator(selector)
+          await reachable(action, `session card ${selector}`)
+          expect((await action.boundingBox()).height).toBeGreaterThanOrEqual(44)
+        }
+        expect(await card(page).evaluate(node => node.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length)).toBe(0)
+        await page.screenshot({ path: testInfo.outputPath('session-card-actions-viewport.png') })
+        await card(page).screenshot({ path: testInfo.outputPath('session-card.png') })
+        expect(host.writes).toEqual([])
+      })
+    }
+  }
+
+  test('keyboard confirmation, cancellation, focus return and successful mocked End', async ({ page }) => {
+    const host = await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control' })
+    const closeRequests = []
+    await page.route('**/api/apps/close', route => {
+      closeRequests.push(route.request().method())
+      return route.fulfill({ json: { status: true } })
+    })
+    await page.goto('/#/')
+    const end = card(page).locator('[data-end-session]')
+    await end.focus(); await page.keyboard.press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'End this session?', exact: true })
+    await expect(dialog.locator('[data-confirm-cancel]')).toBeFocused()
+    await page.keyboard.press('Shift+Tab')
+    await expect(dialog.locator('[data-confirm-confirm]')).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(dialog.locator('[data-confirm-cancel]')).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    await expect(end).toBeFocused()
+    expect(closeRequests).toEqual([])
+    await page.keyboard.press('Enter')
+    await expect(dialog.locator('[data-confirm-cancel]')).toBeFocused()
+    await page.keyboard.press('Tab'); await page.keyboard.press('Enter')
+    await expect(dialog).toHaveCount(0)
+    await expect(page.getByText('Session ended.', { exact: true })).toBeVisible()
+    expect(closeRequests).toEqual(['POST'])
+    expect(host.writes).toEqual([]) // the specific local route owns the one mocked close
+  })
+
+  test('pending End stays single-shot and closes its old dialog on session replacement', async ({ page }) => {
+    const host = await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control' })
+    let finish
+    const pending = new Promise(resolve => { finish = resolve })
+    let posts = 0
+    await page.route('**/api/apps/close', async route => {
+      posts++
+      await pending
+      await route.fulfill({ json: { status: true } })
+    })
+    try {
+      await page.goto('/#/')
+      const end = card(page).locator('[data-end-session]')
+      await end.press('Enter')
+      const dialog = page.getByRole('dialog', { name: 'End this session?', exact: true })
+      await dialog.locator('[data-confirm-confirm]').press('Enter')
+      await expect(dialog.locator('[data-confirm-confirm]')).toBeDisabled()
+      await expect(dialog.locator('[data-confirm-cancel]')).toBeDisabled()
+      await expect(end).toBeDisabled()
+      await host.setStats({ ...session, stream_instance_id: 'card-stream-2' })
+      await expect(dialog).toHaveCount(0)
+      await expect(end).toBeDisabled()
+      expect(posts).toBe(1)
+      finish()
+      await expect(end).toBeEnabled()
+      expect(posts).toBe(1)
+    } finally { finish() }
+  })
+
+  test('keyboard Disconnect confirms only the matched mocked client', async ({ page }) => {
+    const host = await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control' })
+    const requests = []
+    await page.route('**/api/clients/disconnect', route => {
+      requests.push({ method: route.request().method(), body: route.request().postDataJSON() })
+      return route.fulfill({ json: { status: true } })
+    })
+    await page.goto('/#/')
+    const disconnect = card(page).locator('[data-disconnect-client]')
+    await disconnect.press('Enter')
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('Fixture handheld will be removed from the active stream.')
+    await expect(dialog.locator('[data-confirm-cancel]')).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    await expect(disconnect).toBeFocused()
+    expect(requests).toEqual([])
+    await page.keyboard.press('Enter')
+    await dialog.locator('[data-confirm-confirm]').press('Enter')
+    await expect(dialog).toHaveCount(0)
+    expect(requests).toEqual([{ method: 'POST', body: { uuid: 'device' } }])
+    expect(host.writes).toEqual([])
+  })
+
+  test('mocked host refusal leaves the confirmation open without claiming success', async ({ page }) => {
+    await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control' })
+    let posts = 0
+    await page.route('**/api/apps/close', route => {
+      posts++
+      return route.fulfill({ status: 409, json: { status: false } })
+    })
+    await page.goto('/#/')
+    await card(page).locator('[data-end-session]').press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'End this session?', exact: true })
+    await dialog.locator('[data-confirm-confirm]').press('Enter')
+    await expect(page.getByText('Could not end the session.', { exact: true })).toBeVisible()
+    await expect(dialog).toBeVisible()
+    await expect(dialog.locator('[data-confirm-confirm]')).toBeEnabled()
+    await expect(dialog.locator('[data-confirm-cancel]')).toBeFocused()
+    await expect(page.getByText('Session ended.', { exact: true })).toHaveCount(0)
+    expect(posts).toBe(1)
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+  })
+
+  test('withholds unsafe actions for unavailable app or ambiguous client identity', async ({ page }) => {
+    const host = await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control', currentAppAvailable: false,
+      certs: [{ uuid: 'a', name: 'Fixture handheld' }, { uuid: 'b', name: 'Fixture handheld' }] })
+    await page.goto('/#/')
+    await expect(card(page)).toBeVisible()
+    await expect(card(page).locator('[data-end-session]')).toHaveCount(0)
+    await expect(card(page).locator('[data-disconnect-client]')).toHaveCount(0)
+    await expect(card(page).locator('[data-session-connection]')).toHaveCount(0)
+    await host.setStats(idle)
+    await expect(card(page)).toHaveCount(0)
+    expect(host.writes).toEqual([])
+  })
+
+  test('a lost stats channel removes the stale card and its open confirmation', async ({ page }) => {
+    const host = await mockHost(page, { theme: 'polaris', stats: session, currentApp: 'control' })
+    await page.goto('/#/')
+    await card(page).locator('[data-end-session]').press('Enter')
+    await expect(page.getByRole('dialog', { name: 'End this session?', exact: true })).toBeVisible()
+    host.streamDown = true
+    await page.evaluate(() => window.__dropStats())
+    await stageMode(page, 'unavailable')
+    await expect(card(page)).toHaveCount(0)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    expect(host.writes).toEqual([])
+  })
 })

@@ -12,6 +12,7 @@ import { connectionChip, sessionElapsedLabel } from '../live-session.js'
 // weighs on the page before one.
 const props = defineProps({
   title: { type: String, default: '' },
+  appId: { type: String, default: '' },
   artSrc: { type: String, default: '' },
   device: { type: String, default: '' },
   stats: { type: Object, default: null },
@@ -39,12 +40,26 @@ const showArt = computed(() => Boolean(props.artSrc) && !artFailed.value)
 
 const endConfirmOpen = ref(false)
 const ending = ref(false)
+const endTarget = computed(() => JSON.stringify([props.stats?.stream_instance_id ?? null, props.appId]))
+const confirmedEndTarget = ref(null)
+function retireEndConfirmation() {
+  endConfirmOpen.value = false
+  confirmedEndTarget.value = null
+}
+function requestEnd() {
+  if (!props.canEnd || ending.value) return
+  confirmedEndTarget.value = endTarget.value
+  endConfirmOpen.value = true
+}
+// A new stream can have the same app and label. Retire the old intent even if End stays allowed;
+// ordinary telemetry updates for the same stream/app do not dismiss it.
+watch(endTarget, retireEndConfirmation, { flush: 'sync' })
 // A confirmation left open for a session that can no longer be ended closes untouched.
 watch(() => props.canEnd, (allowed) => {
-  if (!allowed && !ending.value) endConfirmOpen.value = false
+  if (!allowed && !ending.value) retireEndConfirmation()
 })
 async function endSession() {
-  if (!props.canEnd || ending.value) return
+  if (!props.canEnd || ending.value || !endConfirmOpen.value || confirmedEndTarget.value !== endTarget.value) return
   ending.value = true
   try {
     const response = await fetch('./api/apps/close', {
@@ -113,7 +128,7 @@ async function endSession() {
           :disabled="ending"
           :aria-label="t('mission_control.session_end_title', { name })"
           data-end-session
-          @click="endConfirmOpen = true"
+          @click="requestEnd"
         >
           {{ t('mission_control.session_end') }}
         </button>
@@ -150,6 +165,7 @@ async function endSession() {
 
 .mc-session-main {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.875rem;
   min-width: 0;
@@ -174,7 +190,7 @@ async function endSession() {
 }
 
 .mc-session-copy {
-  flex: 1;
+  flex: 1 1 12rem;
   min-width: 0;
 }
 
@@ -220,6 +236,12 @@ async function endSession() {
 
 .mc-session-actions .dashboard-action-button {
   min-height: 2.75rem;
+}
+
+@container mc-session (max-width: 20rem) {
+  .mc-session-actions {
+    grid-auto-flow: row;
+  }
 }
 
 @container mc-session (min-width: 36rem) {
