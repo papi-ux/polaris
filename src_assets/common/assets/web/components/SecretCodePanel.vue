@@ -41,6 +41,7 @@ function close() {
 function handleKeydown(event) {
   if (event.key === 'Escape') {
     event.preventDefault()
+    event.stopPropagation()
     close()
     return
   }
