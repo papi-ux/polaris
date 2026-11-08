@@ -103,6 +103,19 @@ describe('SecretCodePanel', () => {
     expect(panel().querySelector('[role=status]').textContent).toBe('Star trails circling the Polaris logo')
   })
 
+  it('Escape closes only the panel without dismissing the enclosing phone drawer', async () => {
+    const enclosingEscape = vi.fn()
+    window.addEventListener('keydown', enclosingEscape)
+    try {
+      await open()
+      await press('Escape')
+      expect(wrapper.emitted('close')).toHaveLength(1)
+      expect(enclosingEscape).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', enclosingEscape)
+    }
+  })
+
   it('gives a still image under reduced motion', async () => {
     reducedMotion(true)
     await open()

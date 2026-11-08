@@ -54,7 +54,8 @@ async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uui
   currentApp = '', currentAppAvailable = true, systemGpu = gpu, history = [], spaces = spacesOff } = {}) {
   const host = { stats, spaces, currentApp, currentAppAvailable, streamDown: false, systemDown: false, requests: [], writes: [] }
   await page.addInitScript(({ skin, initial }) => {
-    localStorage.setItem('polaris-theme', skin)
+    if (skin === null) localStorage.removeItem('polaris-theme')
+    else localStorage.setItem('polaris-theme', skin)
     window.__mockStats = initial
     window.__holdStats = false
     window.__streams = []
@@ -1130,4 +1131,97 @@ test.describe('Mission Control session card acceptance #589', () => {
     await expect(page.getByRole('dialog')).toHaveCount(0)
     expect(host.writes).toEqual([])
   })
+})
+
+// #591 acceptance-only additions reuse the existing guarded local mock route.
+test.describe('Code panel acceptance #591', () => {
+  for (const activation of ['pointer', 'Enter']) {
+    test(`five ${activation} activations, labelled focus, code response and reopening`, async ({ page }, testInfo) => {
+      const motionPreference = testInfo.project.use.contextOptions?.reducedMotion ?? 'no-preference'
+      await page.emulateMedia({ reducedMotion: motionPreference })
+      const reduce = motionPreference === 'reduce'
+      const host = await mockHost(page, { theme: null, stats: idle })
+      await page.goto('/#/')
+      await stageMode(page, 'idle')
+      const actualMedia = await page.evaluate(() => ({ reduce: matchMedia('(prefers-reduced-motion: reduce)').matches, noPreference: matchMedia('(prefers-reduced-motion: no-preference)').matches }))
+      await testInfo.attach('effective-motion-preference', { body: JSON.stringify(actualMedia), contentType: 'application/json' })
+      expect(actualMedia).toEqual({ reduce, noPreference: !reduce })
+      const theme = () => page.evaluate(() => ({ saved: localStorage.getItem('polaris-theme'),
+        attribute: document.documentElement.getAttribute('data-theme'),
+        voidColor: getComputedStyle(document.documentElement).getPropertyValue('--color-void').trim() }))
+      const originalTheme = await theme()
+      expect(originalTheme.attribute).toBeNull()
+      expect(originalTheme.voidColor).toBe('#2a2840')
+      await expect(page.locator('[data-secret-code-panel]')).toHaveCount(0)
+      await expect(page.locator('[data-star-trail]')).toHaveCount(0)
+      const toggle = page.getByRole('button', { name: 'Toggle navigation', exact: true })
+      if (await toggle.isVisible()) {
+        if (activation === 'pointer') await toggle.click()
+        else await toggle.press('Enter')
+      }
+      const version = page.locator('[data-app-version]')
+      await reachable(version, 'visible version activation')
+      if (activation === 'Enter') {
+        await page.locator('#polaris-sidebar a').first().focus()
+        for (let steps = 0; steps < 25 && !(await version.evaluate(node => document.activeElement === node)); steps++) {
+          await page.keyboard.press('Tab')
+        }
+        await expect(version).toBeFocused()
+      }
+      const activate = () => activation === 'pointer' ? version.click() : page.keyboard.press('Enter')
+      for (let count = 0; count < 4; count++) await activate()
+      await expect(page.locator('[data-secret-code-panel]')).toHaveCount(0)
+      await activate()
+      const panel = page.getByRole('dialog', { name: 'Enter a code', exact: true })
+      const field = panel.getByLabel('Enter a code', { exact: true })
+      const close = panel.getByRole('button', { name: 'Close', exact: true })
+      const submit = panel.getByRole('button', { name: 'Try', exact: true })
+      await expect(panel).toBeVisible()
+      await expect(field).toBeFocused()
+      await expect(panel.getByRole('img')).toHaveCount(0)
+      await page.keyboard.press('Tab'); await expect(close).toBeFocused()
+      await page.keyboard.press('Tab'); await expect(submit).toBeFocused()
+      await page.keyboard.press('Tab'); await expect(field).toBeFocused()
+      await page.keyboard.press('Shift+Tab'); await expect(submit).toBeFocused()
+      await page.keyboard.press('Tab'); await expect(field).toBeFocused()
+      await page.keyboard.type('NOT A CODE'); await page.keyboard.press('Enter')
+      await expect(field).toHaveValue('')
+      await expect(panel.getByRole('img')).toHaveCount(0)
+      await expect(panel.getByRole('status')).toHaveText('')
+      await page.keyboard.type('polaris'); await page.keyboard.press('Enter')
+      const trail = panel.getByRole('img', { name: 'Star trails circling the Polaris logo', exact: true })
+      await expect(trail).toBeVisible()
+      await expect(trail).toHaveAttribute('data-star-trail-motion', reduce ? 'still' : 'animated')
+      const motion = await trail.evaluate(node => node.getAnimations({ subtree: true }).map(animation => ({
+        state: animation.playState, duration: animation.effect.getTiming().duration, iterations: animation.effect.getTiming().iterations,
+      })))
+      if (reduce) expect(motion).toEqual([])
+      else {
+        expect(motion).toHaveLength(5)
+        expect(motion.every(animation => animation.state === 'running' && animation.duration === 2400 && animation.iterations === 1)).toBe(true)
+      }
+      await testInfo.attach('actual-star-motion', { body: JSON.stringify(motion), contentType: 'application/json' })
+      for (const control of [field, close, submit]) await reachable(control, 'code panel control')
+      await noSidewaysPage(page, 'code panel')
+      await expect(panel.getByRole('status')).toHaveText('Star trails circling the Polaris logo')
+      await page.screenshot({ path: testInfo.outputPath('code-response.png') })
+      if (activation === 'pointer') await close.click()
+      else await page.keyboard.press('Escape')
+      await expect(panel).toHaveCount(0)
+      await expect(version).toBeFocused()
+      expect(await theme()).toEqual(originalTheme)
+      for (let count = 0; count < 4; count++) await activate()
+      await expect(panel).toHaveCount(0)
+      await activate()
+      await expect(field).toBeFocused()
+      await expect(field).toHaveValue('')
+      await expect(panel.getByRole('img')).toHaveCount(0)
+      await expect(panel.getByRole('status')).toHaveText('')
+      await close.press('Enter')
+      await expect(panel).toHaveCount(0)
+      await expect(version).toBeFocused()
+      expect(await theme()).toEqual(originalTheme)
+      expect(host.writes).toEqual([])
+    })
+  }
 })
