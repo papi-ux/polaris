@@ -44,18 +44,21 @@ const release = {
 const mutablePackageCases = [
   {
     family: 'arch',
+    host: { platform: 'linux', distro: { id: 'arch' } },
     fileName: 'Polaris-arch-x86_64.pkg.tar.zst',
     installLine: 'sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&',
     installLog: 'sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst',
   },
   {
     family: 'fedora',
+    host: { platform: 'linux', distro: { id: 'fedora', version_id: '44' } },
     fileName: 'Polaris-fedora44-x86_64.rpm',
     installLine: 'sudo dnf install "./Polaris-fedora44-x86_64.rpm" &&',
     installLog: 'sudo dnf install ./Polaris-fedora44-x86_64.rpm',
   },
   {
     family: 'ubuntu',
+    host: { platform: 'linux', distro: { id: 'ubuntu', version_id: '24.04' } },
     fileName: 'Polaris-ubuntu24.04-x86_64.deb',
     installLine: 'sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&',
     installLog: 'sudo apt install ./Polaris-ubuntu24.04-x86_64.deb',
@@ -651,27 +654,28 @@ describe('Update Center release awareness', () => {
   })
 
   it('selects the matching Fedora package by host version', () => {
-    const asset = selectReleaseAsset(release, {
+    const host = {
       platform: 'linux',
       distro: { id: 'bazzite', id_like: 'fedora', version_id: '44' },
-    })
+    }
+    const asset = selectReleaseAsset(release, host)
 
     expect(asset.name).toBe('Polaris-fedora44-x86_64.rpm')
-    expect(buildManualInstallCommand(asset, { packageFamily: 'fedora' })).toContain(
+    expect(buildManualInstallCommand(asset, host)).toContain(
       'sudo dnf install "./Polaris-fedora44-x86_64.rpm"',
     )
   })
 
   it.each(mutablePackageCases)(
     'overwrites the exact $family package target and chains install side effects',
-    ({ family, fileName, installLine }) => {
+    ({ family, host, fileName, installLine }) => {
       const downloadUrl = `https://example.test/${fileName}`
 
       expect(buildManualInstallCommand({
         name: fileName,
         browser_download_url: downloadUrl,
         packageFamily: family,
-      }).split('\n')).toEqual([
+      }, host).split('\n')).toEqual([
         `wget --output-document=./${fileName} ${downloadUrl} &&`,
         installLine,
         'sudo -H polaris --setup-host &&',
@@ -682,13 +686,13 @@ describe('Update Center release awareness', () => {
 
   it.each(mutablePackageCases)(
     'stops $family update side effects after each failed command',
-    ({ family, fileName, installLog }) => {
+    ({ family, host, fileName, installLog }) => {
       const downloadUrl = `https://example.test/${fileName}`
       const command = buildManualInstallCommand({
         name: fileName,
         browser_download_url: downloadUrl,
         packageFamily: family,
-      })
+      }, host)
       const downloadLog = `wget --output-document=./${fileName} ${downloadUrl}`
       const setupLog = 'sudo -H polaris --setup-host'
       const expectedByFailure = {
@@ -829,6 +833,109 @@ describe('Update Center release awareness', () => {
   })
 })
 
+describe('host-release package matching', () => {
+  const hostFor = (id, versionId, extra = {}) => ({
+    platform: 'linux', distro: { id, version_id: versionId }, ...extra,
+  })
+  const fedora45 = {
+    name: 'Polaris-fedora45-x86_64.rpm',
+    browser_download_url: 'https://example.test/Polaris-fedora45-x86_64.rpm',
+  }
+  const withFedora45 = { ...release, assets: [...release.assets, fedora45] }
+
+  it.each([
+    { id: 'fedora', versionId: '45' },
+    { id: 'ubuntu', versionId: '22.04' },
+  ])('rejects a package for another host release on $id $versionId', ({ id, versionId }) => {
+    const host = { platform: 'linux', distro: { id, version_id: versionId } }
+    const state = buildUpdateCenterState({ currentVersion: '1.2.1', latestRelease: release, host })
+
+    expect(state.asset).toBeNull()
+    expect(state.installCommand).toBe('')
+    expect(state.canCopyInstallCommand).toBe(false)
+    expect(state.primaryActionKind).toBe('open_release')
+    expect(state.primaryActionSummary).toContain('could not match a local package')
+  })
+
+  it.each(['44', '45'])('selects only Fedora $0 when both RPMs are published', (versionId) => {
+    const name = `Polaris-fedora${versionId}-x86_64.rpm`
+    const host = hostFor('fedora', versionId, { recommended_asset_name: name })
+    const asset = selectReleaseAsset(withFedora45, host)
+
+    expect(asset?.name).toBe(name)
+    expect(buildManualInstallCommand(asset, host)).toContain(`sudo dnf install "./${name}"`)
+  })
+
+  it.each(['24.04', '24.04.1'])('accepts the qualified Ubuntu $0 release', (versionId) => {
+    const host = hostFor('ubuntu', versionId)
+    const asset = selectReleaseAsset(release, host)
+
+    expect(asset?.name).toBe('Polaris-ubuntu24.04-x86_64.deb')
+    expect(buildManualInstallCommand(asset, host)).toContain('sudo apt install ./Polaris-ubuntu24.04-x86_64.deb')
+  })
+
+  it.each([
+    ['fedora', undefined], ['fedora', ''], ['fedora', 'unknown'], ['fedora', '44.1'], ['fedora', '044'],
+    ['ubuntu', undefined], ['ubuntu', ''], ['ubuntu', 'unknown'], ['ubuntu', '22.04'],
+    ['ubuntu', '26.04'], ['ubuntu', '24.040'], ['ubuntu', '24.04beta'], ['ubuntu', '24.04.'],
+  ])('rejects unknown or unsupported %s release %s even with a matching-family hint', (id, versionId) => {
+    const asset = release.assets.find((entry) => entry.name.startsWith(`Polaris-${id}`))
+    const host = hostFor(id, versionId, { recommended_asset_name: asset.name, kms_helper_installed: true })
+
+    expect(selectReleaseAsset(release, host)).toBeNull()
+    expect(buildManualInstallCommand(asset, host)).toBe('')
+    expect(selectKmsReleaseAsset(release, host, asset)).toBeNull()
+  })
+
+  it.each([
+    hostFor('fedora', '45', { recommended_asset_name: 'Polaris-fedora44-x86_64.rpm' }),
+    hostFor('ubuntu', '24.04', { recommended_asset_name: 'Polaris-fedora44-x86_64.rpm' }),
+    hostFor('ubuntu', '44', { package_family: 'fedora' }),
+    hostFor('fedora', '24.04', { package_family: 'ubuntu' }),
+  ])('refuses contradictory host and asset recommendations %#', (host) => {
+    expect(selectReleaseAsset(withFedora45, host)).toBeNull()
+  })
+
+  it('rejects a wrong-release base or KMS package supplied directly', () => {
+    const host = hostFor('fedora', '45', { kms_helper_installed: true })
+    const oldBase = release.assets.find((asset) => asset.name.includes('fedora44'))
+    const kms = (version) => ({
+      name: `Polaris-kms-fedora${version}-x86_64.rpm`,
+      browser_download_url: `https://example.test/Polaris-kms-fedora${version}-x86_64.rpm`,
+    })
+    const oldKms = kms('44')
+    const currentKms = kms('45')
+    const packages = { ...withFedora45, assets: [...withFedora45.assets, oldKms, currentKms] }
+
+    expect(selectKmsReleaseAsset(packages, host, oldBase)).toBeNull()
+    expect(buildManualInstallCommand(oldBase, host, oldKms)).toBe('')
+    expect(selectKmsReleaseAsset(packages, host, fedora45)).toBe(currentKms)
+    expect(buildManualInstallCommand(fedora45, host, oldKms)).toBe('')
+    expect(buildManualInstallCommand(fedora45, host, currentKms)).toContain(
+      'sudo dnf install "./Polaris-fedora45-x86_64.rpm" "./Polaris-kms-fedora45-x86_64.rpm"',
+    )
+    expect(selectKmsReleaseAsset({ assets: [fedora45, oldKms] }, host, fedora45)).toBeNull()
+  })
+
+  it('preserves a configured stable repository route without using it for a prerelease', () => {
+    const host = hostFor('fedora', '45', {
+      repository_configured: true, repository_upgrade_command: 'sudo dnf upgrade polaris',
+    })
+    const state = buildUpdateCenterState({ currentVersion: '1.2.1', latestRelease: release, host })
+    expect(state.asset).toBeNull()
+    expect(state.installCommand).toBe('sudo dnf upgrade polaris &&\nsystemctl --user restart polaris')
+
+    const beta = buildUpdateCenterState({
+      currentVersion: '1.2.1', latestRelease: release,
+      prereleaseRelease: { ...release, tag_name: 'v1.2.3-beta.1', prerelease: true },
+      includePrereleases: true, host,
+    })
+    expect(beta.asset).toBeNull()
+    expect(beta.installCommand).toBe('')
+    expect(beta.primaryActionKind).toBe('open_release')
+  })
+})
+
 describe('the DRM/KMS helper on the download path', () => {
   // polaris-kms carries `Requires: polaris = <its own version>` on RPM and
   // `depends=("polaris=$pkgver-$pkgrel")` on pacman. Installing the base package on its own is
@@ -865,7 +972,7 @@ describe('the DRM/KMS helper on the download path', () => {
 
   it.each(kmsCases)('installs both packages in one $family transaction', ({ family, base, kms, installLine }) => {
     const release = kmsRelease([base, kms])
-    const host = { packageFamily: family, kms_helper_installed: true }
+    const host = { ...mutablePackageCases.find((entry) => entry.family === family).host, packageFamily: family, kms_helper_installed: true }
     const baseAsset = release.assets[0]
     const kmsAsset = selectKmsReleaseAsset(release, host, baseAsset)
 
@@ -897,7 +1004,7 @@ describe('the DRM/KMS helper on the download path', () => {
     // A prerelease before 1.4.13 has no Polaris-kms asset. There is no command that leaves such a
     // host working, so saying nothing beats handing over one that breaks it.
     const release = kmsRelease(['Polaris-fedora44-x86_64.rpm'])
-    const host = { packageFamily: 'fedora', kms_helper_installed: true }
+    const host = { ...mutablePackageCases[1].host, kms_helper_installed: true }
 
     expect(selectKmsReleaseAsset(release, host, release.assets[0])).toBeNull()
     expect(buildManualInstallCommand(release.assets[0], host, null)).toBe('')
@@ -905,7 +1012,7 @@ describe('the DRM/KMS helper on the download path', () => {
 
   it('holds the helper to the same name and URL check as the base package', () => {
     const release = kmsRelease(['Polaris-fedora44-x86_64.rpm'])
-    const host = { packageFamily: 'fedora', kms_helper_installed: true }
+    const host = { ...mutablePackageCases[1].host, kms_helper_installed: true }
     const hostile = { name: 'Polaris-kms-fedora44-x86_64.rpm', browser_download_url: 'https://example.test/x?a=b' }
     const mismatched = { name: 'Polaris-kms-fedora44-x86_64.rpm', browser_download_url: 'http://example.test/Polaris-kms-fedora44-x86_64.rpm' }
 
@@ -934,7 +1041,7 @@ describe('the DRM/KMS helper on the download path', () => {
 
   it('leaves a host without the helper exactly as it was', () => {
     const release = kmsRelease(['Polaris-fedora44-x86_64.rpm', 'Polaris-kms-fedora44-x86_64.rpm'])
-    const host = { packageFamily: 'fedora' }
+    const host = mutablePackageCases[1].host
 
     // Naming a package the host does not have is an error on dnf5, so the helper is only ever
     // added to a host that already has it.

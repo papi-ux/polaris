@@ -100,31 +100,30 @@ function preferredAssetName(host = {}) {
   const family = inferPackageFamily(host)
   const versionId = String(host.distro?.version_id || '').trim()
   if (family === 'steamos') return steamOsPackageName(host)
-  if (host.recommended_asset_name) return host.recommended_asset_name
-  if (family === 'arch') return 'Polaris-arch-x86_64.pkg.tar.zst'
-  if (family === 'fedora' && versionId) return `Polaris-fedora${versionId}-x86_64.rpm`
-  if (family === 'ubuntu' && versionId.startsWith('24.04')) return 'Polaris-ubuntu24.04-x86_64.deb'
-  return ''
+
+  const distroFamily = inferPackageFamily({ ...host, package_family: '' })
+  if (distroFamily && distroFamily !== family) return ''
+
+  let wanted = ''
+  if (family === 'arch') wanted = 'Polaris-arch-x86_64.pkg.tar.zst'
+  if (family === 'fedora' && /^[1-9]\d*$/.test(versionId)) wanted = `Polaris-fedora${versionId}-x86_64.rpm`
+  if (family === 'ubuntu' && /^24\.04(?:\.\d+)?$/.test(versionId)) wanted = 'Polaris-ubuntu24.04-x86_64.deb'
+  // A server hint cannot qualify an unknown release or override the host's release.
+  if (host.recommended_asset_name && host.recommended_asset_name !== wanted) return ''
+  return wanted
+}
+
+function matchesHostRelease(asset, host) {
+  if (!/^Polaris-(?:fedora|ubuntu)/.test(String(asset?.name || ''))) return true
+  return asset.name === preferredAssetName(host)
 }
 
 export function selectReleaseAsset(release, host = {}) {
   if (!release || !Array.isArray(release.assets)) return null
 
-  const assets = release.assets
-  const family = inferPackageFamily(host)
-  if (family === 'steamos') {
-    const wanted = steamOsPackageName(host)
-    if (!wanted) return null
-    return assets.find((asset) => asset.name === wanted) || null
-  }
   const preferredName = preferredAssetName(host)
-  if (preferredName) {
-    const exact = assets.find((asset) => asset.name === preferredName)
-    if (exact) return exact
-  }
-
-  const fallback = assets.find((asset) => packageNamePatterns[family]?.base.test(asset.name))
-  return fallback || null
+  if (!preferredName) return null
+  return release.assets.find((asset) => asset.name === preferredName) || null
 }
 
 /**
@@ -137,6 +136,7 @@ export function selectReleaseAsset(release, host = {}) {
 export function selectKmsReleaseAsset(release, host = {}, baseAsset = null) {
   if (host.kms_helper_installed !== true) return null
   if (!release || !Array.isArray(release.assets) || !baseAsset?.name) return null
+  if (!matchesHostRelease(baseAsset, host)) return null
   const wanted = kmsNameForBase(baseAsset.name)
   if (!wanted) return null
   return release.assets.find((asset) => asset.name === wanted) || null
@@ -166,7 +166,7 @@ export function buildManualInstallCommand(asset, host = {}, kmsAsset = null) {
   if (!asset?.name || !asset?.browser_download_url) return ''
 
   const family = normalizeToken(asset.packageFamily || host.packageFamily || inferPackageFamily(host))
-  if (!isSafeAssetForFamily(asset, family)) return ''
+  if (!isSafeAssetForFamily(asset, family) || !matchesHostRelease(asset, host)) return ''
 
   // A host with the helper installed cannot take the base package alone: polaris-kms requires the
   // exact version beside it. If this release does not carry a matching helper, and a prerelease
@@ -174,6 +174,7 @@ export function buildManualInstallCommand(asset, host = {}, kmsAsset = null) {
   // rather than one that breaks it.
   const needsKms = host.kms_helper_installed === true
   const kmsUsable = Boolean(kmsAsset?.name) && Boolean(kmsAsset?.browser_download_url)
+    && kmsAsset.name === kmsNameForBase(asset.name)
     && isSafeAssetForFamily(kmsAsset, family, 'kms')
   if (needsKms && !kmsUsable) return ''
 
