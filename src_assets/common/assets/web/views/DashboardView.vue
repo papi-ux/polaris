@@ -23,6 +23,7 @@
       <LiveSessionCard
         v-if="stageMode === 'live'"
         :title="currentAppName"
+        :app-id="currentAppUuid"
         :art-src="stageView.artSrc"
         :device="sessionDeviceLabel"
         :stats="stats"

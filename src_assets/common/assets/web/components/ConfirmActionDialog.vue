@@ -73,7 +73,7 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, ref, watchEffect } from 'vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -97,14 +97,6 @@ const titleId = `confirm-action-title-${Math.random().toString(36).slice(2)}`
 const descriptionId = `confirm-action-desc-${Math.random().toString(36).slice(2)}`
 let previousFocus = null
 
-function focusCancel() {
-  dialogEl.value?.querySelector('[data-confirm-cancel]')?.focus()
-}
-
-function getFocusableControls() {
-  return Array.from(dialogEl.value?.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
-}
-
 function restoreFocus() {
   if (previousFocus instanceof HTMLElement && document.contains(previousFocus)) {
     previousFocus.focus()
@@ -127,7 +119,7 @@ function handleKeydown(event) {
   }
 
   if (event.key === 'Tab') {
-    const controls = getFocusableControls()
+    const controls = dialogEl.value?.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || []
     if (!controls.length) {
       event.preventDefault()
       dialogEl.value?.focus()
@@ -136,31 +128,28 @@ function handleKeydown(event) {
 
     const first = controls[0]
     const last = controls[controls.length - 1]
-    if (event.shiftKey && document.activeElement === first) {
+    const active = document.activeElement
+    if (event.shiftKey && active === first) {
       event.preventDefault()
       last.focus()
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && active === last) {
       event.preventDefault()
       first.focus()
     }
   }
 }
 
-watch(() => props.modelValue, async (open) => {
-  if (open) {
-    previousFocus = document.activeElement
-    await nextTick()
-    focusCancel()
-  } else {
-    await nextTick()
-    restoreFocus()
+// Run after DOM updates for both initial/open and pending transitions. Capture the opener once;
+// keep focus in a pending dialog, then return to Cancel if the action leaves it open.
+watchEffect(() => {
+  const pending = props.pending
+  if (!props.modelValue) { restoreFocus(); return }
+  const active = document.activeElement
+  const opening = !previousFocus
+  if (opening) previousFocus = active
+  if (opening || active === document.body || active === dialogEl.value ||
+      (dialogEl.value?.contains(active) && active.matches(':disabled'))) {
+    (pending ? dialogEl.value : dialogEl.value?.querySelector('[data-confirm-cancel]'))?.focus()
   }
-})
-
-onMounted(async () => {
-  if (!props.modelValue) return
-  previousFocus = document.activeElement
-  await nextTick()
-  focusCancel()
-})
+}, { flush: 'post' })
 </script>

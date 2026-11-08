@@ -120,4 +120,59 @@ describe('ConfirmActionDialog', () => {
     await wrapper.vm.$nextTick()
     expect(document.activeElement).toBe(cancel)
   })
+
+  it('keeps keyboard focus in a pending dialog and returns it to Cancel after refusal', async () => {
+    const wrapper = mountDialog()
+    await wrapper.vm.$nextTick()
+    bodyGet('[data-confirm-confirm]').focus()
+
+    await wrapper.setProps({ pending: true })
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement).toBe(bodyGet('[role="dialog"]'))
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(wrapper.emitted('cancel')).toBeUndefined()
+
+    await wrapper.setProps({ pending: false })
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement).toBe(bodyGet('[data-confirm-cancel]'))
+    document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    expect(wrapper.emitted('cancel')).toHaveLength(1)
+  })
+
+  it('captures a later opener once across pending changes and restores it on external close', async () => {
+    const opener = document.createElement('button')
+    document.body.appendChild(opener)
+    const wrapper = mountDialog({ modelValue: false })
+    await wrapper.vm.$nextTick()
+    opener.focus()
+
+    await wrapper.setProps({ modelValue: true })
+    expect(document.activeElement).toBe(bodyGet('[data-confirm-cancel]'))
+    bodyGet('[data-confirm-confirm]').focus()
+    await wrapper.setProps({ pending: true })
+    await wrapper.setProps({ pending: false })
+    await wrapper.setProps({ modelValue: false })
+    expect(document.activeElement).toBe(opener)
+    wrapper.unmount()
+  })
+
+  it('does not replace enabled slot or outside focus on a pending transition', async () => {
+    const wrapper = mount(ConfirmActionDialog, {
+      attachTo: document.body,
+      props: baseProps,
+      slots: { default: '<input data-entry aria-label="Confirmation input">' },
+    })
+    await wrapper.vm.$nextTick()
+    const input = bodyGet('[data-entry]')
+    input.focus()
+    await wrapper.setProps({ pending: true })
+    expect(document.activeElement).toBe(input)
+
+    const outside = document.createElement('button')
+    document.body.appendChild(outside)
+    outside.focus()
+    await wrapper.setProps({ pending: false })
+    expect(document.activeElement).toBe(outside)
+    wrapper.unmount()
+  })
 })
