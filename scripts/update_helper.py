@@ -28,6 +28,10 @@ ENV = {'PATH': '/usr/sbin:/usr/bin', 'LANG': 'C', 'LC_ALL': 'C', 'HOME': '/root'
 STATE = Path('/var/lib/polaris/update')
 RPM = '/usr/bin/rpm'
 PACKAGES = ('polaris', 'polaris-kms')
+# The Fedora releases whose official release assets this helper installs, by exact VERSION_ID.
+# A host outside this set, a derivative, another architecture or an image based system is refused.
+FEDORA_RELEASES = ('44', '45')
+FAMILY_MESSAGE = 'Polaris can install updates on Fedora 44 or 45 x86_64 only. Use the guided steps for this system.'
 VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:-(beta|rc)\.([1-9][0-9]{0,5}))?\Z')
 STARTED = 'Polaris update started.'
 MAX_METADATA = 4 * 1024 * 1024
@@ -79,10 +83,17 @@ def qualify_host(os_release=None, machine=None, image_based=None):
     if image_based is None:
         image_based = Path('/run/ostree-booted').exists() or Path('/usr/bin/steamos-readonly').exists()
     require(not image_based, 'image_based_host', 'Image based and SteamOS updates are still guided.')
-    require(values.get('ID') == 'fedora' and values.get('VERSION_ID') == '44'
-            and (machine or platform.machine()) == 'x86_64', 'family_unqualified',
-            'Polaris can install updates on Fedora 44 x86_64 only. Use the guided steps for this system.')
-    return {'id': 'fedora', 'version_id': '44', 'arch': 'x86_64'}
+    version_id = values.get('VERSION_ID', '')
+    require(values.get('ID') == 'fedora' and version_id in FEDORA_RELEASES
+            and (machine or platform.machine()) == 'x86_64', 'family_unqualified', FAMILY_MESSAGE)
+    return {'id': 'fedora', 'version_id': version_id, 'arch': 'x86_64'}
+
+
+def qualified_host(host):
+    """The exact host identity qualify_host produced; any other value is an untrusted hint."""
+    require(isinstance(host, dict) and set(host) == {'id', 'version_id', 'arch'} and host['id'] == 'fedora'
+            and host['version_id'] in FEDORA_RELEASES and host['arch'] == 'x86_64', 'family_unqualified', FAMILY_MESSAGE)
+    return {'id': 'fedora', 'version_id': host['version_id'], 'arch': 'x86_64'}
 
 
 class OfficialRedirect(urllib.request.HTTPRedirectHandler):
@@ -114,7 +125,10 @@ def releases():
     return data
 
 
-def select_release(data, channel, installed):
+def select_release(data, channel, installed, host):
+    host = qualified_host(host)
+    # Both package assets are named after the actual host release; there is no other-release fallback.
+    suffix = 'fedora' + host['version_id'] + '-x86_64.rpm'
     candidates = []
     for entry in data:
         if not isinstance(entry, dict) or entry.get('draft') is not False:
@@ -140,7 +154,7 @@ def select_release(data, channel, installed):
     for name in PACKAGES:
         if name == 'polaris-kms' and installed[name]['state'] == 'absent':
             continue
-        wanted = ('Polaris-' if name == 'polaris' else 'Polaris-kms-') + 'fedora44-x86_64.rpm'
+        wanted = ('Polaris-' if name == 'polaris' else 'Polaris-kms-') + suffix
         assets = [asset for asset in entry.get('assets', []) if isinstance(asset, dict) and asset.get('name') == wanted]
         require(len(assets) == 1, 'release_unverifiable', 'A matching official package asset is missing or ambiguous.')
         asset = assets[0]
@@ -155,13 +169,12 @@ def select_release(data, channel, installed):
         selected.append({'package': name, 'id': asset['id'], 'name': wanted, 'digest': digest,
                          'size': asset['size'], 'url': url, 'updated_at': asset.get('updated_at', '')})
     identity = {'schema': 1, 'release_id': entry['id'], 'tag': entry['tag_name'], 'channel': channel,
-                'host': {'id': 'fedora', 'version_id': '44', 'arch': 'x86_64'},
-                'installed': installed, 'assets': selected}
+                'host': host, 'installed': installed, 'assets': selected}
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     # Derive from the selected entry, not the last candidate visited above.
     kind = 'rc' if '-rc.' in version else 'beta' if '-' in version else 'stable'
     return {'channel': channel, 'release_kind': kind, 'version': version, 'release_id': entry['id'], 'assets': selected,
-            'review_guard': fingerprint, 'trust': 'release_digest',
+            'host': host, 'review_guard': fingerprint, 'trust': 'release_digest',
             'release_url': 'https://github.com/papi-ux/polaris/releases/tag/' + entry['tag_name']}
 
 
@@ -231,7 +244,7 @@ def installed_packages(run=command):
 
 
 def make_plan(channel, *, fetch=releases, read_installed=installed_packages, host=qualify_host):
-    host()
+    qualified = qualified_host(host())
     current = read_installed()
     require(current['polaris']['state'] == 'installed'
             and current['polaris-kms']['state'] in ('installed', 'absent'),
@@ -239,7 +252,7 @@ def make_plan(channel, *, fetch=releases, read_installed=installed_packages, hos
             'Polaris cannot safely update this package state. Read the versions below. '
             'If there are duplicate entries or an unreadable package database, ask your system administrator '
             'or Fedora software manager to repair them, then review again. Polaris will not force a reinstall or remove entries.')
-    plan = select_release(fetch(), channel, current)
+    plan = select_release(fetch(), channel, current, qualified)
     plan['installed'] = current
     target = version_key(plan['version'])
     require(all(version_key(value['version']) <= target for value in current.values() if value['state'] == 'installed'),

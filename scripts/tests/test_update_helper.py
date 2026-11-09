@@ -21,12 +21,18 @@ def packages(version='1.5.0', kms=True):
     return values
 
 
-def release(version='1.5.1', identity=123):
+def fedora(version='44'):
+    return {'id': 'fedora', 'version_id': version, 'arch': 'x86_64'}
+
+
+def release(version='1.5.1', identity=123, fedora_releases=('44',)):
     tag = 'v' + version
+    names = [prefix + 'fedora' + fedora_release + '-x86_64.rpm'
+             for fedora_release in fedora_releases for prefix in ('Polaris-', 'Polaris-kms-')]
     return {'id': identity, 'draft': False, 'prerelease': '-' in version, 'tag_name': tag,
             'assets': [{'id': number, 'name': name, 'size': 3, 'digest': 'sha256:' + hashlib.sha256(b'rpm').hexdigest(),
                         'browser_download_url': helper.UPSTREAM + tag + '/' + name, 'updated_at': 'today'}
-                       for number, name in enumerate(('Polaris-fedora44-x86_64.rpm', 'Polaris-kms-fedora44-x86_64.rpm'), 10)]}
+                       for number, name in enumerate(names, 10)]}
 
 
 class HelperTests(unittest.TestCase):
@@ -51,7 +57,7 @@ class HelperTests(unittest.TestCase):
                 helper.read_review_guard(io.StringIO(raw))
 
     def test_only_actual_fedora44_asset_family_is_qualified(self):
-        self.assertEqual(helper.qualify_host('ID=fedora\nVERSION_ID="44"', 'x86_64', False)['version_id'], '44')
+        self.assertEqual(helper.qualify_host('ID=fedora\nVERSION_ID="44"', 'x86_64', False), fedora('44'))
         for os_release, machine, image in (('ID=bazzite\nID_LIKE=fedora\nVERSION_ID=44', 'x86_64', False),
                                            ('ID=fedora\nVERSION_ID=43', 'x86_64', False),
                                            ('ID=fedora\nVERSION_ID=44', 'aarch64', False),
@@ -63,36 +69,36 @@ class HelperTests(unittest.TestCase):
     def test_channels_are_host_selected_independently_and_drafts_are_ignored(self):
         draft = release('9.0.0'); draft['draft'] = True
         data = [release('1.5.2-beta.1'), draft, release('1.5.0'), release(), release('1.5.1-beta.2')]
-        self.assertEqual(helper.select_release(data, 'stable', packages())['version'], '1.5.1')
-        self.assertEqual(helper.select_release(data, 'beta', packages())['version'], '1.5.2-beta.1')
-        self.assertEqual(len(helper.select_release(data, 'stable', packages(kms=False))['assets']), 1)
+        self.assertEqual(helper.select_release(data, 'stable', packages(), fedora())['version'], '1.5.1')
+        self.assertEqual(helper.select_release(data, 'beta', packages(), fedora())['version'], '1.5.2-beta.1')
+        self.assertEqual(len(helper.select_release(data, 'stable', packages(kms=False), fedora())['assets']), 1)
 
     def test_include_beta_selects_newest_stable_rc_or_beta_without_downgrading_stable(self):
         for values, expected, kind in (([release('1.5.1-rc.2'), release('1.5.1')], '1.5.1', 'stable'),
                                        ([release('1.5.0'), release('1.5.1-rc.1')], '1.5.1-rc.1', 'rc'),
                                        ([release('1.5.1'), release('1.5.2-beta.1')], '1.5.2-beta.1', 'beta')):
             with self.subTest(expected=expected):
-                plan = helper.make_plan('beta', fetch=lambda: values, read_installed=packages, host=lambda: {})
+                plan = helper.make_plan('beta', fetch=lambda: values, read_installed=packages, host=lambda: fedora())
                 self.assertEqual((plan['version'], plan['release_kind']), (expected, kind))
         current = helper.make_plan('beta', fetch=lambda: [release('1.5.1'), release('1.5.1-rc.2')],
-                                   read_installed=lambda: packages('1.5.1'), host=lambda: {})
+                                   read_installed=lambda: packages('1.5.1'), host=lambda: fedora())
         self.assertFalse(current['update_needed'])
         stable = helper.make_plan('beta', fetch=lambda: [release('1.5.1'), release('1.5.1-rc.2')],
-                                  read_installed=lambda: packages('1.5.1-rc.2'), host=lambda: {})
+                                  read_installed=lambda: packages('1.5.1-rc.2'), host=lambda: fedora())
         self.assertTrue(stable['update_needed'])
 
     def test_review_binds_release_id_asset_ids_digests_pair_and_installed_state(self):
         original = release()
-        guard = helper.select_release([original], 'stable', packages())['review_guard']
+        guard = helper.select_release([original], 'stable', packages(), fedora())['review_guard']
         for change in ('release', 'asset', 'digest', 'size'):
             altered = copy.deepcopy(original)
             if change == 'release': altered['id'] += 1
             elif change == 'asset': altered['assets'][0]['id'] += 1
             elif change == 'digest': altered['assets'][0]['digest'] = 'sha256:' + 'b' * 64
             else: altered['assets'][0]['size'] += 1
-            self.assertNotEqual(helper.select_release([altered], 'stable', packages())['review_guard'], guard)
-        self.assertNotEqual(helper.select_release([original], 'stable', packages(kms=False))['review_guard'], guard)
-        self.assertNotEqual(helper.select_release([original], 'stable', packages('1.4.9'))['review_guard'], guard)
+            self.assertNotEqual(helper.select_release([altered], 'stable', packages(), fedora())['review_guard'], guard)
+        self.assertNotEqual(helper.select_release([original], 'stable', packages(kms=False), fedora())['review_guard'], guard)
+        self.assertNotEqual(helper.select_release([original], 'stable', packages('1.4.9'), fedora())['review_guard'], guard)
 
     def test_absent_digest_unexpected_url_missing_pair_and_ambiguous_identity_refuse(self):
         for change in ('digest', 'url', 'pair', 'duplicate'):
@@ -102,16 +108,16 @@ class HelperTests(unittest.TestCase):
             elif change == 'pair': value['assets'].pop()
             else: value['assets'].append(copy.deepcopy(value['assets'][0]))
             with self.subTest(change=change), self.assertRaises(helper.Refusal):
-                helper.select_release([value], 'stable', packages())
+                helper.select_release([value], 'stable', packages(), fedora())
 
     def test_downgrade_and_unknown_partial_installed_state_refuse_plan(self):
         for current in (packages('2.0.0'), {'polaris': {'state': 'partial'}, 'polaris-kms': {'state': 'absent'}},
                         {'polaris': packages()['polaris'], 'polaris-kms': {'state': 'unknown'}}):
             with self.subTest(current=current), self.assertRaises(helper.Refusal):
-                helper.make_plan('stable', fetch=lambda: [release()], read_installed=lambda: current, host=lambda: {})
+                helper.make_plan('stable', fetch=lambda: [release()], read_installed=lambda: current, host=lambda: fedora())
 
     def test_rpm_identity_refuses_name_arch_epoch_version_and_missing_metadata(self):
-        asset = helper.select_release([release()], 'stable', packages())['assets'][0]
+        asset = helper.select_release([release()], 'stable', packages(), fedora())['assets'][0]
         for metadata in ('other|0|1.5.1|1|x86_64\n', 'polaris|0|1.5.1|1|aarch64\n',
                          'polaris|1|1.5.1|1|x86_64\n', 'polaris|0|1.5.0|1|x86_64\n', ''):
             with self.subTest(metadata=metadata), self.assertRaises(helper.Refusal):
@@ -125,7 +131,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 'transaction_not_closed')
 
     def test_download_compares_exact_independent_size_and_digest(self):
-        asset = helper.select_release([release()], 'stable', packages())['assets'][0]
+        asset = helper.select_release([release()], 'stable', packages(), fedora())['assets'][0]
         for payload, success in ((b'rpm', True), (b'bad', False), (b'rp', False), (b'rpm-extra', False)):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
                 with patch.object(helper, 'open_official', return_value=io.BytesIO(payload)):
@@ -133,9 +139,11 @@ class HelperTests(unittest.TestCase):
                     else:
                         with self.assertRaises(helper.Refusal): helper.download(asset, Path(directory) / 'asset.rpm')
 
-    def exercise_install(self, *, fail_transaction=False, fail_preview=False, changed=False, crash=False, obsoletes=False, current=None):
+    def exercise_install(self, *, fail_transaction=False, fail_preview=False, changed=False, crash=False, obsoletes=False, current=None,
+                         fedora_release='44'):
         current = current or packages()
-        reviewed = helper.make_plan('stable', fetch=lambda: [release()], read_installed=lambda: current, host=lambda: {})
+        reviewed = helper.make_plan('stable', fetch=lambda: [release(fedora_releases=(fedora_release,))],
+                                    read_installed=lambda: current, host=lambda: fedora(fedora_release))
         calls = []
         reads = []
         count = 0
@@ -215,8 +223,69 @@ class HelperTests(unittest.TestCase):
         self.assertIn('will not force a reinstall', result['message'])
         with self.assertRaises(helper.Refusal) as refused:
             helper.make_plan('stable', fetch=lambda: [release()], read_installed=lambda: {
-                'polaris': {'state': 'partial', 'versions': ['1.5.0', '1.5.1']}, 'polaris-kms': {'state': 'absent'}}, host=lambda: {})
+                'polaris': {'state': 'partial', 'versions': ['1.5.0', '1.5.1']}, 'polaris-kms': {'state': 'absent'}}, host=lambda: fedora())
         self.assertIn('repair them, then review again', str(refused.exception))
+
+    def test_fedora45_host_qualifies_with_its_own_release_and_other_releases_still_refuse(self):
+        self.assertEqual(helper.qualify_host('ID=fedora\nVERSION_ID="45"', 'x86_64', False), fedora('45'))
+        self.assertEqual(helper.qualify_host('ID=fedora\nVERSION_ID=44', 'x86_64', False), fedora('44'))
+        for os_release, machine, image in (('ID=fedora\nVERSION_ID=43', 'x86_64', False),
+                                           ('ID=fedora\nVERSION_ID=46', 'x86_64', False),
+                                           ('ID=fedora\nVERSION_ID=450', 'x86_64', False),
+                                           ('ID=fedora\nVERSION_ID=4', 'x86_64', False),
+                                           ('ID=bazzite\nID_LIKE=fedora\nVERSION_ID=45', 'x86_64', False),
+                                           ('ID=fedora\nVERSION_ID=45', 'aarch64', False),
+                                           ('ID=fedora\nVERSION_ID=45', 'x86_64', True)):
+            with self.subTest(os=os_release, machine=machine, image=image):
+                with self.assertRaises(helper.Refusal) as refused:
+                    helper.qualify_host(os_release, machine, image)
+                self.assertEqual(refused.exception.code, 'image_based_host' if image else 'family_unqualified')
+
+    def test_assets_and_review_guard_follow_the_actual_host_release(self):
+        data = [release(fedora_releases=('44', '45'))]
+        plan44 = helper.select_release(data, 'stable', packages(), fedora('44'))
+        plan45 = helper.select_release(data, 'stable', packages(), fedora('45'))
+        self.assertEqual([asset['name'] for asset in plan44['assets']], ['Polaris-fedora44-x86_64.rpm', 'Polaris-kms-fedora44-x86_64.rpm'])
+        self.assertEqual([asset['name'] for asset in plan45['assets']], ['Polaris-fedora45-x86_64.rpm', 'Polaris-kms-fedora45-x86_64.rpm'])
+        self.assertTrue(all(asset['url'].endswith('/' + asset['name']) for asset in plan45['assets']))
+        self.assertNotEqual(plan44['review_guard'], plan45['review_guard'])
+        self.assertEqual(plan45['host'], fedora('45'))
+        # The same release and installed state reviewed on the other host must never share a guard.
+        self.assertEqual(helper.select_release(data, 'stable', packages(), fedora('45'))['review_guard'], plan45['review_guard'])
+
+    def test_release_without_the_hosts_own_assets_refuses_without_cross_release_fallback(self):
+        for host_release, published in (('45', ('44',)), ('44', ('45',))):
+            with self.subTest(host=host_release, published=published):
+                with self.assertRaises(helper.Refusal) as refused:
+                    helper.select_release([release(fedora_releases=published)], 'stable', packages(), fedora(host_release))
+                self.assertEqual(refused.exception.code, 'release_unverifiable')
+        mixed = release(fedora_releases=('45',))
+        mixed['assets'][1]['name'] = 'Polaris-kms-fedora44-x86_64.rpm'
+        mixed['assets'][1]['browser_download_url'] = helper.UPSTREAM + 'v1.5.1/Polaris-kms-fedora44-x86_64.rpm'
+        with self.assertRaises(helper.Refusal):
+            helper.select_release([mixed], 'stable', packages(), fedora('45'))
+
+    def test_make_plan_binds_the_qualified_host_and_refuses_unqualified_host_hints(self):
+        plan = helper.make_plan('stable', fetch=lambda: [release(fedora_releases=('44', '45'))],
+                                read_installed=packages, host=lambda: fedora('45'))
+        self.assertEqual([asset['name'] for asset in plan['assets']], ['Polaris-fedora45-x86_64.rpm', 'Polaris-kms-fedora45-x86_64.rpm'])
+        self.assertEqual(plan['host'], fedora('45'))
+        for hint in ({}, fedora('46'), {'id': 'fedora', 'version_id': '45', 'arch': 'aarch64'},
+                     {'id': 'bazzite', 'version_id': '45', 'arch': 'x86_64'}, {**fedora('45'), 'extra': True}, None):
+            with self.subTest(hint=hint):
+                with self.assertRaises(helper.Refusal) as refused:
+                    helper.make_plan('stable', fetch=lambda: [release(fedora_releases=('44', '45'))],
+                                     read_installed=packages, host=lambda: hint)
+                self.assertEqual(refused.exception.code, 'family_unqualified')
+
+    def test_install_downloads_and_transacts_the_fedora45_assets_for_a_fedora45_host(self):
+        result, calls = self.exercise_install(fedora_release='45')
+        self.assertEqual(result['state'], 'installed')
+        queried = [Path(argv[-1]).name for argv in calls if '-qp' in argv and 'OBSOLETENAME' not in ''.join(argv)]
+        self.assertEqual(sorted(queried), ['Polaris-fedora45-x86_64.rpm', 'Polaris-kms-fedora45-x86_64.rpm'])
+        operations = [argv for argv in calls if '-U' in argv and '--test' not in argv]
+        self.assertEqual(sorted(Path(path).name for path in operations[0][operations[0].index('--') + 1:]),
+                         ['Polaris-fedora45-x86_64.rpm', 'Polaris-kms-fedora45-x86_64.rpm'])
 
     def test_per_package_query_distinguishes_absent_unknown_and_version(self):
         def run(argv):

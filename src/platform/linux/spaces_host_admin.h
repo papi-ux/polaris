@@ -61,6 +61,11 @@ namespace multiseat::spaces {
   };
   [[nodiscard]] std::optional<host_action_refusal_t> host_action_refusal(const host_admin_facts_t &facts);
   [[nodiscard]] std::optional<host_action_refusal_t> update_action_refusal(host_admin_facts_t facts, bool finish = false);
+  /// The Fedora releases whose official RPM assets the host updater installs, by exact os-release VERSION_ID.
+  inline constexpr std::array<std::string_view, 2> update_fedora_releases {"44", "45"};
+  /// Whether an os-release ID and VERSION_ID name a host the updater serves. Derivatives that merely
+  /// resemble Fedora, other releases and anything else are not that host.
+  [[nodiscard]] bool update_family_qualified(std::string_view id, std::string_view version_id);
 
   /// The first line the helper prints when pkexec ran it, which only happens after approval.
   inline constexpr std::string_view host_action_started_line = "Spaces setup started.";

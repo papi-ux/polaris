@@ -192,9 +192,14 @@ namespace multiseat::spaces {
     return std::nullopt;
   }
 
+  bool update_family_qualified(std::string_view id, std::string_view version_id) {
+    return id == "fedora" &&
+      std::find(update_fedora_releases.begin(), update_fedora_releases.end(), version_id) != update_fedora_releases.end();
+  }
+
   std::optional<host_action_refusal_t> update_action_refusal(host_admin_facts_t facts, bool finish) {
     if (!facts.update_family)
-      return host_action_refusal_t {"family_unqualified", "Polaris can install updates on Fedora 44 x86_64 only. Use the guided steps for this system."};
+      return host_action_refusal_t {"family_unqualified", "Polaris can install updates on Fedora 44 or 45 x86_64 only. Use the guided steps for this system."};
     facts.helper = facts.update_helper;
     if (finish) facts.helper = facts.pkexec = facts.policy = true;
     if (const auto refusal = host_action_refusal(facts)) {
@@ -798,7 +803,7 @@ namespace multiseat::spaces {
     facts.update_helper = trusted_program(std::filesystem::path(host_admin_data::update_helper_path), false);
     const auto distro = update_status::detect_host_distro();
 #if defined(__x86_64__)
-    facts.update_family = distro.id == "fedora" && distro.version_id == "44";
+    facts.update_family = update_family_qualified(distro.id, distro.version_id);
 #endif
     facts.external_update_active = update_status::privileged_update_active();
     facts.helper = trusted_program(std::filesystem::path(host_admin_data::helper_path), false);

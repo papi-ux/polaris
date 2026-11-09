@@ -215,6 +215,24 @@ TEST(SpacesHostAdmin, RefusalsComeMostBasicFirstAndSayWhatToDo) {
     "Someone must be signed in at this PC's desktop to approve the password prompt. Otherwise, run the terminal steps on this PC.");
 }
 
+TEST(SpacesHostAdmin, TheUpdaterServesOnlyFedora44And45ByExactRelease) {
+  EXPECT_TRUE(spaces::update_family_qualified("fedora", "44"));
+  EXPECT_TRUE(spaces::update_family_qualified("fedora", "45"));
+  for (const auto &[id, version] : std::vector<std::pair<std::string_view, std::string_view>> {
+         {"fedora", "43"}, {"fedora", "46"}, {"fedora", "4"}, {"fedora", "450"}, {"fedora", "45.1"}, {"fedora", ""},
+         {"bazzite", "45"}, {"rhel", "9"}, {"centos", "45"}, {"ubuntu", "24.04"}, {"", "45"}})
+    EXPECT_FALSE(spaces::update_family_qualified(id, version)) << id << ' ' << version;
+  auto facts = ready_facts();
+  facts.update_helper = true;
+  facts.update_family = false;
+  const auto refusal = spaces::update_action_refusal(facts);
+  ASSERT_TRUE(refusal);
+  EXPECT_EQ(refusal->code, "family_unqualified");
+  EXPECT_EQ(refusal->message, "Polaris can install updates on Fedora 44 or 45 x86_64 only. Use the guided steps for this system.");
+  facts.update_family = true;
+  EXPECT_FALSE(spaces::update_action_refusal(facts));
+}
+
 TEST(SpacesHostAdmin, OnlyAnActiveLocalDesktopSessionCanApprove) {
   EXPECT_EQ(spaces::display_session_id("Display=2\n"), "2");
   EXPECT_EQ(spaces::display_session_id("Display=c135"), "c135");
