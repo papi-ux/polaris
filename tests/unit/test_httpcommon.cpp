@@ -242,10 +242,11 @@ namespace {
     X509_gmtime_adj(X509_getm_notAfter(x509.get()), 60 * 60 * 24);
     X509_set_pubkey(x509.get(), pkey.get());
 
-    auto name = X509_get_subject_name(x509.get());
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char *>(host.data()),
+    util::safe_ptr<X509_NAME, X509_NAME_free> name {X509_NAME_new()};
+    X509_NAME_add_entry_by_txt(name.get(), "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char *>(host.data()),
                                static_cast<int>(host.size()), -1, 0);
-    X509_set_issuer_name(x509.get(), name);
+    X509_set_subject_name(x509.get(), name.get());
+    X509_set_issuer_name(x509.get(), name.get());
 
     const std::string san = "DNS:" + std::string {host};
     if (X509_EXTENSION *extension = X509V3_EXT_conf_nid(nullptr, nullptr, NID_subject_alt_name, san.c_str())) {
