@@ -95,7 +95,8 @@ namespace platf::epic {
   // only from a listing in which every owner task has been judged, so another user's process or an
   // unrelated owner task coming and going does not make it unknown. A candidate changing does.
   // Optional presentation only: a bounded basename of one confirmed blocker, never admission or
-  // process-control authority. Empty for incomplete, unsafe, changed or ambiguous observations.
+  // process-control authority. Every other owner task must be read as no AppImage, or be a protected
+  // task placed by the same roles; it is empty for incomplete, unsafe, changed or ambiguous observations.
   // The caller must restrict it to the authenticated host console; reason stays non-identifying.
   std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr);
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);

@@ -2154,6 +2154,9 @@ namespace platf::epic {
           require(++read.listings <= census_listings, "blocker_budget_exhausted");
           const auto tasks = read.listed_tasks();
           require(std::find(tasks.begin(), tasks.end(), pinned.identity.pid) != tasks.end(), "blocker_changed");
+          // The census refused before placing the protected tasks it read; this pass reads and places its own.
+          read.uninspected.clear();
+          read.roles.clear();
           std::vector<reader_t::owner_task_t> negatives;
           std::vector<std::uint64_t> foreign;
           for (const auto pid : tasks) {
@@ -2162,15 +2165,22 @@ namespace platf::epic {
               foreign.push_back(pid);
               continue;
             }
+            const auto protected_before = read.uninspected.size();
             const auto task = read.owner_task(pid);
-            // Protected/vanishing tasks cannot disprove another AppImage for this presentation.
-            require(task.has_value(), "blocker_identity_incomplete");
+            if (!task) {
+              // A protected task is placed below. An exiting one cannot disprove another AppImage for this presentation.
+              require(read.uninspected.size() > protected_before, "blocker_identity_incomplete");
+              continue;
+            }
             const auto path = fs::path("/proc") / std::to_string(pid);
             const auto other_header = read.counted(read.backend.prefix(path / "exe", 11));
             require(other_header.substr(0, 4) != std::string("\177ELF", 4) || other_header.substr(8, 2) != "AI",
                     "multiple_appimage_blockers");
             negatives.push_back(*task);
           }
+          // A protected task is not another AppImage only as it is not a launcher (D-A (B)): by its session or system
+          // role, exactly as the census sets it aside. One with no such role leaves the presentation generic, as before.
+          read.place_protected("blocker_identity_incomplete");
           require(++read.listings <= census_listings, "blocker_budget_exhausted");
           require(tasks == read.listed_tasks(), "blocker_set_changed");
           for (const auto &task : negatives) {
@@ -2179,6 +2189,7 @@ namespace platf::epic {
                       same_image(task.image, read.stat(path / "exe")), "blocker_set_changed");
           }
           for (const auto pid : foreign) require(!read.owner_owns(pid), "blocker_set_changed");
+          read.recheck_placed("blocker_set_changed");
           require(read.unchanged(process) &&
                     read.counted(read.backend.prefix(fs::path("/proc") / std::to_string(pinned.identity.pid) / "exe", 11)) == header &&
                     read.unchanged(process) && owner == read.backend.owner_uid() && boot == read.boot() &&
