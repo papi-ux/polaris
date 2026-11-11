@@ -2405,6 +2405,76 @@ namespace {
 
 }  // namespace
 
+namespace {
+
+  /// A paced 2.9% whole-send loss run from #654's independent bench (Lane B, seeds from 10000), as the policy heard it:
+  /// 23 clean reports a second apart, then each report as that bench's trace printed it, at its time, with the 3 ms RTT
+  /// readings ten a second. Every report up to the floor verdict was the same under 36a2999f and 037ccb82, so this is
+  /// the run itself up to that verdict. The targets after each report, by its time.
+  std::vector<std::pair<int, int>> paced_seed_replay(const std::vector<std::tuple<int, double, double>> &reports, live_tuning_policy::policy_t &policy) {
+    std::vector<std::tuple<int, double, double>> all;
+    for (int k = 0; k < 23; ++k) {
+      all.emplace_back(500 + 1000 * k, 0.0, 120.0);
+    }
+    all.insert(all.end(), reports.begin(), reports.end());
+    std::vector<std::pair<int, int>> targets;
+    std::size_t next = 0;
+    const int end = std::get<0>(all.back());
+    for (int now = 0; now <= end; ++now) {
+      if (now % 100 == 50) {
+        policy.rtt(now, 3.0);
+      }
+      if (next < all.size() && std::get<0>(all[next]) == now) {
+        const auto &[at, lost, expected] = all[next++];
+        policy.report(at, expected, lost);
+        targets.emplace_back(at, policy.target_kbps());
+      }
+    }
+    return targets;
+  }
+
+}  // namespace
+
+TEST(LiveTuningPolicy, APacedSeedsOneFloorReportJustOver20PercentIsNotTheLinksLoss) {
+  // #654's independent bench: two paced 2.9% seeds, pr 10289 and rb 10708, reach the floor through the deep sample and
+  // judge there on one report, 27 of 129 and 27 of 128 lost, 20.9% and 21.1%. That is over 20% as observed but not
+  // clearly, and the loss falls with the rate. 36a2999f went back to the request, learning 23.1% and 21.5%;
+  // 037ccb82 held both at the floor and spent 296 s and 260 s of 400 below half the request. A sample at the floor is
+  // the link's only when clearly over 20%, as rule 5 already says of the floor sample itself.
+  const std::vector<std::tuple<int, double, double>> pr_10289 {
+    {23510, 0, 120}, {24500, 0, 119}, {25490, 0, 119}, {26480, 9, 122}, {27470, 45, 135}, {28470, 36, 131},
+    {29470, 36, 132}, {30470, 6, 122}, {31470, 27, 129}, {32460, 0, 119}, {33460, 27, 129},
+  };
+  const std::vector<std::tuple<int, double, double>> rb_10708 {
+    {23550, 0, 121}, {24560, 0, 121}, {25570, 0, 120}, {26560, 21, 127}, {27550, 36, 131}, {28560, 21, 127},
+    {29560, 21, 128}, {30560, 36, 131}, {31550, 21, 127}, {32550, 27, 129}, {33550, 6, 122}, {34540, 27, 128},
+  };
+  const struct {
+    const char *name;
+    const std::vector<std::tuple<int, double, double>> *reports;
+    std::vector<std::pair<int, int>> path;  ///< the trace's changes, by report time
+    double learned;
+  } seeds[] {
+    {"pr 10289", &pr_10289, {{27470, 15592}, {29470, 4000}, {31470, 2000}, {33460, 25987}}, 0.231},
+    {"rb 10708", &rb_10708, {{27550, 15592}, {30560, 4000}, {32550, 2000}, {34540, 25987}}, 0.215},
+  };
+  for (const auto &seed : seeds) {
+    SCOPED_TRACE(seed.name);
+    live_tuning_policy::policy_t policy {25987, 2000};
+    const auto targets = paced_seed_replay(*seed.reports, policy);
+    std::vector<std::pair<int, int>> changes;
+    for (std::size_t i = 1; i < targets.size(); ++i) {
+      if (targets[i].second != targets[i - 1].second) {
+        changes.push_back(targets[i]);
+      }
+    }
+    EXPECT_EQ(changes, seed.path);
+    EXPECT_EQ(policy.target_kbps(), 25987);
+    EXPECT_EQ(policy.state(), live_tuning_policy::state_e::normal);
+    EXPECT_NEAR(policy.background_loss(), seed.learned, 0.0005);
+  }
+}
+
 TEST(LiveTuningPolicy, Rp6S3ReplayFromTheHeldRateFollowsTheHostDownToTheFloor) {
   // What the fixture is good for. From the 9658 kbps hold the host held before the step, the recorded reports and RTT
   // readings take the policy through the host's own first changes after it: 5794 at 93.56 s, 4000 at 95.70, 2500 at

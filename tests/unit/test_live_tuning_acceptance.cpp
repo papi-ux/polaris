@@ -828,6 +828,18 @@ TEST(LiveTuningAcceptance, WireLossUnderThreePercentNeverReachesTheFloor) {
   }
 }
 
+TEST(LiveTuningAcceptance, APacedSeedWhoseFloorSampleReadsJustOver20PercentIsNotParkedThere) {
+  // #654's independent bench, pr seed 10289: sends of 5 packets with 2.9% dropped whole, 400 s. The probe reaches the
+  // floor and judges there on one report losing 27 of 129, 20.9%: over 20%, not clearly. 36a2999f went back to the
+  // request and spent 4.1 s below half it; 037ccb82 held at the floor and spent 296.2 s. Background loss is not to
+  // park a stream under half its request.
+  const auto run = wire_run({5, 0.029, 0.0, std::nullopt}, 10289);
+  RecordProperty("wire_pacer_on_skb_29permille_seed_10289_below_half_s", std::to_string(run.below_half / 10.0));
+  RecordProperty("wire_pacer_on_skb_29permille_seed_10289_floor_s", std::to_string(run.floor / 10.0));
+  EXPECT_LT(run.below_half, 300);
+  EXPECT_LT(run.floor, 50);
+}
+
 TEST(LiveTuningAcceptance, PacerOffLossRarelyHalvesTheStreamOverTwentyMinutes) {
   // #576: skbs dropped whole with the pacer off lose the same share of frames at every rate, three frames a loss. A few
   // light reports between those losses can pass for help far under the request, and the stream then searched under
