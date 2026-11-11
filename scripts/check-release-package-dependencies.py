@@ -1298,6 +1298,9 @@ require_command(workflow_run_tokens(post_sign),
 if not (release_job.index("- name: Sign the Fedora release RPMs") < release_job.index("- name: Verify signed Fedora release pairs on clean hosts") < release_job.index("- name: Stage curated GitHub release")):
     raise AssertionError("final clean-host checks must follow signing and precede upload")
 matrix_tests = workflow_step(resolve_job, "Verify Fedora release matrix controls")
+require_block(fedora_rpm_script,
+              'COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"\nexport COMMIT\n',
+              "Fedora RPM commit identity")
 if matrix_tests.strip() != "run: python3 -m unittest discover -s tests/scripts -p 'test_fedora_release_matrix.py'":
     raise AssertionError("resolve-source must run Fedora release matrix controls")
 spec = read("packaging/linux/fedora/Polaris.spec")

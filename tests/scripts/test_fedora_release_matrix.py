@@ -59,6 +59,20 @@ class FedoraReleaseMatrix(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, reason):
                     runpy.run_path(str(CHECKER), run_name='__main__')
 
+    def test_fedora_commit_identity_must_come_from_the_checkout(self):
+        text = WORKFLOW.read_text()
+        binding = '          COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"\n          export COMMIT\n'
+        self.assertTrue(binding in text, "Fedora configure must export the checked-out commit")
+        read = Path.read_text
+        with contextlib.redirect_stdout(io.StringIO()):
+            runpy.run_path(str(CHECKER), run_name='__main__')
+        mutation = text.replace(binding, '', 1)
+        def substituted(path, *args, **kwargs):
+            return mutation if path == WORKFLOW else read(path, *args, **kwargs)
+        with mock.patch.object(Path, 'read_text', substituted):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, 'Fedora RPM commit identity'):
+                runpy.run_path(str(CHECKER), run_name='__main__')
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='polaris-fedora-drivers-')
         self.addCleanup(temporary.cleanup)
