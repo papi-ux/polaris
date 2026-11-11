@@ -44,6 +44,7 @@ TEST(CryptoCredentials, PreservesCommonNamesAndCertificateSignature) {
   const auto credentials = crypto::gen_creds(common_name, key_bits);
   const auto certificate = crypto::x509(credentials.x509);
   ASSERT_NE(certificate, nullptr);
+  EXPECT_EQ(X509_verify(certificate.get(), X509_get0_pubkey(certificate.get())), 1);
 
   std::array<char, 256> subject_cn {};
   std::array<char, 256> issuer_cn {};
