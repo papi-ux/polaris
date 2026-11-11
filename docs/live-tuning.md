@@ -57,9 +57,10 @@ overloaded, takes one deep sample and goes no further.
   the loss does not depend on the bitrate: the stream goes back to its rate, and Live Tuning learns
   that loss and leaves it alone, with the reason `loss_independent_of_bitrate`. Only loss that is
   still clearly more than background costs even there, over about a tenth of the frames, probes on
-  toward the floor. At the floor, loss over a fifth of the frames is the link's, not background:
-  the stream holds at the floor and climbs back only in judged steps of at most half again, never
-  straight back to its rate, which would only load a link that cannot carry the floor.
+  toward the floor. At the floor, loss over a fifth of the frames that is also clearly over the
+  tenth background can cost is the link's: the stream holds at the floor and climbs back only in
+  judged steps of at most half again, never straight back to its rate, which would only load a link
+  that cannot carry the floor.
 - **Under a link.** Settled under a link it found, it tries the rate above after 8 reports and then
   about every 20, and climbs back toward the request when that is clean, with the reason
   `holding_under_the_link`.

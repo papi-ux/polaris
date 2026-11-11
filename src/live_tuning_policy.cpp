@@ -356,15 +356,19 @@ namespace live_tuning_policy {
       sample_floor(now_ms, here);
       return;
     }
-    // Loss over 20% at the floor is the link's, as a hold losing that much is: there is nothing lower to look under,
-    // and nothing says the rate the episode started from would lose less. What decides is the floor's own evidence
-    // for this verdict, the test that just ended there or, for a hold, its own reports, and not the episode's pooled
-    // ledger, which can hold clean reports from before the link changed. Observed and not only when clearly over, as
-    // above: a stream the floor already overloads is never sent back.
+    // At the floor, loss that is heavy and beyond doubt more than background costs there is the link's: there is
+    // nothing lower to look under, and nothing says the rate the episode started from would lose less. Rule 5's two
+    // lines decide it, on the floor's own evidence for this verdict (the test that just ended there, a hold's own
+    // reports, or the run that started a probe with no room under it), not on the episode's pooled ledger, which can
+    // hold clean reports from before the link changed: over 20% as observed, as the guard above reads heavy loss, and
+    // clearly over the 10% that background under 3% can cost near the floor. One report a little over 20% is not
+    // clearly over 10%, and goes back as before; a floor the link cannot carry loses far more than that.
     if (target_ <= floor_) {
-      const double here = test_ && test_->frames() > 0.0 ? test_->rate() : rate;
-      if (here > HEAVY_LOSS) {
-        lo_loss_ = here;
+      const auto [frames, lost] = test_ && test_->frames() > 0.0 ? std::pair<double, double> {test_->frames(), test_->lost()} :
+                                  state_ == state_e::hold                ? hold_stats_ :
+                                                                           hi_stats_;
+      if (frames > 0.0 && lost / frames > HEAVY_LOSS && clearly_over(lost, frames, NEAR_FLOOR_LOSS)) {
+        lo_loss_ = lost / frames;
         hold_at_floor(now_ms);
         return;
       }

@@ -61,9 +61,11 @@
  *   significantly more. Otherwise the loss depends on the rate above: the stream holds at the highest measured rate
  *   that lost no more, under the lowest one that did. Loss over 20% is learned only once the episode has looked
  *   under it, at the floor or at a rate that lost 20% or less: until then the floor is sampled first. At the floor
- *   itself, loss over 20% in the evidence for the verdict, the test that ended there or a hold's own reports, is
+ *   itself, loss in the evidence for the verdict (the test that ended there, a hold's own reports, or the run that
+ *   started a probe with no room under it) that is over 20% and clearly over the 10% background can cost there is
  *   never learned: it is the link's, and the stream holds at the floor with nothing above it known to fail, so it
- *   climbs back only in judged steps of at most 1.5x. A background that has gone is judged only on reports after
+ *   climbs back only in judged steps of at most 1.5x. One report a little over 20% is not clearly over 10%, and goes
+ *   back as before. A background that has gone is judged only on reports after
  *   it was learned.
  * - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
  *   the measured burstiness. An undecided descent test counts as not having helped.
