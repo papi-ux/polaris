@@ -37,6 +37,9 @@ namespace live_tuning_policy {
     constexpr int DUTY_NEEDED = 2;
     constexpr std::int64_t MISSING_MS = 1500;  // no report this long while probing down: step to the deep sample
     constexpr int HOLD_CHECK_REPORTS = 12;
+    constexpr int FAR_DOWN_LOSSY_STEPS = 2;  // lossy bisect steps under a far-down help before it is sampled again
+    constexpr int FAR_DOWN_RESAMPLE_REPORTS = 6;  // judged reports in that second sample
+    constexpr double FAR_DOWN_CERTAIN_Z = 4.0;  // a help this many standard errors lighter needs no second sample
     constexpr int BACKOFF_REPORTS = 1200;
     constexpr int BACKGROUND_DECAY_REPORTS = 60;
     constexpr double CUSUM_H = 4.0;
@@ -228,6 +231,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
+    far_down_reset();
     measured_.clear();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
@@ -292,7 +296,10 @@ namespace live_tuning_policy {
     // rate above.
     const int near_floor = static_cast<int>(floor_ * CLIMB_STEP);
     if (target_ > near_floor) {
-      return near_floor;
+      // From within a bisect step of that stop, the step is too short to tell a link's loss from background: stop
+      // halfway to the floor instead, still above it.
+      const int halfway = static_cast<int>(std::sqrt(static_cast<double>(floor_) * target_));
+      return static_cast<double>(target_) / near_floor <= BISECT_DONE && halfway > floor_ ? halfway : near_floor;
     }
     // The floor itself takes clearly heavy loss, or loss that still falls with the rate here: the nearest rate above
     // lost significantly more.
@@ -326,6 +333,11 @@ namespace live_tuning_policy {
       enter_hold(now_ms, settle);
       return;
     }
+    learn_background(rate, now_ms, why);
+  }
+
+  // The loss does not depend on the rate: back to where the episode started, with that loss learned as background.
+  void policy_t::learn_background(double rate, std::int64_t now_ms, std::string_view why) {
     // Heavy loss is learned only once the episode has looked under it, at the floor or at a rate that lost no more
     // than 20%. Observed, not clearly over: 30 frames a report cannot clear two standard errors at 35%.
     const bool looked_under = std::any_of(measured_.begin(), measured_.end(), [&](const auto &rate_stats) {
@@ -346,6 +358,7 @@ namespace live_tuning_policy {
     // Whether this background goes again is judged on the reports after it was learned.
     normal_stats_ = {0.0, 0.0};
     normal_reports_ = 0;
+    background_reports_ = 0;
     reset_baseline(background_);
     backoff_ = BACKOFF_REPORTS;
     to_normal(now_ms, std::max(r0_, episode_start_), why);
@@ -369,9 +382,39 @@ namespace live_tuning_policy {
     return probe_stats_.first > 0.0 ? probe_stats_.second / probe_stats_.first : l0_;
   }
 
+  void policy_t::far_down_reset() {
+    far_down_lo_.reset();
+    far_down_lossy_steps_ = 0;
+    far_down_verifying_ = false;
+    far_down_resampling_ = false;
+    far_down_resampled_ = false;
+  }
+
+  // The second sample of a rate that had helped far down, judged alone against what the rate it was verified against
+  // has lost. Significantly lighter again: the stream narrows in under the step that just failed. If not, the first
+  // sample was a few light reports between clustered losses, and the loss does not depend on the rate: the stream
+  // goes back as this verdict says, without asking the episode's pooled measurements, which hold the lossy steps that
+  // called for this sample and would hold the stream here against it.
+  void policy_t::far_down_resample_result(std::int64_t now_ms) {
+    far_down_resampling_ = false;
+    lo_ = target_;
+    const auto verified = measured_.find(far_down_hi_);
+    if (verified != measured_.end() &&
+        z_lower(test_->lost(), test_->frames(), verified->second.second, verified->second.first, std::max(2.0, disp())) >= 2.0) {
+      const auto &here = measured_.at(target_);
+      lo_loss_ = here.second / here.first;
+      state_ = state_e::bisect;
+      bisect_step(now_ms);
+      return;
+    }
+    measured_[target_] = {test_->frames(), test_->lost()};
+    learn_background(test_->rate(), now_ms, "rate_independent");
+  }
+
   void policy_t::begin_descent(std::int64_t now_ms, std::string_view why, double l0) {
     // Loss that depends on the rate: parity would only add load.
     fec_revert();
+    far_down_reset();
     if (state_ == state_e::normal) {
       episode_start_ = target_;
       measured_.clear();
@@ -453,6 +496,20 @@ namespace live_tuning_policy {
   }
 
   void policy_t::descend_result(bool helped, std::int64_t now_ms) {
+    if (!helped && phase_ == phase_e::first && backoff_ > 0 && background_reports_ >= HOLD_CHECK_REPORTS &&
+        r0_ == episode_start_ && test_->rate() <= HEAVY_LOSS &&
+        !clearly_over(test_->lost(), test_->frames(), background_ + ABSORB_EXCESS)) {
+      // While backing off, with the background learned since held at the request for a hold check's reports: a first
+      // step that loses no more than that background, give or take, has found it again. It only updates it, as a run
+      // this close does, by at most what such a run may add, without another deep sample and without starting the
+      // back-off again: a short first step can read far over the level it was admitted against.
+      const int remaining = backoff_;
+      rate_independent(std::min(probe_rate(), background_ + ABSORB_EXCESS), now_ms, "rate_independent");
+      if (state_ == state_e::normal) {
+        backoff_ = remaining;
+      }
+      return;
+    }
     if (helped) {
       const bool floor_measured = !measured_.empty() && measured_.begin()->first <= floor_;
       if (target_ > floor_ && target_ <= static_cast<int>(floor_ * CLIMB_STEP) && !floor_measured &&
@@ -464,6 +521,12 @@ namespace live_tuning_policy {
       }
       lo_ = target_;
       lo_loss_ = test_->rate();
+      if (phase_ != phase_e::first && !far_down_resampled_) {
+        far_down_lo_ = target_;
+        far_down_hi_ = *hi_;
+        far_down_lossy_steps_ = 0;
+        far_down_verifying_ = true;
+      }
       state_ = state_e::verify_hi;
       set_target(*hi_, "verify_hi", now_ms);
       test_ = make_sprt(std::max(lo_loss_, p_background()), std::max(hi_loss_ * 0.6, lo_loss_ + CLIMB_LOSSY), upward_min());
@@ -499,9 +562,12 @@ namespace live_tuning_policy {
       const auto [frames, lost] = deep_stats_;
       const double r = frames > 0.0 ? lost / frames : 0.0;
       const double se = std::sqrt(std::max(r, 1e-4) * std::max(2.0, disp()) / std::max(frames, 1.0));
-      // Heavy loss far down that is no lighter than at the first step does not depend on the rate either.
       const bool lighter = z_lower(lost, frames, hi_stats_.second, hi_stats_.first, std::max(2.0, disp())) >= 2.0;
-      if (r - 2.0 * se - background_ <= MILD_LOSS || (!lighter && !clearly_over(lost, frames, HEAVY_LOSS))) {
+      // Loss far down that is no lighter than at the first step does not depend on the rate either, unless it is
+      // clearly more than background costs: that is a link's, and halving on finds where it stops. A sample at the
+      // floor has nowhere to halve on to: there only clearly heavy loss is the link's, as before.
+      const double links = target_ > floor_ ? NEAR_FLOOR_LOSS : HEAVY_LOSS;
+      if (r - 2.0 * se - background_ <= MILD_LOSS || (!lighter && !clearly_over(lost, frames, links))) {
         // The same loss far under the rate, not clearly heavier: it does not depend on the rate.
         rate_independent(probe_rate(), now_ms, "rate_independent");
         return;
@@ -533,6 +599,20 @@ namespace live_tuning_policy {
 
   void policy_t::verify_hi_result(bool lossy, std::int64_t now_ms) {
     const bool loss_probe_verify = failed_queue_hold_ && std::exchange(failed_queue_hold_->verifying, false);
+    if (std::exchange(far_down_verifying_, false) && lossy && !hi_is_queue_ && lo_) {
+      std::pair<double, double> above {0.0, 0.0};
+      const auto here = measured_.find(*lo_);
+      if (here != measured_.end() && here->second.first > 0.0 && !lossier_above(*lo_, above)) {
+        // The rate the probe left is lossy again, but nothing measured above the rate that helped lost significantly
+        // more than it: that help was chance, and the loss does not depend on the rate. The background learned is
+        // the loss where it helped, the lowest measured, so the back-off absorbs no more than that.
+        rate_independent(here->second.second / here->second.first, now_ms, "rate_independent");
+        return;
+      }
+    }
+    if (!lossy || hi_is_queue_) {
+      far_down_lo_.reset();
+    }
     if (!lossy) {
       const auto previous_queue_hold = hi_is_queue_ ? lo_ : std::nullopt;
       clean_promotion();
@@ -616,7 +696,28 @@ namespace live_tuning_policy {
       hi_loss_ = std::max(test_->rate(), hi_loss_ * 0.5);
       hi_stats_ = {test_->frames(), test_->lost()};
       hi_rechecked_ = false;
+      const auto helped_at = far_down_lo_ && lo_ && *lo_ == *far_down_lo_ ? measured_.find(*lo_) : measured_.end();
+      const auto verified = measured_.find(far_down_hi_);
+      if (helped_at != measured_.end() && helped_at->second.second > 0.0 && !hi_is_queue_ &&
+          ++far_down_lossy_steps_ >= FAR_DOWN_LOSSY_STEPS &&
+          (verified == measured_.end() ||
+           z_lower(helped_at->second.second, helped_at->second.first, verified->second.second, verified->second.first, std::max(2.0, disp())) <
+             FAR_DOWN_CERTAIN_Z)) {
+        // The rate the probe left failed its verification, and so has every step toward the rate that helped, which
+        // lost frames itself and was not lighter beyond doubt: before narrowing in further, sample that rate once
+        // more.
+        far_down_lo_.reset();
+        far_down_resampling_ = true;
+        far_down_resampled_ = true;
+        state_ = state_e::descend;
+        phase_ = phase_e::deep;
+        deep_stats_ = {0.0, 0.0};
+        set_target(*lo_, "descend_deep", now_ms);
+        test_ = make_sprt(hi_loss_, std::max(hi_loss_ / 3.0, MIN_LOSS), 0, 0);
+        return;
+      }
     } else {
+      far_down_lo_.reset();
       clean_promotion();
       lo_ = target_;
       if (hi_ && !hi_rechecked_ && static_cast<double>(*hi_) / *lo_ < RECHECK_CEILING &&
@@ -651,6 +752,9 @@ namespace live_tuning_policy {
   }
 
   void policy_t::enter_hold(std::int64_t now_ms, int kbps) {
+    far_down_lo_.reset();
+    far_down_verifying_ = false;
+    far_down_resampling_ = false;
     state_ = state_e::hold;
     reset_baseline(lo_loss_);
     set_target(kbps, "hold", now_ms);
@@ -741,6 +845,14 @@ namespace live_tuning_policy {
       if (!test_) {
         return;
       }
+      if (far_down_resampling_) {
+        // A fixed sample, not a sequential test: its verdict is taken at its last report, whatever the test says.
+        test_->add(expected, lost, 1.0);
+        if (test_->reports() >= FAR_DOWN_RESAMPLE_REPORTS) {
+          far_down_resample_result(now_ms);
+        }
+        return;
+      }
       const auto res = test_->add(expected, lost, 1.0);
       if (res) {
         if (st == state_e::descend) {
@@ -793,6 +905,7 @@ namespace live_tuning_policy {
     if (st == state_e::normal) {
       normal_stats_.first += expected;
       normal_stats_.second += lost;
+      background_reports_ = std::min(background_reports_ + 1, BACKOFF_REPORTS);
       if (++normal_reports_ >= BACKGROUND_DECAY_REPORTS) {
         const double rate = normal_stats_.second / normal_stats_.first;
         if (rate * 1.2 < background_) {
@@ -1058,6 +1171,7 @@ namespace live_tuning_policy {
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
     if (state_ == state_e::native_hold && kbps == target_) return;
     fec_revert();
+    far_down_reset();
     measured_.clear();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
@@ -1104,6 +1218,7 @@ namespace live_tuning_policy {
   void policy_t::rebase(int base_kbps, int floor_kbps) {
     if (state_ == state_e::native_hold && base_kbps == base_ && floor_kbps == floor_) return;
     fec_revert();
+    far_down_reset();
     measured_.clear();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();

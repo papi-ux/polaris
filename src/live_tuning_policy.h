@@ -23,14 +23,29 @@
  *   A due hold retry or climb waits at most one judged duty window for a new candidate; outside writers own their changes.
  * - A probe steps to 0.6x. If that helped, it rechecks the rate it left (the loss may simply have ended) and
  *   climbs back or bisects. If not, it takes one deep sample at max(2x floor, start/8). Clean there: the link
- *   is in between, so it rechecks and bisects. Loss there that is not clearly heavy, or no lighter than at the
- *   first step: the loss does not depend on the rate. Clearly heavy loss that is lighter there, or over 20%
- *   whatever the first step lost: it halves on, until halving no longer lightens it.
+ *   is in between, so it rechecks and bisects. Loss there that is mild, or no lighter than at the first step and
+ *   not clearly over the 10% background can cost: the loss does not depend on the rate. Loss that is lighter there
+ *   but not mild, or clearly over 10% whatever the first step lost: it halves on, until halving no longer lightens
+ *   it. A sample at the floor has nowhere to halve on to, and is the link's only when clearly over 20%.
  *   When reports stop before the first step is judged, perhaps because the link is overloaded, the probe takes
  *   its deep sample after 1.5 s, once, and goes no further until reports return.
+ * - A few light reports between clustered losses can pass for help far down. A help at or below a deep sample is
+ *   therefore checked while the rates above it keep failing. If its verification fails and nothing measured above
+ *   it lost significantly more, it was chance: the loss does not depend on the rate. If the verification and then
+ *   two bisect steps fail with no clean step between, and the helped rate lost frames itself and was not lighter
+ *   beyond doubt (four standard errors), that rate is sampled again for exactly six judged reports, a fixed
+ *   sample and not a sequential test, and judged alone against the rate it was verified against. Significantly
+ *   lighter again: the search carries on, and that help is not sampled a third time in this descent. If not, the
+ *   first sample is dropped, the loss does not depend on the rate, and the stream goes back without consulting
+ *   the pooled measurements that called for the sample.
+ * - While a learned background backs off and has held at the request for twelve reports, a new probe's first step
+ *   that is not helped, not heavy, and not clearly over that background plus 2% has found it again: it raises the
+ *   background by at most 2%, as a run that close does, without another deep sample and without starting the
+ *   back-off again.
  * - A probe step is judged at the whole rate it would set. A fresh descent's first step, with nothing measured
  *   above it, takes the floor when it would reach it, as it always did: a request close over its floor steps
- *   onto it. Within an episode, a probe that would reach the floor stops a climb step above it first, and takes
+ *   onto it. Within an episode, a probe that would reach the floor stops a climb step above it first, or halfway
+ *   to the floor from within a bisect step of that stop, where so short a step tells nothing, and takes
  *   the floor only for loss clearly over 20%, or loss that still falls with the rate there: the nearest rate
  *   above lost significantly more. With no room left for its deep sample, a first step under clearly heavy loss
  *   samples the floor that way before the rate is judged where it is. A probe step at most a climb step over the
@@ -88,9 +103,10 @@
  * none of 40 seeded 400 s runs at a 25987 kbps request and a 2000 kbps floor reaches the floor, with whole sends
  * dropped, the pacer off or on, or single packets dropped, at 1, 2 and 2.9%. That holds for those modelled runs,
  * not for other requests, floors, clients or loss. Over 141 synthetic links close to the floor and the 5111 static
- * links of a wider search it does no worse than the policy at staging 457eeef9, but for named rows: two tail drops
- * just over 2450 kbps, whose loss a 1-2% step down to the stop over the floor cannot tell from background, and two
- * floor holds reached 6 s later, with one retry more in the judged window.
+ * links of a wider search it does no worse than the policy at staging 457eeef9, but for two named rows: floor holds
+ * reached 6 s later, with one retry more in the judged window. With the pacer off, over 400 seeded 1200 s runs at
+ * each of those three loss levels, it spends under 1% of the time below half its request; over 1000 seeds of a second
+ * wire model the 1% level reads 1.07%, and over 1000 other seeds both models read 1.00% there.
  */
 #pragma once
 
@@ -126,6 +142,9 @@ namespace live_tuning_policy {
     /// 1 for H1, 0 for H0, nullopt while undecided.
     std::optional<int> add(double expected, double lost, double weight);
     double rate() const;
+    double reports() const {
+      return n_;
+    }
     double frames() const {
       return frames_;
     }
@@ -253,12 +272,15 @@ namespace live_tuning_policy {
     void set_target(double kbps, std::string_view why, std::int64_t now_ms);
     void to_normal(std::int64_t now_ms, int kbps, std::string_view why);
     void rate_independent(double rate, std::int64_t now_ms, std::string_view why);
+    void learn_background(double rate, std::int64_t now_ms, std::string_view why);
     std::optional<int> lossier_above(int kbps, std::pair<double, double> &above) const;
     void note_measured(int kbps, double expected, double lost);
     bool clearly_over(double lost, double frames, double level) const;
     std::optional<int> loss_step(double kbps, double lost, double frames) const;
     double probe_rate() const;
     void sample_floor(std::int64_t now_ms, std::pair<double, double> here);
+    void far_down_reset();
+    void far_down_resample_result(std::int64_t now_ms);
 
     void begin_descent(std::int64_t now_ms, std::string_view why, double l0);
     void descend_result(bool helped, std::int64_t now_ms);
@@ -292,6 +314,8 @@ namespace live_tuning_policy {
     after_change_e after_change_ = after_change_e::none;
     std::optional<std::int64_t> last_report_ms_;
     double background_ = 0.0;
+    // Judged reports at the request since the background was last learned.
+    int background_reports_ = 0;
     int backoff_ = 0;
     double cusum_ = 0.0;
     std::vector<std::pair<double, double>> run_;
@@ -353,6 +377,15 @@ namespace live_tuning_policy {
     // Consecutive closed queue-bracket failures; saturates once well beyond the capped retry wait.
     int queue_retry_fails_ = 0;
     bool blind_step_ = false;
+    // A help at or below a deep sample is checked again while the rates above it keep failing: the rate it came at
+    // and the rate it was verified against, the lossy bisect steps since, and whether the second sample is running
+    // or has been taken.
+    std::optional<int> far_down_lo_;
+    int far_down_hi_ = 0;
+    int far_down_lossy_steps_ = 0;
+    bool far_down_verifying_ = false;
+    bool far_down_resampling_ = false;
+    bool far_down_resampled_ = false;
     bool hi_rechecked_ = false;
     // First clean queue rate anchoring the staircase's existing recheck radius across real holds.
     std::optional<int> queue_continuation_from_;

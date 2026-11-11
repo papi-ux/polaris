@@ -2074,6 +2074,156 @@ TEST(LiveTuningPolicy, MoreOldCleanHistoryDoesNotOutvoteAFresh97FrameDecline) {
   EXPECT_LT(run.late_lost, 1200 * 97 * 0.05);
 }
 
+namespace {
+
+  /// What a scripted run leaves: the target after each second, and the policy.
+  struct scripted_run_t {
+    std::vector<int> targets;
+    live_tuning_policy::policy_t policy;
+  };
+
+  /// A second at a time, 120 frames a report. From second 30 each report loses the next count scripted for the rate
+  /// the second starts at, the last one repeating; a rate with no script uses the one for rate 0. The first report at
+  /// a new rate is the one the policy does not judge, and takes a count like any other.
+  scripted_run_t run_script(int request, int floor, int seconds, std::map<int, std::vector<double>> script) {
+    scripted_run_t out {{}, live_tuning_policy::policy_t {request, floor}};
+    std::map<int, std::size_t> used;
+    for (int second = 0; second < seconds; ++second) {
+      double lost = 0.0;
+      if (second >= 30) {
+        auto counts = script.find(out.policy.target_kbps());
+        if (counts == script.end()) {
+          counts = script.find(0);
+        }
+        auto &next = used[counts->first];
+        lost = counts->second[std::min(next, counts->second.size() - 1)];
+        ++next;
+      }
+      for (int k = 0; k < 10; ++k) {
+        if (k == 5) {
+          out.policy.report(std::int64_t {second} * 1000 + 500, 120, lost);
+        }
+        out.policy.rtt(std::int64_t {second} * 1000 + 100 * k + 50, 3.0);
+      }
+      out.targets.push_back(out.policy.target_kbps());
+    }
+    return out;
+  }
+
+  constexpr int FIRST_STEP = 161392;  // 0.6 x BASE
+  constexpr int DEEP = 33623;  // BASE / 8
+
+}  // namespace
+
+TEST(LiveTuningPolicy, AFarDownHelpNoLighterThanAnythingAboveItIsChanceWhenItsVerificationFails) {
+  // #576 rule 1. 7 of 120 lost at the request, 14 of 120 at the first step, and one judged report of 3 of 120 at the
+  // deep sample, which the sequential test takes for help against the first step's 11.7%. The verification at the
+  // first step fails. Nothing measured above the deep sample lost significantly more than its 2.5% (1.7 standard errors
+  // pooled): the help was chance. The stream goes back, learning the 2.5%, the lowest loss measured. Staging bisected
+  // down from here: 73664, 49767, 40906.
+  const auto run = run_script(BASE, FLOOR, 50, {{0, {7}}, {FIRST_STEP, {14}}, {DEEP, {0, 3, 7}}});
+  EXPECT_EQ(run.targets[33], DEEP);
+  EXPECT_EQ(run.targets[35], FIRST_STEP);
+  EXPECT_EQ(run.targets[37], BASE);
+  EXPECT_EQ(run.policy.state(), live_tuning_policy::state_e::normal);
+  EXPECT_DOUBLE_EQ(run.policy.background_loss(), 3.0 / 120);
+  EXPECT_EQ(std::count(run.targets.begin() + 37, run.targets.end(), 73664), 0);
+}
+
+TEST(LiveTuningPolicy, AFarDownHelpIsSampledAgainForSixReportsAndGoesBackWhenNotLighterAgain) {
+  // #576 rule 2, not lighter. 7 of 120 lost everywhere but for a deep sample that reads 5 of 360, and for 20 of 120 at
+  // the two bisect steps under the failed verification. Both steps fail with no clean step between, and the helped
+  // rate lost frames itself: it is sampled again after second 44, one report not judged and exactly six judged, losing
+  // 5 of 120 each. That is not significantly lighter than the 5.8% at the rate it was verified against, so the loss
+  // does not depend on the rate and the stream is back at its request after second 51 with those six reports' 4.2%
+  // learned. The episode's pooled measurements, with the two 16.7% steps that called for the sample, would say the
+  // rates above lost significantly more and hold the stream at the deep rate; the verdict does not consult them.
+  // Staging bisects on down to a hold at the deep rate; without the second sample the fix does the same.
+  const auto run = run_script(BASE, FLOOR, 80, {{0, {7}}, {DEEP, {0, 5, 0, 0, 5}}, {73664, {20}}, {49767, {20}}});
+  EXPECT_EQ(run.targets[41], 73664);
+  EXPECT_EQ(run.targets[43], 49767);
+  for (int second = 45; second <= 51; ++second) {
+    EXPECT_EQ(run.targets[second], DEEP) << second;
+  }
+  EXPECT_TRUE(std::all_of(run.targets.begin() + 52, run.targets.end(), [](int t) {
+    return t == BASE;
+  }));
+  EXPECT_EQ(run.policy.state(), live_tuning_policy::state_e::normal);
+  EXPECT_DOUBLE_EQ(run.policy.background_loss(), 5.0 / 120);
+  EXPECT_FALSE(run.policy.ceiling_kbps());
+}
+
+TEST(LiveTuningPolicy, AFarDownHelpThatIsLighterAgainCarriesOnAndIsNotSampledAThirdTime) {
+  // #576 rule 2, confirmed. The same shape, but the deep rate stays clean after its one 6 of 120: the second sample,
+  // seven reports of which six are judged, loses nothing, significantly lighter than the 5.8% it was verified against. The search carries on
+  // under the step that failed, 40906 = sqrt(33623 x 49767), and the next lossy steps narrow in to a hold at the deep
+  // rate without another sample.
+  const auto run = run_script(BASE, FLOOR, 80, {{0, {7}}, {DEEP, {0, 6, 0}}});
+  for (int second = 47; second <= 53; ++second) {
+    EXPECT_EQ(run.targets[second], DEEP) << second;
+  }
+  EXPECT_EQ(run.targets[54], 40906);
+  EXPECT_EQ(run.targets[56], 37086);
+  EXPECT_EQ(run.targets[58], 35312);
+  EXPECT_EQ(run.policy.state(), live_tuning_policy::state_e::hold);
+  EXPECT_EQ(run.policy.target_kbps(), DEEP);
+  EXPECT_EQ(run.policy.background_loss(), 0.0);
+}
+
+TEST(LiveTuningPolicy, AFirstStepThatFindsTheLearnedBackgroundAgainAddsAtMostTwoPointsAndTakesNoDeepSample) {
+  // #576 rule 3. 7 of 120 lost at every rate is learned as background after one deep sample. 40 reports
+  // later four reports of 16 of 120 start a probe, and its first step is decided by one judged report of 18 of 120:
+  // not helped, not clearly over the background plus 2% (15% of 120 frames is within two standard errors of 7.8%), so
+  // the background has been found again and the stream goes back with no second deep sample. That one report reads
+  // 15%; what is learned is capped at the 2 points a run this close may add, 7.8%. Staging took the deep sample again.
+  std::vector<double> request(40, 7.0);
+  request.insert(request.end(), {16, 16, 16, 16, 7});
+  const auto run = run_script(BASE, FLOOR, 110, {{0, {7}}, {BASE, request}, {FIRST_STEP, {7, 7, 7, 7, 18, 7}}});
+  EXPECT_EQ(run.targets[34], DEEP);
+  EXPECT_EQ(run.targets[37], BASE);
+  EXPECT_EQ(run.targets[78], FIRST_STEP);
+  EXPECT_EQ(run.targets[80], BASE);
+  EXPECT_EQ(std::count(run.targets.begin() + 38, run.targets.end(), DEEP), 0);
+  EXPECT_TRUE(std::all_of(run.targets.begin() + 80, run.targets.end(), [](int t) {
+    return t == BASE;
+  }));
+  EXPECT_DOUBLE_EQ(run.policy.background_loss(), 7.0 / 120 + 0.02);
+}
+
+TEST(LiveTuningPolicy, AFloorSampleNoLighterAndNotClearlyHeavyIsStillRateIndependent) {
+  // #576 rule 5 leaves the floor alone. 30 of 120 lost at 6000 and at the first step, 3600, with no room for a deep
+  // sample and nothing looked under: the floor is sampled. It loses 22 of 120, 18.3%, clearly over the 10% background
+  // can cost but not over 20%, and not significantly lighter than the 25% above. Halving on has nowhere to go from the
+  // floor, so this stays what it was: rate-independent, back at the request three reports later with 20.6% learned.
+  const auto run = run_script(6000, 2000, 60, {{0, {30}}, {2000, {0, 22}}});
+  EXPECT_EQ(run.targets[33], 2000);
+  EXPECT_EQ(run.targets[36], 6000);
+  EXPECT_TRUE(std::all_of(run.targets.begin() + 36, run.targets.end(), [](int t) {
+    return t == 6000;
+  }));
+  EXPECT_EQ(run.policy.state(), live_tuning_policy::state_e::normal);
+  EXPECT_NEAR(run.policy.background_loss(), 0.2056, 0.0001);
+}
+
+TEST(LiveTuningPolicy, SoftLossThatFallsWithTheRateIsHalvedOnInsteadOfLearnedOrHeldAtTwiceTheFloor) {
+  // #575 review 3's soft loss: 23750 kbps over a 5700 kbps link and a 5000 kbps floor, losing 45% of the frames over the
+  // link. The deep sample at 10000 loses 19.35%, under the heavy-loss line and not significantly lighter than the first
+  // step's 27%. In 97-frame reports that was learned as background: back at 23750, losing 34% for good. In 120-frame
+  // reports the stream held at 10925, losing 21%. Loss far down that is clearly more than background costs is a
+  // link's: halving on reaches the stop over the floor and settles between it and the link's first clearly lossy
+  // rate. It ends at 6627 kbps losing 6.3%: the 4% left at the stop over the floor is what background costs, so the
+  // floor under it is not sampled, and the link's own 1.06 is not reached (#576, recorded as open).
+  for (const double frames : {97.0, 120.0}) {
+    SCOPED_TRACE(frames);
+    const auto run = run_link_change(23750, 5000, frames, 6000, 0, [](int second, int target) {
+      return second < 30 ? 0.0 : 0.45 * std::max(0.0, 1.0 - 5700.0 / target);
+    });
+    EXPECT_EQ(run.background, 0.0);
+    EXPECT_LE(run.final, 6700);
+    EXPECT_LT(run.late_lost, 1200 * frames * 0.07);
+  }
+}
+
 TEST(LiveTuningPolicy, ALossyHoldWhoseLossSwingsHigherKeepsItsEpisode) {
   // Review 3's time-varying loss, 4750 kbps over a 1000 kbps link and floor in 13-frame reports. A hold that was
   // already losing more than its background is not on a new link when its loss swings higher, and its episode's
