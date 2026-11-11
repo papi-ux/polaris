@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -2303,4 +2304,197 @@ TEST(LiveTuningPolicy, ARebasedFloorClampSkipsThePreviousRatesReportAndRecovers)
   }
   EXPECT_EQ(policy.target_kbps(), 9000);
   EXPECT_EQ(policy.background_loss(), 0.0);
+}
+
+namespace {
+
+  /// #228's release-candidate device run, arm B (Live Tuning on), S3, as tests/fixtures/live-tuning-rp6-s3-cap-step.json
+  /// keeps it: every retained client report and 1 Hz RTT reading in time order, for the 25987 kbps request and the
+  /// 2000 kbps floor. From `from_ms` on only; before that, the same readings with every report clean and a 3 ms RTT,
+  /// and the rate an outside writer set at `from_ms`, if one is given. After the last reading, RTT readings alone at
+  /// the last value for `silent_ms`: the client sent nothing more. The target after every event, by time from
+  /// schedule zero.
+  struct rp6_s3_t {
+    std::vector<std::pair<std::int64_t, int>> targets;
+    live_tuning_policy::policy_t policy {25987, 2000};
+    std::int64_t cap_step_ms = 0;
+  };
+
+  rp6_s3_t rp6_s3_replay(std::int64_t silent_ms, std::int64_t from_ms = std::numeric_limits<std::int64_t>::min(), int seeded_kbps = 0) {
+    static const nlohmann::json fixture = [] {
+      std::ifstream input(std::filesystem::path(POLARIS_SOURCE_DIR) / "tests/fixtures/live-tuning-rp6-s3-cap-step.json");
+      std::stringstream text;
+      text << input.rdbuf();
+      return nlohmann::json::parse(text.str());
+    }();
+    constexpr std::int64_t origin = 200000;
+    rp6_s3_t out;
+    out.cap_step_ms = fixture.at("cap_step_ms").get<std::int64_t>();
+    const auto &reports = fixture.at("reports_ms_expected_lost");
+    const auto &rtts = fixture.at("rtt_ms");
+    bool seeded = seeded_kbps == 0;
+    const auto note = [&](std::int64_t at) {
+      out.targets.emplace_back(at, out.policy.target_kbps());
+    };
+    std::size_t report = 0;
+    std::size_t rtt = 0;
+    while (report < reports.size() || rtt < rtts.size()) {
+      const bool next_is_report =
+        report < reports.size() && (rtt == rtts.size() || reports[report][0].get<std::int64_t>() < rtts[rtt][0].get<std::int64_t>());
+      const auto at = next_is_report ? reports[report][0].get<std::int64_t>() : rtts[rtt][0].get<std::int64_t>();
+      if (at >= from_ms && !seeded) {
+        out.policy.adopt(origin + at - 1, seeded_kbps);
+        seeded = true;
+      }
+      if (next_is_report) {
+        const auto &row = reports[report++];
+        out.policy.report(origin + at, row[1].get<double>(), at < from_ms ? 0.0 : row[2].get<double>());
+      } else {
+        out.policy.rtt(origin + at, at < from_ms ? 3.0 : rtts[rtt][1].get<double>());
+        ++rtt;
+      }
+      note(at);
+    }
+    const auto last = rtts.back()[0].get<std::int64_t>();
+    const auto last_ms = rtts.back()[1].get<double>();
+    for (std::int64_t at = last + 100; at <= last + silent_ms; at += 100) {
+      out.policy.rtt(origin + at, last_ms);
+      note(at);
+    }
+    return out;
+  }
+
+  /// run_script with seconds whose report never arrives; RTT readings carry on.
+  scripted_run_t run_script_quiet(int request, int floor, int seconds, std::map<int, std::vector<double>> script, const std::function<bool(int)> &quiet) {
+    scripted_run_t out {{}, live_tuning_policy::policy_t {request, floor}};
+    std::map<int, std::size_t> used;
+    for (int second = 0; second < seconds; ++second) {
+      double lost = 0.0;
+      if (second >= 30) {
+        auto counts = script.find(out.policy.target_kbps());
+        if (counts == script.end()) {
+          counts = script.find(0);
+        }
+        auto &next = used[counts->first];
+        lost = counts->second[std::min(next, counts->second.size() - 1)];
+        ++next;
+      }
+      for (int k = 0; k < 10; ++k) {
+        if (k == 5 && !quiet(second)) {
+          out.policy.report(std::int64_t {second} * 1000 + 500, 120, lost);
+        }
+        out.policy.rtt(std::int64_t {second} * 1000 + 100 * k + 50, 3.0);
+      }
+      out.targets.push_back(out.policy.target_kbps());
+    }
+    return out;
+  }
+
+  /// The first second from `from` at which the target is back at `request` after being under it.
+  int first_return(const std::vector<int> &targets, int request, int from = 30) {
+    bool under = false;
+    for (int second = from; second < static_cast<int>(targets.size()); ++second) {
+      if (targets[second] < request) {
+        under = true;
+      } else if (under) {
+        return second;
+      }
+    }
+    return -1;
+  }
+
+}  // namespace
+
+TEST(LiveTuningPolicy, Rp6S3ReplayFromTheHeldRateFollowsTheHostDownToTheFloor) {
+  // What the fixture is good for. From the 9658 kbps hold the host held before the step, the recorded reports and RTT
+  // readings take the policy through the host's own first changes after it: 5794 at 93.56 s, 4000 at 95.70, 2500 at
+  // 97.76, 2000 at 99.90, 2500 at 101.96 and, on the RTT, 2236. The host took that last one at 102.03 s; with one
+  // retained reading a second this replay takes it at 102.37. Then 2364 at 106.99, as the host did. After that the
+  // host's 10 Hz RTT and encoder timing are not in the fixture, and the paths part.
+  const auto replay = rp6_s3_replay(0, 89500, 9658);
+  std::vector<std::pair<std::int64_t, int>> changes;
+  for (std::size_t i = 1; i < replay.targets.size(); ++i) {
+    // From the first change after the outside writer's 9658 at 89.5 s.
+    if (replay.targets[i].second != replay.targets[i - 1].second && replay.targets[i - 1].first >= 89500) {
+      changes.push_back(replay.targets[i]);
+    }
+  }
+  const std::vector<std::pair<std::int64_t, int>> host {{93556, 5794}, {95700, 4000}, {97760, 2500}, {99900, 2000}, {101960, 2500}, {102370, 2236}, {106990, 2364}};
+  ASSERT_GE(changes.size(), host.size());
+  for (std::size_t i = 0; i < host.size(); ++i) {
+    EXPECT_NEAR(changes[i].first, host[i].first, 20) << i;
+    EXPECT_EQ(changes[i].second, host[i].second) << i;
+  }
+}
+
+TEST(LiveTuningPolicy, Rp6S3HeavyLossAtTheFloorDoesNotSendTheStreamBackToTheRequest) {
+  // #228's release-candidate device run, arm B, S3, every retained report and RTT reading, then 20 s in which only RTT
+  // readings arrive. On the device the stream reached the 2000 kbps floor losing 85 to 92% of its frames, the policy
+  // judged that loss independent of the rate, learned it as background and went back to the 25987 kbps request at
+  // 136.31 s: about 35 Mbit/s of video into 6.5, no complete frame on the client, no report, the bench's guard 5 s
+  // later. This replay reaches the same verdict at 133.76 s, learning 81.5%. Loss over 20% at the floor is the link's:
+  // there is no lower rate to look under, and going back to the request only loads a link that cannot carry the floor.
+  // After the step every rise is a step of at most 1.5x, and the stream ends at the floor with nothing heavy learned.
+  const auto replay = rp6_s3_replay(20000);
+  for (std::size_t i = 1; i < replay.targets.size(); ++i) {
+    const auto &[at, kbps] = replay.targets[i];
+    if (at >= replay.cap_step_ms) {
+      EXPECT_LT(kbps, 25987) << at;
+      EXPECT_LE(kbps, replay.targets[i - 1].second * 1.5 + 1) << at;
+    }
+  }
+  EXPECT_EQ(replay.policy.target_kbps(), 2000);
+  EXPECT_LT(replay.policy.background_loss(), 0.2);
+}
+
+TEST(LiveTuningPolicy, HeavyLossAtTheFloorHoldsThereAndClimbsBackInSteps) {
+  // 108 of 120 lost at every rate from second 30: a link that cannot carry even the floor. The probe goes down to the
+  // floor and holds there. Its loss is no better than at the rate above, so the loss does not depend on the rate, but
+  // 90% is not background: going back to the request would carry it there. The stream holds at the floor and climbs
+  // only in steps that each report has judged, at most 1.5x the rate it leaves; it never jumps back.
+  const auto run = run_script(25987, 2000, 400, {{0, {108}}});
+  EXPECT_EQ(*std::min_element(run.targets.begin() + 30, run.targets.end()), 2000);
+  for (int second = 31; second < static_cast<int>(run.targets.size()); ++second) {
+    if (run.targets[second] > run.targets[second - 1]) {
+      EXPECT_LE(run.targets[second], run.targets[second - 1] * 1.5 + 1) << second << ": " << run.targets[second - 1] << " -> " << run.targets[second];
+    }
+  }
+  EXPECT_LT(run.policy.background_loss(), 0.2);
+}
+
+TEST(LiveTuningPolicy, SilenceRightAfterAReturnTakesItBackUntilAReportJudgesIt) {
+  // 7 of 120 lost at every rate from second 30 is learned as background, and the stream goes back to its request. No
+  // report has judged that return yet when they stop for 20 s, perhaps because the return overloaded the link: holding
+  // the request would leave it there for the whole pause. 2.5 s after the last report the return is taken back to the
+  // rate it left, as an unjudged raise is, and nothing climbs while reports are missing. When they come back, the
+  // request is tried again and kept.
+  const auto probe = run_script(BASE, FLOOR, 120, {{0, {7}}});
+  const int back = first_return(probe.targets, BASE);
+  ASSERT_GT(back, 30);
+  const int left = probe.targets[back - 1];
+  ASSERT_LT(left, BASE);
+  const auto run = run_script_quiet(BASE, FLOOR, 120, {{0, {7}}}, [&](int second) {
+    return second > back && second <= back + 20;
+  });
+  EXPECT_EQ(run.targets[back], BASE);
+  EXPECT_EQ(run.targets[back + 3], left);
+  for (int second = back + 3; second <= back + 20; ++second) {
+    EXPECT_EQ(run.targets[second], left) << second;
+  }
+  EXPECT_EQ(run.targets.back(), BASE);
+  EXPECT_EQ(run.policy.state(), live_tuning_policy::state_e::normal);
+}
+
+TEST(LiveTuningPolicy, SilenceLongAfterAReturnLeavesTheRequestAlone) {
+  // The same return, judged by ten reports before they stop for 20 s: a pause then says nothing about the return, and
+  // the request stays, as it always has.
+  const auto probe = run_script(BASE, FLOOR, 120, {{0, {7}}});
+  const int back = first_return(probe.targets, BASE);
+  ASSERT_GT(back, 30);
+  const auto run = run_script_quiet(BASE, FLOOR, 120, {{0, {7}}}, [&](int second) {
+    return second > back + 10 && second <= back + 30;
+  });
+  for (int second = back; second <= back + 30; ++second) {
+    EXPECT_EQ(run.targets[second], BASE) << second;
+  }
 }
