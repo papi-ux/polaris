@@ -72,6 +72,9 @@ jobs:
       - name: Verify the release RPM signing controls
         run: python3 -m unittest discover -s tests/scripts -p 'test_release_rpm_signing.py'
 
+      - name: Verify Fedora release matrix controls
+        run: python3 -m unittest discover -s tests/scripts -p 'test_fedora_release_matrix.py'
+
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
 
@@ -1672,6 +1675,10 @@ jobs:
             cc: gcc-15
             cxx: g++-15
             boost_static: OFF
+          - fedora: '45'
+            cc: gcc-15
+            cxx: g++-15
+            boost_static: OFF
     env:
       CCACHE_DIR: /github/home/.cache/ccache
       CCACHE_COMPILERCHECK: content
@@ -1786,7 +1793,16 @@ jobs:
 
           cuda_version="13.2.1"
           cuda_build="595.58.03"
+          cuda_sha256="5514a3fe7bcea92b25073c7c100c3e64e7961a7e1dbad6955adb8b59806053f0"
+          if [ "$architecture" != "x86_64" ]; then
+            echo "This Fedora release matrix only pins the x86_64 CUDA installer" >&2
+            exit 1
+          fi
           cuda_dir="${GITHUB_WORKSPACE}/.cuda"
+          if [ -x "${cuda_dir}/bin/nvcc" ]; then
+            echo "A fresh hash-bound CUDA toolkit is required for this Fedora release build" >&2
+            exit 1
+          fi
           cuda_suffix=""
           if [ "${architecture}" = "aarch64" ]; then
             cuda_suffix="_sbsa"
@@ -1795,12 +1811,18 @@ jobs:
           if [ ! -x "${cuda_dir}/bin/nvcc" ]; then
             mkdir -p "${cuda_dir}" "${GITHUB_WORKSPACE}/.cuda-tmp"
             cuda_url="https://developer.download.nvidia.com/compute/cuda/${cuda_version}/local_installers/cuda_${cuda_version}_${cuda_build}_linux${cuda_suffix}.run"
-            wget \
-              "${cuda_url}" \
-              --progress=bar:force:noscroll \
-              --retry-connrefused \
-              --tries=3 \
-              -q -O "${GITHUB_WORKSPACE}/cuda.run"
+            if [ -n "${POLARIS_CUDA_RUNFILE_CACHE:-}" ]; then
+              cp --reflink=auto -- "$POLARIS_CUDA_RUNFILE_CACHE" "${GITHUB_WORKSPACE}/cuda.run"
+            else
+              wget \
+                "${cuda_url}" \
+                --progress=bar:force:noscroll \
+                --retry-connrefused \
+                --tries=3 \
+                -q -O "${GITHUB_WORKSPACE}/cuda.run"
+            fi
+            printf '%s  %s\n' "$cuda_sha256" "${GITHUB_WORKSPACE}/cuda.run" > "${GITHUB_WORKSPACE}/cuda.run.sha256"
+            sha256sum --check --status "${GITHUB_WORKSPACE}/cuda.run.sha256"
             chmod a+x "${GITHUB_WORKSPACE}/cuda.run"
             "${GITHUB_WORKSPACE}/cuda.run" \
               --no-drm \
@@ -1902,12 +1924,17 @@ jobs:
       - name: Build RPM package
         run: cpack -G RPM --config ./build/CPackConfig.cmake
 
+      - name: Prepare private signed RPM smoke copies
+        run: |
+          set -euo pipefail
+          bash scripts/ci/prepare-fedora-rpm-smoke.sh build/cpack_artifacts build/fedora-rpm-smoke
+
       - name: Smoke test Fedora RPM package
         run: |
           set -euo pipefail
 
-          rpm_path="build/cpack_artifacts/Polaris.rpm"
-          kms_rpm_path="build/cpack_artifacts/Polaris-kms.rpm"
+          rpm_path="build/fedora-rpm-smoke/Polaris.rpm"
+          kms_rpm_path="build/fedora-rpm-smoke/Polaris-kms.rpm"
           if [ ! -f "$rpm_path" ] || [ ! -f "$kms_rpm_path" ]; then
             echo "Both Polaris and its KMS helper RPMs must be produced" >&2
             exit 1
@@ -2049,6 +2076,7 @@ jobs:
         with:
           name: fedora-${{ matrix.fedora }}-rpm-metadata
           path: |
+            build/fedora-rpm-smoke/SMOKE-RECEIPT.json
             build/cpack_artifacts/package-*.txt
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/SPECS/*.spec
             build/cpack_artifacts/_CPack_Packages/Linux/RPM/*.out
@@ -2089,6 +2117,12 @@ jobs:
         with:
           name: fedora-44-rpm-artifacts
           path: release-assets/raw/fedora44
+
+      - name: Download Fedora 45 RPM artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: fedora-45-rpm-artifacts
+          path: release-assets/raw/fedora45
 
       - name: Download Ubuntu 24.04 DEB artifacts
         uses: actions/download-artifact@v8
@@ -2239,6 +2273,7 @@ jobs:
           }
 
           copy_fedora_rpms 44 release-assets/raw/fedora44
+          copy_fedora_rpms 45 release-assets/raw/fedora45
 
           ubuntu_debs=()
           ubuntu_kms_debs=()
@@ -2313,6 +2348,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends rpm gnupg
           bash scripts/ci/sign-release-rpms.sh release-assets/final
+
+      - name: Verify signed Fedora release pairs on clean hosts
+        run: |
+          set -euo pipefail
+          bash scripts/ci/verify-signed-fedora-release-pairs.sh release-assets/final
 
       - name: Stage curated GitHub release
         id: stage-release
@@ -2405,11 +2445,13 @@ jobs:
           required_binary_assets=(
             Polaris-arch-x86_64.pkg.tar.zst
             Polaris-fedora44-x86_64.rpm
+            Polaris-fedora45-x86_64.rpm
             Polaris-steamos3.8-x86_64.pkg.tar.zst
             Polaris-steamos3.9-x86_64.pkg.tar.zst
             Polaris-ubuntu24.04-x86_64.deb
             Polaris-kms-arch-x86_64.pkg.tar.zst
             Polaris-kms-fedora44-x86_64.rpm
+            Polaris-kms-fedora45-x86_64.rpm
             Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
             Polaris-kms-steamos3.9-x86_64.pkg.tar.zst
             Polaris-kms-ubuntu24.04-x86_64.deb

@@ -590,9 +590,13 @@ expected_fedora_strategy = (
     "            cc: gcc-15\n"
     "            cxx: g++-15\n"
     "            boost_static: OFF\n"
+    "          - fedora: '45'\n"
+    "            cc: gcc-15\n"
+    "            cxx: g++-15\n"
+    "            boost_static: OFF\n"
 )
 if not fedora_strategy or fedora_strategy.group(0) != expected_fedora_strategy:
-    raise AssertionError("Fedora CI strategy must contain only the exact reviewed Fedora 44 lane")
+    raise AssertionError("Fedora CI strategy must contain the exact reviewed Fedora 44 and 45 lanes")
 for legacy_version in ("42", "43"):
     for legacy_marker in (
         f"fedora-{legacy_version}-rpm-artifacts",
@@ -829,11 +833,13 @@ for exact_verify_tokens in (
 expected_required_binaries = [
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
+    "Polaris-fedora45-x86_64.rpm",
     "Polaris-steamos3.8-x86_64.pkg.tar.zst",
     "Polaris-steamos3.9-x86_64.pkg.tar.zst",
     "Polaris-ubuntu24.04-x86_64.deb",
     "Polaris-kms-arch-x86_64.pkg.tar.zst",
     "Polaris-kms-fedora44-x86_64.rpm",
+    "Polaris-kms-fedora45-x86_64.rpm",
     "Polaris-kms-steamos3.8-x86_64.pkg.tar.zst",
     "Polaris-kms-steamos3.9-x86_64.pkg.tar.zst",
     "Polaris-kms-ubuntu24.04-x86_64.deb",
@@ -1273,5 +1279,34 @@ require_command(workflow_run_tokens(signing_step),
                 ["bash", "scripts/ci/sign-release-rpms.sh", "release-assets/final"], "release RPM signing")
 if release_job.index("- name: Sign the Fedora release RPMs") > release_job.index("- name: Stage curated GitHub release"):
     raise AssertionError("sign the finalized RPMs before staging/uploading a release")
+
+for family in ('44', '45'):
+    downloaded = workflow_step(release_job, f"Download Fedora {family} RPM artifacts")
+    for binding in (f"name: fedora-{family}-rpm-artifacts", f"path: release-assets/raw/fedora{family}"):
+        if binding not in downloaded:
+            raise AssertionError("release assembly must download each Fedora family's own artifacts")
+    require_command(workflow_run_tokens(workflow_step(release_job, "Prepare release asset names")),
+                    ["copy_fedora_rpms", family, "release-assets/raw/fedora" + family], "Fedora release asset assembly")
+smoke_copies = workflow_step(fedora_job, "Prepare private signed RPM smoke copies")
+require_fail_closed_step(smoke_copies, "private Fedora smoke copies")
+require_command(workflow_run_tokens(smoke_copies),
+                ["bash", "scripts/ci/prepare-fedora-rpm-smoke.sh", "build/cpack_artifacts", "build/fedora-rpm-smoke"], "private Fedora smoke copies")
+post_sign = workflow_step(release_job, "Verify signed Fedora release pairs on clean hosts")
+require_fail_closed_step(post_sign, "final signed Fedora package checks")
+require_command(workflow_run_tokens(post_sign),
+                ["bash", "scripts/ci/verify-signed-fedora-release-pairs.sh", "release-assets/final"], "final signed Fedora package checks")
+if not (release_job.index("- name: Sign the Fedora release RPMs") < release_job.index("- name: Verify signed Fedora release pairs on clean hosts") < release_job.index("- name: Stage curated GitHub release")):
+    raise AssertionError("final clean-host checks must follow signing and precede upload")
+matrix_tests = workflow_step(resolve_job, "Verify Fedora release matrix controls")
+if matrix_tests.strip() != "run: python3 -m unittest discover -s tests/scripts -p 'test_fedora_release_matrix.py'":
+    raise AssertionError("resolve-source must run Fedora release matrix controls")
+spec = read("packaging/linux/fedora/Polaris.spec")
+require_block(spec, "%elif 0%{?fedora} <= 45\nBuildRequires: gcc15\nBuildRequires: gcc15-c++\n%global cc_binary gcc-15\n%global cxx_binary g++-15\n%global boost_use_static OFF\n%global cuda_version 13.2.1\n%global cuda_build 595.58.03\n", "Fedora44/45 compiler and CUDA policy")
+
+cuda_step = workflow_run_script(workflow_step(fedora_job, "Install CUDA toolkit"))
+require_block(cuda_step, 'cuda_sha256="5514a3fe7bcea92b25073c7c100c3e64e7961a7e1dbad6955adb8b59806053f0"', "pinned Fedora CUDA installer")
+require_command(shell_tokens(cuda_step), ["sha256sum", "--check", "--status", "${GITHUB_WORKSPACE}/cuda.run.sha256"], "pinned Fedora CUDA installer")
+if cuda_step.index("sha256sum --check --status") > cuda_step.index('chmod a+x "${GITHUB_WORKSPACE}/cuda.run"'):
+    raise AssertionError("verify the CUDA installer before making it executable")
 
 print("Release package dependency contracts look correct.")

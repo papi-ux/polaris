@@ -80,7 +80,7 @@ BuildRequires: gcc14-c++
 %global boost_use_static ON
 %global cuda_version 13.2.1
 %global cuda_build 595.58.03
-%elif 0%{?fedora} <= 44
+%elif 0%{?fedora} <= 45
 BuildRequires: gcc15
 BuildRequires: gcc15-c++
 %global cc_binary gcc-15

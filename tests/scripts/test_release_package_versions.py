@@ -54,14 +54,15 @@ class ReleasePackageVersions(unittest.TestCase):
             (tools / name).chmod(0o755)
         self.environment = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}")
 
-    def assets(self, *, rpm, deb, pacman, lost=None):
+    def assets(self, *, rpm, deb, pacman, lost=None, fedora_families=("44", "45")):
         """A full set of final assets. lost names one asset that carries the release version instead."""
         release = {"rpm": "1.4.13", "deb": "1.4.13", "pacman": "1.4.13-1"}
         for component in ("", "-kms"):
             name = f"polaris{component}"
-            filename = f"Polaris{component}-fedora44-x86_64.rpm"
-            version = release["rpm"] if filename == lost else rpm
-            (self.final / filename).write_text(f"{name}|{version}|1")
+            for family in fedora_families:
+                filename = f"Polaris{component}-fedora{family}-x86_64.rpm"
+                version = release["rpm"] if filename == lost else rpm
+                (self.final / filename).write_text(f"{name}|{version}|1")
             filename = f"Polaris{component}-ubuntu24.04-x86_64.deb"
             version = release["deb"] if filename == lost else deb
             (self.final / filename).write_text(f"Package: {name}\nVersion: {version}\n")
@@ -88,7 +89,7 @@ class ReleasePackageVersions(unittest.TestCase):
         self.assets(rpm="1.4.13~beta.3", deb="1.4.13~beta.3", pacman="1.4.13beta.3-1")
         result = self.check("v1.4.13-beta.3")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(result.stdout.splitlines()), 13, result.stdout)
+        self.assertEqual(len(result.stdout.splitlines()), 15, result.stdout)
         self.assertIn("Polaris-kms-fedora44-x86_64.rpm: polaris-kms 1.4.13~beta.3-1", result.stdout)
         self.assertIn("Polaris-debug-steamos3.8-x86_64.pkg.tar.zst: polaris-debug 1.4.13beta.3-1", result.stdout)
 
@@ -105,6 +106,8 @@ class ReleasePackageVersions(unittest.TestCase):
         for lost in (
             "Polaris-fedora44-x86_64.rpm",
             "Polaris-kms-fedora44-x86_64.rpm",
+            "Polaris-fedora45-x86_64.rpm",
+            "Polaris-kms-fedora45-x86_64.rpm",
             "Polaris-ubuntu24.04-x86_64.deb",
             "Polaris-kms-ubuntu24.04-x86_64.deb",
             "Polaris-arch-x86_64.pkg.tar.zst",
@@ -125,8 +128,8 @@ class ReleasePackageVersions(unittest.TestCase):
                 self.assertEqual(result.stderr.count(" needs "), 1, result.stderr)
 
     def test_the_published_1413_betas_would_have_been_refused(self):
-        # v1.4.13-beta.3 published 1.4.13 in every format, the release's own version.
-        self.assets(rpm="1.4.13", deb="1.4.13", pacman="1.4.13-1")
+        # Preserve the historical thirteen-asset shape; it had no Fedora45 pair.
+        self.assets(rpm="1.4.13", deb="1.4.13", pacman="1.4.13-1", fedora_families=("44",))
         result = self.check("v1.4.13-beta.3")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr.count(" needs "), 13, result.stderr)
@@ -135,7 +138,7 @@ class ReleasePackageVersions(unittest.TestCase):
         self.assets(rpm="1.4.13~beta.3", deb="1.4.13~beta.3", pacman="1.4.13beta.3-1")
         result = self.check("v1.4.13", prerelease="false", label="")
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr.count(" needs "), 13, result.stderr)
+        self.assertEqual(result.stderr.count(" needs "), 15, result.stderr)
 
     def test_other_spellings_of_a_beta_are_refused(self):
         # Each sorts above the release in the format that would carry it.

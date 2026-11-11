@@ -19,6 +19,8 @@ from pathlib import Path
 REQUIRED = (
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-kms-fedora44-x86_64.rpm",
+    "Polaris-fedora45-x86_64.rpm",
+    "Polaris-kms-fedora45-x86_64.rpm",
     "Polaris-ubuntu24.04-x86_64.deb",
     "Polaris-kms-ubuntu24.04-x86_64.deb",
     *(

@@ -1282,6 +1282,7 @@ include("${join(process.cwd(), 'cmake/prep/special_package_configuration.cmake')
     for (const requiredBinary of [
       'Polaris-arch-x86_64.pkg.tar.zst',
       'Polaris-fedora44-x86_64.rpm',
+      'Polaris-fedora45-x86_64.rpm',
       'Polaris-steamos3.8-x86_64.pkg.tar.zst',
       'Polaris-steamos3.9-x86_64.pkg.tar.zst',
       'Polaris-ubuntu24.04-x86_64.deb',
