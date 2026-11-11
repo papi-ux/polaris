@@ -41,8 +41,11 @@ not take a bitrate step of its own then: it rechecks and says what tuning found
 Live Tuning reads two things: each client media report's frames, expected and lost after FEC
 recovery, and the control channel's round trip time, about ten readings a second. It decides on
 reports, not on the clock, so a pause in reports pauses it, and a step it was trying when the
-reports stopped is taken back without counting against it. A probe that had only begun when reports
-stopped, perhaps because the link is overloaded, takes one deep sample and goes no further.
+reports stopped is taken back without counting against it. So is a return to the request that no
+report has judged yet: if reports stop for 2.5 seconds right after it, perhaps because the return
+overloaded the link, the stream goes back to the rate it left and tries the request again once
+reports are back. A probe that had only begun when reports stopped, perhaps because the link is
+overloaded, takes one deep sample and goes no further.
 
 - **A change in loss.** It learns the stream's usual loss and how bursty that loss is, and starts a
   probe only when loss rises clearly above it and two of the last three reports lose 3% of their
@@ -54,7 +57,9 @@ stopped, perhaps because the link is overloaded, takes one deep sample and goes 
   the loss does not depend on the bitrate: the stream goes back to its rate, and Live Tuning learns
   that loss and leaves it alone, with the reason `loss_independent_of_bitrate`. Only loss that is
   still clearly more than background costs even there, over about a tenth of the frames, probes on
-  toward the floor.
+  toward the floor. At the floor, loss over a fifth of the frames is the link's, not background:
+  the stream holds at the floor and climbs back only in judged steps of at most half again, never
+  straight back to its rate, which would only load a link that cannot carry the floor.
 - **Under a link.** Settled under a link it found, it tries the rate above after 8 reports and then
   about every 20, and climbs back toward the request when that is clean, with the reason
   `holding_under_the_link`.

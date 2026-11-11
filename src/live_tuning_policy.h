@@ -28,7 +28,9 @@
  *   but not mild, or clearly over 10% whatever the first step lost: it halves on, until halving no longer lightens
  *   it. A sample at the floor has nowhere to halve on to, and is the link's only when clearly over 20%.
  *   When reports stop before the first step is judged, perhaps because the link is overloaded, the probe takes
- *   its deep sample after 1.5 s, once, and goes no further until reports return.
+ *   its deep sample after 1.5 s, once, and goes no further until reports return. A return to normal that no
+ *   judged report has covered yet is taken back to the rate it left when reports stop for 2.5 s, as an unjudged
+ *   raise is, and tried again three reports after they return.
  * - A few light reports between clustered losses can pass for help far down. A help at or below a deep sample is
  *   therefore checked while the rates above it keep failing. If its verification fails and nothing measured above
  *   it lost significantly more, it was chance: the loss does not depend on the rate. If the verification and then
@@ -58,8 +60,11 @@
  *   does not probe again at that level for 1200 reports, only if no higher rate measured in the episode lost
  *   significantly more. Otherwise the loss depends on the rate above: the stream holds at the highest measured rate
  *   that lost no more, under the lowest one that did. Loss over 20% is learned only once the episode has looked
- *   under it, at the floor or at a rate that lost 20% or less: until then the floor is sampled first. A background
- *   that has gone is judged only on reports after it was learned.
+ *   under it, at the floor or at a rate that lost 20% or less: until then the floor is sampled first. At the floor
+ *   itself, loss over 20% in the evidence for the verdict, the test that ended there or a hold's own reports, is
+ *   never learned: it is the link's, and the stream holds at the floor with nothing above it known to fail, so it
+ *   climbs back only in judged steps of at most 1.5x. A background that has gone is judged only on reports after
+ *   it was learned.
  * - "Did this help" and "is this step lossy" are sequential probability ratio tests on frame counts, scaled by
  *   the measured burstiness. An undecided descent test counts as not having helped.
  * - A hold retries the rate above it after 8 reports, then every 20. Loss ceilings climb from there when
@@ -98,8 +103,9 @@
  *   never read any of it.
  *
  * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second, and replays two
- * RP6 loss runs; tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells
- * pass, and the four that need a congestion signal while reports stop stay named as unmet. Under its wire layer,
+ * RP6 loss runs and the release candidate's RP6 cap step to 6.5 Mbit/s (#228);
+ * tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells pass, and the four
+ * that need a congestion signal while reports stop stay named as unmet. Under its wire layer,
  * none of 40 seeded 400 s runs at a 25987 kbps request and a 2000 kbps floor reaches the floor, with whole sends
  * dropped, the pacer off or on, or single packets dropped, at 1, 2 and 2.9%. That holds for those modelled runs,
  * not for other requests, floors, clients or loss. Over 141 synthetic links close to the floor and the 5111 static
@@ -185,7 +191,7 @@ namespace live_tuning_policy {
     /// One reading of the ENet-smoothed RTT at host time now_ms. It also advances time, as tick() does.
     void rtt(std::int64_t now_ms, double smoothed_rtt_ms);
 
-    /// Host time passed with no reading: a raise no report can judge is taken back.
+    /// Host time passed with no reading: a raise, or a return to the request, that no report can judge is taken back.
     void tick(std::int64_t now_ms);
 
     /// Dedicated downward-only entry. No legacy sample, failed hold or learned baseline is cleared.
@@ -273,6 +279,7 @@ namespace live_tuning_policy {
     void to_normal(std::int64_t now_ms, int kbps, std::string_view why);
     void rate_independent(double rate, std::int64_t now_ms, std::string_view why);
     void learn_background(double rate, std::int64_t now_ms, std::string_view why);
+    void hold_at_floor(std::int64_t now_ms);
     std::optional<int> lossier_above(int kbps, std::pair<double, double> &above) const;
     void note_measured(int kbps, double expected, double lost);
     bool clearly_over(double lost, double frames, double level) const;
@@ -313,6 +320,8 @@ namespace live_tuning_policy {
     // Loss evidence.
     after_change_e after_change_ = after_change_e::none;
     std::optional<std::int64_t> last_report_ms_;
+    // The rate a return to normal left, until a judged report covers the rate it went back to.
+    std::optional<int> unjudged_return_from_;
     double background_ = 0.0;
     // Judged reports at the request since the background was last learned.
     int background_reports_ = 0;

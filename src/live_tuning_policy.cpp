@@ -231,6 +231,7 @@ namespace live_tuning_policy {
   }
 
   void policy_t::to_normal(std::int64_t now_ms, int kbps, std::string_view why) {
+    const int left = target_;
     far_down_reset();
     measured_.clear();
     retained_queue_ceiling_.reset();
@@ -246,6 +247,8 @@ namespace live_tuning_policy {
     lo_.reset();
     test_.reset();
     set_target(kbps, why, now_ms);
+    // Until a judged report covers the rate it went back to, a pause in reports takes this return back (tick()).
+    unjudged_return_from_ = target_ > left ? std::optional<int> {left} : std::nullopt;
   }
 
   void policy_t::note_measured(int kbps, double expected, double lost) {
@@ -353,6 +356,19 @@ namespace live_tuning_policy {
       sample_floor(now_ms, here);
       return;
     }
+    // Loss over 20% at the floor is the link's, as a hold losing that much is: there is nothing lower to look under,
+    // and nothing says the rate the episode started from would lose less. What decides is the floor's own evidence
+    // for this verdict, the test that just ended there or, for a hold, its own reports, and not the episode's pooled
+    // ledger, which can hold clean reports from before the link changed. Observed and not only when clearly over, as
+    // above: a stream the floor already overloads is never sent back.
+    if (target_ <= floor_) {
+      const double here = test_ && test_->frames() > 0.0 ? test_->rate() : rate;
+      if (here > HEAVY_LOSS) {
+        lo_loss_ = here;
+        hold_at_floor(now_ms);
+        return;
+      }
+    }
     hold_failed_kbps_.reset();
     background_ = std::max(background_, rate);
     // Whether this background goes again is judged on the reports after it was learned.
@@ -363,6 +379,17 @@ namespace live_tuning_policy {
     backoff_ = BACKOFF_REPORTS;
     to_normal(now_ms, std::max(r0_, episode_start_), why);
     fec_open_episode();
+  }
+
+  // Hold at the floor with nothing above it known to fail, so the hold climbs back in steps, each judged, rather than
+  // retrying a rate far above. No background is learned and no parity is asked for: neither helps a link that cannot
+  // carry the floor.
+  void policy_t::hold_at_floor(std::int64_t now_ms) {
+    hi_.reset();
+    hi_is_queue_ = false;
+    hi_stats_ = {0.0, 0.0};
+    hi_rechecked_ = false;
+    enter_hold(now_ms, floor_);
   }
 
   void policy_t::sample_floor(std::int64_t now_ms, std::pair<double, double> here) {
@@ -487,7 +514,9 @@ namespace live_tuning_policy {
     state_ = state_e::descend;
     const auto step = loss_step(target_ * FIRST_STEP, hi_stats_.second, hi_stats_.first);
     if (!step) {
-      // No room to probe under this rate: judge it here.
+      // No room to probe under this rate: judge it here, on the run that started the probe and not on a test left
+      // from before it. Every way out of rate_independent() sets or clears the test anyway.
+      test_.reset();
       rate_independent(l0_, now_ms, "rate_independent");
       return;
     }
@@ -829,6 +858,7 @@ namespace live_tuning_policy {
       // A gap alone leaves the candidate and its snapshot pending: RTT may still confirm a cut.
       return;
     }
+    unjudged_return_from_.reset();
     if (backoff_ > 0) {
       --backoff_;
     }
@@ -1070,6 +1100,20 @@ namespace live_tuning_policy {
       enter_hold(now_ms, *lo_);
       retry_wait_ = 3;
     }
+    if (state_ == state_e::normal && unjudged_return_from_ && last_report_ms_ && now_ms - *last_report_ms_ > PAUSE_TAKE_BACK_MS) {
+      // Reports stopped before any judged a return to normal, maybe because it overloaded the link: take it back to
+      // the rate it left, as an unjudged raise is, and try it again once reports are back.
+      const int tried = target_;
+      const int left = *std::exchange(unjudged_return_from_, std::nullopt);
+      hi_ = tried;
+      hi_is_queue_ = false;
+      hi_loss_ = CLIMB_LOSSY;
+      hi_stats_ = {0.0, 0.0};
+      hi_rechecked_ = false;
+      lo_loss_ = p_background();
+      enter_hold(now_ms, left);
+      retry_wait_ = 3;
+    }
   }
 
   void policy_t::close_second(std::int64_t now_ms) {
@@ -1170,6 +1214,7 @@ namespace live_tuning_policy {
 
   void policy_t::adopt(std::int64_t now_ms, int kbps) {
     if (state_ == state_e::native_hold && kbps == target_) return;
+    unjudged_return_from_.reset();  // an outside writer owns its change
     fec_revert();
     far_down_reset();
     measured_.clear();
@@ -1217,6 +1262,7 @@ namespace live_tuning_policy {
 
   void policy_t::rebase(int base_kbps, int floor_kbps) {
     if (state_ == state_e::native_hold && base_kbps == base_ && floor_kbps == floor_) return;
+    unjudged_return_from_.reset();
     fec_revert();
     far_down_reset();
     measured_.clear();
