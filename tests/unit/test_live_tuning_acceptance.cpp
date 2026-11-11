@@ -704,8 +704,8 @@ namespace {
   };
 
   /// One run: 120 frames a second at the encoder's rate, a report about every second, RTT polls at 10 Hz, and the
-  /// encoder taking each new target 100-300 ms later. Loss is on from second 26 until loss_until.
-  wire_run_t wire_run(const wire_t &wire, std::uint64_t seed, int loss_until = k_wire_seconds) {
+  /// encoder taking each new target 100-300 ms later. Loss is on from second 26 until loss_until, of seconds.
+  wire_run_t wire_run(const wire_t &wire, std::uint64_t seed, int loss_until = k_wire_seconds, int seconds = k_wire_seconds) {
     // As background_series() does: an odd multiplier other than the generator's own step, so no seed's draws are
     // another's shifted.
     rng_t rng {seed * 0x100000001b3ULL + 7};
@@ -721,7 +721,7 @@ namespace {
     int last_target = k_wire_base;
     std::vector<int> applied_10hz;
     wire_run_t result;
-    for (std::int64_t now = 0; now < std::int64_t {k_wire_seconds} * 1000; ++now) {
+    for (std::int64_t now = 0; now < std::int64_t {seconds} * 1000; ++now) {
       while (next_frame_us <= now * 1000) {
         const auto second = next_frame_us / 1000000;
         const bool lossy = second >= k_wire_loss_from && second < loss_until;
@@ -766,7 +766,7 @@ namespace {
         result.below_half += applied < k_wire_base / 2.0;
       }
     }
-    if (loss_until < k_wire_seconds) {
+    if (loss_until < seconds) {
       const auto from = static_cast<std::size_t>(loss_until) * 10;
       for (std::size_t i = applied_10hz.size(); i-- > from && applied_10hz[i] == k_wire_base;) {
         result.recovery = static_cast<int>(i - from);
@@ -825,6 +825,41 @@ TEST(LiveTuningAcceptance, WireLossUnderThreePercentNeverReachesTheFloor) {
     RecordProperty("wire_" + family.name + "_frame_loss_pct", wire_spread(loss));
     RecordProperty("wire_" + family.name + "_runs_at_floor", at_floor);
     EXPECT_EQ(at_floor, 0);
+  }
+}
+
+TEST(LiveTuningAcceptance, PacerOffLossRarelyHalvesTheStreamOverTwentyMinutes) {
+  // #576: skbs dropped whole with the pacer off lose the same share of frames at every rate, three frames a loss. A few
+  // light reports between those losses can pass for help far under the request, and the stream then searched under
+  // half its request for about 50 s at a time: at staging c86ef27f it spent 1.80, 1.63 and 1.39% of 1200 s there, at 1,
+  // 2 and 2.9% over these 400 seeds, with 42, 36 and 30 runs over a minute. #228's bar is 1% of seconds; the mean and
+  // its tail are recorded, and judged with room for a platform's rounding.
+  for (const double share : {0.01, 0.02, 0.029}) {
+    const auto name = "wire_pacer_off_skb_" + std::to_string(static_cast<int>(std::lround(share * 1000))) + "permille_1200s";
+    SCOPED_TRACE(name);
+    constexpr int seeds = 400;
+    constexpr int seconds = 1200;
+    std::vector<double> below_half;
+    double total = 0;
+    int over_a_minute = 0;
+    int over_two = 0;
+    int at_floor = 0;
+    for (std::uint64_t seed = 0; seed < seeds; ++seed) {
+      const auto run = wire_run({46, share, 0.0, std::nullopt}, seed, seconds, seconds);
+      below_half.push_back(run.below_half / 10.0);
+      total += run.below_half / 10.0;
+      over_a_minute += run.below_half > 600;
+      over_two += run.below_half > 1200;
+      at_floor += run.floor > 0;
+    }
+    const double mean_pct = 100.0 * total / (seeds * seconds);
+    RecordProperty(name + "_below_half_s", wire_spread(below_half));
+    RecordProperty(name + "_below_half_mean_pct", std::to_string(mean_pct));
+    RecordProperty(name + "_runs_over_60s", over_a_minute);
+    RecordProperty(name + "_runs_over_120s", over_two);
+    RecordProperty(name + "_runs_at_floor", at_floor);
+    EXPECT_LT(mean_pct, 1.25);
+    EXPECT_LE(over_a_minute, 24);
   }
 }
 
@@ -1001,11 +1036,10 @@ TEST(LiveTuningAcceptance, CongestionCloseToTheFloorSettlesUnderTheLinkAsStaging
 
 TEST(LiveTuningAcceptance, LinksCloseToTheFloorDoNoWorseThanStaging457eeef9) {
   // Every row: at most 0.1 points more loss than 457eeef9, and no lower final rate unless the loss is lower by more.
-  // One named exception, ROOT's decision on 2026-10-29: 3200 kbps over a 2450 kbps tail drop. Later in the episode a
-  // descent from the hold at 2529 stops at 2500, a 1% step that cannot tell the link's loss from background, where
-  // 457eeef9 stepped to the clean floor. Sending such a step to the floor instead puts wire runs under 3% loss on it
-  // (WireLossUnderThreePercentNeverReachesTheFloor), so this row is bounded: a hold with no learned background, at
-  // most 5% lost, and settled within one bisect step (the policy's 1.06) of its link.
+  // 3200 kbps over a 2450 kbps tail drop was the one exception until #576: a descent from the hold at 2529 stopped at
+  // 2500, a 1% step that cannot tell the link's loss from background, where 457eeef9 stepped to the clean floor. Such a
+  // step now stops halfway to the floor instead, at 2249, under the link and still over the floor, and the row is held
+  // to the same bound as the rest. Its outcome stays recorded.
   const auto reference = near_floor_reference();
   ASSERT_EQ(reference.size(), 141u);
   int same = 0;
@@ -1023,9 +1057,6 @@ TEST(LiveTuningAcceptance, LinksCloseToTheFloorDoNoWorseThanStaging457eeef9) {
                              ";staging_lost=" + std::to_string(static_cast<int>(row.lost)) + ";staging_final=" + std::to_string(row.final));
       EXPECT_EQ(run.state, live_tuning_policy::state_e::hold);
       EXPECT_EQ(run.background, 0.0);
-      EXPECT_LE(run.lost, 0.05 * k_near_floor_frames);
-      EXPECT_LE(run.final, row.link * 1.06);
-      continue;
     }
     EXPECT_LE(run.lost, row.lost + k_near_floor_margin) << run.final << " kbps at the end; staging " << row.final;
     if (run.final < row.final) {
@@ -1088,10 +1119,10 @@ namespace {
 TEST(LiveTuningAcceptance, AWideStaticLinkSearchDoesNoWorseThanStaging457eeef9) {
   // Every row: at most 0.1 points more loss than 457eeef9 in seconds 100-299, and never back at the request with 20% or
   // more learned as background where 457eeef9 ended at or under the link, where nothing is lost. Every row is recorded.
-  // Three named rows, ROOT's decision on 2026-10-29:
-  // - 3250 kbps over a 2475 kbps tail drop is the near-floor sweep's 3200 over 2450 again: a descent from the hold at
-  //   2549 stops at 2500, a 2% step losing 1%, where 457eeef9 stepped to the clean floor. Both are bounded as there: a
-  //   hold with no learned background, at most 5% lost, within the policy's 1.06 of the link.
+  // 3250 kbps over a 2475 kbps tail drop, the near-floor sweep's 3200 over 2450 again, was bounded apart until #576: a
+  // descent from the hold at 2549 stopped at 2500, a 2% step losing 1%. Both now stop halfway to the floor and are held
+  // to the bound of every row, as holds with no learned background.
+  // Two named rows, ROOT's decision on 2026-10-29:
   // - 32016 kbps over a step at the floor, at 120 frames and 35% and at 30 frames and 50%: the floor hold 457eeef9 ends
   //   in, retrying the same loss every 23 s, but reached 6 s later, so one more retry lands in seconds 100-299. Bounded
   //   to 457eeef9's final rate, a hold with no learned background, at most one retry's two reports more lost there,
@@ -1128,9 +1159,6 @@ TEST(LiveTuningAcceptance, AWideStaticLinkSearchDoesNoWorseThanStaging457eeef9) 
     if (named(row)) {
       EXPECT_EQ(run.state, live_tuning_policy::state_e::hold);
       EXPECT_EQ(run.background, 0.0);
-      EXPECT_LE(run.lost, 0.05 * frames);
-      EXPECT_LE(run.final, row.link * 1.06);
-      continue;
     }
     const auto phase = retry_phase.find({row.frames, row.request, row.link, row.share});
     if (phase != retry_phase.end()) {

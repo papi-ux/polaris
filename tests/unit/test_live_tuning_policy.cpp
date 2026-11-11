@@ -2074,6 +2074,25 @@ TEST(LiveTuningPolicy, MoreOldCleanHistoryDoesNotOutvoteAFresh97FrameDecline) {
   EXPECT_LT(run.late_lost, 1200 * 97 * 0.05);
 }
 
+TEST(LiveTuningPolicy, SoftLossThatFallsWithTheRateIsHalvedOnInsteadOfLearnedOrHeldAtTwiceTheFloor) {
+  // #575 review 3's soft loss: 23750 kbps over a 5700 kbps link and a 5000 kbps floor, losing 45% of the frames over the
+  // link. The deep sample at 10000 loses 19.35%, under the heavy-loss line and not significantly lighter than the first
+  // step's 27%. In 97-frame reports that was learned as background: back at 23750, losing 34% for good. In 120-frame
+  // reports the stream held at 10925, losing 21%. Loss far down that is clearly more than background costs is a
+  // link's: halving on reaches the stop over the floor and settles between it and the link's first clearly lossy
+  // rate. It ends at 6627 kbps losing 6.3%: the 4% left at the stop over the floor is what background costs, so the
+  // floor under it is not sampled, and the link's own 1.06 is not reached (#576, recorded as open).
+  for (const double frames : {97.0, 120.0}) {
+    SCOPED_TRACE(frames);
+    const auto run = run_link_change(23750, 5000, frames, 6000, 0, [](int second, int target) {
+      return second < 30 ? 0.0 : 0.45 * std::max(0.0, 1.0 - 5700.0 / target);
+    });
+    EXPECT_EQ(run.background, 0.0);
+    EXPECT_LE(run.final, 6700);
+    EXPECT_LT(run.late_lost, 1200 * frames * 0.07);
+  }
+}
+
 TEST(LiveTuningPolicy, ALossyHoldWhoseLossSwingsHigherKeepsItsEpisode) {
   // Review 3's time-varying loss, 4750 kbps over a 1000 kbps link and floor in 13-frame reports. A hold that was
   // already losing more than its background is not on a new link when its loss swings higher, and its episode's
