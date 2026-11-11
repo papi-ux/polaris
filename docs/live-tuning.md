@@ -53,7 +53,8 @@ stopped, perhaps because the link is overloaded, takes one deep sample and goes 
   below twice the floor. Clean there means a link limit somewhere between. The same loss there means
   the loss does not depend on the bitrate: the stream goes back to its rate, and Live Tuning learns
   that loss and leaves it alone, with the reason `loss_independent_of_bitrate`. Only loss that is
-  clearly heavy even there probes on toward the floor.
+  still clearly more than background costs even there, over about a tenth of the frames, probes on
+  toward the floor.
 - **Under a link.** Settled under a link it found, it tries the rate above after 8 reports and then
   about every 20, and climbs back toward the request when that is clean, with the reason
   `holding_under_the_link`.

@@ -26,19 +26,22 @@
  *   is in between, so it rechecks and bisects. Loss there that is mild, or no lighter than at the first step and
  *   not clearly over the 10% background can cost: the loss does not depend on the rate. Loss that is lighter there
  *   but not mild, or clearly over 10% whatever the first step lost: it halves on, until halving no longer lightens
- *   it.
+ *   it. A sample at the floor has nowhere to halve on to, and is the link's only when clearly over 20%.
+ *   When reports stop before the first step is judged, perhaps because the link is overloaded, the probe takes
+ *   its deep sample after 1.5 s, once, and goes no further until reports return.
  * - A few light reports between clustered losses can pass for help far down. A help at or below a deep sample is
  *   therefore checked while the rates above it keep failing. If its verification fails and nothing measured above
  *   it lost significantly more, it was chance: the loss does not depend on the rate. If the verification and then
  *   two bisect steps fail with no clean step between, and the helped rate lost frames itself and was not lighter
- *   beyond doubt (four standard errors), that rate is sampled again for six reports and judged alone against the
- *   rate it was verified against: significantly lighter again, the search carries on; if not, the first sample is
- *   dropped and the loss does not depend on the rate.
+ *   beyond doubt (four standard errors), that rate is sampled again for exactly six judged reports, a fixed
+ *   sample and not a sequential test, and judged alone against the rate it was verified against. Significantly
+ *   lighter again: the search carries on, and that help is not sampled a third time in this descent. If not, the
+ *   first sample is dropped, the loss does not depend on the rate, and the stream goes back without consulting
+ *   the pooled measurements that called for the sample.
  * - While a learned background backs off and has held at the request for twelve reports, a new probe's first step
- *   that is not helped, not heavy, and not clearly over that background plus 2% has found it again: it only updates
- *   it, without another deep sample.
- *   When reports stop before the first step is judged, perhaps because the link is overloaded, the probe takes
- *   its deep sample after 1.5 s, once, and goes no further until reports return.
+ *   that is not helped, not heavy, and not clearly over that background plus 2% has found it again: it raises the
+ *   background by at most 2%, as a run that close does, without another deep sample and without starting the
+ *   back-off again.
  * - A probe step is judged at the whole rate it would set. A fresh descent's first step, with nothing measured
  *   above it, takes the floor when it would reach it, as it always did: a request close over its floor steps
  *   onto it. Within an episode, a probe that would reach the floor stops a climb step above it first, or halfway
@@ -103,7 +106,7 @@
  * links of a wider search it does no worse than the policy at staging 457eeef9, but for two named rows: floor holds
  * reached 6 s later, with one retry more in the judged window. With the pacer off, over 400 seeded 1200 s runs at
  * each of those three loss levels, it spends under 1% of the time below half its request; over 1000 seeds of a second
- * wire model the 1% level reads 1.08%.
+ * wire model the 1% level reads 1.07%, and over 1000 other seeds both models read 1.00% there.
  */
 #pragma once
 
@@ -269,6 +272,7 @@ namespace live_tuning_policy {
     void set_target(double kbps, std::string_view why, std::int64_t now_ms);
     void to_normal(std::int64_t now_ms, int kbps, std::string_view why);
     void rate_independent(double rate, std::int64_t now_ms, std::string_view why);
+    void learn_background(double rate, std::int64_t now_ms, std::string_view why);
     std::optional<int> lossier_above(int kbps, std::pair<double, double> &above) const;
     void note_measured(int kbps, double expected, double lost);
     bool clearly_over(double lost, double frames, double level) const;

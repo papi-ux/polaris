@@ -333,6 +333,11 @@ namespace live_tuning_policy {
       enter_hold(now_ms, settle);
       return;
     }
+    learn_background(rate, now_ms, why);
+  }
+
+  // The loss does not depend on the rate: back to where the episode started, with that loss learned as background.
+  void policy_t::learn_background(double rate, std::int64_t now_ms, std::string_view why) {
     // Heavy loss is learned only once the episode has looked under it, at the floor or at a rate that lost no more
     // than 20%. Observed, not clearly over: 30 frames a report cannot clear two standard errors at 35%.
     const bool looked_under = std::any_of(measured_.begin(), measured_.end(), [&](const auto &rate_stats) {
@@ -387,7 +392,9 @@ namespace live_tuning_policy {
 
   // The second sample of a rate that had helped far down, judged alone against what the rate it was verified against
   // has lost. Significantly lighter again: the stream narrows in under the step that just failed. If not, the first
-  // sample was a few light reports between clustered losses: it is dropped, and the loss does not depend on the rate.
+  // sample was a few light reports between clustered losses, and the loss does not depend on the rate: the stream
+  // goes back as this verdict says, without asking the episode's pooled measurements, which hold the lossy steps that
+  // called for this sample and would hold the stream here against it.
   void policy_t::far_down_resample_result(std::int64_t now_ms) {
     far_down_resampling_ = false;
     lo_ = target_;
@@ -401,7 +408,7 @@ namespace live_tuning_policy {
       return;
     }
     measured_[target_] = {test_->frames(), test_->lost()};
-    rate_independent(test_->rate(), now_ms, "rate_independent");
+    learn_background(test_->rate(), now_ms, "rate_independent");
   }
 
   void policy_t::begin_descent(std::int64_t now_ms, std::string_view why, double l0) {
@@ -489,19 +496,18 @@ namespace live_tuning_policy {
   }
 
   void policy_t::descend_result(bool helped, std::int64_t now_ms) {
-    if (far_down_resampling_) {
-      if (test_->reports() >= FAR_DOWN_RESAMPLE_REPORTS) {
-        far_down_resample_result(now_ms);
-      }
-      return;
-    }
     if (!helped && phase_ == phase_e::first && backoff_ > 0 && background_reports_ >= HOLD_CHECK_REPORTS &&
         r0_ == episode_start_ && test_->rate() <= HEAVY_LOSS &&
         !clearly_over(test_->lost(), test_->frames(), background_ + ABSORB_EXCESS)) {
       // While backing off, with the background learned since held at the request for a hold check's reports: a first
       // step that loses no more than that background, give or take, has found it again. It only updates it, as a run
-      // this close does, without another deep sample.
-      rate_independent(probe_rate(), now_ms, "rate_independent");
+      // this close does, by at most what such a run may add, without another deep sample and without starting the
+      // back-off again: a short first step can read far over the level it was admitted against.
+      const int remaining = backoff_;
+      rate_independent(std::min(probe_rate(), background_ + ABSORB_EXCESS), now_ms, "rate_independent");
+      if (state_ == state_e::normal) {
+        backoff_ = remaining;
+      }
       return;
     }
     if (helped) {
@@ -558,8 +564,10 @@ namespace live_tuning_policy {
       const double se = std::sqrt(std::max(r, 1e-4) * std::max(2.0, disp()) / std::max(frames, 1.0));
       const bool lighter = z_lower(lost, frames, hi_stats_.second, hi_stats_.first, std::max(2.0, disp())) >= 2.0;
       // Loss far down that is no lighter than at the first step does not depend on the rate either, unless it is
-      // clearly more than background costs: that is a link's, and halving on finds where it stops.
-      if (r - 2.0 * se - background_ <= MILD_LOSS || (!lighter && !clearly_over(lost, frames, NEAR_FLOOR_LOSS))) {
+      // clearly more than background costs: that is a link's, and halving on finds where it stops. A sample at the
+      // floor has nowhere to halve on to: there only clearly heavy loss is the link's, as before.
+      const double links = target_ > floor_ ? NEAR_FLOOR_LOSS : HEAVY_LOSS;
+      if (r - 2.0 * se - background_ <= MILD_LOSS || (!lighter && !clearly_over(lost, frames, links))) {
         // The same loss far under the rate, not clearly heavier: it does not depend on the rate.
         rate_independent(probe_rate(), now_ms, "rate_independent");
         return;
@@ -835,6 +843,14 @@ namespace live_tuning_policy {
     }
     if (st == state_e::descend || st == state_e::verify_hi || st == state_e::bisect || st == state_e::climb) {
       if (!test_) {
+        return;
+      }
+      if (far_down_resampling_) {
+        // A fixed sample, not a sequential test: its verdict is taken at its last report, whatever the test says.
+        test_->add(expected, lost, 1.0);
+        if (test_->reports() >= FAR_DOWN_RESAMPLE_REPORTS) {
+          far_down_resample_result(now_ms);
+        }
         return;
       }
       const auto res = test_->add(expected, lost, 1.0);
