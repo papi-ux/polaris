@@ -494,6 +494,8 @@ jobs:
       - name: Configure
         if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
         run: |
+          COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          export COMMIT
           cmake -B build -G Ninja \
             -DBUILD_TESTS=ON \
             -DBUILD_FULL_TESTS=ON \
@@ -1365,6 +1367,8 @@ jobs:
         env:
           POLARIS_RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
+          COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          export COMMIT
           cmake_args=(
             -B build
             -G Ninja

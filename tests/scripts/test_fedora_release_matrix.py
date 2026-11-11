@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import runpy
 import subprocess
@@ -66,12 +67,44 @@ class FedoraReleaseMatrix(unittest.TestCase):
         read = Path.read_text
         with contextlib.redirect_stdout(io.StringIO()):
             runpy.run_path(str(CHECKER), run_name='__main__')
-        mutation = text.replace(binding, '', 1)
+        start = text.index('  fedora-rpm-build:')
+        mutation = text[:start] + text[start:].replace(binding, '', 1)
         def substituted(path, *args, **kwargs):
             return mutation if path == WORKFLOW else read(path, *args, **kwargs)
         with mock.patch.object(Path, 'read_text', substituted):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, 'Fedora RPM commit identity'):
                 runpy.run_path(str(CHECKER), run_name='__main__')
+
+    def test_each_release_configure_exports_its_checked_out_commit(self):
+        text = WORKFLOW.read_text()
+        binding = '          COMMIT="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"\n          export COMMIT\n'
+        read = Path.read_text
+        for job in ('arch-build', 'ubuntu-build', 'fedora-rpm-build'):
+            block = re.search(r'^  ' + job + r':\n.*?(?=^  \S|\Z)', text, re.M | re.S).group()
+            with self.subTest(job=job):
+                self.assertTrue(binding in block, job + ' must derive and export COMMIT')
+                mutation = text.replace(block, block.replace(binding, '', 1), 1)
+                def substituted(path, *args, **kwargs):
+                    return mutation if path == WORKFLOW else read(path, *args, **kwargs)
+                with mock.patch.object(Path, 'read_text', substituted):
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, 'commit identity'):
+                        runpy.run_path(str(CHECKER), run_name='__main__')
+
+    def test_shipped_arch_and_steamos_builds_keep_the_commit_export(self):
+        read = Path.read_text
+        for relative, binding in (
+                ('packaging/linux/Arch/PKGBUILD', 'export COMMIT="${_commit}"'),
+                ('packaging/linux/SteamOS/PKGBUILD', 'export COMMIT="${_commit}"'),
+                ('scripts/ci/build-steamos-package.sh', 'export COMMIT="$REQUESTED_COMMIT"')):
+            target = ROOT / relative
+            original = target.read_text()
+            self.assertIn(binding, original)
+            mutation = original.replace(binding, '', 1)
+            def substituted(path, *args, **kwargs):
+                return mutation if path == target else read(path, *args, **kwargs)
+            with self.subTest(path=relative), mock.patch.object(Path, 'read_text', substituted):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, 'commit identity'):
+                    runpy.run_path(str(CHECKER), run_name='__main__')
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='polaris-fedora-drivers-')
