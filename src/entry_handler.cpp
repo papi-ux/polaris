@@ -680,15 +680,13 @@ namespace args {
   }
 
   int version() {
-    // version was already logged at startup
+    std::cout << version_text() << std::flush;
 #ifdef _WIN32
     const int out = _fileno(stdout);
 #else
     const int out = fileno(stdout);
 #endif
     if (is_interactive_terminal(out)) {
-      // The log line goes first, and it goes through its own sink.
-      logging::log_flush();
       std::cout << version_constellation() << std::flush;
     }
     return 0;

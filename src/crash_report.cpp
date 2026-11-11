@@ -440,8 +440,12 @@ namespace crash_report {
     if (run_begun) {
       return;
     }
-    // Staging's behaviour, kept for the tests-only commit: every role is treated as the run.
-    (void) role;
+    if (role != run_role_e::service) {
+      // Not the run the record is about. Reading it would report a live or
+      // unrelated service as this process's dead predecessor, and writing it
+      // would leave this process's pid behind as a run that never ended.
+      return;
+    }
     run_begun = true;
 
     std::error_code directory_error;
@@ -497,12 +501,17 @@ namespace crash_report {
   }
 
   int note_failed_start(int exit_code, const char *reason) {
-    // Staging's behaviour, kept for the tests-only commit: nothing is recorded.
+    // Wired into main() by the next commit; until then nothing is recorded.
     (void) reason;
     return exit_code;
   }
 
   void install_fatal_handlers() {
+    if (!run_begun) {
+      // Only the run the record is about writes crash evidence. The file is
+      // shared, so any other process arming these would overwrite the slot.
+      return;
+    }
     if (handlers_armed.exchange(true)) {
       return;
     }
