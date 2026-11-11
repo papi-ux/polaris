@@ -62,13 +62,23 @@ class BoundedTests(unittest.TestCase):
             def change(open_fd, count):
                 data = original_read(open_fd, count)
                 if data:
-                    source.write_bytes(b'different')
+                    # Shrink after the original bytes were read: their digest
+                    # still matches, but identity must differ even when both
+                    # writes share the filesystem's timestamp tick.
+                    source.write_bytes(b'bad')
                 return data
             try:
                 with patch('bounded.os.read', side_effect=change), self.assertRaises(BuildError):
                     copy_verified(fd, 'a', hashlib.sha256(b'candidate').hexdigest(), io.BytesIO())
             finally:
                 os.close(fd)
+
+    def test_mutation_fixture_requires_identity_check(self):
+        # Bypass only identity equality; byte count and digest remain checked.
+        # The fixture must then fail to observe its expected rejection.
+        with patch('bounded.identity', return_value=()):
+            with self.assertRaisesRegex(AssertionError, 'BuildError not raised'):
+                self.test_input_mutation_is_rejected()
 
     @unittest.skipUnless(sys.platform == 'linux', 'owned command runner requires Linux waitid')
     def test_command_bounds_and_failures(self):
