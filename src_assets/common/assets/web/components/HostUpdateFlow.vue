@@ -8,18 +8,18 @@
     </div>
     <p v-if="error" class="mt-2 text-warning" role="alert">{{ error }}</p>
     <template v-if="reviewing && plan?.route === 'helper' && !view.active">
-      <p class="mt-3">{{ selectedReleaseLabel(plan) }} · Fedora 44 x86_64 · Polaris {{ plan.version }}</p>
+      <p class="mt-3">{{ selectedReleaseLabel(plan) }} · Fedora {{ plan.host?.version_id || '' }} x86_64 · Polaris {{ plan.version }}</p>
       <ul class="mt-2">
         <li v-for="asset in plan.assets" :key="asset.id" class="mt-2">
           {{ asset.package === 'polaris' ? 'Polaris' : 'DRM/KMS capture helper' }} · {{ plan.version }}
           <span v-if="plan.packages_to_update && !plan.packages_to_update.includes(asset.package)"> · already installed; kept</span>
         </li>
       </ul>
-      <p class="mt-3 text-sm">Checked against the official release’s published SHA-256 over HTTPS. This is integrity checking, not an independent publisher signature. These release assets are not a signed repository.</p>
+      <p class="mt-3 text-sm">Downloads are checked against the official release’s published SHA-256 over HTTPS. Before installing, Polaris also verifies its signature on each package. An unsigned package or a different signing key stops the update.</p>
       <p class="mt-2 text-sm">Your account, paired devices, settings and library stay in their existing locations. Polaris keeps running until you choose Finish.</p>
       <p class="mt-2 text-sm">This update keeps the existing streaming setup. Package setup scripts and cache triggers are skipped, so device rules or desktop icons may not refresh until your next sign-in or reboot. If streaming setup needs attention, use the guided setup steps after Finish.</p>
       <p class="mt-2 font-medium">Updates wait until streams and paused games end.</p>
-      <p v-if="plan.update_needed" class="mt-2 text-sm">Administrator approval opens on this PC’s desktop. No password is entered in this page.</p>
+      <p v-if="plan.update_needed" class="mt-2 text-sm">Administrator approval opens on this PC’s desktop. If needed, it also adds the packaged Polaris signing key to this PC’s trusted keys. No password is entered in this page.</p>
     </template>
     <div v-if="snapshot.job || view.needsFinish || view.needsAttention" class="mt-3" data-update-installed>
       <p>Running Polaris: {{ snapshot.running_version || 'unknown' }}</p>
@@ -69,6 +69,8 @@ const view = computed(() => describeHostUpdate(snapshot.value, plan.value, {
 watch(view, (value) => emit('state', value), { immediate: true })
 const stageLabel = computed(() => ({ checking_release: 'Checking the official release again…', downloading: 'Downloading official release assets…',
   verifying: 'Verifying package identities and SHA-256…', checking_transaction: 'Checking whether these packages can be installed safely…',
+  verifying_signatures: 'Verifying the Polaris package signatures…', trusting_vendor_key: 'Checking this PC’s trusted Polaris key…',
+  vendor_key_imported: 'The Polaris signing key was added. Checking the package transaction…',
   installing: 'Installing RPM packages…', waiting_for_approval: 'Waiting for approval at this PC’s desktop…',
   restarting: 'Waiting for this PC to respond…' })[view.value.stage] || 'Reading this PC’s progress…')
 let timer = null

@@ -27,6 +27,10 @@ UPSTREAM = 'https://github.com/papi-ux/polaris/releases/download/'
 ENV = {'PATH': '/usr/sbin:/usr/bin', 'LANG': 'C', 'LC_ALL': 'C', 'HOME': '/root'}
 STATE = Path('/var/lib/polaris/update')
 RPM = '/usr/bin/rpm'
+RPMKEYS = '/usr/bin/rpmkeys'
+VENDOR_KEY = Path('/usr/share/polaris/keys/polaris.gpg')
+VENDOR_FINGERPRINT = '58017EDFFA9F803E07ED26F835F13F14FAAD15CC'
+VENDOR_KEY_SHA256 = '3387618dcfa246abb5c53abc3a27893791a2de34916fc0954e6195b3a3bb0fe1'
 PACKAGES = ('polaris', 'polaris-kms')
 # The Fedora releases whose official release assets this helper installs, by exact VERSION_ID.
 # A host outside this set, a derivative, another architecture or an image based system is refused.
@@ -299,11 +303,100 @@ def transaction_argv(paths, test=False):
     return [RPM, '-U', '--nomanifest', '--noscripts', '--notriggers', *(['--test'] if test else []), '--', *map(str, paths)]
 
 
+# RPM's public keyring API verifies in memory, without opening/importing into any
+# RPM database. A separate bounded process contains native parser failures and
+# keeps its diagnostics out of this helper's JSON progress protocol. Its only
+# inputs are our package-owned public key and our freshly downloaded files.
+SIGNATURE_CHECK = r'''
+import ctypes as C
+import ctypes.util
+import sys
+library = C.CDLL(ctypes.util.find_library('rpm'))
+def api(name, result, arguments):
+    function = getattr(library, name)
+    function.restype, function.argtypes = result, arguments
+    return function
+pointer, text, integer = C.c_void_p, C.c_char_p, C.c_int
+configure = api('rpmReadConfigFiles', integer, [text, text])
+create = api('rpmtsCreate', pointer, [])
+new_keyring = api('rpmKeyringNew', pointer, [])
+read_key = api('rpmPubkeyRead', pointer, [text])
+fingerprint = api('rpmPubkeyFingerprintAsHex', text, [pointer])
+add_key = api('rpmKeyringAddKey', integer, [pointer, pointer])
+set_keyring = api('rpmtsSetKeyring', integer, [pointer, pointer])
+set_level = api('rpmtsSetVfyLevel', integer, [pointer, integer])
+get_level = api('rpmtsVfyLevel', integer, [pointer])
+verify = api('rpmcliVerifySignatures', integer, [pointer, C.POINTER(text)])
+if configure(None, None) != 0:
+    sys.exit(1)
+transaction, keyring, key = create(), new_keyring(), read_key(sys.argv[1].encode())
+if not transaction or not keyring or not key:
+    sys.exit(1)
+if fingerprint(key).decode().upper() != '58017EDFFA9F803E07ED26F835F13F14FAAD15CC':
+    sys.exit(1)
+if add_key(keyring, key) != 0 or set_keyring(transaction, keyring) != 0:
+    sys.exit(1)
+# Require signatures AND digests in this private check on both Fedora versions,
+# including Fedora 44 where the host default only requires digests. This changes
+# neither the host configuration nor the later RPM install's verification policy.
+set_level(transaction, 3)
+if get_level(transaction) != 3:
+    sys.exit(1)
+names = [name.encode() for name in sys.argv[2:]]
+if not names:
+    sys.exit(1)
+arguments = (text * (len(names) + 1))(*names, None)
+sys.exit(verify(transaction, arguments))
+'''
+
+
+def vendor_key():
+    trusted_directory(VENDOR_KEY.parent)
+    fd = os.open(VENDOR_KEY, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        metadata = os.fstat(source.fileno())
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == 0
+                and not metadata.st_mode & 0o022 and metadata.st_nlink == 1,
+                'vendor_key_unavailable', 'The installed Polaris signing key is unsafe. Repair the package before updating.')
+        raw = source.read(4097)
+    require(hashlib.sha256(raw).hexdigest() == VENDOR_KEY_SHA256,
+            'vendor_key_unavailable', 'The installed Polaris signing key changed. Repair the package before updating.')
+    return VENDOR_KEY
+
+
+def verify_vendor_signatures(paths, key, run=command):
+    code, _ = run([sys.executable, '-I', '-c', SIGNATURE_CHECK, str(key), *map(str, paths)])
+    require(code == 0, 'signature_untrusted',
+            'Polaris stopped before installing: a package is unsigned, has an invalid signature, '
+            'or was not signed by the trusted Polaris key. No signing key was imported. Review the release or repair RPM before updating.')
+
+
+def vendor_key_present(run=command):
+    code, output = run([RPMKEYS, '--list', VENDOR_FINGERPRINT])
+    if code == 0 and len(output.splitlines()) == 1 and output.split()[:1] == [VENDOR_FINGERPRINT.lower()]:
+        return True
+    if code == 1 and output.strip().lower() == 'error: key not found: ' + VENDOR_FINGERPRINT.lower():
+        return False
+    raise Refusal('vendor_key_unavailable', 'RPM could not confirm its trusted signing keys. Repair RPM before updating.')
+
+
+def ensure_vendor_key(key, run=command, on_import=lambda: None, on_attempt=lambda: None):
+    if vendor_key_present(run):
+        return
+    on_attempt()
+    code, _ = run([RPMKEYS, '--import', str(key)])
+    require(code == 0, 'vendor_key_unavailable', 'RPM could not import the packaged Polaris signing key. No package transaction was started.')
+    on_import()
+    require(vendor_key_present(run), 'vendor_key_unavailable',
+            'The Polaris signing key was imported, but RPM could not confirm it. No package transaction was started.')
+
+
 def install(channel, version, guard, directory, *, plan=make_plan, fetch_asset=download,
             run=command, read_installed=installed_packages, progress=lambda stage: None):
     attempted = False
     stage = 'checking_release'
-    result = {'state': 'failed', 'stage': stage, 'transaction_attempted': False}
+    result = {'state': 'failed', 'stage': stage, 'transaction_attempted': False,
+              'signatures_verified': False, 'vendor_key_import_attempted': False, 'vendor_key_imported': False}
     try:
         require(bool(re.fullmatch(r'[0-9a-f]{64}', guard)), 'invalid_review', 'Review this update again.')
         reviewed = plan(channel)
@@ -326,6 +419,20 @@ def install(channel, version, guard, directory, *, plan=make_plan, fetch_asset=d
         stage = 'checking_release'
         progress(stage)
         require(plan(channel)['review_guard'] == guard, 'release_changed', 'This release changed. Review again.')
+        stage = 'verifying_signatures'
+        progress(stage)
+        key = vendor_key()
+        verify_vendor_signatures(paths, key, run=run)
+        result['signatures_verified'] = True
+        stage = 'trusting_vendor_key'
+        def importing():
+            # A lost/error result does not prove that the keyring was unchanged.
+            result.update(vendor_key_import_attempted=True, vendor_key_imported=None)
+            progress(stage)
+        def imported():
+            result['vendor_key_imported'] = True
+            progress('vendor_key_imported')
+        ensure_vendor_key(key, run=run, on_import=imported, on_attempt=importing)
         stage = 'checking_transaction'
         progress(stage)
         code, output = run(transaction_argv(paths, test=True))

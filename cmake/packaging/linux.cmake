@@ -8,6 +8,8 @@ if(NOT POLARIS_BUILD_APPIMAGE)
             DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(PROGRAMS "${CMAKE_SOURCE_DIR}/scripts/update_helper.py"
             DESTINATION "${CMAKE_INSTALL_BINDIR}" RENAME "polaris-update-helper")
+    install(FILES "${CMAKE_SOURCE_DIR}/packaging/linux/keys/polaris.gpg"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polaris/keys")
     # The polkit actions the Spaces page asks for; they only name the helper installed above.
     install(FILES "${CMAKE_BINARY_DIR}/generated/${POLARIS_POLKIT_POLICY_NAME}"
             DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polkit-1/actions")

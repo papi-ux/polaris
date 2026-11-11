@@ -1,4 +1,5 @@
 """Synthetic only: no helper main, subprocess, network, RPM or host changes."""
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -140,7 +141,7 @@ class HelperTests(unittest.TestCase):
                         with self.assertRaises(helper.Refusal): helper.download(asset, Path(directory) / 'asset.rpm')
 
     def exercise_install(self, *, fail_transaction=False, fail_preview=False, changed=False, crash=False, obsoletes=False, current=None,
-                         fedora_release='44'):
+                         fedora_release='44', signature='vendor', key_present=True, import_fails=False, key_lookup_error=False, import_readback_missing=False):
         current = current or packages()
         reviewed = helper.make_plan('stable', fetch=lambda: [release(fedora_releases=(fedora_release,))],
                                     read_installed=lambda: current, host=lambda: fedora(fedora_release))
@@ -155,6 +156,14 @@ class HelperTests(unittest.TestCase):
             return value
         def run(argv, **kwargs):
             calls.append(argv)
+            if argv[0] == helper.sys.executable:
+                return (0, '') if signature == 'vendor' else (1, 'unsigned' if signature == 'unsigned' else 'wrong signer')
+            if argv[:2] == ['/usr/bin/rpmkeys', '--list']:
+                if key_lookup_error: return 2, 'keyring unavailable'
+                present = key_present or (not import_readback_missing and any('--import' in c for c in calls))
+                return (0, '58017edffa9f803e07ed26f835f13f14faad15cc Vendor public key\n') if present else (1, 'error: key not found: 58017EDFFA9F803E07ED26F835F13F14FAAD15CC\n')
+            if argv[:2] == ['/usr/bin/rpmkeys', '--import']:
+                return (1, 'key import refused') if import_fails else (0, '')
             if '-qp' in argv:
                 if 'OBSOLETENAME' in ''.join(argv): return (0, 'unrelated\n' if obsoletes else '')
                 name = 'polaris-kms' if 'Polaris-kms-' in argv[-1] else 'polaris'
@@ -165,7 +174,7 @@ class HelperTests(unittest.TestCase):
         def read_installed():
             reads.append(True)
             return {'polaris': {'state': 'unknown'}, 'polaris-kms': {'state': 'absent'}} if crash else packages('1.5.1')
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch.object(helper, 'vendor_key', create=True, return_value=Path('/usr/share/polaris/keys/polaris.gpg')):
             result = helper.install('stable', '1.5.1', reviewed['review_guard'], Path(directory), plan=plan,
                                     fetch_asset=lambda asset, path: path.write_bytes(b'rpm'), run=run,
                                     read_installed=read_installed)
@@ -296,6 +305,79 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(helper.installed_packages(run=lambda argv: (1, 'database error'))['polaris']['state'], 'unknown')
         duplicates = 'polaris|0|1.5.0|1|x86_64\npolaris|0|1.5.1|1|x86_64\n'
         self.assertEqual(helper.installed_packages(run=lambda argv: (0, duplicates))['polaris']['state'], 'partial')
+
+
+    def test_unsigned_candidate_refuses_before_key_import_or_rpm_transaction(self):
+        result, calls = self.exercise_install(signature='unsigned', key_present=False)
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['code'], 'signature_untrusted')
+        self.assertFalse(result['transaction_attempted'])
+        self.assertFalse(any('--import' in x or '-U' in x for x in calls))
+
+    def test_wrong_signer_refuses_even_when_that_key_might_be_trusted_by_the_host(self):
+        result, calls = self.exercise_install(signature='foreign')
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['code'], 'signature_untrusted')
+        self.assertFalse(any('--import' in x or '-U' in x for x in calls))
+
+    def test_vendor_signature_then_absent_key_import_precedes_unchanged_transaction(self):
+        result, calls = self.exercise_install(key_present=False)
+        self.assertEqual(result['state'], 'installed')
+        self.assertTrue(result['signatures_verified'])
+        self.assertTrue(result['vendor_key_imported'])
+        verify = next(i for i, x in enumerate(calls) if x[0] == helper.sys.executable)
+        imported = next(i for i, x in enumerate(calls) if '--import' in x)
+        transactions = [(i, x) for i, x in enumerate(calls) if '-U' in x]
+        self.assertLess(verify, imported)
+        self.assertLess(imported, transactions[0][0])
+        self.assertEqual([x for x in transactions[0][1] if x != '--test'], transactions[1][1])
+        self.assertEqual(sum('--import' in x for x in calls), 1)
+        self.assertEqual(sum('--list' in x for x in calls), 2)
+        self.assertNotIn('--nosignature', transactions[1][1])
+
+    def test_vendor_key_present_skips_import_but_still_verifies_candidate(self):
+        result, calls = self.exercise_install()
+        self.assertEqual(result['state'], 'installed')
+        self.assertTrue(result['signatures_verified'])
+        self.assertFalse(result['vendor_key_imported'])
+        self.assertFalse(result['vendor_key_import_attempted'])
+        self.assertEqual(sum(x[0] == helper.sys.executable for x in calls), 1)
+        self.assertFalse(any('--import' in x for x in calls))
+
+    def test_key_import_failure_never_starts_transaction_or_claims_import_success(self):
+        result, calls = self.exercise_install(key_present=False, import_fails=True)
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['code'], 'vendor_key_unavailable')
+        self.assertIsNone(result['vendor_key_imported'])
+        self.assertTrue(result['vendor_key_import_attempted'])
+        self.assertFalse(any('-U' in x for x in calls))
+
+    def test_unknown_system_keyring_is_not_absent_and_never_triggers_import(self):
+        result, calls = self.exercise_install(key_present=False, key_lookup_error=True)
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['code'], 'vendor_key_unavailable')
+        self.assertFalse(any('--import' in x or '-U' in x for x in calls))
+
+    def test_successful_import_with_unconfirmed_readback_remains_failed_and_logged(self):
+        result, calls = self.exercise_install(key_present=False, import_readback_missing=True)
+        self.assertEqual(result['state'], 'failed')
+        self.assertTrue(result['vendor_key_imported'])
+        self.assertFalse(result['transaction_attempted'])
+        self.assertFalse(any('-U' in x for x in calls))
+
+    def test_shipped_vendor_key_bytes_and_primary_fingerprint_are_pinned(self):
+        key = Path(__file__).parents[2] / 'packaging/linux/keys/polaris.gpg'
+        raw = key.read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), '3387618dcfa246abb5c53abc3a27893791a2de34916fc0954e6195b3a3bb0fe1')
+        # The retained vendor key starts with one old-format tag-6/v4 RSA packet.
+        # RFC4880's primary fingerprint hashes 0x99 + its two-byte size + body.
+        armor = raw.decode().split('\n\n', 1)[1].split('-----END', 1)[0]
+        packet = base64.b64decode(''.join(x for x in armor.splitlines() if x and not x.startswith('=')), validate=True)
+        self.assertEqual(packet[0], 0x99)
+        size = int.from_bytes(packet[1:3], 'big')
+        self.assertEqual(packet[3], 4)
+        self.assertEqual(hashlib.sha1(packet[:3 + size]).hexdigest().upper(), '58017EDFFA9F803E07ED26F835F13F14FAAD15CC')
+        self.assertEqual(helper.VENDOR_FINGERPRINT, '58017EDFFA9F803E07ED26F835F13F14FAAD15CC')
 
 
 if __name__ == '__main__':

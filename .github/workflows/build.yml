@@ -69,6 +69,9 @@ jobs:
       - name: Verify the release package version check
         run: python3 -m unittest discover -s tests/scripts -p 'test_release_package_versions.py'
 
+      - name: Verify the release RPM signing controls
+        run: python3 -m unittest discover -s tests/scripts -p 'test_release_rpm_signing.py'
+
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
 
@@ -2300,6 +2303,16 @@ jobs:
             echo "Release tag ${POLARIS_PACKAGE_REF_NAME} moved to $tag_commit; expected $EXPECTED_SOURCE_COMMIT" >&2
             exit 1
           fi
+
+      - name: Sign the Fedora release RPMs
+        env:
+          POLARIS_REPO_GPG_PRIVATE_KEY: ${{ secrets.POLARIS_REPO_GPG_PRIVATE_KEY }}
+          POLARIS_REPO_GPG_KEY_ID: ${{ secrets.POLARIS_REPO_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends rpm gnupg
+          bash scripts/ci/sign-release-rpms.sh release-assets/final
 
       - name: Stage curated GitHub release
         id: stage-release

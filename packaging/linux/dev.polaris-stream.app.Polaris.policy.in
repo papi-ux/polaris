@@ -36,7 +36,7 @@
   </action>
   <action id="@POLARIS_POLKIT_ACTION_PREFIX@.update-install">
     <description>Install the reviewed Polaris update</description>
-    <message>Polaris wants to update its installed packages from the official release on this PC. It will not restart until you choose Finish.</message>
+    <message>Polaris wants to update its installed packages and trust its packaged signing key on this PC if needed. It will not restart until you choose Finish.</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>

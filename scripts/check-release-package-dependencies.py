@@ -1258,4 +1258,20 @@ if release_check_test.strip() != (
 ):
     raise AssertionError("resolve-source must run the release package version check's own tests")
 
+signing_tests = workflow_step(resolve_job, "Verify the release RPM signing controls")
+if signing_tests.strip() != (
+    "run: python3 -m unittest discover -s tests/scripts -p 'test_release_rpm_signing.py'"
+):
+    raise AssertionError("resolve-source must run the release RPM signing controls")
+signing_step = workflow_step(release_job, "Sign the Fedora release RPMs")
+require_fail_closed_step(signing_step, "release RPM signing")
+for secret in ("POLARIS_REPO_GPG_PRIVATE_KEY", "POLARIS_REPO_GPG_KEY_ID"):
+    binding = f"          {secret}: ${{{{ secrets.{secret} }}}}\n"
+    if signing_step.count(binding) != 1:
+        raise AssertionError("release RPM signing must bind " + secret)
+require_command(workflow_run_tokens(signing_step),
+                ["bash", "scripts/ci/sign-release-rpms.sh", "release-assets/final"], "release RPM signing")
+if release_job.index("- name: Sign the Fedora release RPMs") > release_job.index("- name: Stage curated GitHub release"):
+    raise AssertionError("sign the finalized RPMs before staging/uploading a release")
+
 print("Release package dependency contracts look correct.")
