@@ -833,7 +833,9 @@ TEST(LiveTuningAcceptance, PacerOffLossRarelyHalvesTheStreamOverTwentyMinutes) {
   // light reports between those losses can pass for help far under the request, and the stream then searched under
   // half its request for about 50 s at a time: at staging c86ef27f it spent 1.80, 1.63 and 1.39% of 1200 s there, at 1,
   // 2 and 2.9% over these 400 seeds, with 42, 36 and 30 runs over a minute. #228's bar is 1% of seconds; the mean and
-  // its tail are recorded, and judged with room for a platform's rounding.
+  // its tail are recorded, and judged with room for a platform's rounding. Staging put 0, 0 and 1 of these runs on the
+  // floor; no more may get there.
+  const std::map<int, int> staging_runs_at_floor {{10, 0}, {20, 0}, {29, 1}};
   for (const double share : {0.01, 0.02, 0.029}) {
     const auto name = "wire_pacer_off_skb_" + std::to_string(static_cast<int>(std::lround(share * 1000))) + "permille_1200s";
     SCOPED_TRACE(name);
@@ -858,8 +860,11 @@ TEST(LiveTuningAcceptance, PacerOffLossRarelyHalvesTheStreamOverTwentyMinutes) {
     RecordProperty(name + "_runs_over_60s", over_a_minute);
     RecordProperty(name + "_runs_over_120s", over_two);
     RecordProperty(name + "_runs_at_floor", at_floor);
+    const int staging_at_floor = staging_runs_at_floor.at(static_cast<int>(std::lround(share * 1000)));
+    RecordProperty(name + "_runs_at_floor_staging_c86ef27f", staging_at_floor);
     EXPECT_LT(mean_pct, 1.25);
     EXPECT_LE(over_a_minute, 24);
+    EXPECT_LE(at_floor, staging_at_floor);
   }
 }
 
