@@ -262,6 +262,12 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
+  // The version is answered before any configuration or per-user state is read: it prints two
+  // lines, not the configuration, and it cannot disturb a Polaris that is serving.
+  if (args::is_version_request(argc, argv)) {
+    return args::version();
+  }
+
   mail::man = std::make_shared<safe::mail_raw_t>();
 
   // parse config file
@@ -309,8 +315,14 @@ int main(int argc, char *argv[]) {
   // Classify how the previous run ended and record that this one is live, then
   // arm the handlers that leave evidence if it is not. This has to happen after
   // logging is up, so the verdict on the previous run reaches the log, and
-  // before anything that can fault.
-  crash_report::begin_run(platf::appdata(), config::sunshine.log_file, PROJECT_VERSION);
+  // before anything that can fault. Only the process that serves does it: a
+  // command that exits, or a second Polaris beside the one that owns the
+  // runtime log, is not the run the record is about.
+  const auto run_role = crash_report::classify_run_role(
+    !config::sunshine.cmd.name.empty(),
+    logging::runtime_log_owned_elsewhere()
+  );
+  crash_report::begin_run(platf::appdata(), config::sunshine.log_file, PROJECT_VERSION, run_role);
   crash_report::install_fatal_handlers();
 
 #ifdef __linux__
@@ -571,7 +583,7 @@ int main(int argc, char *argv[]) {
   auto fec_warmup = reed_solomon_new(1, 1);
   if (!fec_warmup) {
     BOOST_LOG(fatal) << "Unable to initialize FEC encoder"sv;
-    return 1;
+    return crash_report::note_failed_start(1, "start failed: FEC encoder could not be initialized");
   }
   reed_solomon_release(fec_warmup);
   auto input_deinit_guard = input::init();
@@ -584,7 +596,9 @@ int main(int argc, char *argv[]) {
     spaces_setup->shutdown();
     multiseat::spaces::uninstall_setup_service(spaces_setup);
   });
-  if (!multiseat::spaces::install_setup_service(spaces_setup)) return 1;
+  if (!multiseat::spaces::install_setup_service(spaces_setup)) {
+    return crash_report::note_failed_start(1, "start failed: Spaces setup service could not be installed");
+  }
   // Host setup from the Spaces page. Every probe reads the installed services, so the order in
   // which they stop at exit does not matter.
   auto host_admin = multiseat::spaces::make_host_admin_service({
@@ -618,7 +632,9 @@ int main(int argc, char *argv[]) {
     host_admin->shutdown();
     multiseat::spaces::uninstall_host_admin_service(host_admin);
   });
-  if (!multiseat::spaces::install_host_admin_service(host_admin)) return 1;
+  if (!multiseat::spaces::install_host_admin_service(host_admin)) {
+    return crash_report::note_failed_start(1, "start failed: Spaces host setup service could not be installed");
+  }
   auto profile_service_guard = util::fail_guard([&] {
     if (profile_service) {
       profile_service->stop_admission();
@@ -660,7 +676,9 @@ int main(int argc, char *argv[]) {
     if (config::input.multiseat_moonlight_input) {
       BOOST_LOG(error) << "Multiseat cannot start while multiseat_moonlight_input, the separate input owner, is on"sv;
     }
-    if ((!options || config::input.multiseat_moonlight_input) && !managed) return 1;
+    if ((!options || config::input.multiseat_moonlight_input) && !managed) {
+      return crash_report::note_failed_start(1, "start failed: multiseat configuration is invalid or its input owner conflicts");
+    }
     if (options && !config::input.multiseat_moonlight_input) {
       auto created = multiseat::create_production_controller_runtime(*options);
       if (created.status == multiseat::controller_runtime_create_status_e::ready_enabled && created.runtime) {
@@ -678,13 +696,19 @@ int main(int argc, char *argv[]) {
               return multiseat::make_profile_controller(std::move(replacement.runtime));
             }
           });
-        if (!multiseat::install_profile_launch_service(profile_service)) return 1;
+        if (!multiseat::install_profile_launch_service(profile_service)) {
+          return crash_report::note_failed_start(1, "start failed: multiseat profile service could not be installed");
+        }
         runtime_move = multiseat::spaces::make_move_service();
-        if (!multiseat::spaces::install_move_service(runtime_move)) return 1;
+        if (!multiseat::spaces::install_move_service(runtime_move)) {
+          return crash_report::note_failed_start(1, "start failed: Spaces move service could not be installed");
+        }
         BOOST_LOG(info) << "Multiseat profile controller started"sv;
       } else if (created.status != multiseat::controller_runtime_create_status_e::ready_disabled) {
         BOOST_LOG(error) << "Multiseat controller could not establish its configured authority"sv;
-        if (!managed) return 1;
+        if (!managed) {
+          return crash_report::note_failed_start(1, "start failed: multiseat controller could not establish its authority");
+        }
       }
     }
   }
@@ -776,7 +800,7 @@ int main(int argc, char *argv[]) {
     std::this_thread::sleep_for(10s);
 #endif
 
-    return -1;
+    return crash_report::note_failed_start(-1, "start failed: HTTP interface failed to initialize");
   }
 
   std::unique_ptr<platf::deinit_t> mDNS;

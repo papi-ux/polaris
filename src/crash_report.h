@@ -53,6 +53,27 @@ namespace crash_report {
   };
 
   /**
+   * @brief What this process is to the run record.
+   *
+   * The record describes one serving run per configuration directory. A process
+   * that only answers a command, or that starts beside a Polaris already serving
+   * from the same directory, is not that run: it must not read the record as its
+   * predecessor, replace it, or arm handlers on the shared evidence file.
+   */
+  enum class run_role_e {
+    service,  ///< Serves, and owns the runtime: the run the record is about.
+    one_shot,  ///< Answers a command (`--version`, `--creds`, an unknown command) and exits.
+    second_process,  ///< Started while another process owns the runtime log.
+  };
+
+  /**
+   * @brief Decide what this process is to the run record.
+   * @param has_command A command was given on the command line, so this process exits without serving.
+   * @param runtime_owned_elsewhere Logging found another process holding the runtime log.
+   */
+  run_role_e classify_run_role(bool has_command, bool runtime_owned_elsewhere);
+
+  /**
    * @brief The persisted per-run document.
    */
   struct run_state_t {
@@ -131,14 +152,21 @@ namespace crash_report {
    * and before anything that can crash. The state directory is passed in rather
    * than resolved here so the module stays linkable without the platform layer.
    *
+   * Only a service does any of this. For every other role the call returns
+   * without touching the state directory or the log, previous_run() stays
+   * unknown, and note_clean_exit(), note_failed_start() and
+   * install_fatal_handlers() do nothing afterwards.
+   *
    * @param state_dir Directory holding the run-state and crash evidence files.
    * @param log_path Active log path recorded for this run.
    * @param version Polaris version recorded for this run.
+   * @param role What this process is to the record.
    */
   void begin_run(
     const std::filesystem::path &state_dir,
     const std::string &log_path,
-    const std::string &version
+    const std::string &version,
+    run_role_e role = run_role_e::service
   );
 
   /**
@@ -151,10 +179,22 @@ namespace crash_report {
   void note_clean_exit(int exit_code, const char *shutdown_reason);
 
   /**
+   * @brief Record that this run could not start and is returning, and pass the exit code through.
+   *
+   * A start that fails and returns ended on its own terms. Without this the next
+   * start reads the record as a run that never recorded an exit and tells the
+   * owner it was probably killed.
+   *
+   * @return exit_code, so a failing start can `return note_failed_start(...)`.
+   */
+  int note_failed_start(int exit_code, const char *reason);
+
+  /**
    * @brief Install fatal-signal handlers that write crash evidence.
    *
-   * Requires begin_run() first, which is what preformats the buffers the
-   * handler is allowed to touch. The handler restores the default disposition
+   * Requires begin_run() first as a service, which is what preformats the
+   * buffers the handler is allowed to touch; without it nothing is installed,
+   * so no other process can overwrite the service's evidence file. The handler restores the default disposition
    * and re-raises, so core dumps and `coredumpctl` keep working unchanged.
    */
   void install_fatal_handlers();

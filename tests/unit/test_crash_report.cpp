@@ -3,7 +3,9 @@
  * @brief Test run-outcome classification and its persisted contract.
  */
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <src/crash_report.h>
 #include <src/logging.h>
 #include <string>
@@ -59,6 +61,11 @@ namespace {
   };
 
   int CrashReportStateDir::counter_ = 0;
+
+  std::string bytes_of(const fs::path &path) {
+    std::ifstream in {path, std::ios::binary};
+    return {std::istreambuf_iterator<char> {in}, std::istreambuf_iterator<char> {}};
+  }
 }  // namespace
 
 TEST(CrashReportRunStateTests, SerializesAndParsesRoundTrip) {
@@ -260,6 +267,122 @@ TEST_F(CrashReportStateDir, AFatalSignalLeavesEvidenceTheNextRunReadsBack) {
   EXPECT_NE(previous.evidence.find("backtrace:"), std::string::npos);
 }
 #endif
+
+// #647: `polaris --version` beside a running service rewrote the service's record so it named the
+// dead --version process as "running", and told the caller the service had been killed.
+
+TEST(CrashReportRunRole, OnlyAProcessThatServesAndOwnsTheRuntimeIsTheRun) {
+  using crash_report::classify_run_role;
+  using crash_report::run_role_e;
+  EXPECT_EQ(classify_run_role(false, false), run_role_e::service);
+  EXPECT_EQ(classify_run_role(true, false), run_role_e::one_shot);
+  EXPECT_EQ(classify_run_role(false, true), run_role_e::second_process);
+  // A command beside a running service is still a command.
+  EXPECT_EQ(classify_run_role(true, true), run_role_e::one_shot);
+}
+
+TEST_F(CrashReportStateDir, AOneShotCommandLeavesTheRecordByteIdenticalAndSaysNothing) {
+  const auto record = root_ / std::string {crash_report::run_state_file_name};
+  const auto evidence = root_ / std::string {crash_report::crash_evidence_file_name};
+  // A service is running: its record says so and names it.
+  crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0");
+  const auto service_record = bytes_of(record);
+  ASSERT_NE(service_record.find("\"status\":\"running\""), std::string::npos);
+
+  // Another process answers a command. reset_for_tests() stands for "a different process".
+  crash_report::reset_for_tests();
+  crash_report::begin_run(root_, "", "1.5.0", crash_report::run_role_e::one_shot);
+
+  // It did not classify the running service as a previous run, so there is nothing to say:
+  // the "did not record an exit" line is only ever logged for an unclean outcome.
+  EXPECT_EQ(crash_report::previous_run().outcome, crash_report::outcome_e::unknown);
+  EXPECT_FALSE(crash_report::to_json(crash_report::previous_run())["recorded"].get<bool>());
+  EXPECT_EQ(bytes_of(record), service_record);
+
+  // Nor does anything it does on the way out reach the record or the evidence file.
+  crash_report::install_fatal_handlers();
+  crash_report::note_clean_exit(0, "command finished");
+  EXPECT_EQ(crash_report::note_failed_start(7, "unknown command"), 7);
+  EXPECT_EQ(bytes_of(record), service_record);
+  EXPECT_FALSE(fs::exists(evidence));
+}
+
+TEST_F(CrashReportStateDir, AOneShotCommandCreatesNoRecordWhereThereIsNone) {
+  crash_report::begin_run(root_, "", "1.5.0", crash_report::run_role_e::one_shot);
+  crash_report::note_clean_exit(0, "command finished");
+
+  EXPECT_FALSE(fs::exists(root_ / std::string {crash_report::run_state_file_name}));
+  EXPECT_FALSE(fs::exists(root_)) << "a command must not create the state directory either";
+}
+
+#ifndef _WIN32
+TEST_F(CrashReportStateDir, ASecondProcessNeverReplacesTheOwnersRecord) {
+  const auto record = root_ / std::string {crash_report::run_state_file_name};
+  // This process is the service that owns the runtime.
+  crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0");
+  const auto service_record = bytes_of(record);
+
+  // A second Polaris starts beside it, finds the runtime log owned, fails to bind and returns.
+  const auto child = ::fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    crash_report::reset_for_tests();
+    crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0", crash_report::run_role_e::second_process);
+    crash_report::install_fatal_handlers();
+    (void) crash_report::note_failed_start(-1, "start failed: HTTP interface failed to initialize");
+    ::_exit(0);
+  }
+  int status = 0;
+  ASSERT_EQ(::waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(bytes_of(record), service_record);
+
+  // The service then stops normally, and its own record is what the next start reads.
+  crash_report::note_clean_exit(0, "SIGTERM received");
+  crash_report::reset_for_tests();
+  crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0");
+  const auto &previous = crash_report::previous_run();
+  EXPECT_EQ(previous.outcome, crash_report::outcome_e::clean);
+  EXPECT_EQ(previous.pid, static_cast<long long>(::getpid()));
+  EXPECT_EQ(previous.shutdown_reason, "SIGTERM received");
+}
+
+TEST_F(CrashReportStateDir, AOneShotCommandThatFaultsDoesNotWriteIntoTheServicesEvidenceFile) {
+  const auto evidence = root_ / std::string {crash_report::crash_evidence_file_name};
+  crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0");
+
+  const auto child = ::fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    const rlimit no_core {0, 0};
+    (void) ::setrlimit(RLIMIT_CORE, &no_core);
+    crash_report::reset_for_tests();
+    crash_report::begin_run(root_, "", "1.5.0", crash_report::run_role_e::one_shot);
+    crash_report::install_fatal_handlers();
+    std::raise(SIGSEGV);
+    ::_exit(0);
+  }
+  int status = 0;
+  ASSERT_EQ(::waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFSIGNALED(status));
+  EXPECT_EQ(WTERMSIG(status), SIGSEGV);
+  EXPECT_FALSE(fs::exists(evidence)) << "only the run the record is about may write crash evidence";
+}
+#endif
+
+// A start that fails and returns ended on its own terms; the next start must not call it killed.
+TEST_F(CrashReportStateDir, AStartThatFailsAndReturnsIsNotLaterCalledKilled) {
+  crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0");
+  EXPECT_EQ(crash_report::note_failed_start(-1, "start failed: HTTP interface failed to initialize"), -1);
+
+  crash_report::reset_for_tests();
+  crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0");
+
+  const auto &previous = crash_report::previous_run();
+  EXPECT_EQ(previous.outcome, crash_report::outcome_e::clean);
+  EXPECT_EQ(previous.exit_code, -1);
+  EXPECT_EQ(previous.shutdown_reason, "start failed: HTTP interface failed to initialize");
+}
 
 TEST(BackupLogPathTests, NamesTheBackupBesideTheActiveLog) {
   EXPECT_EQ(logging::backup_log_path("/var/log/polaris.log"), "/var/log/polaris.log.backup");

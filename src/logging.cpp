@@ -101,6 +101,7 @@ namespace {
   >;
   boost::shared_ptr<bounded_file_sink_t> file_sink;
   std::unique_ptr<logging::bounded_log_owner_lock_t> runtime_log_owner_lock;
+  bool runtime_log_owned_by_another_process = false;
 }  // namespace
 
 bl::sources::severity_logger<int> verbose(0);  // Dominating output
@@ -269,6 +270,7 @@ namespace logging {
     // console-only logging for commands that must not initialize user state.
     const std::string backup_log_file = backup_log_path(log_file);
     auto file_logging_ready = !log_file.empty();
+    runtime_log_owned_by_another_process = false;
     if (file_logging_ready) {
       // Single owner per config directory: a second Polaris reaching this init
       // while another process owns the runtime log must not inherit, rotate,
@@ -277,6 +279,7 @@ namespace logging {
       if (!runtime_log_owner_lock->owned()) {
         std::cout << "Another Polaris process owns the runtime log; continuing with console-only logging." << std::endl;
         runtime_log_owner_lock.reset();
+        runtime_log_owned_by_another_process = true;
         file_logging_ready = false;
       }
     }
@@ -443,6 +446,10 @@ namespace logging {
     });
   }
 #endif
+
+  bool runtime_log_owned_elsewhere() {
+    return runtime_log_owned_by_another_process;
+  }
 
   void log_flush() {
     if (sink) {

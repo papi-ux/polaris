@@ -52,13 +52,28 @@ namespace args {
 
   /**
    * @brief Print the version to stdout, then exit.
-   * @details A terminal also gets Ursa Minor. Scripts read the version line, so a pipe or a file
-   * gets exactly the output it always did.
+   * @details Prints version_text() and nothing else. A terminal also gets Ursa Minor after it.
    * @examples
    * version();
    * @examples_end
    */
   int version();
+
+  /**
+   * @brief What `--version` prints: "Polaris version: <version> commit: <sha>", and on Linux the
+   * "Build features: cuda=<enabled|disabled> vulkan=<enabled|disabled>" line, each ending in a newline.
+   * @details Scripts and package checks match these two texts, so they are the same texts the
+   * start-up log carries, without its timestamp.
+   */
+  std::string version_text();
+
+  /**
+   * @brief Whether the arguments ask for the version, read the way config::parse reads them.
+   * @details The first argument that begins with `--` names the command; `--help` anywhere before
+   * it wins. main() answers this before it loads the configuration, so `--version` loads and
+   * prints none of it and never touches per-user state.
+   */
+  bool is_version_request(int argc, const char *const *argv);
 
   /**
    * @brief Whether a file descriptor is an interactive terminal.

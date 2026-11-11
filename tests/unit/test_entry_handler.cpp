@@ -18,9 +18,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #ifndef _WIN32
   #include <fcntl.h>
@@ -139,13 +141,53 @@ TEST(EntryHandlerTests, VersionConstellationIsSevenStarsWithPolarisMarked) {
   }
 }
 
+TEST(EntryHandlerTests, VersionTextIsTheTwoLinesScriptsMatch) {
+  // scripts/ci/run-steamos-build.sh, scripts/check-release-package-dependencies.py and the package
+  // workflows grep for exactly this text; the build summary greps for cuda=<word>.
+  const auto text = args::version_text();
+  EXPECT_EQ(text.find(std::string {PROJECT_NAME} + " version: " + PROJECT_VERSION + " commit: " + PROJECT_VERSION_COMMIT + "\n"), 0u);
+#ifdef __linux__
+  EXPECT_EQ(std::count(text.begin(), text.end(), '\n'), 2);
+  EXPECT_NE(text.find("\nBuild features: cuda="), std::string::npos);
+  EXPECT_NE(text.find(" vulkan="), std::string::npos);
+#else
+  EXPECT_EQ(std::count(text.begin(), text.end(), '\n'), 1);
+#endif
+  EXPECT_EQ(text.find("config"), std::string::npos);
+  EXPECT_EQ(text.back(), '\n');
+}
+
+TEST(EntryHandlerTests, AVersionRequestIsReadTheWayTheArgumentsAreParsed) {
+  const auto asks = [](std::vector<const char *> arguments) {
+    arguments.insert(arguments.begin(), "polaris");
+    return args::is_version_request(static_cast<int>(arguments.size()), arguments.data());
+  };
+  EXPECT_TRUE(asks({"--version"}));
+  // A configuration file, an option or a flag may come first; the first --word is the command.
+  EXPECT_TRUE(asks({"/etc/polaris/polaris.conf", "--version"}));
+  EXPECT_TRUE(asks({"min_log_level=1", "-p", "--version"}));
+  EXPECT_TRUE(asks({"--version", "ignored"}));
+  EXPECT_FALSE(asks({}));
+  EXPECT_FALSE(asks({"/etc/polaris/polaris.conf"}));
+  EXPECT_FALSE(asks({"version"}));
+  EXPECT_FALSE(asks({"-version"}));
+  EXPECT_FALSE(asks({"--versions"}));
+  // Another command first, or --help before it, is not a version request.
+  EXPECT_FALSE(asks({"--creds", "user", "--version"}));
+  EXPECT_FALSE(asks({"--help", "--version"}));
+  EXPECT_FALSE(asks({"--setup-host", "--version"}));
+}
+
 #ifndef _WIN32
-TEST(EntryHandlerTests, VersionPrintsNothingExtraWhenStdoutIsNotATerminal) {
+TEST(EntryHandlerTests, VersionPrintsOnlyTheVersionWhenStdoutIsNotATerminal) {
   // CaptureStdout points fd 1 at a file, as a script's redirect does.
   testing::internal::CaptureStdout();
   EXPECT_EQ(args::version(), 0);
   std::fflush(stdout);
-  EXPECT_EQ(testing::internal::GetCapturedStdout(), "");
+  const auto shown = testing::internal::GetCapturedStdout();
+  // #647: the version itself, with no configuration dump, no log prefix and no drawing.
+  EXPECT_EQ(shown, args::version_text());
+  EXPECT_EQ(shown.find("Ursa Minor"), std::string::npos);
 }
 
 TEST(EntryHandlerTests, InteractiveTerminalIsOnlyATerminal) {
@@ -231,8 +273,71 @@ TEST(EntryHandlerTests, VersionDrawsTheConstellationOnATerminal) {
   shown.resize(static_cast<std::size_t>(count));
   EXPECT_NE(shown.find("(*) Polaris"), std::string::npos);
   EXPECT_NE(shown.find("Ursa Minor"), std::string::npos);
+  // The version comes first; a terminal turns each newline into CR LF.
+  const auto version_line = std::string {PROJECT_NAME} + " version: " + PROJECT_VERSION + " commit: " + PROJECT_VERSION_COMMIT;
+  const auto version_at = shown.find(version_line);
+  ASSERT_NE(version_at, std::string::npos);
+  EXPECT_LT(version_at, shown.find("(*) Polaris"));
 }
 #endif
+
+namespace {
+  std::string main_source() {
+    std::ifstream in {std::filesystem::path(POLARIS_SOURCE_DIR) / "src/main.cpp"};
+    return {std::istreambuf_iterator<char> {in}, std::istreambuf_iterator<char> {}};
+  }
+}  // namespace
+
+// main() is not linked into the tests, so its order is pinned from its source (#647).
+TEST(EntryHandlerTests, MainAnswersTheVersionBeforeItLoadsAnyConfiguration) {
+  const auto source = main_source();
+  const auto version = source.find("if (args::is_version_request(argc, argv)) {\n    return args::version();");
+  const auto parse = source.find("config::parse(argc, argv)");
+  const auto logging_init = source.find("logging::init(config::sunshine.min_log_level");
+  const auto begin_run = source.find("crash_report::begin_run(");
+  ASSERT_NE(version, std::string::npos) << "--version is no longer answered on its own";
+  ASSERT_NE(parse, std::string::npos);
+  ASSERT_NE(logging_init, std::string::npos);
+  ASSERT_NE(begin_run, std::string::npos);
+  EXPECT_LT(version, parse);
+  EXPECT_LT(version, logging_init);
+  EXPECT_LT(version, begin_run);
+}
+
+TEST(EntryHandlerTests, MainGivesTheRunRecordOnlyToTheProcessThatServes) {
+  const auto source = main_source();
+  const auto role = source.find("crash_report::classify_run_role(\n    !config::sunshine.cmd.name.empty(),\n    logging::runtime_log_owned_elsewhere()\n  )");
+  const auto begin_run = source.find("crash_report::begin_run(platf::appdata(), config::sunshine.log_file, PROJECT_VERSION, run_role);");
+  const auto handlers = source.find("crash_report::install_fatal_handlers();");
+  const auto dispatch = source.find("cmd_to_func.find(config::sunshine.cmd.name)");
+  ASSERT_NE(role, std::string::npos) << "the run record's role is no longer decided from the command and the log owner";
+  ASSERT_NE(begin_run, std::string::npos) << "begin_run() is called without the role";
+  ASSERT_NE(handlers, std::string::npos);
+  ASSERT_NE(dispatch, std::string::npos);
+  EXPECT_LT(role, begin_run);
+  EXPECT_LT(begin_run, handlers);
+  EXPECT_LT(begin_run, dispatch) << "commands are dispatched after the role is known, and never before it";
+  EXPECT_EQ(source.find("crash_report::begin_run(", begin_run + 1), std::string::npos) << "one call, with the role";
+}
+
+TEST(EntryHandlerTests, MainRecordsAnExitWhereverAStartFailsAndReturns) {
+  // After the record says "running", a plain `return <number>;` leaves it that way and the next
+  // start reports a kill. The one exception is an unknown command, which is not the run at all.
+  const auto source = main_source();
+  const auto begin_run = source.find("crash_report::begin_run(");
+  const auto clean_exit = source.find("crash_report::note_clean_exit(lifetime::desired_exit_code");
+  ASSERT_NE(begin_run, std::string::npos);
+  ASSERT_NE(clean_exit, std::string::npos);
+  ASSERT_LT(begin_run, clean_exit);
+  const auto body = source.substr(begin_run, clean_exit - begin_run);
+  std::vector<std::string> bare;
+  const std::regex bare_return {R"(return\s+-?[0-9]+\s*;)"};
+  for (std::sregex_iterator found {body.begin(), body.end(), bare_return}, end; found != end; ++found) {
+    bare.push_back(found->str());
+  }
+  EXPECT_EQ(bare, std::vector<std::string> {"return 7;"});
+  EXPECT_NE(body.find("return crash_report::note_failed_start(-1, \"start failed: HTTP interface failed to initialize\");"), std::string::npos);
+}
 
 TEST(LifetimeTests, ServiceUnitComesFromTheCgroupLeaf) {
   EXPECT_EQ(lifetime::systemd_service_unit_from_cgroup(
