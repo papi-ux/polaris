@@ -42,7 +42,7 @@ TEST(CryptoCredentials, PreservesCommonNamesAndCertificateSignature) {
   constexpr std::string_view common_name = "Polaris certificate compatibility";
   constexpr std::uint32_t key_bits = 2048;
   const auto credentials = crypto::gen_creds(common_name, key_bits);
-  const auto certificate = crypto::x509(credentials.x509);
+  auto certificate = crypto::x509(credentials.x509);
   ASSERT_NE(certificate, nullptr);
   EXPECT_EQ(X509_verify(certificate.get(), X509_get0_pubkey(certificate.get())), 1);
 
