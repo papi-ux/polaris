@@ -38,6 +38,22 @@ elif name == 'docker' and sys.argv[1] == 'run' and os.environ.get('FAIL_CONTAINE
 
 
 class FedoraReleaseMatrix(unittest.TestCase):
+    def test_fedora45_uses_locked_nvidia_rpms_and44_keeps_runfile(self):
+        text = WORKFLOW.read_text()
+        block = re.search(r'^  fedora-rpm-build:\n.*?(?=^  \S|\Z)', text, re.M | re.S).group()
+        route = 'python3 scripts/ci/install-fedora45-cuda.py --cache "$cuda_rpm_cache"'
+        self.assertIn(route, block, 'Fedora 45 needs the locked NVIDIA RPM route')
+        self.assertIn('if [ "${{ matrix.fedora }}" = "45" ]; then', block)
+        read = Path.read_text
+        for mutation in (text.replace(route, 'true # lost RPM route', 1),
+                         text.replace('if [ "${{ matrix.fedora }}" = "45" ]; then',
+                                      'if [ "${{ matrix.fedora }}" = "44" ]; then', 1)):
+            def substituted(path, *args, **kwargs):
+                return mutation if path == WORKFLOW else read(path, *args, **kwargs)
+            with self.subTest(mutation=mutation[-40:]), mock.patch.object(Path, 'read_text', substituted):
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(AssertionError, 'Fedora 45 CUDA RPM route'):
+                    runpy.run_path(str(CHECKER), run_name='__main__')
+
     def test_both_families_are_mandatory_version_check_inputs(self):
         spec = importlib.util.spec_from_file_location('versions', ROOT / 'scripts/ci/check-release-package-versions.py')
         module = importlib.util.module_from_spec(spec)

@@ -1,0 +1,651 @@
+{
+  "schema": 1,
+  "build_release": "45",
+  "toolkit": "13.2.1",
+  "repository": "https://developer.download.nvidia.com/compute/cuda/repos/fedora43/x86_64/",
+  "reason": "NVIDIA does not publish CUDA toolkit packages in its Fedora 45 repository. Use its Fedora 43 CUDA 13.2.1 build-time packages, matching the toolkit on pc-papi, while retaining GCC 15 and signature enforcement.",
+  "key_fingerprint": "8033132AA30E535FF7F6059764E003B61940C73E",
+  "key_sha256": "95272017d499bb2380fd31f088c0bd74a8ebc00d2f14193dbdcf4438b3fddd1b",
+  "packages": [
+    {
+      "name": "cuda-cccl-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-cccl-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 2136654,
+      "sha256": "d31530bd99ff985ee4afc4ca363ad0686d04e39cba231219f389ec928fa4875e"
+    },
+    {
+      "name": "cuda-command-line-tools-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-command-line-tools-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 7086,
+      "sha256": "f92f1fb9b130aa68553e27cbdfe30df1f9398544c61e799d056e68ce80638053"
+    },
+    {
+      "name": "cuda-compiler-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-compiler-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 7122,
+      "sha256": "9b7290ab010b7866bd90149a007b5296d46d45c70b5e3537e889a9819d020918"
+    },
+    {
+      "name": "cuda-crt-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-crt-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 124816,
+      "sha256": "0a05416a7feb86ab6640625440aa7f96baeeaa30b960850abcefd9d33d144d6e"
+    },
+    {
+      "name": "cuda-cudart-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-cudart-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 248435,
+      "sha256": "68f80258a01b2a42de6ca27d3d12ca75234d05d567e2160b0c38f51b13314930"
+    },
+    {
+      "name": "cuda-cudart-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-cudart-devel-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 2007642,
+      "sha256": "d78f39e6521a3a35815d37fa8d86810e8e68e0ce224fbe0c192cc9c3de010848"
+    },
+    {
+      "name": "cuda-culibos-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-culibos-devel-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 33889,
+      "sha256": "aa571cec8565d7dd00ed1cab74c4b78f07be47930c79e44233ce64ab241f6289"
+    },
+    {
+      "name": "cuda-cuobjdump-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-cuobjdump-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 351582,
+      "sha256": "cad5bb37666ae7508704eefe1e1ebfa94a136fa57fd092f6516c475b473ca96c"
+    },
+    {
+      "name": "cuda-cupti-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-cupti-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 36051672,
+      "sha256": "202176e30bc8a7a3cf88ff9c36bbee29a7d18e452e552b49491a434d18b2efff"
+    },
+    {
+      "name": "cuda-cuxxfilt-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-cuxxfilt-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 103758,
+      "sha256": "f9f02401f3e66c2acc1b33a142d3ad65b7b61edfe3b9e475ee5cd85fbf90fed9"
+    },
+    {
+      "name": "cuda-documentation-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-documentation-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 135128,
+      "sha256": "990b54cb7833c7e22dbeb4f42fed8c128e2f8d5837dd0d9826e98b0015537d1e"
+    },
+    {
+      "name": "cuda-driver-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-driver-devel-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 46854,
+      "sha256": "d3fce5414d705b9aa55f760e8259ab30ebc6a39bcb270db8463d3c8eec3954fe"
+    },
+    {
+      "name": "cuda-gdb-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-gdb-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 36413325,
+      "sha256": "625d97b0e12e6d564fa283192f8ead1892088f2c089f921321f91e91a1c89986"
+    },
+    {
+      "name": "cuda-libraries-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-libraries-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 7326,
+      "sha256": "516e6e13121c965263b1e64ee51059df9d6c1e9359a25825bf007da4e914e78a"
+    },
+    {
+      "name": "cuda-libraries-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-libraries-devel-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 7622,
+      "sha256": "7d8e7a759b61600bc14d283b3327de944548a22c60999a3ff97bb740e83a47a1"
+    },
+    {
+      "name": "cuda-nsight-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nsight-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 118715088,
+      "sha256": "1fe91f97c2ab68715338701d03adaa26f0bceba9176232ee7cb5150b8e72be78"
+    },
+    {
+      "name": "cuda-nsight-compute-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nsight-compute-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 9181,
+      "sha256": "656d527ee954c87d30ea28e0e02119bd40a2e4b59a3d335b30e6a78c9db11d90"
+    },
+    {
+      "name": "cuda-nsight-systems-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nsight-systems-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 8904,
+      "sha256": "4cf533e09d7cbed19959b42aa8c445d2209e3cc4cf5119a37f607c76af52a6c5"
+    },
+    {
+      "name": "cuda-nvcc-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nvcc-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 43680811,
+      "sha256": "ee8e225f70b910ed5a9c7e7a5320853625fa936547c658bbbaddbe519a736277"
+    },
+    {
+      "name": "cuda-nvdisasm-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nvdisasm-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 4423304,
+      "sha256": "adf7ca52c93a1212eb147019c5af005be3cd38acf6508835a016fd30ea111efc"
+    },
+    {
+      "name": "cuda-nvml-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.82",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nvml-devel-13-2-13.2.82-1.x86_64.rpm",
+      "bytes": 234060,
+      "sha256": "f3469133bea91d2b7b06df0fc71d60ab1bd5da573d79bcf7d58ac8937d1d43eb"
+    },
+    {
+      "name": "cuda-nvprune-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nvprune-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 682103,
+      "sha256": "d966e2c4383fa9cbea160541a490396281ef591596daffe7ec1c03141f124bc7"
+    },
+    {
+      "name": "cuda-nvrtc-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nvrtc-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 46666293,
+      "sha256": "2ba71e77a88dcff65f06d9ca197f2c002554ff1cc58b8c70f23cc75e006aa641"
+    },
+    {
+      "name": "cuda-nvrtc-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nvrtc-devel-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 40233380,
+      "sha256": "aed82c3549671fa3eef98ec0068f61a22588af540782fcea2227da0a916e664f"
+    },
+    {
+      "name": "cuda-nvtx-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-nvtx-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 145152,
+      "sha256": "549321e197a71b8fa5dab1fe33a9696d29d8e9b2aa5fa58c8dcb17a3f9144132"
+    },
+    {
+      "name": "cuda-opencl-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-opencl-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 36776,
+      "sha256": "663a5643c3a268668e9d59c4de09c1bef6918a0c6e9b84b993ff4bdc9b98d83a"
+    },
+    {
+      "name": "cuda-opencl-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-opencl-devel-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 124322,
+      "sha256": "1de828865571327a50c73af46245a22a776dd6f3ddcb099c0054ef6bc1df9f39"
+    },
+    {
+      "name": "cuda-profiler-api-13-2",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-profiler-api-13-2-13.2.75-1.x86_64.rpm",
+      "bytes": 28359,
+      "sha256": "8fbdb71edffe7e83bf5997a21cbd62fb9b6823192bea146a1f8328adea060ee0"
+    },
+    {
+      "name": "cuda-sandbox-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.82",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-sandbox-devel-13-2-13.2.82-1.x86_64.rpm",
+      "bytes": 47072,
+      "sha256": "5034f4bbfa28d19e5d516d60d4819284a88ee78b64c905045b142ac125588b48"
+    },
+    {
+      "name": "cuda-sanitizer-13-2",
+      "epoch": "0",
+      "version": "13.2.76",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-sanitizer-13-2-13.2.76-1.x86_64.rpm",
+      "bytes": 16931096,
+      "sha256": "cdeb3b0cee69f1c658f4fc837647f0f00f3f8a7058c1640dd4e0acc68812c4ea"
+    },
+    {
+      "name": "cuda-tileiras-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-tileiras-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 36702075,
+      "sha256": "d1d1f1bb854f4fbf4a937ce7998a332a396e3f007d0c74771cd186d138edc350"
+    },
+    {
+      "name": "cuda-toolkit-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-toolkit-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 8516,
+      "sha256": "010c93d046b2d48171097c1342cc41593ef28b530c64c7e10d20290362e316b2"
+    },
+    {
+      "name": "cuda-toolkit-13-2-config-common",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "noarch",
+      "file": "cuda-toolkit-13-2-config-common-13.2.75-1.noarch.rpm",
+      "bytes": 8530,
+      "sha256": "76e34610a001d690e04230924cfca667053899b003d1af769537740f2b6e6749"
+    },
+    {
+      "name": "cuda-toolkit-13-config-common",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "noarch",
+      "file": "cuda-toolkit-13-config-common-13.2.75-1.noarch.rpm",
+      "bytes": 8737,
+      "sha256": "66546446d4b99f9f71f06d63ba0f8eed94606e8a5fd126bf6447f74e2ae85b85"
+    },
+    {
+      "name": "cuda-toolkit-config-common",
+      "epoch": "0",
+      "version": "13.2.75",
+      "release": "1",
+      "arch": "noarch",
+      "file": "cuda-toolkit-config-common-13.2.75-1.noarch.rpm",
+      "bytes": 8724,
+      "sha256": "3cdf440cfa95486db8cb35a480624a3b6dca3002b36ac4d00bd181a4b2727148"
+    },
+    {
+      "name": "cuda-tools-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-tools-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 6930,
+      "sha256": "9d715e7f312b16b8559d6ded8ebbbe6a56df509614f2c5935fe238ba7df7d2a9"
+    },
+    {
+      "name": "cuda-visual-tools-13-2",
+      "epoch": "0",
+      "version": "13.2.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "cuda-visual-tools-13-2-13.2.1-1.x86_64.rpm",
+      "bytes": 7090,
+      "sha256": "e5963182d3e42549a90a86492bcb71454df1ba6e4743d1b2ca6ddcf0beda6a3e"
+    },
+    {
+      "name": "gds-tools-13-2",
+      "epoch": "0",
+      "version": "1.17.1.22",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "gds-tools-13-2-1.17.1.22-1.x86_64.rpm",
+      "bytes": 47853831,
+      "sha256": "89411a90018ff588ea312709beec3feb959dc074be40ef3f3d5f1ea716f30b5d"
+    },
+    {
+      "name": "libcublas-13-2",
+      "epoch": "0",
+      "version": "13.4.0.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcublas-13-2-13.4.0.1-1.x86_64.rpm",
+      "bytes": 404681578,
+      "sha256": "e88715db9a4333a1a8d6274b6184cfb571e2a57fee0151569b9fe09058d77f84"
+    },
+    {
+      "name": "libcublas-devel-13-2",
+      "epoch": "0",
+      "version": "13.4.0.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcublas-devel-13-2-13.4.0.1-1.x86_64.rpm",
+      "bytes": 499937291,
+      "sha256": "9eaa5a0c400a40da316a4312761450ce736e88d61d45af17b20a9e34fdf7f82c"
+    },
+    {
+      "name": "libcufft-13-2",
+      "epoch": "0",
+      "version": "12.2.0.46",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcufft-13-2-12.2.0.46-1.x86_64.rpm",
+      "bytes": 218469272,
+      "sha256": "e54b8c9a089f120465a1dacc59d8d2ac85ecc8c3ade93065e76c3a67f8ff7f39"
+    },
+    {
+      "name": "libcufft-devel-13-2",
+      "epoch": "0",
+      "version": "12.2.0.46",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcufft-devel-13-2-12.2.0.46-1.x86_64.rpm",
+      "bytes": 219719061,
+      "sha256": "e0dace4ed0efcd6d315f86aa65ef9e8731bf8f1b61df9e38a88248cbbceb8caa"
+    },
+    {
+      "name": "libcufile-13-2",
+      "epoch": "0",
+      "version": "1.17.1.22",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcufile-13-2-1.17.1.22-1.x86_64.rpm",
+      "bytes": 1399881,
+      "sha256": "cbb9116d5fd4f230e0be6a3d9477458debddbaeb0513a8bfdafeb0af04c9ec6b"
+    },
+    {
+      "name": "libcufile-devel-13-2",
+      "epoch": "0",
+      "version": "1.17.1.22",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcufile-devel-13-2-1.17.1.22-1.x86_64.rpm",
+      "bytes": 6285720,
+      "sha256": "8ddc6e6fc5546b312f09e2ae7258679f2d61dd579d4f66ca85d17202e8695313"
+    },
+    {
+      "name": "libcuobjclient-13-2",
+      "epoch": "0",
+      "version": "1.1.1.22",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcuobjclient-13-2-1.1.1.22-1.x86_64.rpm",
+      "bytes": 191877,
+      "sha256": "6d43d40b2d90f522a4248dbf4027104c3cccc42b3664bdf2cbacc5ee0141ef03"
+    },
+    {
+      "name": "libcuobjclient-devel-13-2",
+      "epoch": "0",
+      "version": "1.1.1.22",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcuobjclient-devel-13-2-1.1.1.22-1.x86_64.rpm",
+      "bytes": 28956,
+      "sha256": "ce5be82f81697abffe650d16a9d1c148003c1abd1ef541221a9701533f076755"
+    },
+    {
+      "name": "libcurand-13-2",
+      "epoch": "0",
+      "version": "10.4.2.55",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcurand-13-2-10.4.2.55-1.x86_64.rpm",
+      "bytes": 58756285,
+      "sha256": "a882656897a916c1094dff05c9950eacc24511bce2ea6c91d90344ac91639cdc"
+    },
+    {
+      "name": "libcurand-devel-13-2",
+      "epoch": "0",
+      "version": "10.4.2.55",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcurand-devel-13-2-10.4.2.55-1.x86_64.rpm",
+      "bytes": 59110571,
+      "sha256": "d7c9ae297d09ca71aea0d7b79a724fca7d676843146805f11a117177e8417cee"
+    },
+    {
+      "name": "libcusolver-13-2",
+      "epoch": "0",
+      "version": "12.2.0.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcusolver-13-2-12.2.0.1-1.x86_64.rpm",
+      "bytes": 227112218,
+      "sha256": "8b3cff194f147f92a4bef746dbd5870f954a0462f16e9db8af7e62d53fca8444"
+    },
+    {
+      "name": "libcusolver-devel-13-2",
+      "epoch": "0",
+      "version": "12.2.0.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcusolver-devel-13-2-12.2.0.1-1.x86_64.rpm",
+      "bytes": 144842076,
+      "sha256": "83acc3416f33d5428d10c66ea17fadf273f9e00c98cd187ad0180e619133027f"
+    },
+    {
+      "name": "libcusparse-13-2",
+      "epoch": "0",
+      "version": "12.7.10.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcusparse-13-2-12.7.10.1-1.x86_64.rpm",
+      "bytes": 150865155,
+      "sha256": "c359e192152c9778133fbacf13fc81365d7465e52900d2340e6c91baa242243a"
+    },
+    {
+      "name": "libcusparse-devel-13-2",
+      "epoch": "0",
+      "version": "12.7.10.1",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libcusparse-devel-13-2-12.7.10.1-1.x86_64.rpm",
+      "bytes": 310543629,
+      "sha256": "6887e607f13dff48b23351231924cf7950771b2a1edf2558f70717b7b4ddf060"
+    },
+    {
+      "name": "libnpp-13-2",
+      "epoch": "0",
+      "version": "13.1.0.48",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnpp-13-2-13.1.0.48-1.x86_64.rpm",
+      "bytes": 135621693,
+      "sha256": "be9d3a0274b2a96afe4e64a472894f2e47267094bfbffb3f63d130b888b19787"
+    },
+    {
+      "name": "libnpp-devel-13-2",
+      "epoch": "0",
+      "version": "13.1.0.48",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnpp-devel-13-2-13.1.0.48-1.x86_64.rpm",
+      "bytes": 133070744,
+      "sha256": "60e414736f4ec75dd519721d5c595d84d52bf16cacd7a44f3a3c5038488ad5f7"
+    },
+    {
+      "name": "libnvfatbin-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvfatbin-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 560575,
+      "sha256": "ba42defc885191d18d2b9a3b1154599fce4c952b66851aab1fcce04782e23750"
+    },
+    {
+      "name": "libnvfatbin-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvfatbin-devel-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 1132412,
+      "sha256": "b36c3fec637daec7b0984c395011367fa3d0216377f1487ae83fdbf2a9c10fa0"
+    },
+    {
+      "name": "libnvjitlink-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvjitlink-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 41065834,
+      "sha256": "b6a9be2d4736799f51783f9463a729a4a9f68de160fa0cd5926c06ff61fb5c8c"
+    },
+    {
+      "name": "libnvjitlink-devel-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvjitlink-devel-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 38634971,
+      "sha256": "c547c027c82011a959031047772da3d65195adf68796f42bd042fc0c252cc07c"
+    },
+    {
+      "name": "libnvjpeg-13-2",
+      "epoch": "0",
+      "version": "13.1.0.48",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvjpeg-13-2-13.1.0.48-1.x86_64.rpm",
+      "bytes": 3804194,
+      "sha256": "341db2ff9659d37c02ffc41877835291d6599ee30344f731f198c4c4bd6d4d1b"
+    },
+    {
+      "name": "libnvjpeg-devel-13-2",
+      "epoch": "0",
+      "version": "13.1.0.48",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvjpeg-devel-13-2-13.1.0.48-1.x86_64.rpm",
+      "bytes": 3651859,
+      "sha256": "06c8aea81385359646830b2f7c40b8336fb786187eaec09891ea260db996cce3"
+    },
+    {
+      "name": "libnvptxcompiler-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvptxcompiler-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 24524883,
+      "sha256": "f6aca00dff23e95a96f832346564bb074961b6d03d37a62446bdae748b3bfb84"
+    },
+    {
+      "name": "libnvvm-13-2",
+      "epoch": "0",
+      "version": "13.2.78",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "libnvvm-13-2-13.2.78-1.x86_64.rpm",
+      "bytes": 63768106,
+      "sha256": "7afaada597609cc17aa06092cd455e436f48ed1c821c1fe740cc420f479bb3af"
+    },
+    {
+      "name": "nsight-compute-2026.1.1",
+      "epoch": "0",
+      "version": "2026.1.1.2",
+      "release": "1",
+      "arch": "x86_64",
+      "file": "nsight-compute-2026.1.1-2026.1.1.2-1.x86_64.rpm",
+      "bytes": 475868837,
+      "sha256": "3bb4698ff28c80865f55835e5f35f585675b76908016c54166e6938877b98d37"
+    },
+    {
+      "name": "nsight-systems-2025.6.3",
+      "epoch": "0",
+      "version": "2025.6.3.541_256337736014v0",
+      "release": "0",
+      "arch": "x86_64",
+      "file": "nsight-systems-2025.6.3-2025.6.3.541_3773601-0.x86_64.rpm",
+      "bytes": 413983796,
+      "sha256": "1c288634950e05b54ba04373d5f7c12b13f13e7b3f40e85ab17cbe5b917f47c6"
+    }
+  ]
+}

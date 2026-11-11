@@ -75,6 +75,9 @@ jobs:
       - name: Verify Fedora release matrix controls
         run: python3 -m unittest discover -s tests/scripts -p 'test_fedora_release_matrix.py'
 
+      - name: Verify Fedora CUDA RPM controls
+        run: python3 -m unittest discover -s tests/scripts -p 'test_fedora_cuda_rpms.py'
+
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
 
@@ -1787,6 +1790,17 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
         run: |
           set -euo pipefail
+
+          if [ "${{ matrix.fedora }}" = "45" ]; then
+            # NVIDIA does not publish a Fedora 45 toolkit. Its official Fedora
+            # 43 CUDA 13.2.1 RPMs match pc-papi's working build-time toolkit.
+            # Every vendor package and the public signing identity are pinned;
+            # no NVIDIA driver or floating CUDA repository is installed.
+            cuda_rpm_cache="${POLARIS_CUDA_RPM_CACHE:-${GITHUB_WORKSPACE}/.cuda-rpm-cache}"
+            dnf install -y gnupg2
+            python3 scripts/ci/install-fedora45-cuda.py --cache "$cuda_rpm_cache"
+            exit 0
+          fi
 
           architecture="$(uname -m)"
           cuda_supported_architectures=("x86_64" "aarch64")

@@ -2,6 +2,7 @@
 """Validate explicit release-package build and runtime dependencies."""
 
 from pathlib import Path
+import importlib.util
 import re
 import shlex
 
@@ -1314,6 +1315,20 @@ spec = read("packaging/linux/fedora/Polaris.spec")
 require_block(spec, "%elif 0%{?fedora} <= 45\nBuildRequires: gcc15\nBuildRequires: gcc15-c++\n%global cc_binary gcc-15\n%global cxx_binary g++-15\n%global boost_use_static OFF\n%global cuda_version 13.2.1\n%global cuda_build 595.58.03\n", "Fedora44/45 compiler and CUDA policy")
 
 cuda_step = workflow_run_script(workflow_step(fedora_job, "Install CUDA toolkit"))
+require_block(cuda_step, 'if [ "${{ matrix.fedora }}" = "45" ]; then', "Fedora 45 CUDA RPM route")
+require_block(cuda_step, 'python3 scripts/ci/install-fedora45-cuda.py --cache "$cuda_rpm_cache"\n  exit 0\nfi',
+              "Fedora 45 CUDA RPM route")
+if cuda_step.index('if [ "${{ matrix.fedora }}" = "45" ]; then') > cuda_step.index('cuda_version="13.2.1"'):
+    raise AssertionError("Fedora 45 CUDA RPM route must precede the Fedora 44 runfile")
+cuda_controls = workflow_step(resolve_job, "Verify Fedora CUDA RPM controls")
+if cuda_controls.strip() != "run: python3 -m unittest discover -s tests/scripts -p 'test_fedora_cuda_rpms.py'":
+    raise AssertionError("resolve-source must run Fedora CUDA RPM controls")
+cuda_spec = importlib.util.spec_from_file_location('fedora_cuda_pins', ROOT / 'scripts/ci/install-fedora45-cuda.py')
+cuda_pins = importlib.util.module_from_spec(cuda_spec)
+cuda_spec.loader.exec_module(cuda_pins)
+cuda_pins.load_lock(ROOT / 'scripts/ci/cuda-fedora45-rpm-lock.json')
+if cuda_pins.digest(ROOT / 'scripts/ci/nvidia-fedora43-cuda.pub') != cuda_pins.KEY_SHA256:
+    raise AssertionError("Fedora 45 CUDA RPM route public key changed")
 require_block(cuda_step, 'cuda_sha256="5514a3fe7bcea92b25073c7c100c3e64e7961a7e1dbad6955adb8b59806053f0"', "pinned Fedora CUDA installer")
 require_command(shell_tokens(cuda_step), ["sha256sum", "--check", "--status", "${GITHUB_WORKSPACE}/cuda.run.sha256"], "pinned Fedora CUDA installer")
 if cuda_step.index("sha256sum --check --status") > cuda_step.index('chmod a+x "${GITHUB_WORKSPACE}/cuda.run"'):
