@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <csignal>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1840,6 +1841,65 @@ TEST_F(EpicProcess, BlockerLabelUsesOnlyTheRefusingCensusRemainingListingBudget)
   EXPECT_EQ(error, "launcher_census_unresolved");
   EXPECT_TRUE(label.empty());
   EXPECT_EQ(host->proc_listings, 16);
+  EXPECT_TRUE(host->signals.empty());
+}
+
+namespace {
+  /**
+   * papi's Orca on pc-papi as Lane B read it for #588 on 2026-11-11 (36a2999f): the AppImage runtime, which serves its
+   * mount, and the Electron app inside the mount, both under the user manager; the app's helpers and crash handler;
+   * and its node daemon, a plain executable unpacked outside the mount, in a systemd scope of its own. Only the
+   * runtime carries the AppImage magic.
+   */
+  fs::path add_orca(fixture_t &host) {
+    const fs::path mount = "/tmp/.mount_orca-lgdDMad";
+    const fs::path runtime = "/fixture/owner/.local/opt/orca/1.4.180/orca-linux.AppImage";
+    host.add_process(3885638, mount / "orca-ide", "/fixture/owner", 39019682, 1784);
+    host.add_process(3885655, runtime, "/fixture/owner", 39019684, 1784);
+    host.headers[runtime] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    for (const auto &[pid, start, parent] : std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>> {
+           {3885774, 39019695, 3885638}, {3885781, 39019696, 3885638}, {3885799, 39019699, 3885781}, {3886315, 39019762, 3885638},
+           {3886325, 39019763, 3885638}, {3886507, 39019782, 3885638}, {3886640, 39019791, 3885799}, {3886752, 39019801, 3885638}}) {
+      host.add_process(pid, mount / "orca-ide", "/fixture/owner", start, parent);
+    }
+    host.add_process(3886217, mount / "chrome_crashpad_handler", "/fixture/owner", 39019755, 1784);
+    host.add_process(3886651, "/fixture/owner/.cache/orca/appimage/c8a1bc32c3d21cae77fd9dfa/efa87ac6f57503cff829d54d/resources/node-runtime/bin/node",
+                     "/fixture/owner", 39019793, 3885638);
+    host.files["/proc/3886651/cgroup"] = "0::" + host.manager + "/app.slice/orca-daemon.scope\n";
+    return runtime;
+  }
+}  // namespace
+
+TEST_F(EpicProcess, BlockerLabelNamesOrcaBesideTheRealHostsProtectedSessionTasks) {
+  // #588 on pc-papi: with papi's Orca AppImage running, one owner launch answered with the generic refusal. The census
+  // sets pc-papi's eight protected owner tasks aside by their session and system roles (D-A (B)); the name's own pass
+  // refused on the first of them, so no desktop with a user manager could be named. Placed as the census places them,
+  // they cannot be another AppImage, and Orca's runtime is the only task carrying the magic.
+  host->pids.clear();
+  host->desktop_session_host();
+  add_orca(*host);
+  std::string label = "stale";
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  EXPECT_EQ(label, "orca-linux.AppImage");
+  EXPECT_EQ(host->proc_listings, 3); // one refusing census, two presentation bookends; no retry
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, BlockerLabelIsGenericWhenAPlacedProtectedTaskChangesItsRoleBeforeTheNameIsShown) {
+  // The same desktop, but kwin_wayland's unit changes between its placement and the name's last bookend: the
+  // placement no longer holds, so the refusal stays generic, as it does for any other change during that proof.
+  host->pids.clear();
+  host->desktop_session_host();
+  add_orca(*host);
+  host->before_listing = [&] {
+    if (host->proc_listings == 3) host->files["/proc/4966/cgroup"] = "0::" + host->manager + "/app.slice/mylauncher.service\n";
+  };
+  std::string label = "stale";
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  EXPECT_TRUE(label.empty());
   EXPECT_TRUE(host->signals.empty());
 }
 
