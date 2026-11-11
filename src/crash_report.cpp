@@ -501,8 +501,7 @@ namespace crash_report {
   }
 
   int note_failed_start(int exit_code, const char *reason) {
-    // Wired into main() by the next commit; until then nothing is recorded.
-    (void) reason;
+    note_clean_exit(exit_code, reason);
     return exit_code;
   }
 
