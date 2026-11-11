@@ -1,12 +1,13 @@
 /**
  * @file tests/unit/test_crypto_cipher.cpp
- * @brief Validate AES-GCM decryption of [tag][cipher text] buffers, including ones too short to carry the tag.
+ * @brief Validate certificate credentials and AES-GCM decryption of [tag][cipher text] buffers.
  */
 
 #include <src/crypto.h>
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -36,6 +37,31 @@ namespace {
     return {reinterpret_cast<const char *>(bytes.data()), bytes.size()};
   }
 }  // namespace
+
+TEST(CryptoCredentials, PreservesCommonNamesAndCertificateSignature) {
+  constexpr std::string_view common_name = "Polaris certificate compatibility";
+  constexpr std::uint32_t key_bits = 2048;
+  const auto credentials = crypto::gen_creds(common_name, key_bits);
+  const auto certificate = crypto::x509(credentials.x509);
+  ASSERT_NE(certificate, nullptr);
+
+  std::array<char, 256> subject_cn {};
+  std::array<char, 256> issuer_cn {};
+  ASSERT_EQ(X509_NAME_get_text_by_NID(X509_get_subject_name(certificate.get()), NID_commonName, subject_cn.data(), subject_cn.size()), common_name.size());
+  ASSERT_EQ(X509_NAME_get_text_by_NID(X509_get_issuer_name(certificate.get()), NID_commonName, issuer_cn.data(), issuer_cn.size()), common_name.size());
+  EXPECT_EQ(std::string_view(subject_cn.data()), common_name);
+  EXPECT_EQ(std::string_view(issuer_cn.data()), common_name);
+
+  const ASN1_BIT_STRING *signature = nullptr;
+  X509_get0_signature(&signature, nullptr, certificate.get());
+  ASSERT_NE(signature, nullptr);
+  ASSERT_EQ(ASN1_STRING_length(signature), key_bits / 8);
+  const std::string_view expected_signature {
+    reinterpret_cast<const char *>(ASN1_STRING_get0_data(signature)),
+    static_cast<std::size_t>(ASN1_STRING_length(signature))
+  };
+  EXPECT_EQ(crypto::signature(certificate), expected_signature);
+}
 
 TEST(GcmDecrypt, RefusesInputShorterThanItsTag) {
   for (const auto bytes : {std::size_t {0}, std::size_t {1}, std::size_t {15}}) {
