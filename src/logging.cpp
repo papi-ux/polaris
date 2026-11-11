@@ -444,6 +444,11 @@ namespace logging {
   }
 #endif
 
+  bool runtime_log_owned_elsewhere() {
+    // Staging's behaviour, kept for the tests-only commit: the process is not told.
+    return false;
+  }
+
   void log_flush() {
     if (sink) {
       sink->flush();

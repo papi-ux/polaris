@@ -649,6 +649,36 @@ namespace args {
 )";
   }
 
+  std::string version_text() {
+    std::string text = PROJECT_NAME " version: " PROJECT_VERSION " commit: " PROJECT_VERSION_COMMIT "\n";
+#ifdef __linux__
+  #ifdef POLARIS_BUILD_CUDA
+    text += "Build features: cuda=enabled";
+  #else
+    text += "Build features: cuda=disabled";
+  #endif
+  #ifdef POLARIS_BUILD_VULKAN
+    text += " vulkan=enabled\n";
+  #else
+    text += " vulkan=disabled\n";
+  #endif
+#endif
+    return text;
+  }
+
+  bool is_version_request(int argc, const char *const *argv) {
+    for (int index = 1; index < argc; ++index) {
+      const std::string_view argument {argv[index] != nullptr ? argv[index] : ""};
+      if (argument == "--help"sv) {
+        return false;
+      }
+      if (argument.starts_with("--"sv)) {
+        return argument == "--version"sv;
+      }
+    }
+    return false;
+  }
+
   int version() {
     // version was already logged at startup
 #ifdef _WIN32

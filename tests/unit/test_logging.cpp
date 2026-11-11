@@ -313,6 +313,8 @@ TEST(LoggingOwnerLock, SecondInitFallsBackToConsoleAndLeavesOwnedFilesUntouched)
 
     auto guard = logging::init(2, active.string());
     ASSERT_TRUE(guard);
+    // #647: the process is told, so it can leave the owner's run record alone too.
+    EXPECT_TRUE(logging::runtime_log_owned_elsewhere());
     BOOST_LOG(info) << "must not reach the owned file";
     logging::log_flush();
 
@@ -326,6 +328,7 @@ TEST(LoggingOwnerLock, SecondInitFallsBackToConsoleAndLeavesOwnedFilesUntouched)
   // With the owner gone, the same init inherits the prior log normally.
   auto guard = logging::init(2, active.string());
   ASSERT_TRUE(guard);
+  EXPECT_FALSE(logging::runtime_log_owned_elsewhere());
   EXPECT_TRUE(fs::exists(active.string() + ".backup"));
   guard.reset();
 

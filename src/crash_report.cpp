@@ -424,14 +424,24 @@ namespace crash_report {
     return document;
   }
 
+  run_role_e classify_run_role(bool has_command, bool runtime_owned_elsewhere) {
+    if (has_command) {
+      return run_role_e::one_shot;
+    }
+    return runtime_owned_elsewhere ? run_role_e::second_process : run_role_e::service;
+  }
+
   void begin_run(
     const std::filesystem::path &state_dir,
     const std::string &log_path,
-    const std::string &version
+    const std::string &version,
+    run_role_e role
   ) {
     if (run_begun) {
       return;
     }
+    // Staging's behaviour, kept for the tests-only commit: every role is treated as the run.
+    (void) role;
     run_begun = true;
 
     std::error_code directory_error;
@@ -484,6 +494,12 @@ namespace crash_report {
     current_run_state.exit_code = exit_code;
     current_run_state.shutdown_reason = shutdown_reason != nullptr ? shutdown_reason : "";
     persist(current_run_state);
+  }
+
+  int note_failed_start(int exit_code, const char *reason) {
+    // Staging's behaviour, kept for the tests-only commit: nothing is recorded.
+    (void) reason;
+    return exit_code;
   }
 
   void install_fatal_handlers() {

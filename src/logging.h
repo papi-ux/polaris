@@ -115,6 +115,13 @@ namespace logging {
   void log_flush();
 
   /**
+   * @brief Whether the last init() found another process holding the runtime log.
+   * @details That process is the one serving from this configuration directory. A process that
+   * sees this is a second Polaris beside it and must leave the owner's per-run state alone.
+   */
+  bool runtime_log_owned_elsewhere();
+
+  /**
    * @brief Return the process-local generation of the active log file.
    *
    * The generation changes after initialization, automatic rotation, and every
