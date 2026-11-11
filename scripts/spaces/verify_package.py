@@ -56,6 +56,10 @@ def verify(root, prefix='/usr'):
     update_source = update_helper.read_text()
     assert update_source.startswith('#!/usr/bin/python3 -I\n')
     compile(update_source, str(update_helper), 'exec')
+    vendor_key = base / 'share/polaris/keys/polaris.gpg'
+    assert vendor_key.is_file() and not vendor_key.is_symlink()
+    assert not vendor_key.stat().st_mode & 0o022
+    assert hashlib.sha256(vendor_key.read_bytes()).hexdigest() == '3387618dcfa246abb5c53abc3a27893791a2de34916fc0954e6195b3a3bb0fe1'
     tree = ast.parse(source)
     values = {}
     for item in tree.body:

@@ -14,6 +14,14 @@ RPM with `rpm-ostree` using the [Bazzite guide](bazzite.md) instead.
 
 ## Install
 
+The guided install and Mission Control updater consume the matching Fedora release
+assets; the separately signed package repository is the `dnf upgrade` path described
+in [Repositories](repositories.md). Release RPMs use the same Polaris signing key,
+fingerprint `58017EDFFA9F803E07ED26F835F13F14FAAD15CC`. Before updating, the helper
+verifies the candidate against the public key shipped by the installed package,
+imports that key only if RPM does not already trust it, and leaves RPM's signature
+enforcement enabled. An unsigned package or a different signing key stops the update.
+
 ```bash
 wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm &&
 sudo dnf install ./Polaris-fedora44-x86_64.rpm &&

@@ -38,6 +38,9 @@ class Package(unittest.TestCase):
         self.update_helper = self.root / 'usr/bin/polaris-update-helper'
         self.update_helper.write_bytes((source / 'scripts/update_helper.py').read_bytes())
         self.update_helper.chmod(0o755)
+        self.vendor_key = self.root / 'usr/share/polaris/keys/polaris.gpg'
+        self.vendor_key.parent.mkdir(parents=True)
+        self.vendor_key.write_bytes((source / 'packaging/linux/keys/polaris.gpg').read_bytes())
         seccomp = (source / 'containers/multiseat/seccomp/steam.json').read_bytes()
         (self.data.parent / ('steam-seccomp-' + hashlib.sha256(seccomp).hexdigest() + '.json')).write_bytes(seccomp)
         policy = (source / 'packaging/linux/dev.polaris-stream.app.Polaris.policy.in').read_text()
@@ -103,6 +106,18 @@ class Package(unittest.TestCase):
         self.helper.chmod(0o755)
         for path in self.data.parent.glob('steam-seccomp-*.json'):
             path.unlink()
+        with self.assertRaises(AssertionError):
+            verify(self.root)
+
+    def test_packaged_vendor_key_must_be_exact_non_writable_and_present(self):
+        self.vendor_key.chmod(0o666)
+        with self.assertRaises(AssertionError):
+            verify(self.root)
+        self.vendor_key.chmod(0o644)
+        self.vendor_key.write_bytes(b'foreign key')
+        with self.assertRaises(AssertionError):
+            verify(self.root)
+        self.vendor_key.unlink()
         with self.assertRaises(AssertionError):
             verify(self.root)
 
