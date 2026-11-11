@@ -17,6 +17,7 @@ const section = (notes, heading, next) => {
 const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
   'Polaris-fedora44-x86_64.rpm',
+  'Polaris-fedora45-x86_64.rpm',
   'Polaris-steamos3.8-x86_64.pkg.tar.zst',
   'Polaris-steamos3.9-x86_64.pkg.tar.zst',
   'Polaris-ubuntu24.04-x86_64.deb',
@@ -61,7 +62,7 @@ describe('v1.5.0 release contract', () => {
     expect(notes.trim().length).toBeGreaterThan(0)
   })
 
-  it('ships exactly the five supported packages and installs them from this tag', () => {
+  it('ships exactly the six supported packages and installs them from this tag', () => {
     const notes = currentNotes()
     for (const asset of expectedAssets) {
       expect(notes).toContain(asset)
@@ -93,7 +94,7 @@ describe('v1.5.0 release contract', () => {
   // Containment alone lets a release row go missing unseen, which is how the SteamOS 3.9 package was
   // built for a while before these notes named it. The three asset lines name exactly the binaries
   // the release job requires.
-  it('names exactly the thirteen binaries the release job requires, each once', () => {
+  it('names exactly the fifteen binaries the release job requires, each once', () => {
     const lines = currentNotes().split('\n')
     const lineFor = (prefix) => {
       const line = lines.find((candidate) => candidate.startsWith(prefix))
@@ -101,7 +102,7 @@ describe('v1.5.0 release contract', () => {
       return line
     }
     const named = ['**Assets:**', '**DRM/KMS capture', '**Debug symbols'].flatMap((prefix) => assetsOn(lineFor(prefix)))
-    expect(named).toHaveLength(13)
+    expect(named).toHaveLength(15)
     expect(new Set(named).size).toBe(named.length)
     expect([...named].sort()).toEqual(requiredBinaryAssets())
     expect(assetsOn(lineFor('**Assets:**')).sort()).toEqual(expectedAssets)
