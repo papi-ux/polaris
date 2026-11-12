@@ -15,15 +15,18 @@ package, not a different one.
 
 ## One-command install
 
-On Fedora 44, Arch Linux and CachyOS, one command trusts the repository's
+On Fedora 44 and 45, Arch Linux and CachyOS, one command checks the repository's
 signing key, adds the repository, installs Polaris and runs host setup:
 
 ```bash
 curl -fsSL https://repo.papi-ux.com/install.sh | sh
 ```
 
-It announces each step before running it. An older Polaris already on the host
-is upgraded. On Arch and CachyOS it installs with `pacman -Syu`, so the rest of
+It runs four steps, signing key, repository, packages and host setup, and prints
+each command under its step before running it. What dnf, rpm-ostree, pacman and
+host setup print goes to a log file only you can read, named at the start and at
+the end; a command that fails shows the end of its output there and then. An
+older Polaris already on the host is upgraded. On Arch and CachyOS it installs with `pacman -Syu`, so the rest of
 the system upgrades in the same step, without asking. If the running kernel has
 no modules left on disk afterwards, or the loaded NVIDIA driver and its
 libraries differ, it asks for a reboot and leaves host setup until after it. To
@@ -33,20 +36,33 @@ read every command it would run without changing anything, pass `--dry-run`:
 curl -fsSL https://repo.papi-ux.com/install.sh | sh -s -- --dry-run
 ```
 
+It trusts only the key with the fingerprint on this page. On Fedora it reads the
+downloaded key into an empty keyring first, and unless that holds exactly one
+key, `58017EDFFA9F803E07ED26F835F13F14FAAD15CC`, it stops before importing any
+key or adding the repository. It then imports that key, keeps it as
+`/etc/pki/rpm-gpg/RPM-GPG-KEY-polaris`, and writes
+`/etc/yum.repos.d/polaris.repo` itself, naming that local key, so dnf never
+fetches a key on its own. On Arch it locally signs only that fingerprint and
+writes the `[polaris]` section itself. A Fedora release other than 44 or 45
+stops before the key or the repository is touched.
+
 What it leaves to you:
 
 - **Starting Polaris.** It runs host setup but does not start Polaris. Start it
   with `systemctl --user enable --now polaris`, then open the console as
   [After install or upgrade](#after-install-or-upgrade) describes.
-- **Leaving a beta.** It installs stable releases only. It does not replace a
-  1.4.13 beta, which already carries the version `1.4.13`, but it prints the
-  reinstall command that does;
-  [Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) explains it.
+- **Leaving a beta.** It installs stable releases only, and the release replaces
+  an earlier beta in an ordinary upgrade: 1.5.0 replaces a 1.5.0 beta or a
+  1.4.13 beta. Only a host whose 1.4.13 beta carries the very version the
+  repository serves is left as it is; the installer then prints the reinstall
+  command, and [Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) explains it.
 - **DRM/KMS capture.** It does not install `polaris-kms`. It prints the command
   that does, and the [Fedora](fedora.md#optional-drmkms-capture) and
   [Arch](arch.md#optional-drmkms-capture) guides cover the logout that follows.
 
-Everywhere else, Bazzite, Ubuntu and SteamOS included, follow your
+On Bazzite and other ostree hosts it layers Polaris with `rpm-ostree` and leaves
+host setup until after the reboot; the [Bazzite guide](bazzite.md) covers that
+path in full. Everywhere else, Ubuntu and SteamOS included, follow your
 distribution's guide. The sections below are the same steps by hand.
 
 ## After install or upgrade
@@ -70,6 +86,14 @@ systemctl --user restart polaris
 ```
 
 After that, `sudo dnf upgrade` carries Polaris with everything else.
+
+The repository file names `$releasever`, so dnf reads the Fedora 44 or the
+Fedora 45 tree to match the release the host runs, and the same file follows an
+upgrade from Fedora 44 to 45. **Before upgrading a host from Fedora 44 to 45,**
+replace a repository file fetched or written before 1.5.0: those name a single
+Fedora 44 tree, which still serves Fedora 44 packages but does not follow the
+upgrade. Run the first command above again, or the one-command install, which
+rewrites the file.
 
 There is no separate key import. The repository definition carries `gpgkey=`, so
 `dnf install` fetches the key itself and asks you to accept it:
@@ -167,7 +191,10 @@ rebuild service permits.
 
 The repository currently carries the latest stable release only: `polaris` and
 the optional DRM/KMS helper `polaris-kms`, at the same version. Prereleases are
-never published to it. Rolling back means installing an older release package by
+never published to it. Fedora has one tree for each release,
+`fedora/44/x86_64/` and `fedora/45/x86_64/`, each with the package built for that
+release, and `fedora/x86_64/` keeps a copy of the Fedora 44 tree for repository
+files from before 1.5.0. Rolling back means installing an older release package by
 hand from the [releases page](https://github.com/papi-ux/polaris/releases).
 
 Publishing runs on a schedule, so there is a short window after a release where

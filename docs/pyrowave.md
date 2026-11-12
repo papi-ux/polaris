@@ -14,7 +14,7 @@ It suits you if fast decoding, or sharp text on a streamed desktop (Nova for And
 4:4:4), matters more to you than bandwidth. It does not work in a [Space](spaces.md), which exists
 only if you set one up. You will need:
 
-- **The Polaris 1.4.13 release or the 1.5.0 beta on a Linux host**, not a 1.4.13 beta, which
+- **Polaris 1.4.13 or a later release on a Linux host**, not a 1.4.13 beta, which
   reports the same version as the release. If you install from the package repositories and never installed a beta by hand, you
   have the release ([otherwise, check](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)).
 - **Nova for Android 1.4.13-beta.3 or newer on the phone or handheld**, a beta that installs beside
@@ -54,10 +54,11 @@ before you stream; stable Nova keeps its own pairing.
 
 ### Polaris
 
-Install the [Polaris v1.4.13 release](https://github.com/papi-ux/polaris/releases/tag/v1.4.13)
+Install the [latest Polaris release](https://github.com/papi-ux/polaris/releases/latest)
 with the [update guide](updates.md) or the [package repositories](repositories.md), which never
-serve a beta. Every release package contains the encoder: Fedora 44 (Bazzite takes this RPM), Arch,
-Ubuntu 24.04 and SteamOS 3.8. Polaris 1.4.12 and older, and Windows and macOS hosts, have none.
+serve a beta. Every release package contains the encoder: Fedora 44 (Bazzite takes this RPM) and,
+from 1.5.0, Fedora 45, Arch, Ubuntu 24.04, SteamOS 3.8 and, from 1.5.0, SteamOS 3.9. Polaris
+1.4.12 and older, and Windows and macOS hosts, have none.
 
 **If you ever installed a Polaris 1.4.13 beta by hand**, an update will not replace it (the
 version is the same), and on Fedora neither does `dnf install` of the release file. Beta.1 has no

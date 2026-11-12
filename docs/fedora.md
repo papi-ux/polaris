@@ -1,13 +1,16 @@
-# Install on Fedora 44
+# Install on Fedora 44 and 45
 
-Fedora 44 is one of the two recommended Polaris package paths, and the official
-`Polaris-fedora44-x86_64.rpm` asset ships with every release. Fedora 44 is the only Fedora release
-with a published package; earlier Fedora versions should build from source.
+Fedora is one of the two recommended Polaris package paths, with Arch Linux. Each release ships a
+package for Fedora 44, `Polaris-fedora44-x86_64.rpm`, and from 1.5.0 one for Fedora 45,
+`Polaris-fedora45-x86_64.rpm`, each built against its own Fedora release. Install the one for the
+release your host runs, which `VERSION_ID` in `/etc/os-release` names. Earlier Fedora versions
+should build from source.
 
-On Fedora 45 the 1.4.13 RPM has been installed but not streamed from. In a clean Fedora 45
-prerelease container, dnf installed it with every library it links, and `polaris --version` and
-`polaris --setup-host` both exited 0. Nothing more was checked there, and the
-[one-command install](repositories.md#one-command-install) refuses Fedora 45.
+Fedora 44 and 45 are supported equally, and Fedora 44 has the longer release history. The 1.5.0
+streaming, benchmark and device testing ran on a Fedora 45 host. Before release, on a clean Fedora 45
+Workstation, the [one-command install](repositories.md#one-command-install), pointed at a private
+copy of the repository, installed the Fedora 45 package, started Polaris and served the web console,
+and it refused unsigned and wrongly signed packages.
 
 For an atomic Fedora derivative such as Bazzite, do not follow this page directly — layer the same
 RPM with `rpm-ostree` using the [Bazzite guide](bazzite.md) instead.
@@ -22,9 +25,20 @@ verifies the candidate against the public key shipped by the installed package,
 imports that key only if RPM does not already trust it, and leaves RPM's signature
 enforcement enabled. An unsigned package or a different signing key stops the update.
 
+On Fedora 44:
+
 ```bash
 wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm &&
 sudo dnf install ./Polaris-fedora44-x86_64.rpm &&
+sudo -H polaris --setup-host &&
+polaris
+```
+
+On Fedora 45:
+
+```bash
+wget --output-document=./Polaris-fedora45-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora45-x86_64.rpm &&
+sudo dnf install ./Polaris-fedora45-x86_64.rpm &&
 sudo -H polaris --setup-host &&
 polaris
 ```
@@ -47,7 +61,7 @@ local network only as shown in
 
 ## What `--setup-host` does
 
-The Fedora 44 RPM ships the udev rules and modules-load configuration that make virtual input
+The Fedora RPM ships the udev rules and modules-load configuration that make virtual input
 work. `--setup-host` installs them itself only when a package did not, and reports anything it
 could not complete. It does not silently take privileges you did not ask for.
 
@@ -84,7 +98,8 @@ sudo -H polaris --setup-host --enable-kms
 ```
 
 Without it, download the helper next to the Polaris RPM. The link takes the latest release, so
-[upgrade](#upgrade) Polaris first if yours is older:
+[upgrade](#upgrade) Polaris first if yours is older. This is the Fedora 44 helper; on Fedora 45,
+use `Polaris-kms-fedora45-x86_64.rpm` in both places:
 
 ```bash
 wget --output-document=./Polaris-kms-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-kms-fedora44-x86_64.rpm &&
@@ -130,7 +145,8 @@ systemctl --user restart polaris
 If `polaris-kms` is installed, name it too: `sudo dnf upgrade polaris polaris-kms`.
 
 Without the repository, install the newer RPM the same way. `dnf` replaces the package in place, and your configuration,
-pairing keys, and library stay in `~/.config/polaris`.
+pairing keys, and library stay in `~/.config/polaris`. These commands take the Fedora 44 files; on
+Fedora 45, use `fedora45` in each file name instead.
 
 ```bash
 wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm &&
@@ -164,6 +180,11 @@ With the files downloaded as above, it is
 
 Re-running `--setup-host` after an upgrade is how packaged udev rules and module configuration get
 refreshed.
+
+**Before upgrading the host from Fedora 44 to 45** with the repository added, check that its
+repository file follows the Fedora release. A file fetched or written before 1.5.0 names a single
+Fedora 44 tree and does not follow the upgrade;
+[Package repositories](repositories.md#fedora) explains how to replace it.
 
 After the restart, return to **https://localhost:47990/#/login** with the existing web credentials.
 

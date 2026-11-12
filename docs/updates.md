@@ -6,8 +6,8 @@ Polaris does not install packages or restart the host automatically.
 
 ## Host-approved Fedora updates
 
-The first host-update source path supports an existing native Fedora 44 x86_64
-installation. **Review update** asks the host to select the newest official
+The first host-update source path supports an existing native Fedora 44 or 45
+x86_64 installation. **Review update** asks the host to select the newest official
 Stable release, or the newest official stable, beta or release candidate when
 **Include beta releases** is enabled. The selected release is labeled Stable,
 Beta or Release candidate. Host selection is independent of release data fetched

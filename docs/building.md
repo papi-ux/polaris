@@ -18,6 +18,13 @@ polaris
 ```
 
 ```bash
+wget --output-document=./Polaris-fedora45-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora45-x86_64.rpm &&
+sudo dnf install ./Polaris-fedora45-x86_64.rpm &&
+sudo -H polaris --setup-host &&
+polaris
+```
+
+```bash
 wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
 sudo -H polaris --setup-host &&
@@ -25,9 +32,8 @@ polaris
 ```
 
 SteamOS installation must temporarily disable the read-only root and restore it before service startup. This is the
-SteamOS 3.8 command; the [SteamOS guide](steamos.md) has the SteamOS 3.9 command
-for the `v1.5.0-beta.2` prerelease and explains each step. The 3.9 command
-requires that beta to be published; it does not use the latest stable download:
+SteamOS 3.8 command; on SteamOS 3.9 the package is `Polaris-steamos3.9-x86_64.pkg.tar.zst`. The
+[SteamOS guide](steamos.md) has the command for each release and explains each step:
 
 ```bash
 wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst &&
@@ -74,10 +80,11 @@ those less-turnkey paths.
 | Host distro | Current path | Notes |
 | --- | --- | --- |
 | Fedora 44 | Published RPM asset | Most validated package path. |
+| Fedora 45 | Published RPM asset, from 1.5.0 | Built against Fedora 45; not interchangeable with the Fedora 44 package. |
 | Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
 | CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
 | SteamOS 3.8 x86_64 | Dedicated published `pkg.tar.zst` asset | Proven in Desktop Mode and in Game Mode on a Steam Deck OLED; not a rolling Arch package. |
-| SteamOS 3.9 x86_64 | Dedicated `v1.5.0-beta.2` prerelease `pkg.tar.zst` asset, once published | Built against Valve's SteamOS 3.9 repositories; not yet run on a Deck. Not interchangeable with the 3.8 package. |
+| SteamOS 3.9 x86_64 | Dedicated published `pkg.tar.zst` asset, from 1.5.0 | Built against Valve's SteamOS 3.9 repositories and exercised on a docked Steam Deck OLED on SteamOS 3.9.2. Not interchangeable with the 3.8 package. |
 | Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage and growing AMD/Mesa VAAPI validation, Steam/Game Mode needs more reports. |
 | Ubuntu 24.04 | Published DEB asset | Experimental tester package; broader desktop/GPU coverage needed. |
 | openSUSE Tumbleweed | Source build | Dedicated guide and CI build coverage; no published release asset yet. |

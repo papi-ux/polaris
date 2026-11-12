@@ -1,12 +1,12 @@
 # Quick start
 
-Take a Linux host from nothing to a first stream. Fedora 44 and Arch Linux are the
+Take a Linux host from nothing to a first stream. Fedora 44 and 45 and Arch Linux are the
 recommended package paths; if you run something else, start from [Compatibility](compatibility.md)
 to find your path before following the steps here.
 
 ## 1. Install the package
 
-On Fedora 44, Arch Linux or CachyOS, one command adds the signed
+On Fedora 44 and 45, Arch Linux or CachyOS, one command checks the signing key, adds the signed
 [package repository](repositories.md), installs Polaris and runs host setup:
 
 ```bash
@@ -18,11 +18,11 @@ Then do what its last lines say, usually starting Polaris with
 first, without changing anything, run
 `curl -fsSL https://repo.papi-ux.com/install.sh | sh -s -- --dry-run`. On Arch and CachyOS it
 upgrades the rest of the system in the same step. It installs the stable release only, not the
-optional `polaris-kms` helper, and it does not replace a 1.4.13 beta;
-[One-command install](repositories.md#one-command-install) has the details. The sections below
+optional `polaris-kms` helper; [One-command install](repositories.md#one-command-install) has
+the details. The sections below
 are the same steps by hand.
 
-### Fedora 44
+### Fedora 44 and 45
 
 ```bash
 sudo curl --location --output /etc/yum.repos.d/polaris.repo https://repo.papi-ux.com/fedora/polaris.repo &&
@@ -33,7 +33,8 @@ polaris
 
 Same four commands as downloading the RPM by hand, and `sudo dnf upgrade` carries Polaris from then on
 instead of another download at an exact filename. `dnf install` asks you to accept the signing key;
-the fingerprint to check it against is on the [repositories page](repositories.md#fedora).
+the fingerprint to check it against is on the [repositories page](repositories.md#fedora). The
+same repository file serves Fedora 44 and Fedora 45, each the package built for that release.
 
 The repository serves the latest stable release, and publishing runs on a schedule, so for a few hours
 after a release it still serves the previous one. If you want a brand new release the moment it lands,
@@ -62,7 +63,7 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 
 | Host | Path |
 |---|---|
-| SteamOS 3.8 | [SteamOS guide](steamos.md), proven on a Steam Deck OLED in Desktop Mode and Game Mode |
+| SteamOS 3.8 and 3.9 | [SteamOS guide](steamos.md), a package for each release; 3.8 is proven on a Steam Deck OLED in Desktop Mode and Game Mode |
 | Bazzite 44 | [Bazzite guide](bazzite.md), supported RPM installation: stage, reboot, then run host setup |
 | Steam Deck, ROG Ally, other handhelds | [Handhelds and Game Mode](handhelds.md), keeps Polaris reachable across mode switches |
 | Ubuntu 24.04 | [Ubuntu guide](ubuntu.md), experimental tester DEB |
