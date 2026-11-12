@@ -56,10 +56,14 @@
  * - Every judged report since the stream left its request is kept by rate. When a hold that lost at most 3% there,
  *   over twelve reports or more, starts losing significantly more at the same rate, the link has changed: the
  *   episode starts again from that hold, keeping only the higher rates that lost significantly more than it now
- *   does. A rate-independent result goes back to where the episode started, learns that loss as background, and
- *   does not probe again at that level for 1200 reports, only if no higher rate measured in the episode lost
- *   significantly more. Otherwise the loss depends on the rate above: the stream holds at the highest measured rate
- *   that lost no more, under the lowest one that did. Loss over 20% is learned only once the episode has looked
+ *   does. So does a hold clean over fewer reports whose probe started on a link's loss, over 20% and clearly over
+ *   the 10% background can cost (#659). A rate-independent result goes back to where the episode started, learns
+ *   that loss as background, and does not probe again at that level for 1200 reports, only if no higher rate
+ *   measured in the episode lost significantly more. Otherwise the loss depends on the rate above: the stream holds
+ *   at the highest measured rate that lost no more, under the lowest one that did, but never at or above a hold the
+ *   episode restarted from on a link's loss (#659). When that lowest rate is at or above such a hold, nothing above
+ *   is known on the new link: the stream climbs back in judged steps of at most 1.5x rather than retrying a rate far
+ *   above. Loss over 20% is learned only once the episode has looked
  *   under it, at the floor or at a rate that lost 20% or less: until then the floor is sampled first. At the floor
  *   itself, loss in the evidence for the verdict (the test that ended there, a hold's own reports, or the run that
  *   started a probe with no room under it) that is over 20% and clearly over the 10% background can cost there is
@@ -105,7 +109,7 @@
  *   never read any of it.
  *
  * tests/unit/test_live_tuning_policy.cpp pins this to its reference model, second for second, and replays two
- * RP6 loss runs and the release candidate's RP6 cap step to 6.5 Mbit/s (#228);
+ * RP6 loss runs and two release candidates' RP6 cap steps to 6.5 Mbit/s (#228, #659);
  * tests/unit/test_live_tuning_acceptance.cpp to the frozen acceptance bench: 22 of its 26 cells pass, and the four
  * that need a congestion signal while reports stop stay named as unmet. Under its wire layer,
  * none of 40 seeded 400 s runs at a 25987 kbps request and a 2000 kbps floor reaches the floor, with whole sends
@@ -362,6 +366,8 @@ namespace live_tuning_policy {
     std::optional<int> lo_;
     // A failed hold must survive a full upward dwell before it can erase its loss ceiling.
     std::optional<int> hold_failed_kbps_;
+    // The lowest hold this episode restarted from on a link's loss: the link fell under it. Until a rate there passes.
+    std::optional<int> link_fell_under_;
     // A queue ceiling displaced by a loss probe; proving its lower hold clean cannot retire it.
     std::optional<int> retained_queue_ceiling_;
     // The validated lower queue hold from which this staircase hold was promoted.

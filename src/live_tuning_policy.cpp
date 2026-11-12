@@ -234,6 +234,7 @@ namespace live_tuning_policy {
     const int left = target_;
     far_down_reset();
     measured_.clear();
+    link_fell_under_.reset();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
     queue_hold_below_.reset();
@@ -317,21 +318,32 @@ namespace live_tuning_policy {
     std::pair<double, double> above {0.0, 0.0};
     if (const auto ceiling = lossier_above(target_, above)) {
       // A higher rate this episode lost significantly more: the loss depends on the rate above here.
-      // Settle on the highest measured rate under that ceiling that loses no more than this one.
+      // Settle on the highest measured rate under that ceiling that loses no more than this one. Not at or above a hold
+      // the link fell under, though (#659): its entry is the run that started the probe, which can still read lighter
+      // than here, and settling there jumps straight back over a link that just showed it cannot carry it. With the
+      // ceiling at or above that hold, nothing above here is known on the new link: hold with no ceiling and climb
+      // back in judged steps, as at the floor, rather than retry a rate far above.
+      const bool fell = link_fell_under_ && *link_fell_under_ > target_ && *ceiling >= *link_fell_under_;
+      const int under = fell ? *link_fell_under_ : *ceiling;
       const auto &here = measured_.at(target_);
       int settle = target_;
       for (const auto &[kbps, stats] : measured_) {
-        if (kbps > target_ && kbps < *ceiling &&
+        if (kbps > target_ && kbps < under &&
             z_lower(here.second, here.first, stats.second, stats.first, std::max(2.0, disp())) < 2.0) {
           settle = kbps;
         }
       }
       const auto &at = measured_.at(settle);
       lo_loss_ = at.second / at.first;
-      hi_ = *ceiling;
+      if (fell) {
+        hi_.reset();
+        hi_stats_ = {0.0, 0.0};
+      } else {
+        hi_ = *ceiling;
+        hi_loss_ = above.second / above.first;
+        hi_stats_ = above;
+      }
       hi_is_queue_ = false;
-      hi_loss_ = above.second / above.first;
-      hi_stats_ = above;
       hi_rechecked_ = false;
       enter_hold(now_ms, settle);
       return;
@@ -449,6 +461,7 @@ namespace live_tuning_policy {
     if (state_ == state_e::normal) {
       episode_start_ = target_;
       measured_.clear();
+      link_fell_under_.reset();
       for (const auto &[expected, lost] : run_) {
         note_measured(target_, expected, lost);
       }
@@ -457,7 +470,10 @@ namespace live_tuning_policy {
       // R5-D2: a hold that had been clean here now loses significantly more at the same rate: the link changed.
       // What the episode measured before is another link's, except a higher rate that lost significantly more than
       // this rate loses now, which a worse link cannot have made better. Restart the ledger from this run and judge
-      // from this rate.
+      // from this rate. That takes twelve reports of the clean hold, or (#659) a link's loss in the reports that
+      // started this probe: over 20% and clearly over the 10% background can cost, as rule 5 reads the floor. Kept,
+      // the clean rates the old link carried let a later verdict settle straight back on them. A hold restarted on a
+      // link's loss is where the link fell, and bounds what this episode settles on.
       if (const auto held = measured_.find(target_); held != measured_.end()) {
         double run_frames = 0.0;
         double run_lost = 0.0;
@@ -468,9 +484,21 @@ namespace live_tuning_policy {
         const double prior_frames = held->second.first - run_frames;
         const double prior_lost = held->second.second - run_lost;
         const double dispersion = std::max(2.0, disp());
-        if (prior_frames >= HOLD_CHECK_REPORTS * (run_frames / std::max<std::size_t>(run_.size(), 1)) &&
-            prior_lost / prior_frames <= LOSSY_MIN &&
-            z_lower(prior_lost, prior_frames, run_lost, run_frames, dispersion) >= 2.0) {
+        // Judged on the reports that started this probe, the run's last duty window: a run that crept up on the
+        // detector before the link fell holds reports from before it.
+        double last_frames = 0.0;
+        double last_lost = 0.0;
+        for (auto it = run_.rbegin(); it != run_.rend() && it - run_.rbegin() < DUTY_WINDOW; ++it) {
+          last_frames += it->first;
+          last_lost += it->second;
+        }
+        const bool links_loss = last_frames > 0.0 && last_lost / last_frames > HEAVY_LOSS &&
+                                clearly_over(last_lost, last_frames, NEAR_FLOOR_LOSS);
+        const bool clean = prior_frames > 0.0 && prior_lost / prior_frames <= LOSSY_MIN &&
+                           z_lower(prior_lost, prior_frames, run_lost, run_frames, dispersion) >= 2.0;
+        const bool long_clean =
+          prior_frames >= HOLD_CHECK_REPORTS * (run_frames / std::max<std::size_t>(run_.size(), 1));
+        if (clean && (long_clean || links_loss)) {
           std::map<int, std::pair<double, double>> kept;
           for (auto it = measured_.upper_bound(target_); it != measured_.end(); ++it) {
             if (z_lower(run_lost, run_frames, it->second.second, it->second.first, dispersion) >= 2.0) {
@@ -482,6 +510,9 @@ namespace live_tuning_policy {
             note_measured(target_, expected, lost);
           }
           episode_start_ = target_;
+          if (links_loss) {
+            link_fell_under_ = link_fell_under_ ? std::min(*link_fell_under_, target_) : target_;
+          }
         }
       }
       hold_failed_kbps_ = target_;
@@ -772,6 +803,9 @@ namespace live_tuning_policy {
     // A clean lower rate does not prove the failed rate safe, and ordinary climbs add no dwell.
     if (hold_failed_kbps_ && target_ >= *hold_failed_kbps_) {
       hold_failed_kbps_.reset();
+    }
+    if (link_fell_under_ && target_ >= *link_fell_under_) {
+      link_fell_under_.reset();
     }
   }
 
@@ -1222,6 +1256,7 @@ namespace live_tuning_policy {
     fec_revert();
     far_down_reset();
     measured_.clear();
+    link_fell_under_.reset();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
     queue_hold_below_.reset();
@@ -1270,6 +1305,7 @@ namespace live_tuning_policy {
     fec_revert();
     far_down_reset();
     measured_.clear();
+    link_fell_under_.reset();
     retained_queue_ceiling_.reset();
     queue_continuation_from_.reset();
     queue_hold_below_.reset();
