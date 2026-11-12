@@ -262,6 +262,7 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
 The public release assets are currently:
 
 - `Polaris-fedora44-x86_64.rpm`
+- `Polaris-fedora45-x86_64.rpm`
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`
 - `Polaris-steamos3.8-x86_64.pkg.tar.zst`
