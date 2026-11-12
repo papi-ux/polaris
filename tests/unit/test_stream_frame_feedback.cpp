@@ -721,7 +721,11 @@ TEST(StreamFrameFeedbackIngest, ConcurrentSendsFeedbackAndRetirementOnlyJoinFull
 
   auto ledger = std::make_shared<ff::sender_ledger_t>(k_generation);
   auto scope = std::make_shared<ff::scope_feedback_t>(ledger, k_bound, k_launch);
-  std::atomic<int> released {0}, completed {0};
+  // finished is the oracle: published once the frame's path has finished but before the record's
+  // destructor hands its disposition to the ledger, so any join that can see the frame as sent also
+  // sees it here. completed, stored after the scope, only paces the chunks: a join can see a frame
+  // as sent before completed reaches it.
+  std::atomic<int> released {0}, finished {0}, completed {0};
   std::thread sender([&] {
     for (int frame = 1; frame <= k_frames; ++frame) {
       while (frame > released.load(std::memory_order_acquire)) std::this_thread::yield();
@@ -730,6 +734,7 @@ TEST(StreamFrameFeedbackIngest, ConcurrentSendsFeedbackAndRetirementOnlyJoinFull
         record.send_returned(true, frame % 17 != 0);
         if (frame % 17 == 0) record.send_returned(false, true);
         record.path_finished(false);
+        finished.store(frame, std::memory_order_release);
       }
       completed.store(frame, std::memory_order_release);
     }
@@ -747,7 +752,7 @@ TEST(StreamFrameFeedbackIngest, ConcurrentSendsFeedbackAndRetirementOnlyJoinFull
     ++joined;
     EXPECT_EQ(why, "joined");
     for (auto frame = receipt.from_frame_exclusive + 1; frame <= receipt.to_frame_inclusive; ++frame) {
-      ASSERT_LE(frame, static_cast<std::uint32_t>(completed.load(std::memory_order_acquire))) << "an unfinished send joined";
+      ASSERT_LE(frame, static_cast<std::uint32_t>(finished.load(std::memory_order_acquire))) << "an unfinished send joined";
       ASSERT_NE(frame % 17, 0u) << "a fallback frame joined";
       ASSERT_EQ(kbps_of(frame), receipt.encoder_setting.configured_encoder_kbps) << "a mixed range joined";
     }
