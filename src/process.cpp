@@ -8978,15 +8978,22 @@ namespace proc {
       if (!proof || !platf::epic::verify_launcher(*proof, reason))
         return launch_failure::refuse(503, "epic_launcher_proof_required", "Polaris needs to see Epic open on the host desktop once before a Private Stream.",
           "Open Epic once on the host desktop and scan Epic in the Polaris Library, then quit Epic completely and try Private Stream again. Repeat this after Polaris restarts or Epic updates.");
-      std::string owner_blocker_label;
-      const auto launchers = platf::epic::launcher_instances(reason, proof, &owner_blocker_label);
+      std::string owner_blocker_label, owner_blocker_reason;
+      const auto launchers = platf::epic::launcher_instances(reason, proof, &owner_blocker_label, &owner_blocker_reason);
       if (!launchers) {
         BOOST_LOG(info) << "Epic Private Stream: launcher census unknown: "sv << reason;
         // N4: an AppImage that is not the retained launcher cannot be told apart from Epic.
-        if (reason == "launcher_census_unresolved")
+        if (reason == "launcher_census_unresolved") {
+          // Whether the host console gets the blocker's name, and if not, the name pass's fixed reason code.
+          // The name itself never reaches the journal (#588).
+          if (owner_blocker_label.empty())
+            BOOST_LOG(info) << "Epic Private Stream: AppImage blocker not named: "sv << owner_blocker_reason;
+          else
+            BOOST_LOG(info) << "Epic Private Stream: AppImage blocker named for the host console"sv;
           return launch_failure::refuse(503, "epic_other_appimage_running", "Another AppImage app is running on the host, and Polaris can't tell it apart from Epic.",
             "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.",
             owner_blocker_label.empty() ? std::nullopt : std::make_optional(owner_blocker_label + " (an AppImage) is running; quit it to use Private Stream."));
+        }
         if (reason == "launcher_inventory_incomplete")
           return launch_failure::refuse(503, "epic_protected_process_unplaced", "A protected program on the host isn't a recognised session or system process, so Polaris can't confirm Epic is closed.",
             "Quit Epic and any app that hides its process details on the host, then try again, or use Mirror Desktop.");

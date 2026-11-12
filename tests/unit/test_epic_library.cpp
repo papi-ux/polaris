@@ -165,6 +165,17 @@ TEST(EpicLibraryTests, OwnerBlockerAccessorStaysBehindTheConsoleGuardAndOutOfGen
   }
 }
 
+TEST(EpicLibraryTests, OwnerBlockerJournalCarriesTheNamePassReasonButNeverTheName) {
+  // #588: the journal says why the name was left out, as a fixed code. The name itself stays on the host console.
+  std::ifstream stream(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/process.cpp");
+  ASSERT_TRUE(stream.good());
+  const std::string source {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+  const auto census = source.find("launcher_instances(reason, proof, &owner_blocker_label, &owner_blocker_reason)");
+  ASSERT_NE(census, std::string::npos);
+  EXPECT_NE(source.find("<< owner_blocker_reason", census), std::string::npos);
+  EXPECT_EQ(source.find("<< owner_blocker_label"), std::string::npos);
+}
+
 TEST(EpicLibraryTests, OwnerControlRequiresExactConfirmationAndSessionRevision) {
   const auto request = epic_library::parse_control_request(R"({"action":"adopt","session_id":"session","revision":"revision","confirm":true})");
   ASSERT_TRUE(request); EXPECT_TRUE(request->confirmed); EXPECT_EQ(request->session_id, "session");

@@ -97,8 +97,12 @@ namespace platf::epic {
   // Optional presentation only: a bounded basename of one confirmed blocker, never admission or
   // process-control authority. Every other owner task must be read as no AppImage, or be a protected
   // task placed by the same roles; it is empty for incomplete, unsafe, changed or ambiguous observations.
+  // Like the census, it judges by delta, so unrelated tasks coming and going do not empty it.
   // The caller must restrict it to the authenticated host console; reason stays non-identifying.
-  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr);
+  // When the census is launcher_census_unresolved and the label is empty, owner_blocker_reason gets
+  // why: a fixed code for the journal, never the label, a path or a command line.
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr,
+                                                std::string *owner_blocker_reason = nullptr);
   std::optional<launcher_proof_t> prove_launcher(std::string &reason);
   // Revalidates the retained original file without requiring a launcher or AppImage mount.
   bool verify_launcher(const launcher_proof_t &, std::string &reason);
@@ -291,7 +295,8 @@ namespace platf::epic {
     observation_t observe(const title_t &, std::shared_ptr<backend_t>);
     std::unique_ptr<adopted_game_t> adopt(const title_t &, const observation_t &, std::string &error, std::shared_ptr<backend_t>);
     std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason, std::shared_ptr<backend_t>);
-    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr);
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr,
+                                                  std::string *owner_blocker_reason = nullptr);
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t>);
     setup_readiness_t evaluate_setup(const launcher_proof_t *, const title_t *, bool host_idle,
                                      prerequisite_state_t, std::shared_ptr<backend_t>);

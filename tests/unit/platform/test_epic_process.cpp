@@ -1790,7 +1790,8 @@ TEST_F(EpicProcess, BlockerLabelNeverSurvivesUnknownOrSuccessfulOrForeignCensuse
 }
 
 TEST_F(EpicProcess, BlockerLabelIsGenericForIncompleteOrLateChangingBlockerSets) {
-  for (const auto &change : {"protected", "unreadable", "late_appimage", "late_foreign_owner", "late_birth"}) {
+  // A late birth that is not an AppImage no longer empties the name (#588); a late AppImage birth still does.
+  for (const auto &change : {"protected", "unreadable", "late_appimage", "late_foreign_owner", "late_appimage_birth"}) {
     host = std::make_shared<fixture_t>();
     const fs::path app = "/fixture/owner/Orca";
     host->add_process(45, app, "/fixture/owner", 10005);
@@ -1813,7 +1814,10 @@ TEST_F(EpicProcess, BlockerLabelIsGenericForIncompleteOrLateChangingBlockerSets)
         host->identities["/proc/46"].uid = 1000;
         host->files["/proc/46/status"] = "Uid:\t1000\t1000\t1000\t1000\n";
       }
-      if (std::string(change) == "late_birth") host->add_process(46, "/fixture/owner/Other", "/", 10006);
+      if (std::string(change) == "late_appimage_birth") {
+        host->add_process(46, "/fixture/owner/Other", "/", 10006);
+        host->headers["/fixture/owner/Other"] = std::string("\177ELF\0\0\0\0AI\002", 11);
+      }
     };
     // Put the known blocker first so the original reason is independent of later unreadability.
     host->pids.erase(std::find(host->pids.begin(), host->pids.end(), "45"));
@@ -1896,11 +1900,177 @@ TEST_F(EpicProcess, BlockerLabelIsGenericWhenAPlacedProtectedTaskChangesItsRoleB
   host->before_listing = [&] {
     if (host->proc_listings == 3) host->files["/proc/4966/cgroup"] = "0::" + host->manager + "/app.slice/mylauncher.service\n";
   };
-  std::string label = "stale";
-  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label));
+  std::string label = "stale", why;
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label, &why));
   EXPECT_EQ(error, "launcher_census_unresolved");
   EXPECT_TRUE(label.empty());
+  EXPECT_EQ(why, "blocker_set_changed");
   EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, BlockerLabelNamesOrcaWhileUnrelatedTasksComeAndGoDuringItsPass) {
+  // #588 on RC4 (74a8ad4f), pc-papi 2026-11-12: Orca was the only AppImage, and the owner launch was still refused with
+  // the generic text. The host's process list changed in 15 of 25 listings taken 100 ms apart, and the name pass
+  // required two whole-system listings to be identical. It now judges only what each listing adds or changes, as the
+  // census does, so births, exits and an exec that are not AppImages leave the name in place.
+  host->pids.clear();
+  host->desktop_session_host();
+  add_orca(*host);
+  host->add_process(700, "/usr/bin/docker", "/", 50700);
+  host->add_process(701, "/usr/bin/bash", "/", 50701);
+  host->add_foreign(702, 50702, "containerd-shim");
+  host->before_listing = [&] {
+    // The census refuses on its first listing. The pass's first two listings each see births and exits, the owner's and
+    // another user's, and an unrelated task execs into another plain program. Its third listing is quiet.
+    if (host->proc_listings == 2) {
+      host->add_process(800, "/usr/bin/docker", "/", 50800);
+      host->add_foreign(801, 50801, "runc");
+      host->vanish(700);
+      host->vanish(702);
+    }
+    if (host->proc_listings == 3) {
+      host->add_process(810, "/usr/bin/sleep", "/", 50810);
+      host->add_foreign(811, 50811, "runc");
+      host->vanish(800);
+      host->vanish(801);
+      host->identities["/usr/bin/git"] = regular(70100);
+      host->headers["/usr/bin/git"] = std::string("\177ELF\0\0\0\0\0\0\0", 11);
+      host->links["/proc/701/exe"] = "/usr/bin/git";
+      host->identities["/proc/701/exe"] = host->identities["/usr/bin/git"];
+    }
+  };
+  // A new unrelated task exits while the pass reads it: listed, owned, then gone before its executable is opened.
+  host->after_access = [&](const fs::path &path) {
+    if (path == "/proc/810/exe") host->vanish(810);
+  };
+  std::string label = "stale", why = "stale";
+  EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label, &why));
+  EXPECT_EQ(error, "launcher_census_unresolved");
+  EXPECT_EQ(label, "orca-linux.AppImage");
+  EXPECT_TRUE(why.empty());
+  EXPECT_EQ(host->proc_listings, 4); // one refusing census, three for the name; no retry
+  EXPECT_TRUE(host->opened.empty());
+  EXPECT_TRUE(host->signals.empty());
+
+  // The name reaches only the signed-in host console. A paired client gets the same generic refusal as before.
+  const std::string generic = "Another AppImage app is running on the host, and Polaris can't tell it apart from Epic.";
+  const std::string action = "Quit other AppImage apps on the host, then try Private Stream again, or use Mirror Desktop.";
+  launch_failure::clear();
+  launch_failure::refuse(503, "epic_other_appimage_running", generic, action, label + " (an AppImage) is running; quit it to use Private Stream.");
+  const auto refusal = launch_failure::take();
+  ASSERT_TRUE(refusal);
+  EXPECT_EQ(launch_failure::status_message(*refusal), generic + " " + action);
+  EXPECT_EQ(launch_failure::authenticated_owner_status_message(*refusal),
+            "orca-linux.AppImage (an AppImage) is running; quit it to use Private Stream. " + action);
+}
+
+TEST_F(EpicProcess, BlockerLabelIsGenericWithAReasonWhenThePinnedAppImageGoesDuringItsPass) {
+  // The one candidate the pass keeps: if Orca exits, is reaped or its PID is reused before the name is proved, the
+  // refusal stays generic and the journal can say why.
+  for (const auto &change : {"vanished", "exiting", "reused"}) {
+    host = std::make_shared<fixture_t>();
+    host->pids.clear();
+    host->desktop_session_host();
+    add_orca(*host);
+    host->add_process(700, "/usr/bin/docker", "/", 50700);
+    host->before_listing = [&, change] {
+      if (host->proc_listings == 2) host->add_process(800, "/usr/bin/docker", "/", 50800);
+      if (host->proc_listings != 3) return;
+      host->vanish(700);
+      if (std::string(change) == "vanished") host->vanish(3885655);
+      if (std::string(change) == "exiting") host->exiting(3885655);
+      if (std::string(change) == "reused") host->files["/proc/3885655/stat"] = stat_line(3885655, 39999999, 'S', 1784);
+    };
+    std::string label = "stale", why;
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label, &why)) << change;
+    EXPECT_EQ(error, "launcher_census_unresolved") << change;
+    EXPECT_TRUE(label.empty()) << change;
+    EXPECT_EQ(why, "blocker_set_changed") << change;
+    EXPECT_EQ(host->proc_listings, 3) << change;
+    EXPECT_TRUE(host->opened.empty());
+    EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, BlockerLabelStaysGenericForASecondAppImageWhetherItRunsThroughoutOrIsBornAmidChurn) {
+  for (const auto &when : {"throughout", "born_amid_churn"}) {
+    host = std::make_shared<fixture_t>();
+    host->pids.clear();
+    host->desktop_session_host();
+    add_orca(*host);
+    const fs::path other = "/fixture/owner/Applications/Other.AppImage";
+    host->add_process(700, "/usr/bin/docker", "/", 50700);
+    const auto second = [&] {
+      host->add_process(900, other, "/fixture/owner", 50900, 1784);
+      host->headers[other] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    };
+    if (std::string(when) == "throughout") second();
+    host->before_listing = [&, when] {
+      if (host->proc_listings != 3) return;
+      host->add_process(800, "/usr/bin/docker", "/", 50800);
+      host->vanish(700);
+      if (std::string(when) == "born_amid_churn") second();
+    };
+    std::string label = "stale", why;
+    EXPECT_FALSE(ep::testing::launcher_instances(error, host, nullptr, &label, &why)) << when;
+    EXPECT_EQ(error, "launcher_census_unresolved") << when;
+    EXPECT_TRUE(label.empty()) << when;
+    EXPECT_EQ(why, "multiple_appimage_blockers") << when;
+    EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, BlockerReasonIsOneFixedCodeWheneverTheNameIsLeftOut) {
+  // What the journal gets beside "launcher census unknown": never the name or a path, and nothing once it is named.
+  const auto expect = [&](const std::optional<std::size_t> &count, const std::string &name, const std::string &reason) {
+    std::string label = "stale", why = "stale";
+    EXPECT_EQ(ep::testing::launcher_instances(error, host, nullptr, &label, &why), count) << reason;
+    EXPECT_EQ(label, name) << reason;
+    EXPECT_EQ(why, reason) << name;
+    EXPECT_TRUE(host->signals.empty());
+  };
+  const auto orca = [&](const fs::path &app = "/fixture/owner/Orca") {
+    host = std::make_shared<fixture_t>();
+    host->add_process(45, app, "/fixture/owner", 10005);
+    host->headers[app] = std::string("\177ELF\0\0\0\0AI\002", 11);
+    host->pids.erase(std::find(host->pids.begin(), host->pids.end(), "45"));
+    host->pids.insert(host->pids.begin(), "45");
+  };
+
+  // Admitted, or refused for another reason: there is nothing to name, and no reason.
+  expect(0U, "", "");
+  host->links.erase("/proc/41/exe");
+  expect(std::nullopt, "", "");
+  EXPECT_EQ(error, "unreadable_process_link");
+
+  // A header that cannot be read refuses before any AppImage is pinned.
+  host = std::make_shared<fixture_t>();
+  host->headers.erase(runtime / "files/bin/wine64-preloader");
+  expect(std::nullopt, "", "blocker_unpinned");
+  EXPECT_EQ(error, "launcher_census_unresolved");
+
+  orca("/fixture/owner/Orca\nInjected");
+  expect(std::nullopt, "", "blocker_name_unpresentable");
+
+  orca();
+  host->identities["/fixture/owner/Orca"].mode = S_IFREG | 0777;
+  host->identities["/proc/45/exe"] = host->identities["/fixture/owner/Orca"];
+  expect(std::nullopt, "", "unsafe_blocker_file");
+
+  orca();
+  host->add_protected_process(46);
+  expect(std::nullopt, "", "blocker_identity_incomplete");
+
+  // Churn that never leaves a listing with nothing new to judge spends the census's listing budget.
+  orca();
+  host->before_listing = [&] { host->add_process(100 + host->proc_listings, "/usr/bin/worker", "/", 20000 + host->proc_listings); };
+  expect(std::nullopt, "", "blocker_budget_exhausted");
+  EXPECT_EQ(host->proc_listings, 16);
+
+  // Named: no reason, and the census's own reason is unchanged.
+  orca();
+  expect(std::nullopt, "Orca", "");
+  EXPECT_EQ(error, "launcher_census_unresolved");
 }
 
 TEST_F(EpicProcess, RetainedLauncherProofUsesTheOriginalAppImageAfterItsMountDisappears) {

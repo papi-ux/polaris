@@ -2135,8 +2135,17 @@ namespace platf::epic {
     struct engine_t {
       // This runs only AFTER the census has refused, using that attempt's remaining byte/listing
       // budget. It cannot change the reason, retry admission, grant ownership or signal anything.
+      //
+      // It judges the host the way the census does, by delta (#588): each listing's new or changed
+      // owner tasks are read, and it answers only from a listing with nothing left to judge. Any other
+      // AppImage, any protected task without a session or system role, and the pinned blocker
+      // changing, exiting or vanishing all leave the name out. An unrelated task that is born, execs or
+      // exits between listings is judged afresh or skipped, as the census does, rather than refusing
+      // the name because the whole-system listing moved. When the name is empty, @p why says why: one
+      // fixed, non-identifying code for the journal, never the name, a path or a command line.
       static std::string blocker_label(reader_t &read, const reader_t::owner_task_t &pinned,
-                                       const std::string &header, const std::string &boot, std::uint64_t owner) {
+                                       const std::string &header, const std::string &boot, std::uint64_t owner, std::string &why) {
+        why.clear();
         try {
           const auto label = pinned.exe.filename().string();
           const auto alnum = [](unsigned char c) {
@@ -2147,48 +2156,60 @@ namespace platf::epic {
           if (label.empty() || label.size() > 64 || !alnum(label.front()) || label.back() == ' ' ||
               !std::all_of(label.begin(), label.end(), [&](unsigned char c) {
                 return alnum(c) || c == ' ' || c == '.' || c == '_' || c == '-' || c == '+';
-              })) return {};
+              })) {
+            why = "blocker_name_unpresentable";
+            return {};
+          }
           require(owner == read.backend.owner_uid() && boot == read.boot(), "blocker_changed");
           require(safe_file(pinned.image, owner, true), "unsafe_blocker_file");
           const auto process = read.identity(pinned);
-          require(++read.listings <= census_listings, "blocker_budget_exhausted");
-          const auto tasks = read.listed_tasks();
-          require(std::find(tasks.begin(), tasks.end(), pinned.identity.pid) != tasks.end(), "blocker_changed");
-          // The census refused before placing the protected tasks it read; this pass reads and places its own.
+          // The census refused partway through a listing, before it had judged or placed everything.
+          // This pass judges and places every task itself, starting from its own first listing.
+          read.census_changed = "blocker_set_changed";
+          read.judged.clear();
           read.uninspected.clear();
           read.roles.clear();
-          std::vector<reader_t::owner_task_t> negatives;
-          std::vector<std::uint64_t> foreign;
-          for (const auto pid : tasks) {
-            if (pid == pinned.identity.pid) continue;
+          read.unproved = false;
+          const auto judge = [&](std::uint64_t pid) {
+            if (pid == pinned.identity.pid) {
+              // The one candidate: every later listing refuses if it vanishes, exits or its PID is reused.
+              read.note(pid, pinned.identity.start, reader_t::verdict_t::candidate);
+              return;
+            }
             if (!read.owner_owns(pid)) {
-              foreign.push_back(pid);
-              continue;
+              return;
             }
-            const auto protected_before = read.uninspected.size();
-            const auto task = read.owner_task(pid);
-            if (!task) {
-              // A protected task is placed below. An exiting one cannot disprove another AppImage for this presentation.
-              require(read.uninspected.size() > protected_before, "blocker_identity_incomplete");
-              continue;
+            bool candidate = false;
+            try {
+              const auto task = read.owner_task(pid);
+              if (!task) {
+                // Protected, and placed below by its role; or already exiting, so it can run nothing.
+                return;
+              }
+              const auto other = read.counted(read.backend.prefix(fs::path("/proc") / std::to_string(pid) / "exe", 11));
+              candidate = other.substr(0, 4) == std::string("\177ELF", 4) && other.substr(8, 2) == "AI";
+              require(!candidate, "multiple_appimage_blockers");
+              // One that changed stays unjudged, so the next listing judges it again.
+              if (read.stable_negative(task->identity, task->exe, &task->image)) {
+                read.note(pid, task->identity.start, reader_t::verdict_t::negative, task->exe, task->image);
+              }
             }
-            const auto path = fs::path("/proc") / std::to_string(pid);
-            const auto other_header = read.counted(read.backend.prefix(path / "exe", 11));
-            require(other_header.substr(0, 4) != std::string("\177ELF", 4) || other_header.substr(8, 2) != "AI",
-                    "multiple_appimage_blockers");
-            negatives.push_back(*task);
+            catch (const refusal_t &) {
+              // Only a task the kernel proves gone, and never another AppImage, is skipped.
+              read.rethrow_unless_gone(pid, candidate);
+            }
+          };
+          for (auto fresh = read.unjudged(); !fresh.empty(); fresh = read.unjudged()) {
+            for (const auto pid : fresh) {
+              judge(pid);
+            }
+            // A protected task is not another AppImage only as it is not a launcher (D-A (B)): by its session or
+            // system role, exactly as the census sets it aside. One with no such role leaves the name out.
+            read.place_protected("blocker_identity_incomplete");
           }
-          // A protected task is not another AppImage only as it is not a launcher (D-A (B)): by its session or system
-          // role, exactly as the census sets it aside. One with no such role leaves the presentation generic, as before.
-          read.place_protected("blocker_identity_incomplete");
-          require(++read.listings <= census_listings, "blocker_budget_exhausted");
-          require(tasks == read.listed_tasks(), "blocker_set_changed");
-          for (const auto &task : negatives) {
-            const auto path = fs::path("/proc") / std::to_string(task.identity.pid);
-            require(read.stable_negative(task.identity, task.exe, &task.image) &&
-                      same_image(task.image, read.stat(path / "exe")), "blocker_set_changed");
-          }
-          for (const auto pid : foreign) require(!read.owner_owns(pid), "blocker_set_changed");
+          const auto pinned_verdict = read.judged.find(pinned.identity.pid);
+          require(pinned_verdict != read.judged.end() && pinned_verdict->second.verdict == reader_t::verdict_t::candidate &&
+                    pinned_verdict->second.start == pinned.identity.start, "blocker_changed");
           read.recheck_placed("blocker_set_changed");
           require(read.unchanged(process) &&
                     read.counted(read.backend.prefix(fs::path("/proc") / std::to_string(pinned.identity.pid) / "exe", 11)) == header &&
@@ -2196,15 +2217,22 @@ namespace platf::epic {
                     read.backend.link("/proc/self/ns/cgroup") == read.group_namespace, "blocker_changed");
           return label;
         }
-        catch (const std::exception &) {
-          return {}; // Presentation is unavailable; retain the original, generic refusal.
+        catch (const refusal_t &error) {
+          // Every refusal is a fixed code. unjudged() refuses with the pass's change reason at its cap.
+          why = read.listings > census_listings ? "blocker_budget_exhausted" : error.what();
         }
+        catch (const std::exception &) {
+          why = "blocker_label_failed";
+        }
+        return {}; // Presentation is unavailable; retain the original, generic refusal.
       }
 
       static std::optional<std::size_t> launcher_instances(
-        std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher, std::string *owner_blocker_label) {
+        std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher, std::string *owner_blocker_label,
+        std::string *owner_blocker_reason) {
         reason.clear();
         if (owner_blocker_label) owner_blocker_label->clear();
+        if (owner_blocker_reason) owner_blocker_reason->clear();
         std::optional<reader_t> observation;
         std::optional<reader_t::owner_task_t> blocker;
         std::string blocker_header, boot;
@@ -2284,8 +2312,15 @@ namespace platf::epic {
         }
         catch (const refusal_t &error) {
           reason = error.what();
-          if (reason == "launcher_census_unresolved" && owner_blocker_label && blocker && observation) {
-            *owner_blocker_label = blocker_label(*observation, *blocker, blocker_header, boot, owner);
+          if (reason == "launcher_census_unresolved" && owner_blocker_label) {
+            // An unreadable header refuses before any AppImage is pinned, so there is nothing to name.
+            std::string why = "blocker_unpinned";
+            if (blocker && observation) {
+              *owner_blocker_label = blocker_label(*observation, *blocker, blocker_header, boot, owner, why);
+            }
+            if (owner_blocker_reason && owner_blocker_label->empty()) {
+              *owner_blocker_reason = why;
+            }
           }
         }
         catch (const std::exception &) {
@@ -2427,7 +2462,7 @@ namespace platf::epic {
             out.reason = reason;
           }
         }
-        const auto count = launcher_instances(reason, backend, out.proof == proof_state_t::valid ? proof : nullptr, nullptr);
+        const auto count = launcher_instances(reason, backend, out.proof == proof_state_t::valid ? proof : nullptr, nullptr, nullptr);
         if (!count) {
           out.reason = reason; // Generic: unresolved also includes an unreadable header, not just AppImages.
           return out;
@@ -2589,8 +2624,9 @@ namespace platf::epic {
     return desktop_launcher_executable(reason).has_value();
   }
 
-  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher, std::string *owner_blocker_label) {
-    return detail::engine_t::launcher_instances(reason, production_backend(), known_launcher, owner_blocker_label);
+  std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher, std::string *owner_blocker_label,
+                                                std::string *owner_blocker_reason) {
+    return detail::engine_t::launcher_instances(reason, production_backend(), known_launcher, owner_blocker_label, owner_blocker_reason);
   }
 
   std::optional<launcher_proof_t> prove_launcher(std::string &reason) {
@@ -2747,8 +2783,9 @@ namespace platf::epic {
       return std::nullopt;
     }
 
-    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher, std::string *owner_blocker_label) {
-      return detail::engine_t::launcher_instances(reason, std::move(backend), known_launcher, owner_blocker_label);
+    std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t> backend, const launcher_proof_t *known_launcher, std::string *owner_blocker_label,
+                                                  std::string *owner_blocker_reason) {
+      return detail::engine_t::launcher_instances(reason, std::move(backend), known_launcher, owner_blocker_label, owner_blocker_reason);
     }
 
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
