@@ -63,7 +63,9 @@ overloaded, takes one deep sample and goes no further.
   that cannot carry the floor.
 - **Under a link.** Settled under a link it found, it tries the rate above after 8 reports and then
   about every 20, and climbs back toward the request when that is clean, with the reason
-  `holding_under_the_link`.
+  `holding_under_the_link`. When the link itself falls, so that a rate it held clean starts losing,
+  Live Tuning stops trusting the rates the old link carried. It climbs back from where the new link
+  holds it, a judged step at a time, and never jumps straight back to the rate it held before.
 - **Queues.** A round trip time that rises and stays, 10 ms or more over the minute's lowest reading
   and not falling for 8 seconds, is a queue at the link: Live Tuning cuts 15% at a time until it
   drains and holds under it, with the reason `holding_under_a_queue`. A short rise is not a queue. A

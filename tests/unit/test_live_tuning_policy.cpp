@@ -2309,20 +2309,23 @@ TEST(LiveTuningPolicy, ARebasedFloorClampSkipsThePreviousRatesReportAndRecovers)
 namespace {
 
   /// #228's release-candidate device run, arm B (Live Tuning on), S3, as tests/fixtures/live-tuning-rp6-s3-cap-step.json
-  /// keeps it: every retained client report and 1 Hz RTT reading in time order, for the 25987 kbps request and the
-  /// 2000 kbps floor. From `from_ms` on only; before that, the same readings with every report clean and a 3 ms RTT,
-  /// and the rate an outside writer set at `from_ms`, if one is given. After the last reading, RTT readings alone at
-  /// the last value for `silent_ms`: the client sent nothing more. The target after every event, by time from
-  /// schedule zero.
+  /// keeps it, or another release candidate's S3 kept the same way (`name`): every retained client report and 1 Hz RTT
+  /// reading in time order, for the 25987 kbps request and the 2000 kbps floor. From `from_ms` on only; before that,
+  /// the same readings with every report clean and a 3 ms RTT, and the rate an outside writer set at `from_ms`, if one
+  /// is given. After the last reading, RTT readings alone at the last value for `silent_ms`: the client sent nothing
+  /// more. The target after every event, by time from schedule zero.
   struct rp6_s3_t {
     std::vector<std::pair<std::int64_t, int>> targets;
     live_tuning_policy::policy_t policy {25987, 2000};
     std::int64_t cap_step_ms = 0;
+    /// When the cap was removed, if the fixture says.
+    std::int64_t cap_removed_ms = std::numeric_limits<std::int64_t>::max();
   };
 
-  rp6_s3_t rp6_s3_replay(std::int64_t silent_ms, std::int64_t from_ms = std::numeric_limits<std::int64_t>::min(), int seeded_kbps = 0) {
-    static const nlohmann::json fixture = [] {
-      std::ifstream input(std::filesystem::path(POLARIS_SOURCE_DIR) / "tests/fixtures/live-tuning-rp6-s3-cap-step.json");
+  rp6_s3_t rp6_s3_replay(std::int64_t silent_ms, std::int64_t from_ms = std::numeric_limits<std::int64_t>::min(), int seeded_kbps = 0,
+                         const char *name = "live-tuning-rp6-s3-cap-step.json") {
+    const nlohmann::json fixture = [name] {
+      std::ifstream input(std::filesystem::path(POLARIS_SOURCE_DIR) / "tests/fixtures" / name);
       std::stringstream text;
       text << input.rdbuf();
       return nlohmann::json::parse(text.str());
@@ -2330,6 +2333,7 @@ namespace {
     constexpr std::int64_t origin = 200000;
     rp6_s3_t out;
     out.cap_step_ms = fixture.at("cap_step_ms").get<std::int64_t>();
+    out.cap_removed_ms = fixture.value("cap_removed_ms", out.cap_removed_ms);
     const auto &reports = fixture.at("reports_ms_expected_lost");
     const auto &rtts = fixture.at("rtt_ms");
     bool seeded = seeded_kbps == 0;
@@ -2515,6 +2519,88 @@ TEST(LiveTuningPolicy, Rp6S3HeavyLossAtTheFloorDoesNotSendTheStreamBackToTheRequ
   }
   EXPECT_EQ(replay.policy.target_kbps(), 2000);
   EXPECT_LT(replay.policy.background_loss(), 0.2);
+}
+
+TEST(LiveTuningPolicy, Rp6S3Rc2FromTheFloorReprobesInStepsNotBackToTheRateTheOldLinkCarried) {
+  // #659: RC2's device run, arm B, S3, every retained report and RTT reading (live-tuning-rp6-s3-rc2-cap-step.json). In
+  // the 15 Mbit/s phase this replay holds at 11096 and then 11577 kbps without loss, and at 8865 when the cap steps to
+  // 6.5 Mbit/s. That hold loses 118 of 165 and 195 of 197 frames, and the probe goes down to the floor, which loses 156
+  // of 163. The rates above it lost more, so the loss depends on the rate, and the policy settled on the highest rate
+  // in the episode that lost no more than the floor: 11577 at 120.14 s, clean in the 15 Mbit/s phase, over a link that
+  // now carried 6.5, with the reason holding_under_the_link. On the device it went straight back to 10747 five times,
+  // each meeting 76-98% loss. A hold that was clean and turns to a link's loss is where the link fell: the episode
+  // restarts from it, so what the old link carried is no longer in the ledger, and no verdict settles at or over that
+  // hold. From the floor the stream re-probes in steps of at most 1.5x and stays under the 6.5 Mbit/s link until the
+  // cap is removed.
+  const auto replay = rp6_s3_replay(0, std::numeric_limits<std::int64_t>::min(), 0, "live-tuning-rp6-s3-rc2-cap-step.json");
+  int old_link = 0;
+  std::optional<std::int64_t> floor_at;
+  int highest = 0;
+  int rises = 0;
+  for (std::size_t i = 1; i < replay.targets.size(); ++i) {
+    const auto &[at, kbps] = replay.targets[i];
+    const int before = replay.targets[i - 1].second;
+    if (at >= 20000 && at < replay.cap_step_ms) {
+      old_link = std::max(old_link, kbps);
+    }
+    if (at < replay.cap_step_ms || at >= replay.cap_removed_ms) {
+      continue;
+    }
+    if (!floor_at && kbps == 2000) {
+      floor_at = at;
+    }
+    if (floor_at) {
+      highest = std::max(highest, kbps);
+      if (kbps > before) {
+        ++rises;
+        EXPECT_LE(kbps, before * 1.5 + 1) << at << ": " << before << " -> " << kbps;
+      }
+    }
+  }
+  EXPECT_GE(old_link, 11000);
+  ASSERT_TRUE(floor_at);
+  EXPECT_LT(*floor_at, replay.cap_step_ms + 15000);
+  EXPECT_GT(rises, 0);
+  EXPECT_LT(highest, 6500);
+  EXPECT_LT(replay.policy.background_loss(), 0.2);
+}
+
+TEST(LiveTuningPolicy, ALinkThatFallsUnderACleanHoldIsClimbedBackInStepsNotJumpedBackTo) {
+  // #659 without the device's timing. From 30 s a 12000 kbps link, under which the stream holds at 11577 from 47 s. At
+  // 50 s, three reports into that hold, the link falls to 6500: a rate over it loses 98 of 100 frames, and one under
+  // it 60, as S3's floor lost most of its frames while the queue drained. Staging went down to the floor, settled
+  // straight back on 11577 at 67 s, and later learned 62% as background at 2500 and went back to the request. Here
+  // the stream holds at the floor and climbs back in judged steps of at most 1.5x, never to the rate it held over the
+  // old link, never to the request, and learns nothing.
+  live_tuning_policy::policy_t policy {25987, 2000};
+  std::vector<int> targets;
+  for (int second = 0; second < 300; ++second) {
+    const int link = second < 50 ? 12000 : 6500;
+    const double share = second < 30 ? 0.0 : policy.target_kbps() > link ? 0.98 : second < 50 ? 0.0 : 0.6;
+    for (int k = 0; k < 10; ++k) {
+      if (k == 5) {
+        policy.report(std::int64_t {second} * 1000 + 500, 120, std::floor(120 * share));
+      }
+      policy.rtt(std::int64_t {second} * 1000 + 100 * k + 50, 3.0);
+    }
+    targets.push_back(policy.target_kbps());
+  }
+  ASSERT_EQ(targets[49], 11577);
+  EXPECT_EQ(*std::min_element(targets.begin() + 50, targets.end()), 2000);
+  int highest_after_floor = 0;
+  bool floored = false;
+  for (int second = 51; second < static_cast<int>(targets.size()); ++second) {
+    floored = floored || targets[second] == 2000;
+    if (floored) {
+      highest_after_floor = std::max(highest_after_floor, targets[second]);
+    }
+    if (targets[second] > targets[second - 1]) {
+      EXPECT_LE(targets[second], targets[second - 1] * 1.5 + 1) << second << ": " << targets[second - 1] << " -> " << targets[second];
+    }
+  }
+  EXPECT_GT(highest_after_floor, 2000);
+  EXPECT_LT(highest_after_floor, 11577);
+  EXPECT_EQ(policy.background_loss(), 0.0);
 }
 
 TEST(LiveTuningPolicy, HeavyLossAtTheFloorHoldsThereAndClimbsBackInSteps) {
