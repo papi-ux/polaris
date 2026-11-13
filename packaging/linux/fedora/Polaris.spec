@@ -4,6 +4,10 @@
 %global build_version 0
 %global branch 0
 %global commit 0
+# The AppStream release date, YYYY-MM-DD: the commit date of the source in the tarball. The tarball
+# has no .git and this spec no changelog for rpmbuild to set SOURCE_DATE_EPOCH from, so left at 0
+# the metainfo is dated 1990-01-01, with a CMake warning (cmake/prep/release_date.cmake).
+%global release_date 0
 
 %undefine _hardened_build
 
@@ -248,6 +252,9 @@ fi
 export BRANCH=%{branch}
 export BUILD_VERSION=v%{build_version}
 export COMMIT=%{commit}
+if [ "%{release_date}" != 0 ]; then
+  export POLARIS_RELEASE_DATE=%{release_date}
+fi
 
 # cmake
 cd %{_builddir}/Polaris

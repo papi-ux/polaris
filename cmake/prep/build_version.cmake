@@ -84,42 +84,10 @@ endif()
 include(${CMAKE_CURRENT_LIST_DIR}/prerelease_versions.cmake)
 polaris_prerelease_versions("${PROJECT_VERSION}" "${POLARIS_PRERELEASE_LABEL}")
 
-# set date variables
-set(PROJECT_YEAR "1990")
-set(PROJECT_MONTH "01")
-set(PROJECT_DAY "01")
-
-# Extract year, month, and day (do this AFTER version parsing)
-# Note: Cmake doesn't support "{}" regex syntax
-if(PROJECT_VERSION MATCHES "^([0-9][0-9][0-9][0-9])\\.([0-9][0-9][0-9][0-9]?)\\.([0-9]+)$")
-    message("Extracting year and month/day from PROJECT_VERSION: ${PROJECT_VERSION}")
-    # First capture group is the year
-    set(PROJECT_YEAR "${CMAKE_MATCH_1}")
-
-    # Second capture group contains month and day
-    set(MONTH_DAY "${CMAKE_MATCH_2}")
-
-    # Extract month (first 1-2 digits) and day (last 2 digits)
-    string(LENGTH "${MONTH_DAY}" MONTH_DAY_LENGTH)
-    if(MONTH_DAY_LENGTH EQUAL 3)
-        # Format: MDD (e.g., 703 = month 7, day 03)
-        string(SUBSTRING "${MONTH_DAY}" 0 1 PROJECT_MONTH)
-        string(SUBSTRING "${MONTH_DAY}" 1 2 PROJECT_DAY)
-    elseif(MONTH_DAY_LENGTH EQUAL 4)
-        # Format: MMDD (e.g., 1203 = month 12, day 03)
-        string(SUBSTRING "${MONTH_DAY}" 0 2 PROJECT_MONTH)
-        string(SUBSTRING "${MONTH_DAY}" 2 2 PROJECT_DAY)
-    endif()
-
-    # Ensure month is two digits
-    if(PROJECT_MONTH LESS 10 AND NOT PROJECT_MONTH MATCHES "^0")
-        set(PROJECT_MONTH "0${PROJECT_MONTH}")
-    endif()
-    # Ensure day is two digits
-    if(PROJECT_DAY LESS 10 AND NOT PROJECT_DAY MATCHES "^0")
-        set(PROJECT_DAY "0${PROJECT_DAY}")
-    endif()
-endif()
+# The date of the AppStream release entry: from a date-style version, else POLARIS_RELEASE_DATE, the
+# HEAD commit date, or SOURCE_DATE_EPOCH (cmake/prep/release_date.cmake).
+include(${CMAKE_CURRENT_LIST_DIR}/release_date.cmake)
+polaris_release_date("${PROJECT_VERSION}" "${CMAKE_SOURCE_DIR}")
 
 # Parse PROJECT_VERSION to extract major, minor, and patch components
 if(PROJECT_VERSION MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+)")
@@ -145,6 +113,7 @@ message("CMAKE_PROJECT_VERSION_PATCH: ${CMAKE_PROJECT_VERSION_PATCH}")
 message("PROJECT_YEAR: ${PROJECT_YEAR}")
 message("PROJECT_MONTH: ${PROJECT_MONTH}")
 message("PROJECT_DAY: ${PROJECT_DAY}")
+message("POLARIS_RELEASE_DATE_SOURCE: ${POLARIS_RELEASE_DATE_SOURCE}")
 message("POLARIS_PRERELEASE_LABEL: ${POLARIS_PRERELEASE_LABEL}")
 message("POLARIS_RUNTIME_VERSION: ${POLARIS_RUNTIME_VERSION}")
 message("POLARIS_RPM_PACKAGE_VERSION: ${POLARIS_RPM_PACKAGE_VERSION}")

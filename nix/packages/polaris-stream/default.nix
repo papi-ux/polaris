@@ -89,6 +89,9 @@
   polarisSrc,
   # Git-backed flakes supply their own revision; path inputs have no Git proof.
   sourceRevision ? null,
+  # The AppStream release date, YYYY-MM-DD. The flake passes its commit date. Left null, CMake finds
+  # no .git in the source and ignores stdenv's 1980 SOURCE_DATE_EPOCH, so the metainfo says 1990.
+  releaseDate ? null,
 }:
 let
   stdenv' = if cudaSupport then cudaPackages.backendStdenv else stdenv;
@@ -306,6 +309,9 @@ stdenv'.mkDerivation (finalAttrs: {
     # CMake uses its own project version. Do not overwrite it with a historical
     # CI branch/version, or claim a commit unrelated to the checked-out source.
     COMMIT = if sourceRevision == null then "unknown" else sourceRevision;
+  }
+  // lib.optionalAttrs (releaseDate != null) {
+    POLARIS_RELEASE_DATE = releaseDate;
   };
 
   # cmake runs in $source/build; stamp files so web-ui / browser-stream targets
