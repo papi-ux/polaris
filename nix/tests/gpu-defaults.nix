@@ -35,9 +35,16 @@ let
   projectVersion = builtins.head
     (builtins.match ".*VERSION ([0-9]+[.][0-9]+[.][0-9]+).*" projectLine);
   sourceRevision = self.rev or self.dirtyRev or "unknown";
+  releaseStamp = self.lastModifiedDate or null;
+  releaseDate =
+    if releaseStamp == null || (self.lastModified or 0) == 0 then null
+    else "${builtins.substring 0 4 releaseStamp}-${builtins.substring 4 2 releaseStamp}-${builtins.substring 6 2 releaseStamp}";
   facts = {
     packageVersionMatchesProject = noCuda.version == projectVersion && withCuda.version == projectVersion;
     revisionTracksSource = noCuda.COMMIT == sourceRevision && withCuda.COMMIT == sourceRevision;
+    # The AppStream release is dated by the flake's commit, not stdenv's 1980 SOURCE_DATE_EPOCH (#673).
+    releaseDateTracksSource = (noCuda.POLARIS_RELEASE_DATE or null) == releaseDate
+      && (withCuda.POLARIS_RELEASE_DATE or null) == releaseDate;
     noHistoricalVersionOverride = !(noCuda ? BUILD_VERSION) && !(noCuda ? BRANCH);
     publisherMatchesProject = builtins.elem
       (lib.cmakeFeature "POLARIS_PUBLISHER_WEBSITE" noCuda.meta.homepage) noCuda.cmakeFlags;

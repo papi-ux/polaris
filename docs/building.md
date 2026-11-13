@@ -231,6 +231,9 @@ checkout yourself.
 - The main local web build commands are `npm run lint` and `npm run build`.
 - `build-tests/` is useful when you want to rebuild the served web bundle without touching your main local build.
 - Polaris stores runtime config in `~/.config/polaris`.
+- The AppStream metainfo dates its release entry by the `HEAD` commit, in UTC. A build from a source
+  tarball has no `.git`, so pass `POLARIS_RELEASE_DATE=YYYY-MM-DD` in the environment or as a CMake
+  variable; without it CMake warns and writes 1990-01-01.
 - Use `scripts/dev-clean.sh status` before or after build sessions to inspect local branches, stashes, worktrees, generated artifacts, and repository size.
 - Use `scripts/dev-clean.sh prune --apply` after throwaway local builds to remove allowlisted build/test outputs such as `build/`, `build-*`, `cmake-*`, `arch-pkgbuild/`, `test-results/`, and `playwright-report/`.
 - Use `scripts/dev-clean.sh git-prune --apply` after deleting branches, stashes, or worktrees to prune stale remote refs, worktree metadata, and unreachable Git objects.
