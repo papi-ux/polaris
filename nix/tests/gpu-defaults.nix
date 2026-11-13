@@ -37,7 +37,7 @@ let
   sourceRevision = self.rev or self.dirtyRev or "unknown";
   releaseStamp = self.lastModifiedDate or null;
   releaseDate =
-    if releaseStamp == null || (self.lastModified or 0) == 0 then null
+    if releaseStamp == null || (self.lastModified or 0) <= 1577836800 then null
     else "${builtins.substring 0 4 releaseStamp}-${builtins.substring 4 2 releaseStamp}-${builtins.substring 6 2 releaseStamp}";
   facts = {
     packageVersionMatchesProject = noCuda.version == projectVersion && withCuda.version == projectVersion;

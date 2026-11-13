@@ -35,14 +35,16 @@
           );
       };
 
-      # The time of this flake's commit as YYYY-MM-DD in UTC, or null where Nix has none, for the
-      # AppStream release date. The package source has no .git and stdenv's SOURCE_DATE_EPOCH is
-      # 1980-01-01, so CMake has nothing better to go on (#673).
+      # The time of this flake's commit as YYYY-MM-DD in UTC, for the AppStream release date. The
+      # package source has no .git and stdenv's SOURCE_DATE_EPOCH is 1980-01-01, so CMake has
+      # nothing better to go on (#673). A path flake reports its newest file time instead, and one
+      # copied out of the store reports 1, so a time at or before 2020-01-01 gives null, the same
+      # floor CMake applies to SOURCE_DATE_EPOCH, and CMake warns rather than dating it 1970.
       releaseDate =
         let
           stamp = self.lastModifiedDate or null;
         in
-        if stamp == null || (self.lastModified or 0) == 0 then
+        if stamp == null || (self.lastModified or 0) <= 1577836800 then
           null
         else
           "${builtins.substring 0 4 stamp}-${builtins.substring 4 2 stamp}-${builtins.substring 6 2 stamp}";
