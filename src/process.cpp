@@ -8715,6 +8715,11 @@ namespace proc {
       if (!authoritative_launch) {
         return launch_failure::refuse(503, "session_state_changed", "The session changed on the host while this launch was being admitted.", "Launch again.");
       }
+#ifdef __linux__
+      // A resume/viewer joins the admitted app's effective input route, even
+      // when its request has different defaults or capture is already active.
+      launch_session->input_capabilities = authoritative_launch->input_capabilities;
+#endif
       capture_owner = sync.capture_owner.load();
       sync.metadata_capture_owner = capture_owner;
       sync.capture_launch = launch_session;
@@ -10994,6 +10999,12 @@ namespace proc {
 
       log_runtime_state();
       const auto runtime_state = private_runtime->runtime_state();
+      if (!probe_only) {
+        // Startup and capture/encoder admission have succeeded. Freeze the real
+        // route before RTSP publication; temporary probes must not decide it.
+        launch_session->input_capabilities.bind_effective_runtime(
+          runtime_state.backend_name, runtime_state.effective_headless);
+      }
       if (!runtime_state.effective_headless && !probe_only) {
         // KDE edit mode only matters when the private compositor is a visible
         // nested window. A probe cage is torn down immediately, and the probe's

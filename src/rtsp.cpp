@@ -1537,9 +1537,10 @@ namespace rtsp_stream {
   }
 
   std::uint32_t session_feature_flags(const launch_session_t &launch, std::uint32_t host_flags) {
-    // A host tablet device does not imply support in the worker's compositor.
-    // Keep controller touch support, which uses the allocated gamepad directly.
-    return launch.worker_connection_requirement()->load() ?
+    // A host tablet device does not imply support in the admitted compositor.
+    // Use the frozen effective route, not current backend health at DESCRIBE.
+    // Controller touch uses the allocated gamepad directly and remains available.
+    return launch.worker_connection_requirement()->load() || !launch.input_capabilities.native_pen_touch ?
       host_flags & ~platf::platform_caps::pen_touch : host_flags;
   }
 
