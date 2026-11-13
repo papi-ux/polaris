@@ -69,6 +69,9 @@ jobs:
       - name: Verify the release package version check
         run: python3 -m unittest discover -s tests/scripts -p 'test_release_package_versions.py'
 
+      - name: Verify the release notes renderer
+        run: python3 -m unittest discover -s tests/scripts -p 'test_render_release_notes.py'
+
       - name: Verify the release RPM signing controls
         run: python3 -m unittest discover -s tests/scripts -p 'test_release_rpm_signing.py'
 
@@ -2392,6 +2395,17 @@ jobs:
             exit 1
           fi
 
+          # The notes are written for the stable release, which publishes them byte for byte. A beta or
+          # rc publishes them under a preamble saying what it is, with Polaris's own download links
+          # naming its tag, since the release they name does not exist yet. Staging and the readback
+          # below use these same rendered bytes.
+          rendered_notes="${RUNNER_TEMP}/release-notes-${POLARIS_PACKAGE_REF_NAME}.md"
+          python3 scripts/ci/render-release-notes.py \
+            --tag "${POLARIS_PACKAGE_REF_NAME}" \
+            --prerelease "$IS_PRERELEASE" \
+            --notes "$release_notes" \
+            --output "$rendered_notes"
+
           channel=()
           if [ "$IS_PRERELEASE" = "true" ]; then
             channel=(--prerelease)
@@ -2403,7 +2417,7 @@ jobs:
               --verify-tag \
               "${channel[@]}" \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
-              --notes-file "$release_notes"
+              --notes-file "$rendered_notes"
             echo "publish_draft=true" >> "$GITHUB_OUTPUT"
           else
             gh release edit "${POLARIS_PACKAGE_REF_NAME}" \
@@ -2411,14 +2425,14 @@ jobs:
               --draft=true \
               "${channel[@]}" \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
-              --notes-file "$release_notes"
+              --notes-file "$rendered_notes"
             echo "publish_draft=true" >> "$GITHUB_OUTPUT"
           fi
 
-          expected_notes="$(cat "$release_notes")"
+          expected_notes="$(cat "$rendered_notes")"
           published_notes="$(gh release view "${POLARIS_PACKAGE_REF_NAME}" --json body --jq .body)"
           if [ "$published_notes" != "$expected_notes" ]; then
-            echo "Published release notes do not match $release_notes" >&2
+            echo "Published release notes do not match $rendered_notes, rendered from $release_notes" >&2
             exit 1
           fi
 

@@ -679,6 +679,13 @@ for required_stage_tokens in (
     # A beta reads the notes of the release it precedes, so the channel suffix is stripped first.
     ["notes_tag=${POLARIS_PACKAGE_REF_NAME%%-*}"],
     ["release_notes=docs/release-notes/${notes_tag}.md"],
+    ["rendered_notes=${RUNNER_TEMP}/release-notes-${POLARIS_PACKAGE_REF_NAME}.md"],
+    [
+        "python3", "scripts/ci/render-release-notes.py",
+        "--tag", "${POLARIS_PACKAGE_REF_NAME}", "--prerelease", "$IS_PRERELEASE",
+        "--notes", "$release_notes", "--output", "$rendered_notes",
+    ],
+    ["expected_notes=$(cat $rendered_notes)"],
     ["set", "-euo", "pipefail"],
     # The channel is carried into both release paths below. A rerun that finds the release already
     # staged takes the edit path, and a beta that lost its flag there would publish as stable.
@@ -692,17 +699,17 @@ for required_stage_tokens in (
     [
         "gh", "release", "create", "${POLARIS_PACKAGE_REF_NAME}",
         "--draft", "--verify-tag", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
-        "--notes-file", "$release_notes",
+        "--notes-file", "$rendered_notes",
     ],
     [
         "gh", "release", "edit", "${POLARIS_PACKAGE_REF_NAME}",
         "--verify-tag", "--draft=true", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
-        "--notes-file", "$release_notes",
+        "--notes-file", "$rendered_notes",
     ],
     ["published_notes=$(gh release view ${POLARIS_PACKAGE_REF_NAME} --json body --jq .body)"],
     [
         "if", "[", "$published_notes", "!=", "$expected_notes", "]", ";", "then", ";",
-        "echo", "Published release notes do not match $release_notes", ">", "&", "2", ";",
+        "echo", "Published release notes do not match $rendered_notes, rendered from $release_notes", ">", "&", "2", ";",
         "exit", "1", ";", "fi",
     ],
 ):
@@ -722,12 +729,12 @@ expected_stage_release_mutations = [
     [
         "release", "create", "${POLARIS_PACKAGE_REF_NAME}", "--draft",
         "--verify-tag", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
-        "--notes-file", "$release_notes",
+        "--notes-file", "$rendered_notes",
     ],
     [
         "release", "edit", "${POLARIS_PACKAGE_REF_NAME}", "--verify-tag",
         "--draft=true", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
-        "--notes-file", "$release_notes",
+        "--notes-file", "$rendered_notes",
     ],
 ]
 if stage_release_mutations != expected_stage_release_mutations:
