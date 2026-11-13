@@ -109,21 +109,21 @@ describe('v1.5.0 release contract', () => {
     expect(assetsOn(lineFor('**Debug symbols')).sort()).toEqual([...debugAssets].sort())
   })
 
-  // A beta publishes these notes, and the stable tag publishes them again as they stand then.
-  // scripts/check-stable-release-notes.py refuses a stable tag that still holds the beta line, but
-  // it reads wording, not meaning, so the line has to be the template's own words: a rewording it
-  // does not know would reach the stable page. When the beta line comes out for the stable tag,
-  // this test goes with it.
-  it("tells a beta tester which packages to use in the template's exact words", () => {
+  // The betas published these notes with the template's beta line in them. The stable tag publishes
+  // them again as they stand, so the line is out now, in any wording
+  // scripts/check-stable-release-notes.py knows, and the notes say nothing about a release that
+  // does not exist yet.
+  it('carries nothing the template wrote for beta testers', () => {
     const template = read('docs/release-notes/TEMPLATE.md')
     const lines = template.split('\n').filter((line) => line.includes('X.Y.Z is in beta'))
     expect(lines).toHaveLength(1)
     const betaLine = lines[0].replace('X.Y.Z', '1.5.0').replace(/ \(Beta notes only[^)]*\)$/, '')
-    expect(betaLine).toBe(
-      '- While 1.5.0 is in beta, use the packages attached to the prerelease you are reading. ' +
-        'The install commands below name the final release, which does not exist yet.',
-    )
-    expect(currentNotes().split('\n')).toContain(betaLine)
+    const notes = currentNotes()
+    expect(notes.split('\n')).not.toContain(betaLine)
+    expect(notes).not.toMatch(/\bwhile\s+1\.5\.0\s+is\s+(?:still\s+)?in\s+beta\b/i)
+    expect(notes).not.toMatch(/the\s+prerelease\s+you\s+are\s+reading/i)
+    expect(notes).not.toMatch(/does\s+not\s+exist\s+yet/i)
+    expect(notes).not.toContain('This is 1.5.0-beta.2')
   })
 
   // Nova ships on its own schedule, and nothing at tag time can show that a Nova release named
@@ -209,7 +209,8 @@ describe('v1.5.0 release contract', () => {
   // qualified on devices. Current Nova builds still request no VRR.
   it('keeps the native trial a config-file opt-in and client VRR requests out of the shipped scope', () => {
     const notes = currentNotes()
-    const unreleased = read('docs/changelog.md').split('## Unreleased')[1].split('\n## ')[0]
+    // The section is headed `## v1.5.0`, and gains ` - YYYY-MM-DD` on the day it is published.
+    const unreleased = read('docs/changelog.md').split(/\n## v1\.5\.0(?: - \d{4}-\d{2}-\d{2})?\n/)[1].split('\n## ')[0]
     expect(notes).toContain('off by default and turned on only by `adaptive_bitrate_native_downward` in `polaris.conf`')
     expect(notes).toContain('full device qualification and any delivery-quality benefit remain unconfirmed')
     expect(unreleased).toContain('off by default: `adaptive_bitrate_native_downward = enabled` is a config-file-only host setting')
@@ -274,7 +275,7 @@ describe('v1.5.0 release contract', () => {
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
     expect(notes).toContain('host processing latency of 9 ms with Vulkan Video and 16 ms with VA-API')
-    expect(notes).toContain('not a new beta benchmark or an encoder-only measurement')
+    expect(notes).toContain('not a new benchmark or an encoder-only measurement')
     expect(notes).toContain('https://github.com/papi-ux/polaris/issues/635')
     expect(notes).toContain('earlier RX 7900 XTX encoder-output tests')
     expect(notes).toContain('not a live game-stream measurement')
@@ -296,15 +297,20 @@ describe('v1.5.0 release contract', () => {
     expect(notes).not.toContain("Live Tuning's own loss handling is unchanged in this release.")
     // Live Tuning acts on the loss in each media report by the rule src/live_tuning_policy.h states, and
     // cuts for a queue, not for one high round trip reading.
-    const loss = section(currentNotes(), "**New since beta.2: Live Tuning acts on video frame loss, and it's on**", '**Fixed since beta.2**')
+    const loss = section(currentNotes(), '**Live Tuning, on and acting on lost frames**', '**PyroWave gets the bits it needs**')
     expect(loss).toContain('in two of three reports, each losing 3% of its frames or more')
     expect(loss).toContain('Live Tuning treats a sustained rise in round trip time as queue evidence and lowers the bitrate while checking whether it drains.')
     expect(loss).toContain('Doctor takes no bitrate step of its own for sustained loss.')
-    // The round 5 controller's own results stand: its policy tests with the RP6 replays and the
-    // adaptive bitrate tests built on their own. Device runs before round 5 don't count for this build,
-    // so the notes say this build's device runs haven't been done.
-    expect(notes).toContain('On this build its 70 Live Tuning policy tests pass, including replays of Retroid Pocket 6 streams')
-    expect(notes).toContain("Runs with this build on a Retroid Pocket 6 and a Steam Deck haven't been done yet.")
+    // The final controller's own results stand: its policy tests with the real device replays. The
+    // release candidates then ran on a Retroid Pocket 6 over a shaped link (#228, #659), so the notes
+    // quote those runs and the bench, name what is still open, and no longer say device runs are to
+    // come. Test counts change with every fix, so the notes quote none.
+    expect(notes).toContain('Its policy tests pass on this build, including replays of real Retroid Pocket 6 and Steam Deck streams.')
+    expect(notes).toContain('Live Tuning\'s loss handling passes 22 of the 26 cases on its replay bench.')
+    expect(notes).toContain('On a Retroid Pocket 6 over a shaped link, with Live Tuning on')
+    expect(notes).toContain("I'd like to fix both in 1.5.1, but that's not a promise.")
+    expect(notes).not.toContain("Runs with this build on a Retroid Pocket 6 and a Steam Deck haven't been done yet.")
+    expect(notes).not.toContain('70 Live Tuning policy tests')
     expect(notes).not.toContain('Retroid Pocket 6 and Steam Deck streams under a capped link')
     // A receipt placeholder left in the notes would reach the release page as written.
     expect(notes).not.toContain('[[')
