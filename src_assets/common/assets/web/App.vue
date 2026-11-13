@@ -99,18 +99,23 @@
           <span v-if="!sidebarCollapsed" class="min-w-0 flex-1 font-medium [overflow-wrap:anywhere]">{{ signingOut ? signOutPendingLabel : signOutLabel }}</span>
         </button>
       </div>
+      <!-- One row on every platform (#672): the shortcut chip stays on the label's line and never
+           shrinks; on a narrow sidebar the label wraps within itself instead. Ctrl+K is wider than ⌘K,
+           and Chromium on Linux draws the label 124 px wide; a UI-font chip at px-1.5 leaves it 128 px
+           at the default width. Only the collapsed rail wraps, to stack the icon over its K chip. -->
       <div class="px-3 pb-2">
         <button
           type="button"
-          class="focus-ring flex w-full flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
+          class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-storm transition-[background-color,color] duration-200 hover:bg-twilight/50 hover:text-silver"
+          :class="{ 'flex-wrap': sidebarCollapsed }"
           :title="paletteShortcut"
           :aria-label="`Open command palette (${paletteShortcut})`"
           @click="commandPaletteOpen = true"
         >
           <svg class="h-4 w-4 shrink-0 text-storm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/></svg>
           <template v-if="!sidebarCollapsed">
-            <span class="min-w-0 flex-auto font-medium [overflow-wrap:anywhere]">Command Palette</span>
-            <kbd class="ml-auto rounded-md border border-storm/20 bg-void/60 px-2 py-1 text-[11px] text-storm">
+            <span class="min-w-0 flex-1 break-words font-medium">Command Palette</span>
+            <kbd class="shrink-0 rounded-md border border-storm/20 bg-void/60 px-1.5 py-1 font-sans text-[11px] text-storm">
               {{ isMac ? '\u2318K' : 'Ctrl+K' }}
             </kbd>
           </template>

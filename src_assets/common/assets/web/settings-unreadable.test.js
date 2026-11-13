@@ -164,8 +164,7 @@ describe('the app shell', () => {
   })
 
   it('renders the one banner inside the signed-in shell, above the page, by that rule', () => {
-    // App.vue imports its wordmark by absolute URL, which vitest cannot resolve,
-    // so its wiring is held here by source.
+    // The banner's place in the shell is held here by source.
     const app = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/App.vue'), 'utf8')
     const shell = app.slice(app.indexOf('<main id="polaris-main"'), app.indexOf('</main>'))
     expect(app.match(/<SettingsUnreadableBanner\b/g)).toHaveLength(1)

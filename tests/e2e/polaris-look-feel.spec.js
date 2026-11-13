@@ -777,3 +777,48 @@ for (const width of [390, 1280]) {
     })
   }
 }
+
+// #672: the sidebar's Command Palette chip reads Ctrl+K off a Mac and ⌘K on one. Ctrl+K once
+// wrapped onto a line of its own, which made the row 28 px taller and pushed the version footer
+// off a 1289x864 window. The row is one line either way, so the footer sits in the same place.
+for (const [width, height] of [[1289, 864], [1920, 1080]]) {
+  for (const theme of ['polaris', 'director']) {
+    test(`Command Palette row is one line for Ctrl+K and ⌘K in ${theme} at ${width}x${height}`, async ({ page }) => {
+      await page.setViewportSize({ width, height })
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      const writes = await mockHost(page, theme)
+      const cdp = await page.context().newCDPSession(page)
+      const { userAgent } = await cdp.send('Browser.getVersion')
+      const measured = {}
+      for (const [platform, chip] of [['Linux x86_64', 'Ctrl+K'], ['MacIntel', '⌘K']]) {
+        await cdp.send('Emulation.setUserAgentOverride', { userAgent, platform })
+        // The shell reads the platform once, when it mounts: load the document again for each.
+        await (page.url() === 'about:blank' ? page.goto('/#/') : page.reload())
+        await expect(page.locator('[data-dashboard-play-rail]')).toBeVisible()
+        await page.evaluate(() => document.fonts.ready)
+        const row = page.getByRole('button', { name: /^Open command palette/ })
+        await expect(row.locator('kbd')).toHaveText(chip)
+        measured[platform] = await row.evaluate(button => {
+          const box = node => node.getBoundingClientRect().toJSON()
+          const label = button.querySelector('span'), chip = button.querySelector('kbd')
+          return { row: box(button), label: box(label), chip: box(chip), lineHeight: parseFloat(getComputedStyle(label).lineHeight),
+            footer: box(document.querySelector('[data-app-version]')) }
+        })
+      }
+      const detail = JSON.stringify(measured)
+      for (const { row, label, chip, lineHeight } of Object.values(measured)) {
+        // The label reads in full on one line, and the chip shares that line inside the row.
+        expect(label.height, detail).toBeLessThanOrEqual(lineHeight + 1)
+        expect(Math.abs(label.y + label.height / 2 - (chip.y + chip.height / 2)), detail).toBeLessThan(2)
+        expect(chip.x, detail).toBeGreaterThanOrEqual(label.x + label.width)
+        expect(chip.x + chip.width, detail).toBeLessThanOrEqual(row.x + row.width)
+      }
+      const [linux, mac] = [measured['Linux x86_64'], measured.MacIntel]
+      expect(linux.row.height, detail).toBeCloseTo(mac.row.height, 0)
+      expect(linux.footer.y, detail).toBeCloseTo(mac.footer.y, 0)
+      if (theme === 'polaris' && height === 864) expect(linux.footer.bottom, detail).toBeLessThanOrEqual(height)
+      expect(writes).toEqual([])
+      await page.locator('#polaris-sidebar').screenshot({ path: `test-results/look-feel-command-palette-row-${theme}-${width}x${height}.png`, animations: 'disabled' })
+    })
+  }
+}
