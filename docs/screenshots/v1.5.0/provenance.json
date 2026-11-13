@@ -1,0 +1,69 @@
+{
+  "version": "1.5.0",
+  "capturedDate": "2026-11-13",
+  "replaces": "docs/screenshots/beta2/ (1.5.0-beta.2, captured 2026-10-20)",
+  "images": [
+    {
+      "file": "polaris-mission-control-aurora.webp",
+      "width": 1289,
+      "height": 864,
+      "theme": "polaris",
+      "scene": "Mission Control, Control Ultimate Edition next up",
+      "capturedAt": "2026-11-13T02:20:38.454Z",
+      "sha256": "5c0927b1973b176541140753d0a897f5c8810ed0cb89a099a62f9379a0d1ed5c",
+      "bytes": 113114,
+      "originalPNGsha256": "62969cdc472240a4e95de9e7a252d3ba492c67209f4a60b18266f638ffc43539",
+      "encoding": "WebP quality 90 (cwebp 1.6.0, -q 90 -metadata none), original dimensions, no crop or compositing",
+      "capture": "Live 1.5.0 web UI of the installed Fedora package, rendered on the host in headless Chromium 149.0.7827.55 (Playwright 1.61.1), viewport 1289x864 at DPR 1, native Linux platform, through the read-only route: every host-origin non-GET aborted, websockets closed; the two anonymous public GETs api.github.com/repos/papi-ux/polaris/releases/latest and /releases let through (Accept and User-Agent only); every other foreign request aborted. Theme chosen in the throwaway browser profile only (localStorage polaris-theme); no host config writes.",
+      "platform": "Linux x86_64 (native)",
+      "package": "polaris-1.5.0-1.x86_64",
+      "sourceCommit": "d0f16dc5a1259758a41695c307876f375822c5ed",
+      "binarySHA256": "3be573914cef71173693824492511235c38c0cab305da4dd7d40880b85992350",
+      "updatePill": "v1.5.0 current (green); title \"Update Center: v1.5.0 current. Latest v1.5.0-beta.2\""
+    },
+    {
+      "file": "polaris-mission-control-director.webp",
+      "width": 1289,
+      "height": 864,
+      "theme": "director",
+      "scene": "Mission Control, Control Ultimate Edition next up",
+      "capturedAt": "2026-11-13T02:20:59.705Z",
+      "sha256": "1b2875589df64593589e13481ebd5fe7cd6d33a3153fe0b6960cd052b899f9e2",
+      "bytes": 108056,
+      "originalPNGsha256": "4f7b3ab1af9dca66fe18957230a64b448aede42349ca425b8d389cb6f8d79887",
+      "encoding": "WebP quality 90 (cwebp 1.6.0, -q 90 -metadata none), original dimensions, no crop or compositing",
+      "capture": "Live 1.5.0 web UI of the installed Fedora package, rendered on the host in headless Chromium 149.0.7827.55 (Playwright 1.61.1), viewport 1289x864 at DPR 1, native Linux platform, through the read-only route: every host-origin non-GET aborted, websockets closed; the two anonymous public GETs api.github.com/repos/papi-ux/polaris/releases/latest and /releases let through (Accept and User-Agent only); every other foreign request aborted. Theme chosen in the throwaway browser profile only (localStorage polaris-theme); no host config writes.",
+      "platform": "Linux x86_64 (native)",
+      "package": "polaris-1.5.0-1.x86_64",
+      "sourceCommit": "d0f16dc5a1259758a41695c307876f375822c5ed",
+      "binarySHA256": "3be573914cef71173693824492511235c38c0cab305da4dd7d40880b85992350",
+      "updatePill": "v1.5.0 current (green); title \"Update Center: v1.5.0 current. Latest v1.5.0-beta.2\""
+    },
+    {
+      "file": "nova-play-setup-aurora.webp",
+      "width": 1920,
+      "height": 1080,
+      "theme": "polaris",
+      "scene": "Control Play Setup (This Game), Where It Runs focused",
+      "capturedAt": "2026-11-13T00:58:17Z",
+      "sha256": "a97accc8aed6afd7d01460a704447bd2df3b9446db622ffab6bbb60feea6abce",
+      "bytes": 59350,
+      "originalPNGsha256": "c009c3f5624a7f4ddd5ffeef5dc80fd0dd4158a903ba85d1794fa779fb734712",
+      "encoding": "WebP quality 90 (cwebp 1.6.0, -q 90 -metadata none), original dimensions, no crop or compositing",
+      "capture": "Actual Retroid Pocket 6 Android interface, adb screencap; D-pad only; Play Setup shown, not launched; no stream started. Captured with the app's default video codec: a pre-existing per-game codec override for Control was cleared for the capture as a test-owned change and restored afterwards.",
+      "package": "com.papi.nova.debug",
+      "versionName": "1.5.0",
+      "versionCode": 55,
+      "sourceCommit": "bc24e0aa98af6f3e94f638074f4b2f56bf1525d0",
+      "APKsha256": "da49bb374d9d0de2fe11390bc72269b2cba9a8c44f452cc40db56c33d9778667",
+      "device": "Retroid Pocket 6 (Android 13)",
+      "reusedFrom": {
+        "repository": "papi-ux/nova",
+        "commit": "pending (staged with this change, not yet committed)",
+        "path": "docs/screenshots/v1.5.0/nova-play-setup-aurora.webp",
+        "purpose": "Reciprocal companion-app feature showcase; same capture reused byte-exact."
+      }
+    }
+  ],
+  "final": true
+}

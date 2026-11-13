@@ -25,7 +25,7 @@ and play your library while your desktop stays exactly as you left it.
 
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
-![Polaris Mission Control: Control Ultimate Edition is next up, the host is ready for clients with 5 of 5 launch checks passing, the launch mode is Private Stream, and recent games wait below](docs/screenshots/beta2/polaris-mission-control-aurora.webp)
+![Polaris Mission Control: Control Ultimate Edition is next up, the host is ready for clients with 5 of 5 launch checks passing, the launch mode is Private Stream, and recent games wait below](docs/screenshots/v1.5.0/polaris-mission-control-aurora.webp)
 
 <sub>Mission Control, the Polaris console in your browser: the next game, whether
 the host is ready, how the game will launch and how your GPU is doing.</sub>
@@ -80,7 +80,7 @@ controls a shortcut away. Nova runs on Android, with Linux, Steam Deck and
 Steam Frame builds in Beta. [Meet Nova](https://papi-ux.com/nova/) or
 [get the latest release](https://github.com/papi-ux/nova/releases/latest).
 
-![Nova Play Setup for Control on a Retroid Pocket 6: what will happen, where it runs, resolution, frame rate, codec and launch preset, shown before the game starts](docs/screenshots/beta2/nova-play-setup-aurora.webp)
+![Nova Play Setup for Control on a Retroid Pocket 6: what will happen, where it runs, resolution, frame rate, codec and launch preset, shown before the game starts](docs/screenshots/v1.5.0/nova-play-setup-aurora.webp)
 
 Want a different look? The console comes in a choice of themes under
 **Appearance**.
@@ -148,7 +148,7 @@ play.
 - [Roadmap](https://papi-ux.com/docs/roadmap/) · [Website changelog](https://papi-ux.com/docs/changelog/) · [Changelog](docs/changelog.md) · [Releases](https://github.com/papi-ux/polaris/releases)
 - [Matrix community](https://matrix.to/#/#papi-ux:papi-ux.com) · [Issues](https://github.com/papi-ux/polaris/issues) · [Discussions](https://github.com/papi-ux/polaris/discussions) · [Security policy](SECURITY.md) · [Contributing](.github/CONTRIBUTING.md)
 
-<sub>Screenshots: 1.5.0-beta.2 ([details](docs/screenshots/beta2/provenance.json)).
+<sub>Screenshots: 1.5.0 ([details](docs/screenshots/v1.5.0/provenance.json)).
 Website gallery: [image sources](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json).</sub>
 
 ## Acknowledgments
