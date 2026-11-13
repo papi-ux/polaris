@@ -26,11 +26,13 @@ against the host's review fingerprint. A changed or missing identity requires a
 new review. Neither a browser URL nor a caller digest, filename, path or command
 authorizes root to download or install anything.
 
-Both Stable and Beta use the actual official GitHub release assets in this
-slice. The published digest over HTTPS checks **integrity, not an independent
-publisher signature**. This route does not claim a signed repository or a
-separate Beta signature. Existing repository instructions are a separate guided
-route and are not used by this helper.
+Both Stable and Beta use the official GitHub release assets. The published
+digest, fetched over HTTPS, checks each package's integrity. Before anything
+changes, the helper also checks both packages' signatures against the public key
+Polaris ships, imports that key only when RPM doesn't already trust it, and
+installs with RPM's own signature checks left on. An unsigned package, or one
+signed by another key, stops the update. Existing repository instructions are a
+separate guided route and are not used by this helper.
 
 **Install with host approval** opens the operating system's administrator prompt
 on this PC's active local desktop. There is no password field in the console.
@@ -90,13 +92,9 @@ reconnect attempts to 15 seconds. Visible idle tabs read status once per minute;
 active operations read every three seconds, reviews every five, and hidden tabs
 pause automatic polling until visible again. No reconnect repeats a mutation.
 
-This source slice does not close #490 or the approved 1.5.0 installer/update
-objective. Arch/CachyOS and Ubuntu adapters, immutable/ostree and SteamOS routes,
-headless authorization, first-install site/native-installer handoff and
-post-install setup remain explicitly open. Unqualified systems fail closed for
-host installation and keep their guided instructions. Live polkit, package,
-restart, per-family installer and physical streaming qualification remain
-separate acceptance gates.
+Host-approved updates support an existing Fedora 44 or 45 RPM install. Other
+hosts keep their guided instructions. The full Review, approval and Finish
+journey against a published release hasn't been checked on a host yet.
 
 ## Opt in to beta releases
 

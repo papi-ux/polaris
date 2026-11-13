@@ -59,9 +59,8 @@
       "device": "Retroid Pocket 6 (Android 13)",
       "reusedFrom": {
         "repository": "papi-ux/nova",
-        "commit": "pending (staged with this change, not yet committed)",
         "path": "docs/screenshots/v1.5.0/nova-play-setup-aurora.webp",
-        "purpose": "Reciprocal companion-app feature showcase; same capture reused byte-exact."
+        "purpose": "Reciprocal companion-app feature showcase; same capture reused byte-exact, identified by the sha256 above."
       }
     }
   ],
