@@ -16,6 +16,7 @@
 // local includes
 #include "crypto.h"
 #include "launch_failure.h"
+#include "session_input_capabilities.h"
 #include "stream_bitrate.h"
 #include "thread_safe.h"
 #include "vrr_session_policy.h"
@@ -115,6 +116,7 @@ namespace rtsp_stream {
     std::string frame_submission_launch_nonce;
     // This launch received the host offer; an unsolicited ANNOUNCE echo cannot negotiate it.
     std::atomic_bool packet_reception_feedback_offered {false};
+    session_input_capabilities_t input_capabilities;
     // Set by the profile service after checking this paired device's access.
     std::string worker_profile_key;
     // Validated against this Space library before controller admission.

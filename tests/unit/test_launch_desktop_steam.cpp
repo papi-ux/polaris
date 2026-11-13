@@ -16,6 +16,7 @@
 #include <src/crypto.h>
 #include <src/file_handler.h>
 #include <src/nvhttp.h>
+#include <src/platform/common.h>
 #include <src/prelaunch_transition.h>
 #include <src/process.h>
 #include <src/rtsp.h>
@@ -53,6 +54,76 @@
 
 namespace {
   using namespace std::literals;
+
+  TEST(LaunchInputCapabilities, EffectiveHeadlessPrivateStreamWithholdsOnlyNativeTablet) {
+    rtsp_stream::launch_session_t launch;
+    launch.stream_mode = "headless_stream";
+    launch.input_capabilities.bind_effective_runtime("labwc", true);
+    constexpr std::uint32_t host_flags = 0xffffffffU;
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, host_flags),
+      host_flags & ~platf::platform_caps::pen_touch);
+    EXPECT_FALSE(launch.worker_connection_requirement()->load());
+  }
+
+  TEST(LaunchInputCapabilities, RequestedHeadlessKeepsTabletWhenRuntimeIsWindowed) {
+    rtsp_stream::launch_session_t launch;
+    launch.stream_mode = "headless_stream";
+    // A GPU-native override can make the admitted runtime windowed.
+    launch.input_capabilities.bind_effective_runtime("labwc", false);
+    constexpr auto host_flags = platf::platform_caps::pen_touch | platf::platform_caps::controller_touch;
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, host_flags), host_flags);
+  }
+
+  TEST(LaunchInputCapabilities, MirrorAndDesktopKeepNativeTabletOnHostRoutes) {
+    for (const bool mirror : {false, true}) {
+      rtsp_stream::launch_session_t launch;
+      launch.mirror_desktop = mirror;
+      launch.stream_mode = "desktop_display";
+      constexpr std::uint32_t host_flags = 0xffffffffU;
+      EXPECT_EQ(rtsp_stream::session_feature_flags(launch, host_flags), host_flags);
+      launch.input_capabilities.bind_effective_runtime("host", false);
+      EXPECT_EQ(rtsp_stream::session_feature_flags(launch, host_flags), host_flags);
+    }
+  }
+
+  TEST(LaunchInputCapabilities, EffectiveRuntimeWinsOverTheRequestedTopology) {
+    rtsp_stream::launch_session_t launch;
+    launch.mirror_desktop = true;
+    launch.stream_mode = "desktop_display";
+    launch.input_capabilities.bind_effective_runtime("labwc", true);
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, platf::platform_caps::pen_touch), 0U);
+  }
+
+  TEST(LaunchInputCapabilities, DescribeKeepsTheAdmittedDecisionAfterRuntimeStateChanges) {
+    rtsp_stream::launch_session_t launch;
+    platf::runtime_state_t runtime {.effective_headless = true, .backend_name = "labwc"};
+    launch.input_capabilities.bind_effective_runtime(runtime.backend_name, runtime.effective_headless);
+    // The backend can stop being healthy after admission. An empty current
+    // runtime must not cause negotiation to offer the host tablet again.
+    runtime = {};
+    launch.stream_mode = "desktop_display";
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, platf::platform_caps::pen_touch), 0U);
+    rtsp_stream::launch_session_t next_launch;
+    EXPECT_EQ(rtsp_stream::session_feature_flags(next_launch, platf::platform_caps::pen_touch),
+      platf::platform_caps::pen_touch);
+  }
+
+  TEST(LaunchInputCapabilities, BindingCannotEnableAHostCapabilityOrUndoWorkerSuppression) {
+    rtsp_stream::launch_session_t launch;
+    constexpr auto controller_touch = platf::platform_caps::controller_touch;
+    constexpr auto tablet = platf::platform_caps::pen_touch;
+    constexpr std::uint32_t unrelated = 0x80000000U;
+    launch.input_capabilities.bind_effective_runtime("labwc", true);
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, controller_touch | unrelated), controller_touch | unrelated);
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, 0), 0U);
+    launch.require_worker_connection();
+    launch.input_capabilities.bind_effective_runtime("host", false);
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, tablet | controller_touch | unrelated),
+      controller_touch | unrelated);
+    launch.cancel();
+    EXPECT_EQ(rtsp_stream::session_feature_flags(launch, tablet | controller_touch | unrelated),
+      controller_touch | unrelated);
+  }
 
   constexpr auto steam_game_id = "41";
   constexpr auto desktop_id = "42";
@@ -1162,6 +1233,38 @@ TEST_F(LaunchDesktopSteamTest, ConsoleCloseLeavesOtherClientActiveOrPendingToRef
     EXPECT_EQ(receipt.restore, prelaunch::restore_e::refused);
     EXPECT_EQ(receipt.restore_reason, "a stream is active or pending on the host");
     EXPECT_EQ(owned.adapter.starts, (std::vector<prelaunch::direction_e> {prelaunch::direction_e::to_desktop}));
+  }
+}
+
+TEST_F(LaunchDesktopSteamTest, ResumeInheritsNativeInputRouteBeforeRtspPublication) {
+  console_return_launch_t owned;
+  ASSERT_NO_FATAL_FAILURE(owned.prepare());
+  // Stand in for the decision frozen after the owner's real compositor starts.
+  owned.launch->input_capabilities.bind_effective_runtime("labwc", true);
+  constexpr auto tablet = platf::platform_caps::pen_touch;
+  constexpr auto controller_touch = platf::platform_caps::controller_touch;
+  for (int kind = 0; kind != 3; ++kind) {
+    SCOPED_TRACE(kind); // input-only, viewer, and another stream of the active app
+    if (kind == 2) rtsp_stream::add_session_for_tests(*owned.launch, false);
+    auto resume = std::make_shared<rtsp_stream::launch_session_t>();
+    resume->id = 42908 + kind;
+    resume->unique_id = owned.launch->unique_id;
+    resume->session_token = owned.launch->session_token;
+    resume->input_only = kind == 0;
+    resume->watch_only = kind == 1;
+    // A fresh request's defaults are not the active app's effective route.
+    resume->stream_mode = "desktop_display";
+    EXPECT_EQ(rtsp_stream::session_feature_flags(*resume, tablet | controller_touch), tablet | controller_touch);
+    const auto admitted = proc::proc.capture_session_launch_generation();
+    ASSERT_TRUE(admitted && proc::proc.try_begin_session_launch(*admitted));
+    auto finish_launch = util::fail_guard([]() { proc::proc.finish_session_launch(); });
+    resume->lifecycle_generation = *admitted;
+    ASSERT_EQ(proc::proc.prepare_capture_for_admitted_launch(resume), 0);
+    ASSERT_EQ(rtsp_stream::session_snapshot({}).pending_sessions, 0);
+    EXPECT_EQ(rtsp_stream::session_feature_flags(*resume, tablet | controller_touch), controller_touch);
+    ASSERT_TRUE(rtsp_stream::launch_session_raise(resume));
+    EXPECT_EQ(rtsp_stream::session_feature_flags(*resume, tablet | controller_touch), controller_touch);
+    rtsp_stream::launch_session_clear(resume->id);
   }
 }
 
