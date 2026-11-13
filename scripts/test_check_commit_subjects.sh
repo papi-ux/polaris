@@ -129,6 +129,22 @@ history_check reject 0171868a989f233927d629c6aa880b644fa3ce2b \
 history_check reject 3581a073a749b9abd979d5f2b7f4737adbdac579 \
   "fix(stream_stats): serve a verdict's figure with the band it was judged into"
 
+# The same two commits under their cleaned-history IDs.
+history_check accept f1e574bde225826e9054e44f42a761142c4b7c74 \
+  "fix(stream_stats): serve a verdict's figure with the band it was judged into"
+history_check accept 73cc96acc967aa42c4402d3e0faabddf985dae59 \
+  'feat(stream_stats): judge video frame loss and RTT over a 20 second window'
+history_check reject f1e574bde225826e9054e44f42a761142c4b7c74 \
+  'fix(stream_stats): a different malformed historical subject'
+history_check reject 73cc96acc967aa42c4402d3e0faabddf985dae59 \
+  'feat(Stream-Stats): a different malformed historical subject'
+history_check reject f1e574bde225826e9054e44f42a761142c4b7c74 \
+  'feat(stream_stats): judge video frame loss and RTT over a 20 second window'
+history_check reject f1e574bde225826e9054e44f42a761142c4b7c75 \
+  "fix(stream_stats): serve a verdict's figure with the band it was judged into"
+history_check reject 73cc96acc967aa42c4402d3e0faabddf985dae5a \
+  'feat(stream_stats): judge video frame loss and RTT over a 20 second window'
+
 echo
 echo "range handling:"
 git checkout -q -B probe "$base"

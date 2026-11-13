@@ -75,10 +75,14 @@ fi
 # Two already accepted stream-statistics commits used an underscore in their
 # scopes. Preserve those immutable identities without admitting that spelling
 # on new commits. Both the full object ID and exact subject must match.
+# The 1.5.0 history cleanup gave the same two commits new IDs with identical
+# trees and subjects; those mapped IDs follow the originals.
 accepted_history_subject() {
   case "$1:$2" in
     "3581a073a749b9abd979d5f2b7f4737adbdac578:fix(stream_stats): serve a verdict's figure with the band it was judged into" | \
-    "0171868a989f233927d629c6aa880b644fa3ce2b:feat(stream_stats): judge video frame loss and RTT over a 20 second window")
+    "0171868a989f233927d629c6aa880b644fa3ce2b:feat(stream_stats): judge video frame loss and RTT over a 20 second window" | \
+    "f1e574bde225826e9054e44f42a761142c4b7c74:fix(stream_stats): serve a verdict's figure with the band it was judged into" | \
+    "73cc96acc967aa42c4402d3e0faabddf985dae59:feat(stream_stats): judge video frame loss and RTT over a 20 second window")
       return 0 ;;
     *) return 1 ;;
   esac
