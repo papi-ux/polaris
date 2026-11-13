@@ -4566,6 +4566,7 @@
           "epic_installation_changed",
           "windows_setup_unknown",
           "launcher_changed",
+          "epic_flatpak_mirror_only",
           "unsupported"
         ]
       },

@@ -17,11 +17,35 @@ Use [Epic's official Preview download page](https://launcher.epicgames.com/).
 an x86-64 AppImage and a Debian package. Both are the Preview launcher, not a stable release.
 Choose the package suited to your distribution; Polaris does not install or convert Epic packages.
 
+The [Epic Games Launcher package on Flathub](https://flathub.org/en/apps/com.epicgames.launcher)
+also packages the official Preview. Its Polaris route is limited to **Mirror Desktop**:
+discovery/import and URI dispatch are implemented, but a deployed Flatpak and live stream
+have not yet been validated. Native/AppImage hands-on results above do not qualify this route.
+Updates to this package come through Flatpak, with Epic's self-updater disabled by the
+[package manifest](https://github.com/flathub/com.epicgames.launcher/blob/8f2584ce007ac9c7f09b7756c79f489380754418/com.epicgames.launcher.yml).
+
+Polaris checks the default user or default system installation's exact x86-64 branch and
+deployment against an already-running desktop instance. Multiple user/system deployments,
+multiple active branches, missing or unreadable metadata, and a launcher still running an
+older deployment are unavailable until resolved. Named system installations and custom
+installation roots are not supported in this slice. The game must have an unchanged,
+host-visible path under `~/.var/app/com.epicgames.launcher/`; portal-only paths and other
+sandbox-to-host mappings are unavailable. Polaris reads the app-private
+`data/com.epicgames.eglv2/installations.jsonl`, without reading account data or migrating saves.
+
+Keep that matching Epic Flatpak open on the desktop before launching. Flatpak **Private
+Stream**, game adoption and close-game permission are unavailable. An attempted private
+launch is refused before startup and never forwarded to the desktop. **End** still ends
+the stream, leaving the desktop game and launcher running; **Disconnect** and **Resume**
+also leave them running. A successful URI command does not prove game ownership or streaming
+acceptance. The setup checklist explains this package limit and cannot turn a metadata-only
+Flatpak scan into a native setup receipt or Private Stream readiness.
+
 Open Epic on the host desktop, sign in yourself, and let the selected game's installation or
 update finish. Keep the launcher open before launching through Polaris. Polaris does not read
 your Epic account store, sign you in, install a game, select Proton or change your saves.
 
-Mirror Desktop uses the already-running **desktop** launcher. Private Stream starts its
+Mirror Desktop uses the already-running **desktop** launcher. For native packages, Private Stream starts its
 own launcher only after the desktop launcher is completely quit. Game Mode, Host Virtual Display,
 Gamescope/private Gamescope and Spaces remain refused instead of receiving a forwarded desktop launch.
 Native Linux Epic games aren't supported yet.
@@ -91,6 +115,7 @@ launch or other mutation is automatically retried; browser storage holds no setu
 | Choose a game | Select an official Epic installation in the checklist's picker. This does not alter import staging. |
 | Selected-game support unknown | Selected-title Windows setup-folder and runtime diagnostics still run. A sampled absent game/runtime is reported separately; this host cannot confirm all Private Stream prerequisites. Use Mirror Desktop or rely on the independent actual-launch checks; no ready claim is made. |
 | Private Stream prerequisites unavailable | Use Mirror Desktop or review the host's explicit labwc Private Stream configuration. |
+| Epic Flatpak: Mirror Desktop only | Keep the matching Flatpak open on the desktop and choose Mirror Desktop. Private Stream and game-control permission are unavailable; End ends the stream and leaves the game running. |
 | Windows setup folder unknown (N3) | For a first play on this PC, play once in Mirror Desktop, then close the game and Epic. If played before, finish any update and check that the folder is readable. This is not proof the game was never played. |
 | Installation unavailable or changed | Complete the install/update in Epic, rescan and select the current installation again. |
 | Game or its exact runtime still running | Close that game yourself and check again. No process-group or wineserver cleanup is performed by the checklist. |

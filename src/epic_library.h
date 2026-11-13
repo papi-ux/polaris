@@ -13,17 +13,29 @@ namespace epic_library {
     std::string namespace_id, item_id, artifact_id;
     bool operator==(const identity_t &) const = default;
   };
+  // Host-side installed deployment, never a host-native /app executable or ownership grant.
+  // This slice supports the default user and system installations; named installations
+  // and paths exposed only through portals remain unavailable.
+  struct flatpak_deployment_t {
+    std::string scope, installation, arch, branch, commit;
+    std::filesystem::path root, directory, app_home;
+    std::string metadata, image_stamp;
+    bool operator==(const flatpak_deployment_t &) const = default;
+  };
   struct installation_t {
     identity_t identity;
     std::string installation_id, name, launch_executable, version;
     std::filesystem::path install_dir, data_root;
     std::string platform;
+    std::optional<flatpak_deployment_t> flatpak;
     bool operator==(const installation_t &) const = default;
   };
   struct snapshot_t {
     bool available = false;
     std::vector<installation_t> games;
     std::vector<std::string> warnings;
+    // Also identifies an empty Flatpak-only scan; it cannot create a native setup receipt.
+    bool flatpak_only = false;
   };
   bool valid_identity(const identity_t &identity);
   struct control_request_t {
@@ -34,6 +46,12 @@ namespace epic_library {
   snapshot_t parse_installations(std::string_view bytes, const std::filesystem::path &data_root);
   snapshot_t read_installations(const std::filesystem::path &data_root);
   snapshot_t scan(const std::vector<std::filesystem::path> &homes);
+  // Explicit default-system root for inert fixtures; production uses /var/lib/flatpak.
+  snapshot_t scan(const std::vector<std::filesystem::path> &homes, const std::filesystem::path &system_flatpak_root);
+  bool verify_flatpak_deployment(const flatpak_deployment_t &);
+  // Pure strict projection of Flatpak's nonsecret info file. No process authority.
+  std::optional<std::string> flatpak_instance_id(std::string_view info, const flatpak_deployment_t &);
+  std::string flatpak_launch_command(const flatpak_deployment_t &, const identity_t &);
   // Exact available metadata content, independent of discovery order. Not a wire identifier.
   bool same_snapshot(const snapshot_t &, const snapshot_t &);
   std::optional<installation_t> find(const snapshot_t &, const identity_t &);

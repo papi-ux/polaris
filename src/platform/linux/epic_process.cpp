@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <map>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <openssl/sha.h>
 #include <poll.h>
 #include <set>
@@ -1358,6 +1359,7 @@ namespace platf::epic {
 
     observation_t snapshot(const title_t &title, backend_t &backend, const private_context_t *session = nullptr,
                            std::uint64_t not_before_ticks = 0) {
+      require(!title.flatpak, "epic_flatpak_game_control_unavailable");
       reader_t read {backend};
       if (session) {
         validate_session(read, *session);
@@ -1588,6 +1590,7 @@ namespace platf::epic {
     std::optional<bool> runtime_absent(const title_t &title, std::string &reason, backend_t &backend) {
       reason.clear();
       try {
+        require(!title.flatpak, "epic_flatpak_private_unavailable");
         reader_t read {backend};
         require(token(title.namespace_id) && token(title.item_id) && token(title.artifact_id), "invalid_title_identity");
         require(title.platform == "Windows" || title.platform == "Linux", "unknown_title_runtime");
@@ -2082,7 +2085,120 @@ namespace platf::epic {
                 image_mount(read.read(proc / "mountinfo", mount_limit), launcher->exe).identity == mount.identity, "desktop_launcher_changed");
       return {executable, executable_file, appimage, *launcher, boot, own_group, mount.identity, read.group_namespace};
     }
+
+    std::string flatpak_desktop_snapshot(const epic_library::flatpak_deployment_t &d, backend_t &backend) {
+      reader_t read {backend};
+      const auto owner = read.owner_and_namespace();
+      const auto boot = read.boot();
+      const auto own_group = cgroup(read.read("/proc/self/cgroup"));
+      require(own_group != "/", "unknown_polaris_cgroup");
+      // Validate the complete command shape without executing it, including scope/name/ref.
+      (void) epic_library::flatpak_launch_command(d, {"namespace", "item", "artifact"});
+      const auto image = d.directory / "files/bin/EpicGamesLauncher";
+      const auto active = d.directory.parent_path() / "active";
+      const auto deployed = read.stat(image);
+      const auto stamp = std::to_string(deployed.device) + ':' + std::to_string(deployed.inode) + ':' +
+        std::to_string(deployed.uid) + ':' + std::to_string(deployed.mode) + ':' + std::to_string(deployed.size) + ':' +
+        std::to_string(deployed.modified_ns) + ':' + std::to_string(deployed.changed_ns);
+      require(read.canonical(d.root) == d.root && read.canonical(active) == d.directory &&
+                read.canonical(image) == image && safe_file(deployed, owner, true) && stamp == d.image_stamp &&
+                read.read(d.directory / "metadata") == d.metadata &&
+                needed(backend.prefix(image, 4), "epic_flatpak_image_unreadable") == std::string("\177ELF", 4),
+              "epic_flatpak_deployment_changed");
+      const auto host_mnt = mount_namespace(backend, "/proc/self");
+      const auto host_pid_ns = needed(backend.link("/proc/self/ns/pid"), "epic_flatpak_namespace_unavailable");
+      digest_t digest;
+      digest.add("epic-flatpak-desktop-presence-v1");
+      digest.add(boot); digest.add(owner); digest.add(own_group); digest.add(host_mnt.string()); digest.add(host_pid_ns.string());
+      digest.add(d.scope); digest.add(d.installation); digest.add(d.root.string()); digest.add(d.directory.string());
+      digest.add(d.app_home.string()); digest.add(d.metadata); digest.file(deployed);
+      bool found = false;
+      for (const auto pid : read.listed_tasks()) {
+        const auto proc = fs::path("/proc") / std::to_string(pid);
+        const auto exe = backend.link(proc / "exe");
+        if (!exe || exe->filename() != "EpicGamesLauncher") continue;
+        if (!check_uid(read.read(proc / "status"), owner)) continue;
+        require(!found, "epic_flatpak_desktop_ambiguous");
+        const auto task = parse_stat(read.read(proc / "stat"));
+        require(task.pid == pid && !exiting(task) && read.stat(proc).uid == owner, "epic_flatpak_desktop_changed");
+        require(*exe == fs::path("/app/bin/EpicGamesLauncher") && same_image(deployed, read.stat(proc / "exe")) &&
+                  same_image(deployed, read.stat(proc / "root/app/bin/EpicGamesLauncher")), "epic_flatpak_desktop_mismatch");
+        const auto info = read.read(proc / "root/.flatpak-info");
+        const auto instance = needed(epic_library::flatpak_instance_id(info, d), "epic_flatpak_desktop_mismatch");
+        require(std::all_of(instance.begin(), instance.end(), [](char c) { return c >= '0' && c <= '9'; }), "epic_flatpak_instance_invalid");
+        const auto record = fs::path("/run/user") / std::to_string(owner) / ".flatpak" / instance;
+        require(read.canonical(record) == record && read.stat(record).uid == owner &&
+                  read.read(record / "info") == info, "epic_flatpak_record_mismatch");
+        const auto group = cgroup(read.read(proc / "cgroup"));
+        require(!service_cgroup(group, own_group) && fs::path(group).filename() ==
+                  "app-flatpak-com.epicgames.launcher-" + instance + ".scope", "epic_flatpak_not_desktop");
+        const auto mnt = mount_namespace(backend, proc);
+        require(mnt != host_mnt, "epic_flatpak_namespace_mismatch");
+        const auto ns = needed(backend.link(proc / "ns/pid"), "epic_flatpak_namespace_unavailable");
+        require(ns != host_pid_ns, "epic_flatpak_namespace_mismatch");
+        // The record's numeric init is checked against the kernel. The opaque instance
+        // string is never decoded into a PID, and this proof never opens a pidfd.
+        const auto wrapper_text = words(read.read(record / "pid"));
+        require(wrapper_text.size() == 1, "epic_flatpak_record_invalid");
+        const auto wrapper_pid = number(wrapper_text.front());
+        std::set<std::string> keys;
+        const auto info_json = nlohmann::json::parse(read.read(record / "bwrapinfo.json"),
+          [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json &value) {
+            require(depth <= 4, "epic_flatpak_record_invalid");
+            if (event == nlohmann::json::parse_event_t::key)
+              require(keys.insert(value.get<std::string>()).second, "epic_flatpak_record_invalid");
+            return true;
+          });
+        require(info_json.is_object() && info_json.contains("child-pid") && info_json["child-pid"].is_number_unsigned() &&
+                  info_json.contains("pid-namespace") && info_json["pid-namespace"].is_number_unsigned(), "epic_flatpak_record_invalid");
+        const auto init_pid = info_json["child-pid"].get<std::uint64_t>();
+        require(wrapper_pid > 1 && wrapper_pid <= INT_MAX && init_pid > 1 && init_pid <= INT_MAX && init_pid != pid,
+                "epic_flatpak_record_invalid");
+        const auto init_proc = fs::path("/proc") / std::to_string(init_pid);
+        const auto wrapper_proc = fs::path("/proc") / std::to_string(wrapper_pid);
+        const auto init = parse_stat(read.read(init_proc / "stat"));
+        const auto wrapper = parse_stat(read.read(wrapper_proc / "stat"));
+        require(init.pid == init_pid && wrapper.pid == wrapper_pid && init.parent == wrapper.pid &&
+                  !exiting(init) && !exiting(wrapper) && wrapper.start <= init.start && init.start <= task.start &&
+                  check_uid(read.read(init_proc / "status"), owner) &&
+                  cgroup(read.read(init_proc / "cgroup")) == group &&
+                  backend.link(init_proc / "ns/pid") == ns && ns == fs::path("pid:[" + std::to_string(info_json["pid-namespace"].get<std::uint64_t>()) + "]"),
+                "epic_flatpak_record_stale");
+        const auto mount = image_mount(read.read(proc / "mountinfo", mount_limit), "/app/bin/EpicGamesLauncher");
+        const auto info_mount = image_mount(read.read(proc / "mountinfo", mount_limit), "/.flatpak-info");
+        const auto options = words(info_mount.identity);
+        const auto app_options = words(mount.identity);
+        // stat through both executable views already joins the actual inode/device.
+        // Btrfs st_dev need not equal mountinfo's device, as in the native reader.
+        require(mount.point == "/app" && app_options.size() > 5 &&
+                  (',' + app_options[5] + ',').find(",ro,") != std::string::npos &&
+                  info_mount.point == "/.flatpak-info" && options.size() > 5 &&
+                  (',' + options[5] + ',').find(",ro,") != std::string::npos, "epic_flatpak_mount_mismatch");
+        // No argv, environ, account cache or game process is read here.
+        require(check_uid(read.read(proc / "status"), owner) && backend.link(proc / "exe") == exe &&
+                  same_image(deployed, read.stat(proc / "exe")) &&
+                  parse_stat(read.read(proc / "stat")).start == task.start &&
+                  read.read(proc / "root/.flatpak-info") == info && read.read(record / "info") == info,
+                "epic_flatpak_desktop_changed");
+        digest.add(task.pid); digest.add(task.start); digest.add(task.parent); digest.add(group); digest.add(mnt.string()); digest.add(ns.string());
+        digest.add(init.pid); digest.add(init.start); digest.add(wrapper.pid); digest.add(wrapper.start);
+        digest.add(info); digest.add(mount.identity); digest.add(info_mount.identity);
+        found = true;
+      }
+      require(found, "epic_flatpak_desktop_required");
+      require(owner == backend.owner_uid() && boot == read.boot() && cgroup(read.read("/proc/self/cgroup")) == own_group &&
+                backend.link("/proc/self/ns/cgroup") == read.group_namespace &&
+                read.canonical(active) == d.directory && same_image(deployed, read.stat(image)) &&
+                read.read(d.directory / "metadata") == d.metadata, "epic_flatpak_deployment_changed");
+      return digest.finish();
+    }
   }  // namespace
+
+  struct flatpak_desktop_proof_t::state_t {
+    epic_library::flatpak_deployment_t deployment;
+    std::string observation;
+    std::shared_ptr<backend_t> backend;
+  };
 
   struct launcher_proof_t::state_t {
     launcher_image_t image;
@@ -2366,6 +2482,33 @@ namespace platf::epic {
         return adopt(title, observation, error, context.backend, context, not_before_ticks);
       }
 
+      static std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::flatpak_deployment_t &deployment,
+                                                                         std::string &reason, std::shared_ptr<backend_t> backend) {
+        reason.clear();
+        try {
+          require(bool(backend), "missing_process_reader");
+          const auto before = flatpak_desktop_snapshot(deployment, *backend);
+          require(before == flatpak_desktop_snapshot(deployment, *backend), "epic_flatpak_desktop_changed");
+          return flatpak_desktop_proof_t(std::make_shared<flatpak_desktop_proof_t::state_t>(
+            flatpak_desktop_proof_t::state_t {deployment, before, std::move(backend)}));
+        } catch (const refusal_t &error) { reason = error.what(); }
+        catch (const std::exception &) { reason = "epic_flatpak_desktop_unavailable"; }
+        return std::nullopt;
+      }
+
+      static bool verify_flatpak_desktop(const flatpak_desktop_proof_t &proof, std::string &reason) {
+        reason.clear();
+        try {
+          require(bool(proof.state_) && bool(proof.state_->backend), "missing_process_reader");
+          const auto &s = *proof.state_;
+          require(s.observation == flatpak_desktop_snapshot(s.deployment, *s.backend) &&
+                    s.observation == flatpak_desktop_snapshot(s.deployment, *s.backend), "epic_flatpak_desktop_changed");
+          return true;
+        } catch (const refusal_t &error) { reason = error.what(); }
+        catch (const std::exception &) { reason = "epic_flatpak_desktop_unavailable"; }
+        return false;
+      }
+
       static std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
         reason.clear();
         try {
@@ -2444,6 +2587,13 @@ namespace platf::epic {
         if (!host_idle) {
           out.state = readiness_state_t::busy;
           out.reason = "session_busy";
+          return out;
+        }
+        if (title && title->flatpak) {
+          out.proof = proof_state_t::unavailable;
+          out.runtime = runtime_state_t::unknown;
+          out.state = readiness_state_t::needs_action;
+          out.reason = "epic_flatpak_mirror_only";
           return out;
         }
         if (!backend || (proof && (!proof->state_ || proof->state_->backend != backend))) {
@@ -2527,6 +2677,7 @@ namespace platf::epic {
       static std::unique_ptr<adopted_game_t> adopt(const title_t &title, const observation_t &observation, std::string &error, std::shared_ptr<backend_t> backend,
                                                 std::optional<private_context_t> session = std::nullopt, std::uint64_t not_before_ticks = 0) {
         error.clear();
+        if (title.flatpak) { error = "epic_flatpak_game_control_unavailable"; return nullptr; }
         auto current = safe_snapshot(title, *backend, session ? &*session : nullptr, not_before_ticks);
         if (!same_observation(current, observation)) {
           error = current.available ? "stale_observation" : current.reason;
@@ -2560,6 +2711,7 @@ namespace platf::epic {
   adopted_game_t &adopted_game_t::operator=(adopted_game_t &&) noexcept = default;
 
   launcher_proof_t::launcher_proof_t(std::shared_ptr<const state_t> state): state_(std::move(state)) {}
+  flatpak_desktop_proof_t::flatpak_desktop_proof_t(std::shared_ptr<const state_t> state): state_(std::move(state)) {}
 
   private_session_t::private_session_t(std::shared_ptr<const state_t> state): state_(std::move(state)) {}
 
@@ -2622,6 +2774,14 @@ namespace platf::epic {
 
   bool desktop_launcher_running(std::string &reason) {
     return desktop_launcher_executable(reason).has_value();
+  }
+
+  std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::flatpak_deployment_t &d, std::string &reason) {
+    return detail::engine_t::prove_flatpak_desktop(d, reason, production_backend());
+  }
+
+  bool verify_flatpak_desktop(const flatpak_desktop_proof_t &proof, std::string &reason) {
+    return detail::engine_t::verify_flatpak_desktop(proof, reason);
   }
 
   std::optional<std::size_t> launcher_instances(std::string &reason, const launcher_proof_t *known_launcher, std::string *owner_blocker_label,
@@ -2699,6 +2859,10 @@ namespace platf::epic {
     if (metadata_observer_) metadata_observer_();
 #endif
     if (!metadata.available) return last_scan_ = scan_state_t::metadata_unavailable;
+    // A native launcher opened alongside a Flatpak library does not observe that
+    // sandbox. Metadata alone must never create a native setup receipt for it.
+    if (metadata.flatpak_only || (!metadata.games.empty() && std::all_of(metadata.games.begin(), metadata.games.end(), [](const auto &game) { return game.flatpak.has_value(); })))
+      return last_scan_ = scan_state_t::unsupported;
     if (!ticket.before) return last_scan_ = scan_state_t::launcher_unobserved;
     if (!after || !same_launcher_observation(*ticket.before, *after)) return last_scan_ = scan_state_t::launcher_changed;
     snapshot_ = std::make_shared<const epic_library::snapshot_t>(metadata); // Empty, available metadata is still a successful scan.
@@ -2790,6 +2954,11 @@ namespace platf::epic {
 
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t> backend) {
       return detail::engine_t::prove_launcher(reason, std::move(backend));
+    }
+
+    std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::flatpak_deployment_t &d, std::string &reason,
+                                                                std::shared_ptr<backend_t> backend) {
+      return detail::engine_t::prove_flatpak_desktop(d, reason, std::move(backend));
     }
 
     setup_readiness_t evaluate_setup(const launcher_proof_t *proof, const title_t *title, bool idle,

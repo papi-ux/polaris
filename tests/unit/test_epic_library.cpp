@@ -37,6 +37,23 @@ namespace {
     std::filesystem::create_directories(p.parent_path());
     std::ofstream f(p); f << raw;
   }
+#ifndef _WIN32
+  std::filesystem::path flatpak_fixture(const std::filesystem::path &home, const std::filesystem::path &location,
+                                       const std::string &commit = std::string(64, 'a')) {
+    const auto app_home = home / ".var/app/com.epicgames.launcher";
+    const auto dir = app_home / "data/Games/A Game";
+    auto r = row(); r["dir"] = dir.string();
+    write(app_home / "data/com.epicgames.eglv2/installations.jsonl", installed_log({r}));
+    const auto ref = location / "app/com.epicgames.launcher/x86_64/stable";
+    write(ref / commit / "metadata", "[Application]\nname=com.epicgames.launcher\nruntime=org.gnome.Platform/x86_64/51\ncommand=EpicGamesLauncher\n");
+    write(ref / commit / "files/bin/EpicGamesLauncher", std::string("\177ELF", 4));
+    std::filesystem::permissions(ref / commit / "files/bin/EpicGamesLauncher", std::filesystem::perms::owner_exec, std::filesystem::perm_options::add);
+    std::filesystem::create_directories(dir);
+    std::filesystem::remove(ref / "active");
+    std::filesystem::create_symlink(commit, ref / "active");
+    return ref;
+  }
+#endif
 }
 
 TEST(EpicLibraryTests, CompletedInstallUsesExactTripleAndDirectoryNameWithoutAccountData) {
@@ -284,6 +301,35 @@ TEST(EpicLibraryTests, CatalogMatchesAllThreeIdentifiersNeverNameAlone) {
     EXPECT_FALSE(epic_library::matches_heroic_catalog(title, j.dump()));
   }
 }
+TEST(EpicLibraryTests, FlatpakDispatchAndStatusHaveNoNativeAdoptionOrGenericEndFallback) {
+  std::ifstream file(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/process.cpp");
+  ASSERT_TRUE(file.good());
+  const std::string source {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+  const auto admission = source.find("if (const auto refusal = admit_private_epic(*epic_title");
+  const auto effects = source.find("terminate_impl(false, false);", admission);
+  ASSERT_NE(admission, std::string::npos); ASSERT_NE(effects, std::string::npos);
+  EXPECT_LT(admission, effects);
+  const auto control = source.find("proc_t::epic_session_control(");
+  const auto flatpak = source.find("if (_epic_title->flatpak)", control);
+  const auto native = source.find("platf::epic::observe(target)", control);
+  ASSERT_NE(flatpak, std::string::npos); ASSERT_NE(native, std::string::npos);
+  EXPECT_LT(flatpak, native);
+  const auto refused = source.substr(flatpak, source.find("if (_epic_private_requested)", flatpak) - flatpak);
+  EXPECT_NE(refused.find("return {200"), std::string::npos);
+  EXPECT_NE(refused.find("{\"can_adopt\", false}"), std::string::npos);
+  EXPECT_EQ(refused.find("platf::epic::observe"), std::string::npos);
+  EXPECT_EQ(refused.find("platf::epic::adopt"), std::string::npos);
+  EXPECT_NE(refused.find("End ends the stream and leaves the game and launcher running"), std::string::npos);
+  const auto check = source.find("!platf::epic::verify_flatpak_desktop(*epic_flatpak_desktop, reason)");
+  const auto spawn = source.find("auto child = platf::run_command(_app.elevated, true, cmd", check);
+  ASSERT_NE(check, std::string::npos); ASSERT_NE(spawn, std::string::npos); EXPECT_LT(check, spawn);
+  const auto end = source.find("void proc_t::terminate_isolated_session_generation()");
+  const auto no_generic = source.find("if (_app.source == \"epic_launcher\" && !_epic_private_requested)", end);
+  const auto returns = source.find("return;", no_generic);
+  const auto generic = source.find("const bool apps_stopped_first", end);
+  ASSERT_NE(no_generic, std::string::npos); ASSERT_NE(returns, std::string::npos); ASSERT_NE(generic, std::string::npos);
+  EXPECT_LT(returns, generic);
+}
 #ifndef _WIN32
 TEST(EpicLibraryTests, ReaderRefusesSymlinkAndDoesNotRecoverPrevFile) {
   const auto p = root("nofollow");
@@ -309,5 +355,177 @@ TEST(EpicLibraryTests, ScanDeduplicatesNoTitleByNameAndKeepsUnreadableRootUnavai
   s = epic_library::scan({home, other}); EXPECT_FALSE(s.available); EXPECT_TRUE(s.games.empty());
   write(other / suffix, "bad");
   EXPECT_FALSE(epic_library::scan({home, other}).available);
+}
+TEST(EpicLibraryTests, ScanFindsCompletedEpicFlatpakInItsAppPrivateDataDirectory) {
+  const auto home = std::filesystem::canonical(root("flatpak-original-regression"));
+  const auto app_home = home / ".var/app/com.epicgames.launcher";
+  auto r = row();
+  r["dir"] = (app_home / "data/Games/Alan Wake 2").string();
+  write(app_home / "data/com.epicgames.eglv2/installations.jsonl", installed_log({r}));
+  const auto ref = home / ".local/share/flatpak/app/com.epicgames.launcher/x86_64/stable";
+  const std::string commit(64, 'a');
+  write(ref / commit / "metadata", "[Application]\nname=com.epicgames.launcher\nruntime=org.gnome.Platform/x86_64/51\ncommand=EpicGamesLauncher\n");
+  write(ref / commit / "files/bin/EpicGamesLauncher", std::string("\177ELF", 4));
+  std::filesystem::permissions(ref / commit / "files/bin/EpicGamesLauncher", std::filesystem::perms::owner_exec, std::filesystem::perm_options::add);
+  std::filesystem::create_directories(app_home / "data/Games/Alan Wake 2");
+  std::filesystem::create_symlink(commit, ref / "active");
+  const auto found = epic_library::scan({home});
+  ASSERT_TRUE(found.available);
+  ASSERT_EQ(found.games.size(), 1);
+  EXPECT_EQ(found.games[0].identity, title);
+  EXPECT_EQ(found.games[0].data_root, app_home / "data/com.epicgames.eglv2");
+}
+TEST(EpicLibraryTests, FlatpakScopeAndDeploymentBindTheQuotedCommand) {
+  for (bool system : {false, true}) {
+    const auto home = std::filesystem::canonical(root(system ? "flatpak-system" : "flatpak-user"));
+    const auto location = home / (system ? "system-flatpak" : ".local/share/flatpak");
+    flatpak_fixture(home, location);
+    const auto s = epic_library::scan({home}, home / "system-flatpak");
+    ASSERT_TRUE(s.available); ASSERT_EQ(s.games.size(), 1); ASSERT_TRUE(s.games[0].flatpak);
+    const auto &d = *s.games[0].flatpak;
+    EXPECT_EQ(d.scope, system ? "system" : "user");
+    EXPECT_EQ(d.installation, system ? "default" : "");
+    EXPECT_EQ(d.arch, "x86_64"); EXPECT_EQ(d.branch, "stable"); EXPECT_EQ(d.commit, std::string(64, 'a'));
+    EXPECT_TRUE(epic_library::verify_flatpak_deployment(d));
+    const auto command = epic_library::flatpak_launch_command(d, title);
+    EXPECT_TRUE(command.starts_with("env HOME='" + home.string() + "' "));
+    EXPECT_NE(command.find(system ? "--installation=default" : "--user"), std::string::npos);
+    EXPECT_NE(command.find("'--commit=" + d.commit + "'"), std::string::npos);
+    EXPECT_TRUE(command.ends_with("'" + epic_library::launch_uri(title) + "'"));
+    EXPECT_EQ(command.find("/app/bin"), std::string::npos);
+    EXPECT_EQ(command.find("xdg-open"), std::string::npos);
+  }
+}
+TEST(EpicLibraryTests, EmptyFlatpakScanCannotBeMistakenForNativeSetupMetadata) {
+  const auto home = std::filesystem::canonical(root("flatpak-empty"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  write(home / ".var/app/com.epicgames.launcher/data/com.epicgames.eglv2/installations.jsonl", installed_log({}));
+  const auto s = epic_library::scan({home});
+  EXPECT_TRUE(s.available); EXPECT_TRUE(s.games.empty()); EXPECT_TRUE(s.flatpak_only);
+  auto native = s; native.flatpak_only = false;
+  EXPECT_FALSE(epic_library::same_snapshot(s, native));
+}
+TEST(EpicLibraryTests, FlatpakMissingInstalledStateNeverRecoversPrevOrAnOldNativeInstallation) {
+  const auto home = std::filesystem::canonical(root("flatpak-no-state"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  const auto state = home / ".var/app/com.epicgames.launcher/data/com.epicgames.eglv2/installations.jsonl";
+  std::filesystem::rename(state, state.string() + ".prev");
+  write(home / ".local/share/com.epicgames.eglv2/installations.jsonl", installed_log({row(),
+    {{"installationId", "install1"}, {"deleted", true}, {"writtenAt", "now"}}}));
+  const auto absent = epic_library::scan({home});
+  EXPECT_FALSE(absent.available); EXPECT_TRUE(absent.games.empty());
+  auto incomplete = row(); incomplete["complete"] = false;
+  incomplete["dir"] = (home / ".var/app/com.epicgames.launcher/data/Games/A Game").string();
+  write(state, installed_log({incomplete}));
+  const auto pending = epic_library::scan({home});
+  EXPECT_TRUE(pending.available); EXPECT_TRUE(pending.games.empty()); EXPECT_FALSE(pending.warnings.empty());
+}
+TEST(EpicLibraryTests, FlatpakDuplicateScopesAndRefsNeverPickAnInstallation) {
+  const auto home = std::filesystem::canonical(root("flatpak-ambiguous"));
+  const auto user = home / ".local/share/flatpak", system = home / "system-flatpak";
+  const auto ref = flatpak_fixture(home, user);
+  flatpak_fixture(home, system);
+  EXPECT_FALSE(epic_library::scan({home}, system).available);
+  std::filesystem::remove_all(system);
+  const auto beta = ref.parent_path() / "beta";
+  std::filesystem::copy(ref, beta, std::filesystem::copy_options::recursive | std::filesystem::copy_options::copy_symlinks);
+  EXPECT_FALSE(epic_library::scan({home}, system).available);
+}
+TEST(EpicLibraryTests, FlatpakUpdateInvalidatesTheWholeSnapshotAndRetainedDeployment) {
+  const auto home = std::filesystem::canonical(root("flatpak-update"));
+  const auto user = home / ".local/share/flatpak";
+  flatpak_fixture(home, user);
+  const auto before = epic_library::scan({home}); ASSERT_EQ(before.games.size(), 1);
+  const auto retained = *before.games[0].flatpak;
+  flatpak_fixture(home, user, std::string(64, 'b'));
+  const auto after = epic_library::scan({home}); ASSERT_EQ(after.games.size(), 1);
+  EXPECT_FALSE(epic_library::same_snapshot(before, after));
+  EXPECT_FALSE(epic_library::verify_flatpak_deployment(retained));
+  EXPECT_TRUE(epic_library::verify_flatpak_deployment(*after.games[0].flatpak));
+  auto changed = after;
+  changed.games[0].flatpak->scope = "system";
+  EXPECT_FALSE(epic_library::same_snapshot(after, changed));
+}
+TEST(EpicLibraryTests, FlatpakMissingUnreadableRedirectedAndWrongDeploymentStayUnavailable) {
+  for (int failure = 0; failure < 6; ++failure) {
+    const auto home = std::filesystem::canonical(root(("flatpak-deploy-failure-" + std::to_string(failure)).c_str()));
+    const auto ref = flatpak_fixture(home, home / ".local/share/flatpak");
+    const auto dir = ref / std::string(64, 'a');
+    switch (failure) {
+      case 0: std::filesystem::remove(ref / "active"); break;
+      case 1: std::filesystem::remove(dir / "metadata"); break;
+      case 2: write(dir / "metadata", "[Application]\nname=another.app\ncommand=EpicGamesLauncher\n"); break;
+      case 3: std::filesystem::permissions(dir / "files/bin/EpicGamesLauncher", std::filesystem::perms::group_write, std::filesystem::perm_options::add); break;
+      case 4: std::filesystem::permissions(dir / "metadata", std::filesystem::perms::none); break;
+      case 5: std::filesystem::remove(ref / "active"); std::filesystem::create_symlink("../elsewhere", ref / "active"); break;
+    }
+    EXPECT_FALSE(epic_library::scan({home}).available) << failure;
+    if (failure == 4) std::filesystem::permissions(dir / "metadata", std::filesystem::perms::owner_read);
+  }
+}
+TEST(EpicLibraryTests, FlatpakNeverGuessesPortalOrSandboxOrRedirectedGameMappings) {
+  for (const auto *path : {"/app/Games/A", "/run/user/1000/doc/abcdef/A", "/games/A", "/var/data/Games/A"}) {
+    const auto home = std::filesystem::canonical(root("flatpak-unmapped"));
+    flatpak_fixture(home, home / ".local/share/flatpak");
+    auto r = row(); r["dir"] = path;
+    write(home / ".var/app/com.epicgames.launcher/data/com.epicgames.eglv2/installations.jsonl", installed_log({r}));
+    const auto s = epic_library::scan({home});
+    EXPECT_TRUE(s.available); EXPECT_TRUE(s.games.empty()); EXPECT_FALSE(s.warnings.empty());
+  }
+  const auto home = std::filesystem::canonical(root("flatpak-game-symlink"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  const auto dir = home / ".var/app/com.epicgames.launcher/data/Games/A Game";
+  std::filesystem::remove(dir); std::filesystem::create_directories(home / "elsewhere");
+  std::filesystem::create_directory_symlink(home / "elsewhere", dir);
+  EXPECT_TRUE(epic_library::scan({home}).games.empty());
+}
+TEST(EpicLibraryTests, NativeAndFlatpakKeepExactTitleDedupAndNativeCommands) {
+  const auto home = std::filesystem::canonical(root("flatpak-native-dedup"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  const auto native = home / ".local/share/com.epicgames.eglv2/installations.jsonl";
+  write(native, installed_log({row()}));
+  EXPECT_FALSE(epic_library::scan({home}).available);
+  auto other = row(); other["artifactId"] = "another"; other["dir"] = "/games/A Game";
+  write(native, installed_log({other}));
+  const auto s = epic_library::scan({home}); ASSERT_TRUE(s.available); ASSERT_EQ(s.games.size(), 2);
+  EXPECT_EQ(s.games[0].name, s.games[1].name); // Names alone never merge installations.
+  EXPECT_FALSE(epic_library::find(s, {"sandbox", "catalog", "another"})->flatpak);
+  EXPECT_TRUE(epic_library::find(s, title)->flatpak);
+  EXPECT_EQ(epic_library::launch_command("/usr/bin/EpicGamesLauncher", title), "'/usr/bin/EpicGamesLauncher' '" + epic_library::launch_uri(title) + "'");
+}
+TEST(EpicLibraryTests, FlatpakTitleStillUsesOnlyExactHeroicCatalogIdentityForProviderDedupHints) {
+  const auto home = std::filesystem::canonical(root("flatpak-heroic-identity"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  const auto catalog = home / ".config/heroic/legendaryConfig/legendary/metadata/artifact.json";
+  json metadata {{"app_name", "artifact"}, {"metadata", {{"namespace", "sandbox"}, {"id", "catalog"}, {"title", "Actual title"}}}};
+  write(catalog, metadata.dump());
+  auto s = epic_library::scan({home}); ASSERT_EQ(s.games.size(), 1);
+  EXPECT_EQ(s.games[0].name, "Actual title"); EXPECT_TRUE(s.games[0].flatpak);
+  metadata["metadata"]["id"] = "different";
+  write(catalog, metadata.dump());
+  s = epic_library::scan({home}); ASSERT_EQ(s.games.size(), 1);
+  EXPECT_EQ(s.games[0].name, "A Game");
+}
+TEST(EpicLibraryTests, FlatpakInstanceInfoMustMatchEveryDeploymentAndAppPrivatePath) {
+  const auto home = std::filesystem::canonical(root("flatpak-info"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  const auto s = epic_library::scan({home}); ASSERT_EQ(s.games.size(), 1);
+  const auto d = *s.games[0].flatpak;
+  const std::string info = "[Application]\nname=com.epicgames.launcher\n[Instance]\ninstance-id=123456\narch=x86_64\nbranch=stable\napp-commit=" + d.commit +
+    "\napp-path=" + (d.directory / "files").string() + "\ninstance-path=" + d.app_home.string() + '\n';
+  ASSERT_EQ(epic_library::flatpak_instance_id(info, d), "123456");
+  for (const auto &[old, replacement] : std::vector<std::pair<std::string, std::string>> {
+      {"name=com.epicgames.launcher", "name=other.app"}, {"arch=x86_64", "arch=aarch64"}, {"branch=stable", "branch=beta"},
+      {d.commit, std::string(64, 'b')}, {d.directory.string(), "/another/scope"}, {d.app_home.string(), "/another/player"}}) {
+    auto raw = info; raw.replace(raw.find(old), old.size(), replacement);
+    EXPECT_FALSE(epic_library::flatpak_instance_id(raw, d)) << old;
+  }
+  for (const auto *extra : {"app-commit=duplicate\n", "sandbox=true\n", "build=true\n", "original-app-path=/other\n"})
+    EXPECT_FALSE(epic_library::flatpak_instance_id(info + extra, d));
+  auto bad = d; bad.branch = "stable;touch";
+  EXPECT_THROW(epic_library::flatpak_launch_command(bad, title), std::invalid_argument);
+  bad = d; bad.installation = "other";
+  EXPECT_THROW(epic_library::flatpak_launch_command(bad, title), std::invalid_argument);
+  EXPECT_THROW(epic_library::flatpak_launch_command(d, {"sandbox", "catalog", "a&action=uninstall"}), std::invalid_argument);
 }
 #endif

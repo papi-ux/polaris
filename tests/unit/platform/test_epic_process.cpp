@@ -3610,4 +3610,140 @@ TEST(EpicProcessReader, FixtureFileReadsRequireEofWithinTheCapAndRefuseSymlinks)
   EXPECT_FALSE(ep::testing::read_bounded(root, 4096));
 }
 
+namespace {
+  epic_library::flatpak_deployment_t flatpak_desktop_fixture(fixture_t &host) {
+    epic_library::flatpak_deployment_t d {"user", "", "x86_64", "stable", std::string(64, 'a'),
+      "/fixture/owner/.local/share/flatpak", {}, "/fixture/owner/.var/app/com.epicgames.launcher",
+      "[Application]\nname=com.epicgames.launcher\ncommand=EpicGamesLauncher\nruntime=org.gnome.Platform/x86_64/51\n", ""};
+    d.directory = d.root / "app/com.epicgames.launcher/x86_64/stable" / d.commit;
+    const auto deployed = d.directory / "files/bin/EpicGamesLauncher";
+    const auto file = regular(5000);
+    d.image_stamp = std::to_string(file.device) + ':' + std::to_string(file.inode) + ':' + std::to_string(file.uid) + ':' +
+      std::to_string(file.mode) + ':' + std::to_string(file.size) + ':' + std::to_string(file.modified_ns) + ':' + std::to_string(file.changed_ns);
+    host.identities[deployed] = file;
+    host.headers[deployed] = std::string("\177ELF", 4);
+    host.files[d.directory / "metadata"] = d.metadata;
+    host.resolved[d.directory.parent_path() / "active"] = d.directory;
+    host.add_process(43, "/app/bin/EpicGamesLauncher", "/fixture/owner", 230, 52);
+    host.add_process(51, "/usr/bin/bwrap", "/fixture/owner", 210);
+    host.add_process(52, "/usr/bin/bwrap", "/fixture/owner", 220, 51);
+    // /app is absent in the host namespace. Only the process-root/deployment join works.
+    host.identities.erase("/app/bin/EpicGamesLauncher");
+    host.identities["/proc/43/exe"] = file;
+    host.identities["/proc/43/root/app/bin/EpicGamesLauncher"] = file;
+    host.links["/proc/self/ns/pid"] = "pid:[111]";
+    host.links["/proc/self/ns/mnt"] = "mnt:[222]";
+    host.links["/proc/43/ns/pid"] = host.links["/proc/52/ns/pid"] = "pid:[333]";
+    host.links["/proc/43/ns/mnt"] = "mnt:[444]";
+    host.links["/proc/43/ns/cgroup"] = "cgroup:[555]";
+    const std::string group = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-com.epicgames.launcher-123456.scope";
+    host.files["/proc/43/cgroup"] = host.files["/proc/52/cgroup"] = "0::" + group + '\n';
+    host.files["/proc/43/mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:52 /files /app ro - btrfs /dev/fixture ro\n53 21 0:1 /info /.flatpak-info ro - tmpfs tmpfs ro\n";
+    const std::string info = "[Application]\nname=com.epicgames.launcher\n[Instance]\ninstance-id=123456\narch=x86_64\nbranch=stable\napp-commit=" + d.commit +
+      "\napp-path=" + (d.directory / "files").string() + "\ninstance-path=" + d.app_home.string() + '\n';
+    const fs::path record = "/run/user/1000/.flatpak/123456";
+    host.identities[record] = directory(100);
+    host.files[record / "info"] = host.files["/proc/43/root/.flatpak-info"] = info;
+    host.files[record / "pid"] = "51\n";
+    host.files[record / "bwrapinfo.json"] = "{\"child-pid\":52,\"pid-namespace\":333}";
+    return d;
+  }
+}
+
+TEST_F(EpicProcess, FlatpakDesktopProofJoinsDeploymentKernelInstanceAndReadOnlyMountWithoutNativeAuthority) {
+  const auto d = flatpak_desktop_fixture(*host);
+  const auto proof = ep::testing::prove_flatpak_desktop(d, error, host);
+  ASSERT_TRUE(proof) << error;
+  EXPECT_TRUE(ep::verify_flatpak_desktop(*proof, error)) << error;
+  EXPECT_FALSE(ep::testing::prove_launcher(error, host));
+  EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  EXPECT_EQ(host->access_counts["/app/bin/EpicGamesLauncher"], 0);
+  for (const auto &path : host->reads) {
+    EXPECT_NE(path.filename(), "environ"); EXPECT_NE(path.filename(), "cmdline");
+    EXPECT_EQ(path.string().find("account"), std::string::npos);
+  }
+}
+
+TEST_F(EpicProcess, FlatpakBtrfsBindingUsesExactExecutableViewsWithoutEquatingStatAndMountDevices) {
+  const auto d = flatpak_desktop_fixture(*host);
+  host->files["/proc/43/mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n52 21 0:99 /files /app ro - btrfs /dev/fixture ro\n53 21 0:1 /info /.flatpak-info ro - tmpfs tmpfs ro\n";
+  const auto proof = ep::testing::prove_flatpak_desktop(d, error, host);
+  ASSERT_TRUE(proof) << error;
+  EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FlatpakDesktopProofRefusesMissingDifferentAndAmbiguousInstances) {
+  for (int failure = 0; failure < 9; ++failure) {
+    host = std::make_shared<fixture_t>();
+    const auto d = flatpak_desktop_fixture(*host);
+    switch (failure) {
+      case 0: host->links.erase("/proc/43/exe"); break;
+      case 1: host->files["/proc/43/root/.flatpak-info"] += "app-commit=duplicate\n"; break;
+      case 2: host->identities["/proc/43/exe"].inode++; break;
+      case 3: host->files["/proc/52/stat"] = stat_line(52, 220, 'S', 99); break;
+      case 4: host->links["/proc/52/ns/pid"] = "pid:[777]"; break;
+      case 5: host->files["/proc/43/cgroup"] = host->files["/proc/self/cgroup"]; break;
+      case 6: host->resolved[d.directory.parent_path() / "active"] = d.directory.parent_path() / std::string(64, 'b'); break;
+      case 7: host->files["/proc/43/mountinfo"] = "21 1 0:1 / / rw - tmpfs tmpfs rw\n"; break;
+      case 8: host->add_process(44, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 240); break;
+    }
+    EXPECT_FALSE(ep::testing::prove_flatpak_desktop(d, error, host)) << failure;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, FlatpakDesktopProofRejectsDeploymentProcessNamespaceAndRecordDriftBeforeDispatch) {
+  for (int change = 0; change < 7; ++change) {
+    host = std::make_shared<fixture_t>();
+    const auto d = flatpak_desktop_fixture(*host);
+    const auto proof = ep::testing::prove_flatpak_desktop(d, error, host);
+    ASSERT_TRUE(proof) << error;
+    switch (change) {
+      case 0: host->files["/proc/43/stat"] = stat_line(43, 231, 'S', 52); break;
+      case 1: host->identities[d.directory / "files/bin/EpicGamesLauncher"].modified_ns++; break;
+      case 2: host->files[d.directory / "metadata"] += "# changed\n"; break;
+      case 3: host->links["/proc/43/ns/mnt"] = "mnt:[666]"; break;
+      case 4: host->files["/run/user/1000/.flatpak/123456/pid"] = "99\n"; break;
+      case 5: host->uid++; break;
+      case 6: host->files["/proc/sys/kernel/random/boot_id"] = "1dd26721-4424-4907-ab80-4f023729a22f\n"; break;
+    }
+    EXPECT_FALSE(ep::verify_flatpak_desktop(*proof, error)) << change;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, FlatpakGamesNeverEnterNativeObservationAdoptionOrPrivateReadiness) {
+  auto title = host->title(); title.flatpak = flatpak_desktop_fixture(*host);
+  host->reads.clear();
+  const auto seen = ep::testing::observe(title, host);
+  EXPECT_FALSE(seen.available); EXPECT_EQ(seen.reason, "epic_flatpak_game_control_unavailable");
+  EXPECT_TRUE(host->reads.empty());
+  // Even a current valid native game observation cannot substitute for sandbox ownership.
+  const auto native = ep::testing::observe(host->title(), host); ASSERT_TRUE(native.available) << native.reason;
+  EXPECT_FALSE(ep::testing::adopt(title, native, error, host));
+  EXPECT_EQ(error, "epic_flatpak_game_control_unavailable");
+  EXPECT_FALSE(ep::testing::title_runtime_absent(title, error, host));
+  const auto facts = ep::testing::evaluate_setup(nullptr, &title, true, ep::prerequisite_state_t::available, host);
+  EXPECT_EQ(facts.reason, "epic_flatpak_mirror_only");
+  EXPECT_EQ(facts.proof, ep::proof_state_t::unavailable);
+  EXPECT_EQ(facts.runtime, ep::runtime_state_t::unknown);
+  EXPECT_NE(facts.state, ep::readiness_state_t::ready);
+  EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FlatpakMetadataCannotCreateNativeSetupReceiptEvenAlongsideANativeDesktopProof) {
+  host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+  const auto proof = ep::testing::prove_launcher(error, host); ASSERT_TRUE(proof) << error;
+  ep::setup_history_t history;
+  auto scan = history.begin_scan(); history.observe_scan(scan, *proof);
+  epic_library::installation_t game; game.flatpak = epic_library::flatpak_deployment_t {};
+  const epic_library::snapshot_t metadata {true, {game}, {}};
+  EXPECT_EQ(history.finish_scan(scan, metadata, &*proof, true), ep::scan_state_t::unsupported);
+  EXPECT_EQ(history.receipt(metadata, true), ep::receipt_state_t::required);
+  const epic_library::snapshot_t empty_flatpak {true, {}, {}, true};
+  scan = history.begin_scan(); history.observe_scan(scan, *proof);
+  EXPECT_EQ(history.finish_scan(scan, empty_flatpak, &*proof, true), ep::scan_state_t::unsupported);
+  EXPECT_EQ(history.receipt(empty_flatpak, true), ep::receipt_state_t::required);
+}
+
 #endif

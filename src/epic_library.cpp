@@ -1,8 +1,10 @@
 #include "epic_library.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
 
@@ -18,6 +20,7 @@ namespace epic_library {
     constexpr std::size_t max_bytes = 16 * 1024 * 1024;
     constexpr std::size_t max_line = 64 * 1024;
     constexpr std::size_t max_catalog = 1024 * 1024;
+    constexpr const char *flatpak_app = "com.epicgames.launcher";
     bool text(const std::string &s, std::size_t limit = 4096) {
       return !s.empty() && s.size() <= limit &&
         std::none_of(s.begin(), s.end(), [](unsigned char c) { return c < 32 || c == 127; });
@@ -55,6 +58,39 @@ namespace epic_library {
       for (char c : s) out += c == '\'' ? "'\\''" : std::string(1, c);
       return out + "'";
     }
+    bool component(const std::string &s) {
+      return id(s) && s.front() != '-';
+    }
+    bool commit_id(const std::string &s) {
+      return s.size() == 64 && std::all_of(s.begin(), s.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    }
+    bool beneath(const std::filesystem::path &path, const std::filesystem::path &parent) {
+      auto p = path.begin();
+      for (const auto &part : parent) if (p == path.end() || *p++ != part) return false;
+      return p != path.end();
+    }
+    using ini_t = std::map<std::string, std::string>;
+    ini_t flatpak_ini(std::string_view raw) {
+      if (raw.empty() || raw.size() > max_catalog) throw std::runtime_error("unavailable Flatpak metadata");
+      ini_t out;
+      std::set<std::string> groups;
+      std::string group, line;
+      std::istringstream stream {std::string(raw)};
+      while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line.front() == '#') continue;
+        if (line.front() == '[' && line.back() == ']') {
+          group = line.substr(1, line.size() - 2);
+          if (!text(group) || !groups.insert(group).second) throw std::runtime_error("ambiguous Flatpak group");
+        } else {
+          const auto equals = line.find('=');
+          if (group.empty() || equals == std::string::npos || !equals ||
+              !out.emplace(group + '/' + line.substr(0, equals), line.substr(equals + 1)).second)
+            throw std::runtime_error("ambiguous Flatpak key");
+        }
+      }
+      return out;
+    }
 #ifndef _WIN32
     struct fd_t {
       int fd = -1;
@@ -70,14 +106,18 @@ namespace epic_library {
 #endif
         ;
     }
-    std::optional<std::string> bounded_read(const std::filesystem::path &path, std::size_t limit) {
+    std::optional<std::string> bounded_read(const std::filesystem::path &path, std::size_t limit, bool deployment = false) {
       // Only the named nonsecret metadata file is read. Never use .prev, account caches or a retry.
       fd_t root {::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)};
       struct stat root_before {}, root_after {}, named_root {}, before {}, after {}, named {};
-      if (root.fd < 0 || ::fstat(root.fd, &root_before) || root_before.st_uid != ::getuid()) return {};
+      const auto owner = [deployment](const struct stat &s) {
+        return (s.st_uid == ::getuid() || (deployment && s.st_uid == 0)) &&
+          (!deployment || (s.st_mode & (S_IWGRP | S_IWOTH)) == 0);
+      };
+      if (root.fd < 0 || ::fstat(root.fd, &root_before) || !owner(root_before)) return {};
       fd_t file {::openat(root.fd, path.filename().c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)};
       if (file.fd < 0 || ::fstat(file.fd, &before) || !S_ISREG(before.st_mode) ||
-          before.st_uid != ::getuid() || before.st_size <= 0 || static_cast<uint64_t>(before.st_size) > limit) return {};
+          !owner(before) || (deployment && !(before.st_mode & S_IRUSR)) || before.st_size <= 0 || static_cast<uint64_t>(before.st_size) > limit) return {};
       std::string raw(static_cast<std::size_t>(before.st_size) + 1, '\0');
       std::size_t count = 0;
       while (count < raw.size()) {
@@ -93,9 +133,69 @@ namespace epic_library {
       raw.resize(count);
       return raw;
     }
+    std::string image_stamp(const std::filesystem::path &path) {
+      fd_t file {::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)};
+      struct stat before {}, after {};
+      char header[4] {};
+      if (file.fd < 0 || ::fstat(file.fd, &before) || !S_ISREG(before.st_mode) ||
+          (before.st_uid != 0 && before.st_uid != ::getuid()) ||
+          (before.st_mode & (S_IWGRP | S_IWOTH | S_ISUID | S_ISGID)) || !(before.st_mode & 0111) ||
+          ::read(file.fd, header, 4) != 4 || std::string(header, 4) != std::string("\177ELF", 4) ||
+          ::fstat(file.fd, &after) || !same(before, after)) return {};
+#ifdef __APPLE__
+      const auto modified = before.st_mtimespec, changed = before.st_ctimespec;
 #else
-    std::optional<std::string> bounded_read(const std::filesystem::path &, std::size_t) { return {}; }
+      const auto modified = before.st_mtim, changed = before.st_ctim;
 #endif
+      return std::to_string(before.st_dev) + ':' + std::to_string(before.st_ino) + ':' + std::to_string(before.st_uid) + ':' +
+        std::to_string(before.st_mode) + ':' + std::to_string(before.st_size) + ':' +
+        std::to_string(static_cast<std::int64_t>(modified.tv_sec) * 1000000000 + modified.tv_nsec) + ':' +
+        std::to_string(static_cast<std::int64_t>(changed.tv_sec) * 1000000000 + changed.tv_nsec);
+    }
+#else
+    std::optional<std::string> bounded_read(const std::filesystem::path &, std::size_t, bool = false) { return {}; }
+    std::string image_stamp(const std::filesystem::path &) { return {}; }
+#endif
+    flatpak_deployment_t deployment(const std::filesystem::path &root, const std::filesystem::path &app_home, const std::string &scope) {
+      namespace fs = std::filesystem;
+      if (!valid_absolute_path(root) || !valid_absolute_path(app_home) || (scope != "user" && scope != "system"))
+        throw std::runtime_error("invalid Flatpak installation");
+      std::vector<flatpak_deployment_t> found;
+      const auto app = root / "app" / flatpak_app;
+      std::size_t entries = 0;
+      for (const auto &arch : fs::directory_iterator(app)) {
+        if (++entries > 64) throw std::runtime_error("too many Flatpak refs");
+        // current is Flatpak's own convenience symlink, never an implicit ref choice.
+        if (arch.path().filename() == "current") continue;
+        if (!arch.is_directory() || arch.is_symlink()) throw std::runtime_error("invalid Flatpak architecture");
+        for (const auto &branch : fs::directory_iterator(arch.path())) {
+          if (++entries > 64) throw std::runtime_error("too many Flatpak refs");
+          if (!branch.is_directory() || branch.is_symlink()) throw std::runtime_error("invalid Flatpak branch");
+          const auto active = branch.path() / "active";
+          std::error_code ec;
+          if (fs::symlink_status(active, ec).type() == fs::file_type::not_found) continue;
+          const auto commit = fs::read_symlink(active).string();
+          if (arch.path().filename() != "x86_64" || !component(branch.path().filename().string()) || !commit_id(commit))
+            throw std::runtime_error("unsupported Flatpak ref");
+          const auto dir = branch.path() / commit;
+          if (fs::canonical(active) != dir || fs::canonical(root) != root || fs::canonical(dir) != dir)
+            throw std::runtime_error("redirected Flatpak deployment");
+          const auto raw = bounded_read(dir / "metadata", max_catalog, true);
+          if (!raw) throw std::runtime_error("unreadable Flatpak deployment");
+          auto ini = flatpak_ini(*raw);
+          if (ini["Application/name"] != flatpak_app || ini["Application/command"] != "EpicGamesLauncher" ||
+              !ini["Application/runtime"].starts_with("org.gnome.Platform/x86_64/"))
+            throw std::runtime_error("mismatched Flatpak metadata");
+          const auto stamp = image_stamp(dir / "files/bin/EpicGamesLauncher");
+          if (stamp.empty() || fs::canonical(active) != dir || bounded_read(dir / "metadata", max_catalog, true) != raw)
+            throw std::runtime_error("changed Flatpak deployment");
+          found.push_back({scope, scope == "system" ? "default" : "", "x86_64", branch.path().filename().string(), commit,
+            root, dir, app_home, *raw, stamp});
+        }
+      }
+      if (found.size() != 1) throw std::runtime_error("missing or ambiguous Flatpak deployment");
+      return found.front();
+    }
   }
 
   bool valid_identity(const identity_t &i) { return id(i.namespace_id) && id(i.item_id) && id(i.artifact_id); }
@@ -215,30 +315,90 @@ namespace epic_library {
     return found;
   }
 
-  snapshot_t scan(const std::vector<std::filesystem::path> &homes) {
+  bool verify_flatpak_deployment(const flatpak_deployment_t &retained) {
+    try { return deployment(retained.root, retained.app_home, retained.scope) == retained; }
+    catch (const std::exception &) { return false; }
+  }
+
+  std::optional<std::string> flatpak_instance_id(std::string_view raw, const flatpak_deployment_t &d) {
+    try {
+      auto info = flatpak_ini(raw);
+      const auto instance = info["Instance/instance-id"];
+      if (!component(instance) || info["Application/name"] != flatpak_app || info["Instance/arch"] != d.arch ||
+          info["Instance/branch"] != d.branch || info["Instance/app-commit"] != d.commit ||
+          info["Instance/app-path"] != (d.directory / "files").string() ||
+          info["Instance/instance-path"] != d.app_home.string() || info.contains("Instance/original-app-path")) return {};
+      for (const auto *flag : {"Instance/build", "Instance/devel", "Instance/sandbox"})
+        if (info.contains(flag) && info[flag] != "false") return {};
+      return instance;
+    } catch (const std::exception &) { return {}; }
+  }
+
+  snapshot_t scan(const std::vector<std::filesystem::path> &homes) { return scan(homes, "/var/lib/flatpak"); }
+
+  snapshot_t scan(const std::vector<std::filesystem::path> &homes, const std::filesystem::path &system_root) {
     snapshot_t out;
+    bool native_metadata = false;
     std::set<std::string> identities;
-    for (const auto &home : homes) {
-      const auto root = home / ".local/share/com.epicgames.eglv2";
-      std::error_code ec;
-      if (!std::filesystem::exists(root, ec)) continue;
-      auto s = read_installations(root);
-      if (!s.available) return s; // Do not silently trust a different root when one is unreadable.
+    const auto append = [&](snapshot_t s) {
+      if (!s.available) { out = std::move(s); return false; }
       out.available = true;
       out.warnings.insert(out.warnings.end(), s.warnings.begin(), s.warnings.end());
       for (auto &game : s.games) {
-        if (!identities.insert(key(game.identity)).second) return {false, {}, {"More than one Epic data root claims this title. Choose one launcher installation first."}};
+        if (!identities.insert(key(game.identity)).second) {
+          out = {false, {}, {"More than one Epic data root claims this title. Choose one launcher installation first."}};
+          return false;
+        }
         std::string name;
         const auto catalog = heroic_identity(game.identity.artifact_id, homes, &name);
         if (catalog && *catalog == game.identity && !name.empty()) game.name = name;
         out.games.push_back(std::move(game));
       }
+      return true;
+    };
+    try {
+      for (const auto &home : homes) {
+        const auto root = home / ".local/share/com.epicgames.eglv2";
+        if (std::filesystem::exists(root)) {
+          native_metadata = true;
+          out.flatpak_only = false;
+          if (!append(read_installations(root))) return out;
+        }
+        const auto app_home = home / ".var/app" / flatpak_app;
+        const auto data = app_home / "data/com.epicgames.eglv2";
+        if (!std::filesystem::exists(data)) continue;
+        std::vector<flatpak_deployment_t> deployments;
+        for (const auto &[location, scope] : std::vector<std::pair<std::filesystem::path, std::string>> {
+            {home / ".local/share/flatpak", "user"}, {system_root, "system"}})
+          if (std::filesystem::exists(location / "app" / flatpak_app)) deployments.push_back(deployment(location, app_home, scope));
+        if (deployments.size() != 1 || std::filesystem::canonical(app_home) != app_home || std::filesystem::canonical(data) != data)
+          throw std::runtime_error("missing, redirected or ambiguous Flatpak installation");
+        auto s = read_installations(data);
+        if (!s.available) return s;
+        s.games.erase(std::remove_if(s.games.begin(), s.games.end(), [&](auto &game) {
+          // Only an identical app-private host path is qualified. No /app, portal,
+          // home-directory or mount/drive mapping is guessed from a sandbox path.
+          std::error_code ec;
+          if (!beneath(game.install_dir, app_home) || std::filesystem::canonical(game.install_dir, ec) != game.install_dir || ec) {
+            s.warnings.push_back("An Epic Flatpak game path has no verified app-private host mapping; it was not imported.");
+            return true;
+          }
+          game.flatpak = deployments.front();
+          return false;
+        }), s.games.end());
+        if (!verify_flatpak_deployment(deployments.front())) throw std::runtime_error("changed Flatpak deployment");
+        s.warnings.push_back("Epic Flatpak supports Mirror Desktop only. End ends the stream and leaves the desktop game running.");
+        if (!append(std::move(s))) return out;
+        out.flatpak_only = !native_metadata;
+      }
+    } catch (const std::exception &) {
+      return {false, {}, {"Epic Flatpak deployment or metadata is missing, unreadable, changed or ambiguous. Finish its Flatpak update and keep only one installation before rescanning."}};
     }
     return out;
   }
 
   bool same_snapshot(const snapshot_t &a, const snapshot_t &b) {
-    if (!a.available || !b.available || a.games.size() != b.games.size() || a.warnings != b.warnings) return false;
+    if (!a.available || !b.available || a.games.size() != b.games.size() || a.warnings != b.warnings || a.flatpak_only != b.flatpak_only) return false;
     auto left = a.games, right = b.games;
     const auto order = [](const installation_t &x, const installation_t &y) { return key(x.identity) < key(y.identity); };
     std::sort(left.begin(), left.end(), order);
@@ -259,6 +419,19 @@ namespace epic_library {
   std::string launch_command(const std::filesystem::path &launcher, const identity_t &i) {
     if (!valid_absolute_path(launcher)) throw std::invalid_argument("Invalid Epic launcher path");
     return quote(launcher.string()) + ' ' + quote(launch_uri(i));
+  }
+  std::string flatpak_launch_command(const flatpak_deployment_t &d, const identity_t &i) {
+    const auto home = d.app_home.parent_path().parent_path().parent_path();
+    if ((d.scope != "user" && d.scope != "system") || d.installation != (d.scope == "system" ? "default" : "") ||
+        d.arch != "x86_64" || !component(d.branch) || !commit_id(d.commit) || !valid_absolute_path(d.root) ||
+        !valid_absolute_path(home) || d.app_home != home / ".var/app" / flatpak_app ||
+        d.directory != d.root / "app" / flatpak_app / d.arch / d.branch / d.commit)
+      throw std::invalid_argument("Invalid Epic Flatpak deployment");
+    // Bind this child's app-private home and installation lookup even if the service
+    // inherited another directory. This changes no host setting or sandbox permission.
+    return "env HOME=" + quote(home.string()) + ' ' + std::string(d.scope == "user" ? "FLATPAK_USER_DIR=" : "FLATPAK_SYSTEM_DIR=") + quote(d.root.string()) +
+      " flatpak run " + (d.scope == "user" ? "--user" : "--installation=default") + " --arch=x86_64 " +
+      quote("--branch=" + d.branch) + ' ' + quote("--commit=" + d.commit) + ' ' + quote(flatpak_app) + ' ' + quote(launch_uri(i));
   }
   std::string appimage_stage_command(const std::filesystem::path &image, const std::filesystem::path &install_dir,
     const identity_t &i, const std::function<std::string(const std::string &)> &isolate) {

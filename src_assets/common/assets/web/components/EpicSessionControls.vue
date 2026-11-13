@@ -86,7 +86,12 @@ async function leaveRunning() { await release() }
       </p>
 
       <!-- Honest state when the backend has an active game it cannot read. -->
-      <template v-if="isPrivate">
+      <p v-if="state.code === 'epic_flatpak_game_control_unavailable'" class="mt-3 text-xs text-support" data-epic-flatpak-limit>
+        Epic Flatpak supports Mirror Desktop only. End Session ends the stream and leaves the desktop game and
+        launcher running. Disconnect and Resume leave them running too. Private Stream and close-game permission
+        are unavailable for this package.
+      </p>
+      <template v-else-if="isPrivate">
         <p v-if="privateGameState === 'unavailable'" class="mt-3 text-xs text-warning-bright" data-epic-private-unavailable>
           Polaris can't verify the requested game. End still closes the whole private session.
         </p>
