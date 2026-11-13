@@ -57,9 +57,9 @@ or subscription, and pairing, settings and your library stay on your PC.
 - **A Doctor for bad streams.** When a game feels wrong, Doctor tells you
   whether the network, the host or the client may be behind it. When it can help,
   it offers one safe fix, checks whether it worked and undoes it if it didn't.
-- **Your library comes along.** Steam, Heroic (GOG and Epic), Lutris and ROM
-  folders with their emulators arrive with artwork, and each game shows its
-  launch checks before you press play.
+- **Your library comes along.** Steam, Heroic (GOG and Epic), Epic's own
+  Linux Preview launcher, Lutris and ROM folders with their emulators arrive
+  with artwork, and each game shows its launch checks before you press play.
 - **Step away without losing your place.** Disconnect keeps the game running
   so you can resume later. End Session stops only the game that session
   started, and a second device can watch without taking over.
@@ -92,8 +92,8 @@ the right package. If you'd rather choose yourself:
 
 | Your Linux host | Start here |
 | --- | --- |
-| Fedora 44, Arch Linux, CachyOS | [Quick start](https://papi-ux.com/docs/quickstart/), with signed package repositories |
-| SteamOS 3.8 or 3.9 on a Steam Deck | [SteamOS guide](https://papi-ux.com/docs/steamos/); stable has a 3.8 package, and 1.5.0-beta.2 adds a separate 3.9 package |
+| Fedora 44 or 45, Arch Linux, CachyOS | [Quick start](https://papi-ux.com/docs/quickstart/), with signed package repositories |
+| SteamOS 3.8 or 3.9 on a Steam Deck | [SteamOS guide](https://papi-ux.com/docs/steamos/), with a package for each release |
 | Bazzite | [Bazzite guide](https://papi-ux.com/docs/bazzite/) |
 | Ubuntu 24.04 | [Ubuntu guide](https://papi-ux.com/docs/ubuntu/), a tester package |
 | NixOS | [NixOS guide](https://papi-ux.com/docs/nixos/), a source build with community validation |
@@ -125,10 +125,12 @@ play.
   and capture path can deliver; [Compatibility](https://papi-ux.com/docs/compatibility/)
   has the details.
 - **Stable or beta.** [Latest](https://github.com/papi-ux/polaris/releases/latest)
-  is always stable; betas are opt-in prereleases. This page follows the source,
-  which can be ahead of the newest package. The [release notes](docs/release-notes/)
-  and [changelog](docs/changelog.md) cover what changed in each version and
-  what's still being checked.
+  is always stable, and the package repositories serve stable only. Betas are
+  opt-in prereleases: Update Center offers one only when **Include beta
+  releases** is on. This page follows the source, which can be ahead of the
+  newest package. The [release notes](docs/release-notes/) and
+  [changelog](docs/changelog.md) cover what changed in each version and what's
+  still being checked.
 - **Extras to try when you want them.** These stay out of the way until you
   choose them. [Spaces](https://papi-ux.com/docs/spaces/) gives each
   player their own launcher sign-in, library and saves on one PC.
