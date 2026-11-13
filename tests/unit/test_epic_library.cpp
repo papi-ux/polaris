@@ -114,7 +114,9 @@ namespace {
         if (!files.contains(sandbox(prefix))) files[sandbox(prefix)] = {99, inode++, 1000, S_IFDIR | 0755, 100, 123, 456};
       }
       headers.erase(sandbox(image())); headers[portal(image())] = "MZfixture";
-      links[sandbox("/run/user/1000/doc")] = "/run/flatpak/doc";
+      files[sandbox("/run/user")] = {2, 61000, 1000, S_IFDIR | 0755, 100, 123, 456};
+      files[sandbox("/run/user/1000")] = {2, 61001, 1000, S_IFDIR | 0700, 100, 123, 456};
+      links[sandbox("/run/user/1000/doc")] = "../../flatpak/doc";
       host_mountinfo = "80 1 0:99 / /run/user/1000/doc rw - fuse.portal portal rw\n";
       sandbox_mountinfo = "81 1 0:99 /by-app/com.epicgames.launcher /run/flatpak/doc rw - fuse.portal portal rw\n";
     }
@@ -649,12 +651,15 @@ TEST(EpicLibraryTests, FlatpakPortalGamesUsesTypedDocumentsAndBackingPathProofNe
   ASSERT_NE(p.files.at(p.image()).inode, p.files.at(p.portal(p.image())).inode);
   const auto before = p.binding(); ASSERT_TRUE(before);
   EXPECT_EQ(p.binding(), before);
+  p.links[p.sandbox("/run/user/1000/doc")] = "/run/flatpak/doc";
+  EXPECT_TRUE(p.binding()); // Both exact aliases resolve through proved real parents.
+  p.links[p.sandbox("/run/user/1000/doc")] = "../../flatpak/doc";
   p.files[p.portal(p.image())].inode++;
   const auto after = p.binding(); ASSERT_TRUE(after);
   EXPECT_NE(after, before); // Per-view identity drift cannot reuse the retained prerequisite.
 }
 TEST(EpicLibraryTests, FlatpakPortalGamesRefusesMissingRevokedChangedAndMismatchedProtocolFacts) {
-  for (int failure = 0; failure < 17; ++failure) {
+  for (int failure = 0; failure < 20; ++failure) {
     direct_games_paths_t p; p.use_portal(); ASSERT_TRUE(p.binding());
     switch (failure) {
       case 0: p.document.reset(); break;
@@ -674,6 +679,11 @@ TEST(EpicLibraryTests, FlatpakPortalGamesRefusesMissingRevokedChangedAndMismatch
       case 14: p.document->permissions = {"read"}; break;
       case 15: p.sandbox_mountinfo += "82 81 0:100 / /run/flatpak/doc/fixture-doc/Games/A\\040Game rw - tmpfs tmpfs rw\n"; break;
       case 16: p.after_nofollow = [&](const auto &) { p.document->permissions = {"read"}; }; break;
+      case 17: p.files[p.sandbox("/run/user")].mode = S_IFLNK | 0777; break;
+      case 18: p.links[p.sandbox("/run/user/1000/doc")] = "../../other/doc"; break;
+      case 19: p.after_nofollow = [&](const auto &path) {
+        if (path == p.portal(p.image())) p.files[p.sandbox("/run/user/1000")].inode++;
+      }; break;
     }
     EXPECT_FALSE(p.binding()) << failure;
   }

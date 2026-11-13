@@ -653,6 +653,8 @@ namespace epic_library {
       add("epic-flatpak-same-path-v1"); add(process_root.string()); add(game.installation_id); add(game.version);
       add(key(game.identity)); add(game.data_root.string()); add(game.install_dir.string()); add(game.launch_executable);
       fs::path portal_export;
+      std::vector<std::pair<fs::path, flatpak_path_file_t>> alias_directories;
+      std::optional<std::pair<fs::path, fs::path>> portal_alias;
       if (game.document) {
         const auto current = document_mapping(game.document->metadata_dir, home, read.owner, read.document, read.canonical);
         if (!current || current->first != *game.document || current->second != game.install_dir || shared != home / "Games" ||
@@ -667,8 +669,19 @@ namespace epic_library {
         add(host_mount->identity); add(app_mount->identity);
         for (const auto &p : game.document->permissions) add(p);
         if (beneath(game.document->metadata_dir, game.document->mount_point)) {
-          const auto alias = read.link(process_root / game.document->mount_point.relative_path());
-          if (!alias || *alias != sandbox_mount) return {};
+          const auto alias_path = process_root / game.document->mount_point.relative_path();
+          const auto alias = read.link(alias_path);
+          // Flatpak's runtime alias is exactly ../../flatpak/doc. Its parent
+          // directories must be real, pinned directories before resolving it.
+          if (!alias || (*alias != sandbox_mount && *alias != fs::path("../../flatpak/doc"))) return {};
+          fs::path parent = process_root;
+          for (const auto &part : game.document->mount_point.parent_path().relative_path()) {
+            parent /= part;
+            const auto f = read.nofollow(parent);
+            if (!f || !f->inode || !S_ISDIR(f->mode) || (f->uid != 0 && f->uid != read.owner)) return {};
+            add(parent.string()); identity(*f); alias_directories.emplace_back(parent, *f);
+          }
+          portal_alias = std::make_pair(alias_path, *alias);
           add(alias->string());
         }
         portal_export = sandbox_mount / game.document->id / "Games";
@@ -718,6 +731,8 @@ namespace epic_library {
       for (const auto &s : samples)
         if (read.nofollow(s.host) != s.a || read.nofollow(s.sandbox) != s.b ||
             (game.document && (s.host == shared || beneath(s.host, shared)) && read.portal_host_path(s.sandbox) != s.host)) return {};
+      for (const auto &[path, file] : alias_directories) if (read.nofollow(path) != file) return {};
+      if (portal_alias && read.link(portal_alias->first) != portal_alias->second) return {};
       if (game.document) {
         const auto after = document_mapping(game.document->metadata_dir, home, read.owner, read.document, read.canonical);
         if (!after || after->first != *game.document || after->second != game.install_dir) return {};

@@ -3714,7 +3714,9 @@ namespace {
       host.identities.erase(process_root / prefix.relative_path());
     }
     host.headers[exported / image.lexically_relative(shared)] = "MZfixture";
-    host.links[process_root / "run/user/1000/doc"] = "/run/flatpak/doc";
+    host.identities[process_root / "run/user"] = directory(inode++);
+    host.identities[process_root / "run/user/1000"] = directory(inode++);
+    host.links[process_root / "run/user/1000/doc"] = "../../flatpak/doc";
     host.files["/proc/self/mountinfo"] = "80 1 0:99 / /run/user/1000/doc rw - fuse.portal portal rw\n";
     host.files["/proc/43/mountinfo"] += "81 21 0:99 /by-app/com.epicgames.launcher /run/flatpak/doc rw - fuse.portal portal rw\n";
     return game;
