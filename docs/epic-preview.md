@@ -2,7 +2,7 @@
 
 This integration is new in Polaris 1.5.0. It imports completed Windows-game installations from
 the official Epic Linux Preview and launches them in **Mirror Desktop**. Epic manages its own
-sign-in, downloads, updates, Proton runtime and cloud saves. A game can also run in labwc
+sign-in, downloads, updates, Proton runtime and cloud saves. With a native package, a game can also run in labwc
 **Private Stream** when you choose it for that game, as described below; imported entries still
 default to Mirror Desktop. Hands-on checks so far cover one game on one host in each mode: in
 Private Stream, a Retroid Pocket 6 launched it with controller isolation on, its controller input
@@ -18,11 +18,17 @@ an x86-64 AppImage and a Debian package. Both are the Preview launcher, not a st
 Choose the package suited to your distribution; Polaris does not install or convert Epic packages.
 
 The [Epic Games Launcher package on Flathub](https://flathub.org/en/apps/com.epicgames.launcher)
-also packages the official Preview. Its Polaris route is limited to **Mirror Desktop**:
-discovery/import and URI dispatch are implemented, but a deployed Flatpak and live stream
-have not yet been validated. Native/AppImage hands-on results above do not qualify this route.
-Updates to this package come through Flatpak, with Epic's self-updater disabled by the
-[package manifest](https://github.com/flathub/com.epicgames.launcher/blob/8f2584ce007ac9c7f09b7756c79f489380754418/com.epicgames.launcher.yml).
+is a community-maintained package of Epic's official Preview client. The package is not
+published by Epic, and its listing does not establish Epic endorsement. Its
+[pinned manifest](https://github.com/flathub/com.epicgames.launcher/blob/8f2584ce007ac9c7f09b7756c79f489380754418/com.epicgames.launcher.yml)
+fetches Epic's own Debian package with a pinned SHA256 hash and adds UMU. This provenance
+check is not a full binary or security audit. Updates come through Flatpak, with Epic's
+self-updater disabled by the package.
+
+Its Polaris route is limited to **Mirror Desktop**: discovery/import and URI dispatch are
+implemented, but exact-source Linux checks and deployed Flatpak Mirror/URI forwarding,
+streaming, End, Disconnect and Resume validation remain pending. Native/AppImage hands-on
+results above do not qualify this route.
 
 Polaris checks the default user or default system installation's exact x86-64 branch and
 deployment against an already-running desktop instance. Multiple user/system deployments,
@@ -44,6 +50,23 @@ accessible to Epic themselves. Let the installation finish in Epic: an incomplet
 update remains unavailable even when its download is progressing normally.
 Polaris does not grant Flatpak permissions, export a portal folder, copy or move a game,
 or choose a different installation when the selected path is inaccessible.
+
+Before streaming, confirm that the completed game opens normally from Epic itself. Readable
+Documents metadata and files do not prove that Proton can use the portal directory as its
+working directory. On one recorded Epic 0.113.0 / GE-Proton 10-34 setup, two Alan Wake 2
+launch captures failed at `protonfixes/util.py:909`, where `os.getcwd()` encountered a deleted
+FUSE working directory. Re-entering the same directory repaired it only temporarily.
+Direct access to the existing `~/Games/` folder, correcting the existing installation's path
+to its real location, and a normal launcher restart let the owner open the game without
+moving or redownloading it or migrating old saves. This observation does not identify the
+underlying portal defect or establish a fix for every setup.
+
+If this limitation affects you, check access to the specific existing game folder and its
+configured installation path with the package or launcher maintainer; restart Epic normally
+once the launcher and game are idle. Limit any access change to that chosen folder.
+Polaris does not repair these settings or choose a fallback path. Opening a game inside
+Epic does not validate Polaris Flatpak URI forwarding, streaming, End/Resume, game ownership
+or release readiness; the Flatpak route still needs its own validation.
 
 At launch, Polaris checks the selected folder and launch file through the independently
 verified running desktop launcher's process root. For a direct path, the actual host and
