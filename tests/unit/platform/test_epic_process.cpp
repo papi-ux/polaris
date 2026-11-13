@@ -82,6 +82,8 @@ namespace {
     std::map<fs::path, std::string> files, headers;
     std::map<fs::path, fs::path> links, resolved;
     std::map<fs::path, file_t> identities;
+    std::map<std::string, epic_library::flatpak_document_t> documents;
+    std::map<fs::path, fs::path> portal_origins;
     std::map<fs::path, std::vector<std::string>> listings;
     std::map<std::string, ep::testing::unit_t> units;
     std::vector<std::string> unit_queries;
@@ -462,6 +464,26 @@ namespace {
         return stat(text.substr(root + 5));
       }
       return std::nullopt;
+    }
+
+    std::optional<file_t> nofollow_stat(const fs::path &path) override {
+      // Every sandbox view must be explicit. stat() above has a legacy host-view
+      // convenience fallback, which must never fabricate a same-path proof.
+      const auto found = identities.find(path);
+      if (found == identities.end()) return {};
+      const auto value = found->second;
+      accessed(path);
+      return value;
+    }
+
+    std::optional<epic_library::flatpak_document_t> document(const std::string &id, const fs::path &) override {
+      const auto it = documents.find(id);
+      return it == documents.end() ? std::nullopt : std::make_optional(it->second);
+    }
+
+    std::optional<fs::path> portal_host_path(const fs::path &path) override {
+      const auto it = portal_origins.find(path);
+      return it == portal_origins.end() ? std::nullopt : std::make_optional(it->second);
     }
 
     std::optional<std::vector<std::string>> list(const fs::path &path, std::size_t limit) override {
@@ -3618,6 +3640,7 @@ namespace {
     d.directory = d.root / "app/com.epicgames.launcher/x86_64/stable" / d.commit;
     const auto deployed = d.directory / "files/bin/EpicGamesLauncher";
     const auto file = regular(5000);
+    host.identities[d.root] = directory(4999); // canonical(root) requires an explicit fixture directory.
     d.image_stamp = std::to_string(file.device) + ':' + std::to_string(file.inode) + ':' + std::to_string(file.uid) + ':' +
       std::to_string(file.mode) + ':' + std::to_string(file.size) + ':' + std::to_string(file.modified_ns) + ':' + std::to_string(file.changed_ns);
     host.identities[deployed] = file;
@@ -3648,6 +3671,149 @@ namespace {
     host.files[record / "bwrapinfo.json"] = "{\"child-pid\":52,\"pid-namespace\":333}";
     return d;
   }
+  epic_library::installation_t direct_games_desktop_fixture(fixture_t &host) {
+    const auto d = flatpak_desktop_fixture(host);
+    epic_library::installation_t game {{"namespace", "item", "artifact"}, "install1", "A Game", "bin/Game.exe", "1",
+      "/fixture/owner/Games/A Game", d.app_home / "data/com.epicgames.eglv2", "Windows", d};
+    const auto image = game.install_dir / game.launch_executable;
+    fs::path path = "/";
+    std::uint64_t inode = 7000;
+    bool shared = false;
+    for (const auto &part : image.relative_path()) {
+      path /= part;
+      shared = shared || path == fs::path("/fixture/owner/Games");
+      auto file = path == image ? regular(inode++) : directory(inode++);
+      host.identities[path] = file;
+      if (!shared) file.inode += 10000;
+      host.identities[fs::path("/proc/43/root") / path.relative_path()] = file;
+    }
+    host.headers[image] = host.headers[fs::path("/proc/43/root") / image.relative_path()] = "MZfixture";
+    return game;
+  }
+  epic_library::installation_t portal_games_desktop_fixture(fixture_t &host) {
+    auto game = direct_games_desktop_fixture(host);
+    game.document = epic_library::flatpak_document_t {"fixture-doc", std::string(32, 'a'), ":1.44", 1000, 70,
+      "/run/user/1000/doc", "/fixture/owner/Games", "/run/user/1000/doc/fixture-doc/Games/A Game", {"read", "write"}};
+    host.documents["fixture-doc"] = *game.document;
+    const fs::path process_root = "/proc/43/root", shared = "/fixture/owner/Games";
+    const fs::path exported = process_root / "run/flatpak/doc/fixture-doc/Games";
+    const auto image = game.install_dir / game.launch_executable;
+    fs::path prefix = "/";
+    std::uint64_t inode = 8000;
+    for (const auto &part : fs::path("/run/flatpak/doc/fixture-doc/Games").relative_path()) {
+      prefix /= part; host.identities[process_root / prefix.relative_path()] = directory(inode++);
+    }
+    bool sharing = false;
+    prefix = "/";
+    for (const auto &part : image.relative_path()) {
+      prefix /= part; sharing = sharing || prefix == shared;
+      if (!sharing) continue;
+      const auto view = prefix == shared ? exported : exported / prefix.lexically_relative(shared);
+      auto file = host.identities.at(prefix); file.inode += 50000; file.device = makedev(0, 99);
+      host.identities[view] = file; host.portal_origins[view] = prefix;
+      host.identities.erase(process_root / prefix.relative_path());
+    }
+    host.headers[exported / image.lexically_relative(shared)] = "MZfixture";
+    host.links[process_root / "run/user/1000/doc"] = "/run/flatpak/doc";
+    host.files["/proc/self/mountinfo"] = "80 1 0:99 / /run/user/1000/doc rw - fuse.portal portal rw\n";
+    host.files["/proc/43/mountinfo"] += "81 21 0:99 /by-app/com.epicgames.launcher /run/flatpak/doc rw - fuse.portal portal rw\n";
+    return game;
+  }
+}
+
+TEST_F(EpicProcess, FlatpakPortalGamesProofBindsDocumentsMountBackingPathsAndExactDesktopWithoutOwnership) {
+  const auto game = portal_games_desktop_fixture(*host);
+  const auto proof = ep::testing::prove_flatpak_desktop(game, error, host);
+  ASSERT_TRUE(proof) << error;
+  EXPECT_TRUE(ep::verify_flatpak_desktop(*proof, error)) << error;
+  auto target = host->title(); target.flatpak = game.flatpak;
+  const auto seen = ep::testing::observe(target, host);
+  EXPECT_FALSE(ep::testing::adopt(target, seen, error, host));
+  EXPECT_EQ(error, "epic_flatpak_game_control_unavailable");
+  EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FlatpakPortalGamesProofRefusesRevokedOriginServiceMountInstanceAndBackingPathDrift) {
+  for (int change = 0; change < 10; ++change) {
+    host = std::make_shared<fixture_t>();
+    const auto game = portal_games_desktop_fixture(*host);
+    const auto proof = ep::testing::prove_flatpak_desktop(game, error, host);
+    ASSERT_TRUE(proof) << error;
+    const fs::path view = "/proc/43/root/run/flatpak/doc/fixture-doc/Games/A Game/bin/Game.exe";
+    switch (change) {
+      case 0: host->documents["fixture-doc"].permissions = {"read"}; break;
+      case 1: host->documents["fixture-doc"].origin = "/fixture/owner/Other"; break;
+      case 2: host->documents["fixture-doc"].service = ":1.45"; break;
+      case 3: {
+        const std::string expected_root = "/by-app/com.epicgames.launcher";
+        host->files["/proc/43/mountinfo"].replace(host->files["/proc/43/mountinfo"].find(expected_root), expected_root.size(), "/by-app/another.app");
+        break;
+      }
+      case 4: host->portal_origins.erase(view); break;
+      case 5: host->portal_origins[view] = "/fixture/owner/Games/Other/Game.exe"; break;
+      case 6: host->files["/proc/43/stat"] = stat_line(43, 231, 'S', 52); break;
+      case 7: host->identities[view].inode++; break;
+      case 8: host->resolved[game.flatpak->directory.parent_path() / "active"] = game.flatpak->directory.parent_path() / std::string(64, 'b'); break;
+      case 9: host->files["/proc/43/mountinfo"] += "82 81 0:100 / /run/flatpak/doc/fixture-doc rw - tmpfs tmpfs rw\n"; break;
+    }
+    EXPECT_FALSE(ep::verify_flatpak_desktop(*proof, error)) << change;
+    const char *expected[] {"epic_flatpak_game_path_unavailable", "epic_flatpak_game_path_unavailable", "epic_flatpak_game_path_unavailable",
+      "epic_flatpak_game_path_unavailable", "epic_flatpak_game_path_unavailable", "epic_flatpak_game_path_unavailable",
+      "epic_flatpak_desktop_changed", "epic_flatpak_desktop_changed", "epic_flatpak_deployment_changed", "epic_flatpak_game_path_unavailable"};
+    EXPECT_EQ(error, expected[change]) << change;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, FlatpakDirectGamesProofPinsTheSelectedFilesToTheVerifiedDesktopWithoutOwnership) {
+  const auto game = direct_games_desktop_fixture(*host);
+  const auto proof = ep::testing::prove_flatpak_desktop(game, error, host);
+  ASSERT_TRUE(proof) << error;
+  EXPECT_TRUE(ep::verify_flatpak_desktop(*proof, error)) << error;
+  auto target = host->title(); target.flatpak = game.flatpak;
+  const auto seen = ep::testing::observe(target, host);
+  EXPECT_FALSE(seen.available); EXPECT_EQ(seen.reason, "epic_flatpak_game_control_unavailable");
+  EXPECT_FALSE(ep::testing::adopt(target, seen, error, host));
+  EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FlatpakDirectGamesProofNeverPromotesHostExistenceIntoAMissingSandboxView) {
+  const auto game = direct_games_desktop_fixture(*host);
+  ASSERT_TRUE(ep::testing::prove_flatpak_desktop(game, error, host)) << error;
+  const auto view = fs::path("/proc/43/root") / (game.install_dir / game.launch_executable).relative_path();
+  host->identities.erase(view);
+  ASSERT_TRUE(host->stat(view)); // The older fixture accessor's host fallback is insufficient evidence.
+  EXPECT_FALSE(ep::testing::prove_flatpak_desktop(game, error, host));
+  EXPECT_EQ(error, "epic_flatpak_game_path_unavailable");
+  EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+}
+
+TEST_F(EpicProcess, FlatpakDirectGamesProofRejectsDeploymentPidNamespaceAndPathDriftBeforeDispatch) {
+  for (int change = 0; change < 9; ++change) {
+    host = std::make_shared<fixture_t>();
+    const auto game = direct_games_desktop_fixture(*host);
+    const auto proof = ep::testing::prove_flatpak_desktop(game, error, host);
+    ASSERT_TRUE(proof) << error;
+    const auto file = game.install_dir / game.launch_executable;
+    const auto view = fs::path("/proc/43/root") / file.relative_path();
+    switch (change) {
+      case 0: host->identities[view].inode++; break;
+      case 1: host->identities[file].inode++; host->identities[view] = host->identities[file]; break;
+      case 2: host->identities[fs::path("/proc/43/root") / game.install_dir.relative_path()].inode++; break;
+      case 3: host->identities["/proc/43/root/fixture/owner"].mode = S_IFLNK | 0777; break;
+      case 4: host->files["/proc/43/stat"] = stat_line(43, 231, 'S', 52); break;
+      case 5: host->links["/proc/43/ns/mnt"] = "mnt:[666]"; break;
+      case 6: host->resolved[game.flatpak->directory.parent_path() / "active"] = game.flatpak->directory.parent_path() / std::string(64, 'b'); break;
+      case 7: host->resolved[game.install_dir] = "/fixture/owner/Games/Another"; break;
+      case 8: host->headers.erase(view); break;
+    }
+    EXPECT_FALSE(ep::verify_flatpak_desktop(*proof, error)) << change;
+    const char *expected[] {"epic_flatpak_game_path_unavailable", "epic_flatpak_desktop_changed", "epic_flatpak_game_path_unavailable",
+      "epic_flatpak_game_path_unavailable", "epic_flatpak_desktop_changed", "epic_flatpak_desktop_changed",
+      "epic_flatpak_deployment_changed", "epic_flatpak_game_path_unavailable", "epic_flatpak_game_path_unavailable"};
+    EXPECT_EQ(error, expected[change]) << change;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
 }
 
 TEST_F(EpicProcess, FlatpakDesktopProofJoinsDeploymentKernelInstanceAndReadOnlyMountWithoutNativeAuthority) {
@@ -3676,6 +3842,7 @@ TEST_F(EpicProcess, FlatpakDesktopProofRefusesMissingDifferentAndAmbiguousInstan
   for (int failure = 0; failure < 9; ++failure) {
     host = std::make_shared<fixture_t>();
     const auto d = flatpak_desktop_fixture(*host);
+    ASSERT_TRUE(ep::testing::prove_flatpak_desktop(d, error, host)) << error;
     switch (failure) {
       case 0: host->links.erase("/proc/43/exe"); break;
       case 1: host->files["/proc/43/root/.flatpak-info"] += "app-commit=duplicate\n"; break;
@@ -3688,6 +3855,10 @@ TEST_F(EpicProcess, FlatpakDesktopProofRefusesMissingDifferentAndAmbiguousInstan
       case 8: host->add_process(44, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 240); break;
     }
     EXPECT_FALSE(ep::testing::prove_flatpak_desktop(d, error, host)) << failure;
+    const char *expected[] {"epic_flatpak_desktop_required", "epic_flatpak_desktop_mismatch", "epic_flatpak_desktop_mismatch",
+      "epic_flatpak_record_stale", "epic_flatpak_record_stale", "epic_flatpak_not_desktop", "epic_flatpak_deployment_changed",
+      "epic_flatpak_mount_mismatch", "epic_flatpak_desktop_ambiguous"};
+    EXPECT_EQ(error, expected[failure]) << failure;
     EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
   }
 }
@@ -3708,6 +3879,9 @@ TEST_F(EpicProcess, FlatpakDesktopProofRejectsDeploymentProcessNamespaceAndRecor
       case 6: host->files["/proc/sys/kernel/random/boot_id"] = "1dd26721-4424-4907-ab80-4f023729a22f\n"; break;
     }
     EXPECT_FALSE(ep::verify_flatpak_desktop(*proof, error)) << change;
+    const char *expected[] {"epic_flatpak_desktop_changed", "epic_flatpak_deployment_changed", "epic_flatpak_deployment_changed",
+      "epic_flatpak_desktop_changed", "incomplete_process_observation", "epic_flatpak_deployment_changed", "epic_flatpak_desktop_changed"};
+    EXPECT_EQ(error, expected[change]) << change;
     EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
   }
 }

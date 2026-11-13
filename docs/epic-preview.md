@@ -28,10 +28,41 @@ Polaris checks the default user or default system installation's exact x86-64 br
 deployment against an already-running desktop instance. Multiple user/system deployments,
 multiple active branches, missing or unreadable metadata, and a launcher still running an
 older deployment are unavailable until resolved. Named system installations and custom
-installation roots are not supported in this slice. The game must have an unchanged,
-host-visible path under `~/.var/app/com.epicgames.launcher/`; portal-only paths and other
-sandbox-to-host mappings are unavailable. Polaris reads the app-private
+installation roots are not supported in this slice. Game files may use an unchanged,
+canonical path under `~/.var/app/com.epicgames.launcher/` or `~/Games/`. A completed game
+using an existing Documents portal export of exactly `~/Games/` is also supported by the
+source implementation when its mapping can be independently verified. Other portal origins,
+external folders and guessed path translations are unavailable. Polaris reads the app-private
 `data/com.epicgames.eglv2/installations.jsonl`, without reading account data or migrating saves.
+
+Discovery and import describe current completed installation metadata and a canonical host
+directory. They do not establish that Epic can see that directory, that the game is running,
+or that streaming is ready. Epic's folder picker may already provide access to `~/Games/`
+through a Documents export; that route does not require a new broad filesystem override or
+moving/redownloading the game. For direct folder access, the owner makes the chosen folder
+accessible to Epic themselves. Let the installation finish in Epic: an incomplete or pending
+update remains unavailable even when its download is progressing normally.
+Polaris does not grant Flatpak permissions, export a portal folder, copy or move a game,
+or choose a different installation when the selected path is inaccessible.
+
+At launch, Polaris checks the selected folder and launch file through the independently
+verified running desktop launcher's process root. For a direct path, the actual host and
+sandbox device, inode and file identities must agree at the same absolute path; symlinks, redirected
+ancestors, unreadable or missing views, and different same-spelling files are refused.
+Those identities are retained across stream preparation and checked again immediately
+before the URI. A closed or changed desktop instance cannot provide a mapping, and a
+permission setting or host directory alone never establishes one. These are sampled
+read-only prerequisites, with no game-control authority or guarantee of future launch success.
+
+For the Documents route, Polaris reads only the current Documents service's version,
+mount point, exact Games export ID/origin and Epic's existing read/write grant. It binds
+those facts to the matching live Epic sandbox's app-domain `fuse.portal` mount and the
+portal's read-only backing-path property for the selected folders and launch file. FUSE
+inodes differ from native inodes; they are retained separately, never treated as native
+equality. The grant, service, mount, instance and both file views are checked again before
+dispatch. Missing, revoked, redirected or changed facts are unavailable, with no direct-path
+or native-provider fallback. Nothing is exported or granted by Polaris, and mappings are
+not saved in the imported app entry. This route still needs deployed-package validation.
 
 Keep that matching Epic Flatpak open on the desktop before launching. Flatpak **Private
 Stream**, game adoption and close-game permission are unavailable. An attempted private

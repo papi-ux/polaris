@@ -5,10 +5,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <thread>
 #include <nlohmann/json.hpp>
 #ifndef _WIN32
   #include <sys/stat.h>
+  #include <unistd.h>
 #endif
 
 namespace {
@@ -53,6 +55,95 @@ namespace {
     std::filesystem::create_symlink(commit, ref / "active");
     return ref;
   }
+  struct direct_games_paths_t {
+    using file_t = epic_library::flatpak_path_file_t;
+    using path_t = std::filesystem::path;
+    epic_library::installation_t game;
+    path_t process_root = "/proc/43/root";
+    std::map<path_t, file_t> files;
+    std::map<path_t, path_t> redirects;
+    std::map<path_t, std::string> headers;
+    std::vector<path_t> canonical_reads;
+    std::function<void(const path_t &)> after_nofollow;
+    std::optional<epic_library::flatpak_document_t> document;
+    std::map<path_t, path_t> origins, links;
+    std::string host_mountinfo, sandbox_mountinfo;
+
+    direct_games_paths_t(bool app_private = false) {
+      epic_library::flatpak_deployment_t d {"user", "", "x86_64", "stable", std::string(64, 'a'),
+        "/fixture/player/.local/share/flatpak", {}, "/fixture/player/.var/app/com.epicgames.launcher", "", ""};
+      d.directory = d.root / "app/com.epicgames.launcher/x86_64/stable" / d.commit;
+      const path_t dir = app_private ? d.app_home / "data/Games/A Game" : path_t("/fixture/player/Games/A Game");
+      game = {title, "install1", "A Game", "bin/Game.exe", "1", dir, d.app_home / "data/com.epicgames.eglv2", "Windows", d};
+      path_t host = "/";
+      std::uint64_t inode = 10;
+      const auto shared = app_private ? d.app_home : path_t("/fixture/player/Games");
+      bool sharing = false;
+      for (const auto &part : image().relative_path()) {
+        host /= part;
+        sharing = sharing || host == shared;
+        file_t f {1, inode++, 1000, static_cast<std::uint64_t>((host == image() ? S_IFREG : S_IFDIR) | 0755), 100, 123, 456};
+        files[host] = f;
+        if (!sharing) { f.device = 2; f.inode += 1000; } // Sandbox ancestors may be separate tmpfs directories.
+        files[sandbox(host)] = f;
+      }
+      headers[image()] = headers[sandbox(image())] = "MZfixture";
+    }
+    path_t image() const { return game.install_dir / game.launch_executable; }
+    path_t sandbox(const path_t &path) const { return process_root / path.relative_path(); }
+    path_t portal(const path_t &path) const {
+      const path_t base = process_root / "run/flatpak/doc/fixture-doc/Games";
+      return path == path_t("/fixture/player/Games") ? base : base / path.lexically_relative("/fixture/player/Games");
+    }
+    void use_portal() {
+      document = epic_library::flatpak_document_t {"fixture-doc", std::string(32, 'a'), ":1.44", 1000, 70,
+        "/run/user/1000/doc", "/fixture/player/Games", "/run/user/1000/doc/fixture-doc/Games/A Game", {"read", "write"}};
+      game.document = document;
+      std::vector<path_t> source;
+      for (const auto &[path, file] : files)
+        if (path.string().starts_with("/fixture/player/Games")) source.push_back(path);
+      for (const auto &path : source) {
+        auto file = files.at(path); file.device = 99; file.inode += 50000;
+        files[portal(path)] = file; origins[portal(path)] = path;
+        files.erase(sandbox(path));
+      }
+      path_t prefix = "/";
+      std::uint64_t inode = 60000;
+      for (const auto &part : path_t("/run/flatpak/doc/fixture-doc/Games").relative_path()) {
+        prefix /= part;
+        if (!files.contains(sandbox(prefix))) files[sandbox(prefix)] = {99, inode++, 1000, S_IFDIR | 0755, 100, 123, 456};
+      }
+      headers.erase(sandbox(image())); headers[portal(image())] = "MZfixture";
+      links[sandbox("/run/user/1000/doc")] = "/run/flatpak/doc";
+      host_mountinfo = "80 1 0:99 / /run/user/1000/doc rw - fuse.portal portal rw\n";
+      sandbox_mountinfo = "81 1 0:99 /by-app/com.epicgames.launcher /run/flatpak/doc rw - fuse.portal portal rw\n";
+    }
+    epic_library::flatpak_path_reader_t reader() {
+      epic_library::flatpak_path_reader_t result {1000,
+        [&](const path_t &p) -> std::optional<file_t> {
+          const auto it = files.find(p);
+          if (it == files.end()) return {};
+          const auto value = it->second;
+          if (after_nofollow) after_nofollow(p);
+          return value;
+        },
+        [&](const path_t &p) -> std::optional<path_t> {
+          canonical_reads.push_back(p);
+          if (redirects.contains(p)) return redirects.at(p);
+          return files.contains(p) ? std::make_optional(p) : std::nullopt;
+        },
+        [&](const path_t &p, std::size_t n) -> std::optional<std::string> {
+          const auto it = headers.find(p);
+          return it != headers.end() && it->second.size() >= n ? std::make_optional(it->second.substr(0, n)) : std::nullopt;
+        }};
+      result.document = [&](const auto &, const auto &) { return document; };
+      result.portal_host_path = [&](const path_t &p) -> std::optional<path_t> { return origins.contains(p) ? std::make_optional(origins.at(p)) : std::nullopt; };
+      result.link = [&](const path_t &p) -> std::optional<path_t> { return links.contains(p) ? std::make_optional(links.at(p)) : std::nullopt; };
+      result.host_mountinfo = host_mountinfo; result.sandbox_mountinfo = sandbox_mountinfo;
+      return result;
+    }
+    std::optional<std::string> binding() { return epic_library::flatpak_game_path_binding(game, process_root, reader()); }
+  };
 #endif
 }
 
@@ -323,6 +414,7 @@ TEST(EpicLibraryTests, FlatpakDispatchAndStatusHaveNoNativeAdoptionOrGenericEndF
   const auto check = source.find("!platf::epic::verify_flatpak_desktop(*epic_flatpak_desktop, reason)");
   const auto spawn = source.find("auto child = platf::run_command(_app.elevated, true, cmd", check);
   ASSERT_NE(check, std::string::npos); ASSERT_NE(spawn, std::string::npos); EXPECT_LT(check, spawn);
+  EXPECT_NE(source.find("platf::epic::prove_flatpak_desktop(*epic_title, reason)"), std::string::npos);
   const auto end = source.find("void proc_t::terminate_isolated_session_generation()");
   const auto no_generic = source.find("if (_app.source == \"epic_launcher\" && !_epic_private_requested)", end);
   const auto returns = source.find("return;", no_generic);
@@ -394,6 +486,196 @@ TEST(EpicLibraryTests, FlatpakScopeAndDeploymentBindTheQuotedCommand) {
     EXPECT_TRUE(command.ends_with("'" + epic_library::launch_uri(title) + "'"));
     EXPECT_EQ(command.find("/app/bin"), std::string::npos);
     EXPECT_EQ(command.find("xdg-open"), std::string::npos);
+  }
+}
+TEST(EpicLibraryTests, FlatpakDirectGamesMetadataIsDiscoverableWithoutClaimingSandboxAccess) {
+  const auto home = std::filesystem::canonical(root("flatpak-direct-games-original-regression"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  const auto directory = home / "Games/A Game";
+  auto game = row(); game["dir"] = directory.string();
+  write(directory / "bin/Game.exe", "MZfixture");
+  write(home / ".var/app/com.epicgames.launcher/data/com.epicgames.eglv2/installations.jsonl", installed_log({game}));
+  // There is no sandbox or running process in this fixture. Discovery describes
+  // completed metadata and the host directory, never accessible/shared/ready state.
+  const auto s = epic_library::scan({home});
+  ASSERT_TRUE(s.available);
+  ASSERT_EQ(s.games.size(), 1);
+  EXPECT_EQ(s.games[0].identity, title);
+  EXPECT_EQ(s.games[0].install_dir, directory);
+  EXPECT_TRUE(s.games[0].flatpak);
+}
+TEST(EpicLibraryTests, FlatpakDirectGamesBindingAcceptsOnlyIdenticalPersistentViewsAndPreservesAppPrivate) {
+  for (bool app_private : {false, true}) {
+    direct_games_paths_t paths(app_private);
+    const auto bound = paths.binding();
+    ASSERT_TRUE(bound);
+    EXPECT_EQ(paths.binding(), bound);
+    // No canonicalization may resolve /proc/PID/root back into the host namespace.
+    for (const auto &p : paths.canonical_reads) EXPECT_FALSE(p.string().starts_with("/proc/"));
+  }
+}
+TEST(EpicLibraryTests, FlatpakDirectGamesBindingRejectsMissingDifferentUnreadableAndSymlinkViews) {
+  for (int failure = 0; failure < 12; ++failure) {
+    direct_games_paths_t p;
+    ASSERT_TRUE(p.binding());
+    const auto dir = p.game.install_dir, file = p.image();
+    switch (failure) {
+      case 0: p.files.erase(p.sandbox(dir)); break;
+      case 1: p.files[p.sandbox(dir)].inode++; break;
+      case 2: p.files[p.sandbox(file)].device++; break;
+      case 3: p.files[p.sandbox(file)].inode++; break;
+      case 4: p.files[p.sandbox(file)].modified_ns++; break;
+      case 5: p.headers.erase(p.sandbox(file)); break;
+      case 6: p.headers[p.sandbox(file)] = "XX"; break;
+      case 7: p.files[p.sandbox(dir)].mode = S_IFLNK | 0777; break;
+      case 8: p.files[p.sandbox("/fixture/player")].mode = S_IFLNK | 0777; break;
+      case 9: p.files["/fixture/player/Games"].mode = S_IFLNK | 0777; break;
+      case 10: p.redirects[file] = "/fixture/elsewhere/Game.exe"; break;
+      case 11: p.files[p.sandbox(file.parent_path())].mode = S_IFLNK | 0777; break;
+    }
+    EXPECT_FALSE(p.binding()) << failure;
+  }
+}
+TEST(EpicLibraryTests, FlatpakDirectGamesBindingRejectsHostRedirectionAndOtherScopesRatherThanGuessing) {
+  for (int failure = 0; failure < 10; ++failure) {
+    direct_games_paths_t p;
+    ASSERT_TRUE(p.binding());
+    switch (failure) {
+      case 0: p.redirects["/fixture/player"] = "/fixture/actual"; break;
+      case 1: p.redirects[p.game.install_dir] = "/fixture/player/Games/Other"; break;
+      case 2: p.game.install_dir = "/fixture/player/Games-other/A"; break;
+      case 3: p.game.install_dir = "/run/user/1000/doc/abcd/A"; break;
+      case 4: p.game.install_dir = "/app/Games/A"; break;
+      case 5: p.game.install_dir = "/var/data/Games/A"; break;
+      case 6: p.game.install_dir = "/mnt/games/A"; break;
+      case 7: p.game.launch_executable = "../Game.exe"; break;
+      case 8: p.files[p.image().parent_path()].mode = S_IFLNK | 0777; break;
+      case 9: p.game.data_root = "/fixture/player/.local/share/com.epicgames.eglv2"; break;
+    }
+    EXPECT_FALSE(p.binding()) << failure;
+  }
+}
+TEST(EpicLibraryTests, FlatpakDirectGamesBindingRetainsMetadataFileAndDirectoryIdentityAcrossPreparation) {
+  for (int change = 0; change < 9; ++change) {
+    direct_games_paths_t p;
+    const auto before = p.binding(); ASSERT_TRUE(before);
+    const auto file = p.image();
+    switch (change) {
+      case 0: p.files[file].inode++; p.files[p.sandbox(file)] = p.files[file]; break;
+      case 1: p.files[file].changed_ns++; p.files[p.sandbox(file)] = p.files[file]; break;
+      case 2: p.files[file].size++; p.files[p.sandbox(file)] = p.files[file]; break;
+      case 3: p.files[p.game.install_dir].inode++; p.files[p.sandbox(p.game.install_dir)] = p.files[p.game.install_dir]; break;
+      case 4: p.files["/fixture/player/Games"].modified_ns++; p.files[p.sandbox("/fixture/player/Games")] = p.files["/fixture/player/Games"]; break;
+      case 5: p.files[p.sandbox("/fixture/player")].inode++; break;
+      case 6: p.game.version = "2"; break;
+      case 7: p.game.identity.artifact_id = "other"; break;
+      case 8: p.game.installation_id = "new-install"; break;
+    }
+    const auto after = p.binding(); ASSERT_TRUE(after) << change;
+    EXPECT_NE(after, before) << change;
+  }
+}
+TEST(EpicLibraryTests, FlatpakDirectGamesBindingBookendsConcurrentFileReplacement) {
+  direct_games_paths_t p;
+  const auto file = p.image();
+  bool changed = false;
+  p.after_nofollow = [&](const auto &path) {
+    if (!changed && path == file) {
+      changed = true;
+      p.files[file].inode++;
+      p.files[p.sandbox(file)] = p.files[file];
+    }
+  };
+  EXPECT_FALSE(p.binding());
+  EXPECT_TRUE(changed);
+}
+TEST(EpicLibraryTests, FlatpakDirectGamesDiscoveryRejectsRedirectedDirectoriesAndKeepsExactSourceDuplicatesUnavailable) {
+  const auto home = std::filesystem::canonical(root("flatpak-direct-games-discovery-guards"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  const auto dir = home / "Games/A Game";
+  auto game = row(); game["dir"] = dir.string();
+  write(dir / "bin/Game.exe", "MZfixture");
+  const auto state = home / ".var/app/com.epicgames.launcher/data/com.epicgames.eglv2/installations.jsonl";
+  write(state, installed_log({game}));
+  ASSERT_EQ(epic_library::scan({home}).games.size(), 1);
+  write(home / ".local/share/com.epicgames.eglv2/installations.jsonl", installed_log({game}));
+  EXPECT_FALSE(epic_library::scan({home}).available);
+  std::filesystem::remove_all(home / ".local/share/com.epicgames.eglv2");
+  std::filesystem::rename(home / "Games", home / "Elsewhere");
+  std::filesystem::create_directory_symlink(home / "Elsewhere", home / "Games");
+  const auto redirected = epic_library::scan({home});
+  EXPECT_TRUE(redirected.available); EXPECT_TRUE(redirected.games.empty());
+}
+TEST(EpicLibraryTests, FlatpakPortalGamesDiscoveryRequiresAuthoritativeOriginAndRetainsOriginalMetadataPath) {
+  const auto home = std::filesystem::canonical(root("flatpak-portal-games"));
+  flatpak_fixture(home, home / ".local/share/flatpak");
+  write(home / "Games/A Game/bin/Game.exe", "MZfixture");
+  const auto mount = std::filesystem::path("/run/user") / std::to_string(::getuid()) / "doc";
+  const auto metadata_dir = mount / "fixture-doc/Games/A Game";
+  auto game = row(); game["dir"] = metadata_dir.string();
+  const auto state = home / ".var/app/com.epicgames.launcher/data/com.epicgames.eglv2/installations.jsonl";
+  write(state, installed_log({game}));
+  epic_library::flatpak_document_t document {"fixture-doc", std::string(32, 'a'), ":1.44", static_cast<std::uint64_t>(::getuid()), 70,
+    mount, home / "Games", {}, {"read", "write"}};
+  unsigned calls = 0;
+  const auto reader = [&](const auto &, const auto &) -> std::optional<epic_library::flatpak_document_t> { ++calls; return document; };
+  const auto scan = [&] { return epic_library::scan({home}, home / "system-flatpak", reader); };
+  auto s = scan(); ASSERT_TRUE(s.available); ASSERT_EQ(s.games.size(), 1);
+  EXPECT_EQ(s.games[0].install_dir, home / "Games/A Game");
+  ASSERT_TRUE(s.games[0].document);
+  EXPECT_EQ(s.games[0].document->metadata_dir, metadata_dir);
+  EXPECT_FALSE(s.warnings.empty());
+  auto second = game; second["installationId"] = "another-install"; second["artifactId"] = "another-artifact";
+  write(home / "Games/Another/bin/Game.exe", "MZfixture");
+  second["dir"] = (mount / "fixture-doc/Games/Another").string();
+  write(state, installed_log({game, second})); calls = 0;
+  ASSERT_EQ(scan().games.size(), 2); EXPECT_EQ(calls, 1);
+  second["dir"] = (home / "Games/A Game").string();
+  write(state, installed_log({game, second}));
+  EXPECT_FALSE(scan().available); // Different raw paths cannot claim one mapped directory.
+  write(state, installed_log({game}));
+  ASSERT_EQ(scan().games.size(), 1);
+  document.origin = home / "Other";
+  EXPECT_FALSE(scan().available);
+  document.origin = home / "Games"; document.permissions = {"write"};
+  EXPECT_FALSE(scan().available);
+  game["complete"] = false; game["pendingVersion"] = "1.2.11";
+  write(state, installed_log({game})); calls = 0;
+  s = scan(); EXPECT_TRUE(s.available); EXPECT_TRUE(s.games.empty()); EXPECT_EQ(calls, 0);
+}
+TEST(EpicLibraryTests, FlatpakPortalGamesUsesTypedDocumentsAndBackingPathProofNeverNativeInodeEquality) {
+  direct_games_paths_t p; p.use_portal();
+  ASSERT_NE(p.files.at(p.image()).device, p.files.at(p.portal(p.image())).device);
+  ASSERT_NE(p.files.at(p.image()).inode, p.files.at(p.portal(p.image())).inode);
+  const auto before = p.binding(); ASSERT_TRUE(before);
+  EXPECT_EQ(p.binding(), before);
+  p.files[p.portal(p.image())].inode++;
+  const auto after = p.binding(); ASSERT_TRUE(after);
+  EXPECT_NE(after, before); // Per-view identity drift cannot reuse the retained prerequisite.
+}
+TEST(EpicLibraryTests, FlatpakPortalGamesRefusesMissingRevokedChangedAndMismatchedProtocolFacts) {
+  for (int failure = 0; failure < 17; ++failure) {
+    direct_games_paths_t p; p.use_portal(); ASSERT_TRUE(p.binding());
+    switch (failure) {
+      case 0: p.document.reset(); break;
+      case 1: p.document->permissions = {"write"}; break;
+      case 2: p.document->origin = "/fixture/player/Other"; break;
+      case 3: p.document->id = "another-doc"; break;
+      case 4: p.document->service = ":1.45"; break;
+      case 5: p.document->bus_id = std::string(32, 'b'); break;
+      case 6: p.host_mountinfo = "80 1 0:99 / /run/user/1000/doc rw - tmpfs tmpfs rw\n"; break;
+      case 7: p.sandbox_mountinfo = "81 1 0:98 /by-app/com.epicgames.launcher /run/flatpak/doc rw - fuse.portal portal rw\n"; break;
+      case 8: p.sandbox_mountinfo = "81 1 0:99 /by-app/another.app /run/flatpak/doc rw - fuse.portal portal rw\n"; break;
+      case 9: p.links[p.sandbox("/run/user/1000/doc")] = "/another/mount"; break;
+      case 10: p.origins.erase(p.portal(p.image())); break;
+      case 11: p.origins[p.portal(p.image())] = "/fixture/player/Games/Other/Game.exe"; break;
+      case 12: p.files.erase(p.portal(p.image())); break;
+      case 13: p.files[p.portal(p.image().parent_path())].mode = S_IFLNK | 0777; break;
+      case 14: p.document->permissions = {"read"}; break;
+      case 15: p.sandbox_mountinfo += "82 81 0:100 / /run/flatpak/doc/fixture-doc/Games/A\\040Game rw - tmpfs tmpfs rw\n"; break;
+      case 16: p.after_nofollow = [&](const auto &) { p.document->permissions = {"read"}; }; break;
+    }
+    EXPECT_FALSE(p.binding()) << failure;
   }
 }
 TEST(EpicLibraryTests, EmptyFlatpakScanCannotBeMistakenForNativeSetupMetadata) {

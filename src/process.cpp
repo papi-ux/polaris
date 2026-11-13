@@ -9126,10 +9126,10 @@ namespace proc {
         if (const auto refusal = admit_private_epic(*epic_title, _epic_launcher_proof ? &*_epic_launcher_proof : nullptr)) return refusal;
         epic_command = epic_library::launch_command(_epic_launcher_proof->path(), epic_title->identity);
       } else if (epic_title->flatpak) {
-        epic_flatpak_desktop = platf::epic::prove_flatpak_desktop(*epic_title->flatpak, reason);
+        epic_flatpak_desktop = platf::epic::prove_flatpak_desktop(*epic_title, reason);
         if (!epic_flatpak_desktop)
-          return launch_failure::refuse(503, "epic_flatpak_desktop_unavailable", "The matching installed Epic Flatpak is not verified open on the host desktop.",
-            "Open that Epic Flatpak on the desktop after its update finishes, keep only one installation, then rescan and launch in Mirror Desktop.");
+          return launch_failure::refuse(503, "epic_flatpak_desktop_unavailable", "The matching Epic Flatpak desktop instance or its identical game-folder and launch-file views could not be verified.",
+            "Keep the matching desktop Epic open, finish the installation and verify its existing folder or document access, then rescan and use Mirror Desktop. Polaris does not grant permissions or relocate games.");
         epic_command = epic_library::flatpak_launch_command(*epic_title->flatpak, epic_title->identity);
       } else {
         const auto launcher = platf::epic::desktop_launcher_executable(reason);
@@ -11559,7 +11559,7 @@ namespace proc {
           const auto current = epic_library::find(epic_library::scan(game_library::library_home_roots()), epic_title->identity);
           if (!current || *current != *epic_title || !epic_flatpak_desktop ||
               !platf::epic::verify_flatpak_desktop(*epic_flatpak_desktop, reason))
-            return launch_failure::refuse(503, "epic_flatpak_desktop_changed", "The Epic Flatpak deployment, installation or desktop instance changed before dispatch.",
+            return launch_failure::refuse(503, "epic_flatpak_desktop_changed", "The Epic Flatpak deployment, installation, desktop instance or shared game path changed before dispatch.",
               "Open the current Epic Flatpak on the desktop, rescan, then launch again in Mirror Desktop.");
         }
 #endif

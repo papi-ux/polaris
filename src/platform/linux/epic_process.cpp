@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 #include <utility>
 
@@ -1832,6 +1833,26 @@ namespace platf::epic {
                        value.st_mtim.tv_sec * 1000000000LL + value.st_mtim.tv_nsec, value.st_ctim.tv_sec * 1000000000LL + value.st_ctim.tv_nsec};
       }
 
+      std::optional<file_t> nofollow_stat(const fs::path &path) override {
+        struct stat value {};
+        if (::lstat(path.c_str(), &value) != 0) return std::nullopt;
+        return file_t {value.st_dev, value.st_ino, value.st_uid, value.st_mode, static_cast<std::uint64_t>(value.st_size),
+                       value.st_mtim.tv_sec * 1000000000LL + value.st_mtim.tv_nsec, value.st_ctim.tv_sec * 1000000000LL + value.st_ctim.tv_nsec};
+      }
+
+      std::optional<epic_library::flatpak_document_t> document(const std::string &id, const fs::path &games) override {
+        return epic_library::read_flatpak_document(id, games);
+      }
+
+      std::optional<fs::path> portal_host_path(const fs::path &path) override {
+        std::array<char, 4097> value {};
+        const auto size = ::lgetxattr(path.c_str(), "user.document-portal.host-path", value.data(), value.size());
+        if (size <= 0 || size > 4096) return {};
+        const std::string text(value.data(), static_cast<std::size_t>(size));
+        if (text.find('\0') != std::string::npos || !safe_absolute_path(text)) return {};
+        return fs::path(text);
+      }
+
       std::optional<std::vector<std::string>> list(const fs::path &path, std::size_t limit) override {
         std::vector<std::string> result;
         std::error_code error;
@@ -2086,8 +2107,10 @@ namespace platf::epic {
       return {executable, executable_file, appimage, *launcher, boot, own_group, mount.identity, read.group_namespace};
     }
 
-    std::string flatpak_desktop_snapshot(const epic_library::flatpak_deployment_t &d, backend_t &backend) {
+    std::string flatpak_desktop_snapshot(const epic_library::flatpak_deployment_t &d, backend_t &backend,
+                                        const epic_library::installation_t *game = nullptr) {
       reader_t read {backend};
+      require(!game || (game->flatpak && *game->flatpak == d), "epic_flatpak_title_changed");
       const auto owner = read.owner_and_namespace();
       const auto boot = read.boot();
       const auto own_group = cgroup(read.read("/proc/self/cgroup"));
@@ -2174,6 +2197,30 @@ namespace platf::epic {
                   (',' + app_options[5] + ',').find(",ro,") != std::string::npos &&
                   info_mount.point == "/.flatpak-info" && options.size() > 5 &&
                   (',' + options[5] + ',').find(",ro,") != std::string::npos, "epic_flatpak_mount_mismatch");
+        if (game) {
+          epic_library::flatpak_path_reader_t paths {
+            owner,
+            [&](const fs::path &path) -> std::optional<epic_library::flatpak_path_file_t> {
+              const auto f = backend.nofollow_stat(path);
+              if (!f) return {};
+              return epic_library::flatpak_path_file_t {f->device, f->inode, f->uid, f->mode, f->size, f->modified_ns, f->changed_ns};
+            },
+            [&](const fs::path &path) { return backend.canonical(path); },
+            [&](const fs::path &path, std::size_t size) { return backend.prefix(path, size); }
+          };
+          if (game->document) {
+            paths.document = [&](const std::string &id, const fs::path &games) { return backend.document(id, games); };
+            paths.portal_host_path = [&](const fs::path &path) { return backend.portal_host_path(path); };
+            paths.link = [&](const fs::path &path) { return backend.link(path); };
+            paths.host_mountinfo = read.read("/proc/self/mountinfo", mount_limit);
+            paths.sandbox_mountinfo = read.read(proc / "mountinfo", mount_limit);
+          }
+          const auto binding = epic_library::flatpak_game_path_binding(*game, proc / "root", paths);
+          require(binding.has_value(), "epic_flatpak_game_path_unavailable");
+          require(!game->document || (read.read("/proc/self/mountinfo", mount_limit) == paths.host_mountinfo &&
+                    read.read(proc / "mountinfo", mount_limit) == paths.sandbox_mountinfo), "epic_flatpak_portal_mount_changed");
+          digest.add(*binding);
+        }
         // No argv, environ, account cache or game process is read here.
         require(check_uid(read.read(proc / "status"), owner) && backend.link(proc / "exe") == exe &&
                   same_image(deployed, read.stat(proc / "exe")) &&
@@ -2198,6 +2245,7 @@ namespace platf::epic {
     epic_library::flatpak_deployment_t deployment;
     std::string observation;
     std::shared_ptr<backend_t> backend;
+    std::optional<epic_library::installation_t> game;
   };
 
   struct launcher_proof_t::state_t {
@@ -2483,14 +2531,15 @@ namespace platf::epic {
       }
 
       static std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::flatpak_deployment_t &deployment,
-                                                                         std::string &reason, std::shared_ptr<backend_t> backend) {
+          std::string &reason, std::shared_ptr<backend_t> backend, std::optional<epic_library::installation_t> game = std::nullopt) {
         reason.clear();
         try {
           require(bool(backend), "missing_process_reader");
-          const auto before = flatpak_desktop_snapshot(deployment, *backend);
-          require(before == flatpak_desktop_snapshot(deployment, *backend), "epic_flatpak_desktop_changed");
+          const auto selected = game ? &*game : nullptr;
+          const auto before = flatpak_desktop_snapshot(deployment, *backend, selected);
+          require(before == flatpak_desktop_snapshot(deployment, *backend, selected), "epic_flatpak_desktop_changed");
           return flatpak_desktop_proof_t(std::make_shared<flatpak_desktop_proof_t::state_t>(
-            flatpak_desktop_proof_t::state_t {deployment, before, std::move(backend)}));
+            flatpak_desktop_proof_t::state_t {deployment, before, std::move(backend), std::move(game)}));
         } catch (const refusal_t &error) { reason = error.what(); }
         catch (const std::exception &) { reason = "epic_flatpak_desktop_unavailable"; }
         return std::nullopt;
@@ -2501,8 +2550,9 @@ namespace platf::epic {
         try {
           require(bool(proof.state_) && bool(proof.state_->backend), "missing_process_reader");
           const auto &s = *proof.state_;
-          require(s.observation == flatpak_desktop_snapshot(s.deployment, *s.backend) &&
-                    s.observation == flatpak_desktop_snapshot(s.deployment, *s.backend), "epic_flatpak_desktop_changed");
+          const auto selected = s.game ? &*s.game : nullptr;
+          require(s.observation == flatpak_desktop_snapshot(s.deployment, *s.backend, selected) &&
+                    s.observation == flatpak_desktop_snapshot(s.deployment, *s.backend, selected), "epic_flatpak_desktop_changed");
           return true;
         } catch (const refusal_t &error) { reason = error.what(); }
         catch (const std::exception &) { reason = "epic_flatpak_desktop_unavailable"; }
@@ -2780,6 +2830,11 @@ namespace platf::epic {
     return detail::engine_t::prove_flatpak_desktop(d, reason, production_backend());
   }
 
+  std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::installation_t &game, std::string &reason) {
+    if (!game.flatpak) { reason = "epic_flatpak_title_required"; return {}; }
+    return detail::engine_t::prove_flatpak_desktop(*game.flatpak, reason, production_backend(), game);
+  }
+
   bool verify_flatpak_desktop(const flatpak_desktop_proof_t &proof, std::string &reason) {
     return detail::engine_t::verify_flatpak_desktop(proof, reason);
   }
@@ -2959,6 +3014,12 @@ namespace platf::epic {
     std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::flatpak_deployment_t &d, std::string &reason,
                                                                 std::shared_ptr<backend_t> backend) {
       return detail::engine_t::prove_flatpak_desktop(d, reason, std::move(backend));
+    }
+
+    std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::installation_t &game, std::string &reason,
+                                                                std::shared_ptr<backend_t> backend) {
+      if (!game.flatpak) { reason = "epic_flatpak_title_required"; return {}; }
+      return detail::engine_t::prove_flatpak_desktop(*game.flatpak, reason, std::move(backend), game);
     }
 
     setup_readiness_t evaluate_setup(const launcher_proof_t *proof, const title_t *title, bool idle,
