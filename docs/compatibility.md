@@ -145,7 +145,7 @@ What the rows mean, and where they come from:
   Sleep This Host** is on. **Wake-on-LAN** is the client's own magic packet, sent to the MAC the
   host reports.
 - **Desktop Steam controls.** Open Steam, Open Big Picture and Quit Steam from Nova's PC menu and
-  Command Center, on a Polaris 1.5.0 beta.2 host or newer. Viewers, another client's session,
+  Command Center, on a Polaris 1.5.0 host or newer. Viewers, another client's session,
   private runtimes and Game Mode are refused ([Desktop Steam and End Session](steam-lifecycle.md)).
 - **Refusal detail.** A refused launch carries a reason, the change that fixes it, and a stable
   code. Moonlight, Artemis and Nova for Linux show the reason and the fix as one line of text,

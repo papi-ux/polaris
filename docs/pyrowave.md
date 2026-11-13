@@ -1,8 +1,9 @@
 # PyroWave
 
-PyroWave is an experimental video codec for a wired gigabit local network, and of the published
-clients the Nova for Android beta can play it; the standard Nova Linux 1.5.0 beta also includes
-the decoder, subject to its device check. Nova is the client built alongside Polaris.
+PyroWave is an experimental video codec for a wired gigabit local network. Of the published
+clients, the separate Nova Beta app for Android can play it, and so can Nova 1.5.0 for Linux and
+Steam Deck, which is in Beta, subject to its device check; stable Nova for Android doesn't offer it.
+Nova is the client built alongside Polaris.
 Moonlight cannot play it on any platform, and no iPhone, iPad, Mac or Windows client can: if you
 stream from one of those, nothing changes and there is nothing to turn on. Every frame is a key
 frame, so the client decodes each one much faster than H.264, HEVC or AV1, and the stream needs much
@@ -14,14 +15,14 @@ It suits you if fast decoding, or sharp text on a streamed desktop (Nova for And
 4:4:4), matters more to you than bandwidth. It does not work in a [Space](spaces.md), which exists
 only if you set one up. You will need:
 
-- **Polaris 1.4.13 or a later release on a Linux host**, not a 1.4.13 beta, which
-  reports the same version as the release. If you install from the package repositories and never installed a beta by hand, you
-  have the release ([otherwise, check](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)).
-- **Nova for Android 1.4.13-beta.3 or newer on the phone or handheld**, a beta that installs beside
-  stable Nova ([below](#nova-for-android)). So: the Polaris release on the host, a Nova beta on
-  the client.
-- **Or, on Linux or a Steam Deck, the standard Nova Linux 1.5.0 beta**, which includes PyroWave
-  and checks the device before launch. The separate 1.4.13 PyroWave Alpha is an older package
+- **Polaris 1.4.13 or a later release on a Linux host**, such as 1.5.0, not a 1.4.13 beta. A host
+  that installed a 1.4.13 beta by hand gets the release with an ordinary update to 1.5.0
+  ([why it matters](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)).
+- **The Nova Beta app for Android, 1.4.13-beta.3 or newer, on the phone or handheld**, which
+  installs beside stable Nova ([below](#nova-for-android)). So: the Polaris release on the host,
+  Nova Beta on the client.
+- **Or, on Linux or a Steam Deck, Nova 1.5.0's standard bundle**, which includes PyroWave and
+  checks the device before launch. The separate 1.4.13 PyroWave Alpha is an older package
   ([version-specific steps](pyrowave-reference.md#nova-for-linux)). Vulkan version alone is not
   proof that a device can decode a chosen stream size.
 - **Wired gigabit ethernet on every link, the client's included**, usually through a USB ethernet
@@ -42,29 +43,28 @@ SDR either way
 
 ### Nova for Android
 
-Install Nova for Android 1.4.13-beta.3 or newer from
+Install the Nova Beta app, 1.4.13-beta.3 or newer, from
 [Nova's releases](https://github.com/papi-ux/nova/releases), where betas are marked Pre-release. For
 almost any current phone or handheld, take `Nova-Beta-Android-arm64-v8a.apk`
-([other devices](pyrowave-reference.md#which-apk)). Stable Nova, 1.4.13 included, cannot select
+([other devices](pyrowave-reference.md#which-apk)). Stable Nova, 1.5.0 included, cannot select
 PyroWave on Android: its release builds leave the codec out.
 
-The beta installs beside stable Nova as a separate app, **Nova Pre** on the home screen (**Nova Beta**
-in later betas), with its own settings and host list. Pair your host in the beta ([Pair and manage devices](devices.md))
+Nova Beta installs beside stable Nova as a separate app, **Nova Beta** on the home screen (**Nova Pre**
+in early betas), with its own settings and host list. Pair your host in Nova Beta ([Pair and manage devices](devices.md))
 before you stream; stable Nova keeps its own pairing.
 
 ### Polaris
 
 Install the [latest Polaris release](https://github.com/papi-ux/polaris/releases/latest)
 with the [update guide](updates.md) or the [package repositories](repositories.md), which never
-serve a beta. Every release package contains the encoder: Fedora 44 (Bazzite takes this RPM) and,
-from 1.5.0, Fedora 45, Arch, Ubuntu 24.04, SteamOS 3.8 and, from 1.5.0, SteamOS 3.9. Polaris
-1.4.12 and older, and Windows and macOS hosts, have none.
+serve a beta. Every release package contains the encoder: Fedora 44 and 45, Arch, Ubuntu 24.04,
+and SteamOS 3.8 and 3.9, with Bazzite 44 taking the Fedora 44 RPM. The Fedora 45 and SteamOS 3.9
+packages start with 1.5.0. Polaris 1.4.12 and older, and Windows and macOS hosts, have none.
 
-**If you ever installed a Polaris 1.4.13 beta by hand**, an update will not replace it (the
-version is the same), and on Fedora neither does `dnf install` of the release file. Beta.1 has no
-encoder; beta.2 and beta.3 have it but can crash as a stream starts, so a working PyroWave stream
-does not show that the release is installed.
-[Compare build dates, and reinstall the release](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta).
+**If you ever installed a Polaris 1.4.13 beta by hand** and never updated past it, update to the
+latest release: 1.5.0 is a newer version, so an ordinary update replaces the beta. Beta.1 has no
+encoder; beta.2 and beta.3 have it but can crash as a stream starts
+([more](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)).
 
 ### The network
 
@@ -75,15 +75,17 @@ reaches the host, the adapter is carrying the stream.
 
 ## Turn it on
 
-You choose PyroWave in the beta, not on the host: the Polaris web console has no PyroWave setting.
+You choose PyroWave in Nova, not on the host: the Polaris web console has no PyroWave setting.
 Nova for Linux has [its own steps](pyrowave-reference.md#turn-it-on-in-nova-for-linux).
 
-These steps describe Nova for Android 1.4.13-beta.3. In Nova's 1.5.0 beta, prefer the
-host's recommendation for the selected size, frame rate and colour format; see the current
-[bitrate advice](pyrowave-reference.md#bitrate-advice). The older flat figures below do not
-include the new calibrated advice.
+In the current Nova Beta app, PyroWave is under **Video Codec** in Play Setup, and Nova recommends a bitrate
+from the host's advice for the selected size, frame rate and colour format; Nova's
+[PyroWave on Android](https://github.com/papi-ux/nova/blob/v1.5.0/docs/pyrowave-android.md) guide
+has its steps, and the [bitrate advice](pyrowave-reference.md#bitrate-advice) here has the figures.
+The steps below were written for Nova Beta 1.4.13-beta.3, and their flat figures predate the
+calibrated advice.
 
-1. Open the beta, not stable Nova, then **Settings > Client Stream Defaults**. Steps 2 to 5 are
+1. Open Nova Beta, not stable Nova, then **Settings > Client Stream Defaults**. Steps 2 to 5 are
    on that screen.
 2. If you use a **Quality Preset** (the first item), pick it first: it sets resolution, bitrate and
    codec together.
@@ -97,7 +99,7 @@ include the new calibrated advice.
 5. Leave **Request HDR when host supports it** off. HDR on PyroWave has not been shown end to end.
 6. Start a stream that is not a Space.
 
-The codec applies to every host in the beta. While PyroWave is chosen, a stream to a Space, or to
+The codec applies to every host in Nova Beta. While PyroWave is chosen, a stream to a Space, or to
 a host that does not offer PyroWave, is refused, so choose another codec before you stream one.
 Auto never picks PyroWave.
 
@@ -121,7 +123,7 @@ own figure, from its author's quality model, with the target for a phone's or ha
 set by a check on a Retroid Pocket 6. On such a screen, set about 101 Mbps for 1920x1080 at 60 fps
 in 4:2:0, 109 Mbps in 4:4:4, which Nova for Android streams, and 215 Mbps at 120 fps in 4:4:4, at
 the host's default 10% FEC with stereo audio. The exact 1080p120 4:4:4 request is 214.898 Mbps,
-which leaves 192.396 Mbps for video; Nova's 1.5.0 beta reads the host advice first and uses the
+which leaves 192.396 Mbps for video; Nova 1.5.0 reads the host advice first and uses the
 same 31 dB model when it needs a fallback. Auto and Use recommended stay at or below 300 Mbps.
 A number entered by hand can reach 500 Mbps only when the host advertises that limit; older
 hosts without it keep 300 Mbps
@@ -136,12 +138,12 @@ stream above your setting only to its 2 Mbps floor, and stops cutting at half th
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| No PyroWave in the codec list. | You opened stable Nova, or an older Nova beta. | Open the beta app, 1.4.13-beta.3 or newer ([Nova for Android](#nova-for-android)). |
+| No PyroWave in the codec list. | You opened stable Nova, or an older Nova beta. | Open the Nova Beta app, 1.4.13-beta.3 or newer ([Nova for Android](#nova-for-android)). |
 | No codec choice in Play Setup. | Nova for Android 1.4.13-beta.3's Play Setup has none. | Use **Settings > Client Stream Defaults > Change codec settings**. |
-| Nova for Linux: no PyroWave in **Video Codec**, or Play Setup says it cannot start. | The standard 1.5.0 beta includes the decoder; older 1.4.13 packages differ. The device may still lack the required profile or decoder features. | Check your package version and [Play Setup's message](pyrowave-reference.md#turn-it-on-in-nova-for-linux); the [1.4.13 instructions](pyrowave-reference.md#nova-for-linux) describe the separate historical Alpha. |
-| Nova says "This host does not offer the PyroWave profile this build of Nova can decode." | The host runs Polaris older than 1.4.13, 1.4.13-beta.1 or a build without the encoder, or its GPU lacks what the encoder needs. Or the stream is a Space. | Install the release ([over a beta](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)), then [check the host's GPU](pyrowave-reference.md#check-the-hosts-gpu). For a Space, choose another codec. |
+| Nova for Linux: no PyroWave in **Video Codec**, or Play Setup says it cannot start. | Nova 1.5.0's standard bundle includes the decoder; older 1.4.13 packages differ. The device may still lack the required profile or decoder features. | Check your package version and [Play Setup's message](pyrowave-reference.md#turn-it-on-in-nova-for-linux); the [1.4.13 instructions](pyrowave-reference.md#nova-for-linux) describe the separate historical Alpha. |
+| Nova says "This host does not offer the PyroWave profile this build of Nova can decode." | The host runs Polaris older than 1.4.13, 1.4.13-beta.1 or a build without the encoder, or its GPU lacks what the encoder needs. Or the stream is a Space. | Update to the latest release ([over a beta](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)), then [check the host's GPU](pyrowave-reference.md#check-the-hosts-gpu). For a Space, choose another codec. |
 | Nova says "Failed to start video stream establishment (error -2)" or "Video decoder failed to initialize...". | The phone's decoder could not start at this size, or the phone cannot decode PyroWave. | Lower the resolution; otherwise choose another codec ([the phone's GPU](pyrowave-reference.md#the-phones-gpu)). |
-| No picture ever, and `systemctl --user status polaris` on the host shows Polaris failed or restarted. | A Polaris 1.4.13-beta.2 or beta.3 package, whose Vulkan video encoder crashes as a stream starts. | [Reinstall the release](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta). |
+| No picture ever, and `systemctl --user status polaris` on the host shows Polaris failed or restarted. | A Polaris 1.4.13-beta.2 or beta.3 package, whose Vulkan video encoder crashes as a stream starts. | [Update to the latest release](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta). |
 | KDE host with a display in HDR: the host refuses the stream with a message naming HDR, or RTSP error 503, SDR too. On Polaris 1.4.13, Nova connects, shows no picture, then the stream ends. | Capture goes through kms, and KWin's HDR frames come in a format PyroWave cannot read. | Turn HDR off on the host display, or use HEVC or AV1 ([other fixes](pyrowave-reference.md#a-kde-host-with-a-display-in-hdr)). |
 | Refused with **Request HDR when host supports it** on. | The host refuses PyroWave HDR unless the captured display is in HDR, and it has not been shown end to end. | Turn **Request HDR when host supports it** off. |
 | Soft picture, and Nova says "PyroWave asks for about N Mbps at this resolution and frame rate." | The bitrate is too low, often from a **Quality Preset** (10, 20 or 50 Mbps). | Raise **Video bitrate**, or lower the resolution or frame rate. |

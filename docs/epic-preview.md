@@ -1,11 +1,14 @@
 # Official Epic Linux Preview
 
-This integration is being qualified for Polaris 1.5.0. It imports completed Windows-game
-installations from the official Epic Linux Preview and launches them in **Mirror Desktop**.
-Epic manages its own sign-in, downloads, updates, Proton runtime and cloud saves.
-The explicit labwc **Private Stream** path described below is a source candidate pending
-native, integrated UI and owner-controlled runtime qualification. It is not a stable availability
-or hardware acceptance claim; imported entries still default to Mirror Desktop.
+This integration is new in Polaris 1.5.0. It imports completed Windows-game installations from
+the official Epic Linux Preview and launches them in **Mirror Desktop**. Epic manages its own
+sign-in, downloads, updates, Proton runtime and cloud saves. A game can also run in labwc
+**Private Stream** when you choose it for that game, as described below; imported entries still
+default to Mirror Desktop. Hands-on checks so far cover one game on one host in each mode: in
+Private Stream, a Retroid Pocket 6 launched it with controller isolation on, its controller input
+reached the game, and End closed the whole private session. Keyboard input, play past the game's
+opening screens, saves and cloud sync, Disconnect and Resume in Private Stream, and Epic's AppImage
+build in a private session haven't been checked.
 
 ## Install and open Epic
 
@@ -18,10 +21,10 @@ Open Epic on the host desktop, sign in yourself, and let the selected game's ins
 update finish. Keep the launcher open before launching through Polaris. Polaris does not read
 your Epic account store, sign you in, install a game, select Proton or change your saves.
 
-Mirror Desktop uses the already-running **desktop** launcher. The private candidate starts its
+Mirror Desktop uses the already-running **desktop** launcher. Private Stream starts its
 own launcher only after the desktop launcher is completely quit. Game Mode, Host Virtual Display,
 Gamescope/private Gamescope and Spaces remain refused instead of receiving a forwarded desktop launch.
-Native Linux games are not enabled in this first installed-metadata slice.
+Native Linux Epic games aren't supported yet.
 
 ## Add a game
 
@@ -101,9 +104,9 @@ launch or other mutation is automatically retried; browser storage holds no setu
 | Live setup unsupported (including an older host's 404) | Follow the static open → scan → quit instructions; live checkmarks are unavailable. |
 | Malformed or unknown-version setup response | Check host/console version compatibility. Missing fields, unknown versions or unknown enum values cannot authorize readiness. |
 
-This UI and its mocked browser checks remain source/software evidence. Native compilation,
-HTTP authentication qualification, installed-host observation and owner device acceptance are
-separate gates; the checklist does not qualify the Private Stream candidate by itself.
+The checklist's line for whether Epic is closed reads **Can't check** even when Epic is closed,
+because the host only looks for a running launcher when a launch asks. Polaris checks everything
+again when you launch.
 
 ## Mirror Desktop: Disconnect, End and close permission
 
@@ -134,12 +137,12 @@ could not be inspected before you confirm. Permission still concerns only the ve
 instance, not every game on the desktop. A change in that inspection context invalidates the
 permission; Polaris will not guess a replacement or close an uninspected process.
 
-## Private Stream candidate
+## Private Stream
 
 This path requires an explicit `headless_stream` selection and the actual **labwc** private
 runtime. It never falls back to sending the request to the desktop. Existing entries and host
 defaults are not migrated. Mission Control shows the private session's state without consent
-actions; that view still needs its integrated runtime qualification.
+actions.
 
 While Epic is running on the host desktop, scan the signed-in Polaris Library or select the
 official Epic provider. Polaris retains proof of that exact original launcher executable in
@@ -236,7 +239,7 @@ No source-only result establishes those outcomes.
 ## When launch or observation is unavailable
 
 - Open Epic on the host desktop and finish any install or update before trying again.
-- Use Mirror Desktop if the explicit labwc private candidate or its ownership checks are unavailable.
+- Use Mirror Desktop if Private Stream or its ownership checks are unavailable.
   A running desktop launcher cannot be moved into the private compositor.
 - Under `headless_gamepad_isolation`, Epic can't relaunch itself from inside the sandbox, since its
   AppImage needs FUSE to start again. If Epic updates itself during a Private Stream, the launcher

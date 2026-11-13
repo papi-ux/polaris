@@ -90,81 +90,23 @@ this codec.
 ## A host that ran a Polaris 1.4.13 beta
 
 The package repositories never serve a beta, so a host that only ever installed Polaris from
-repo.papi-ux.com runs the release. If you installed a Polaris 1.4.13 beta package by hand, the
-betas carry the same version, so an update will not replace them. The order is: check which build
-is installed, reinstall the release if the build dates differ (on Ubuntu or SteamOS, reinstall
-anyway), restart Polaris, then check again.
+repo.papi-ux.com runs a release. The 1.4.13 betas carried the release's own version, `1.4.13`, so
+while 1.4.13 was the newest release an update could not replace one and it needed a reinstall.
+1.5.0 is a newer version, so an ordinary update replaces a 1.4.13 beta now: `sudo dnf upgrade` or
+`sudo pacman -Syu` with the Polaris repository, or the package for your host from the
+[latest release](https://github.com/papi-ux/polaris/releases/latest), installed as its guide shows.
+If `polaris-kms` is installed, update it in the same command, or the beta's helper stays. Then
+restart Polaris: `systemctl --user restart polaris`, or quit and start it again if you started it
+from the desktop. [Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) has the details.
 
-Which command replaces a beta depends on the distribution. On Fedora, `dnf install` of the release
-file over a beta says the package is already installed and changes nothing; if you installed the
-release that way, it did not take, and `dnf reinstall` does. On Arch, `pacman -U` of the release
-file reinstalls it. On Ubuntu, `apt install` of the release file replaced the beta in a test, and
-`apt install --reinstall` is the command below.
+Why it matters for PyroWave:
 
 - Polaris 1.4.13-beta.1 has no encoder at all.
-- Polaris 1.4.13-beta.2 and beta.3 can crash as a stream starts: reinstall the release on any host
-  that ran either, whatever its GPU. The 1.4.13 release fixes it. The crash is in Polaris's Vulkan
-  video encoder, not in PyroWave, and any stream that starts that encoder can take Polaris down
-  before its first frame. On an AMD GPU, Polaris's automatic encoder choice tries it first for
-  Private Stream (a launch mode that runs a game in its own session). These are Polaris betas;
-  Nova's 1.4.13 betas are a different app.
-
-### Is the release installed?
-
-The version cannot tell a beta from the release, so compare build dates. First download the release
-package from the
-[Polaris v1.4.13 release](https://github.com/papi-ux/polaris/releases/tag/v1.4.13), then run these in
-the folder you saved it to. On Fedora, compare
-`rpm -qi polaris | grep 'Build Date'` with
-`rpm -qip ./Polaris-fedora44-x86_64.rpm | grep 'Build Date'`. On Arch, compare
-`pacman -Qi polaris | grep 'Build Date'` with
-`pacman -Qip ./Polaris-arch-x86_64.pkg.tar.zst | grep 'Build Date'`. If the dates match, the release
-is installed. Bazzite uses the Fedora comparison. On Ubuntu or SteamOS this page has no way to tell
-a beta from the release, so reinstall anyway; it does no harm, but nothing here confirms it took.
-After a reinstall on Fedora, Bazzite or Arch, the same comparison confirms that it worked.
-
-If the host also has `polaris-kms`, compare it too. That package carries its own copy of Polaris,
-encoder included, and on a host set up with `--enable-kms` the service runs that copy. Download the
-release's `polaris-kms` file and compare `rpm -qi polaris-kms` with
-`rpm -qip ./Polaris-kms-fedora44-x86_64.rpm`, or `pacman -Qi polaris-kms` with
-`pacman -Qip ./Polaris-kms-arch-x86_64.pkg.tar.zst`, each piped to `grep 'Build Date'`.
-
-A match covers the installed files, not the copy that is running. If Polaris has not restarted since
-the install, restart it as described at the end of [Reinstall the release](#reinstall-the-release).
-
-### Reinstall the release
-
-In the same folder:
-
-```sh
-sudo dnf reinstall ./Polaris-fedora44-x86_64.rpm                 # Fedora
-sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst                 # Arch
-sudo apt install --reinstall ./Polaris-ubuntu24.04-x86_64.deb    # Ubuntu
-```
-
-If the host also has `polaris-kms` (`rpm -q polaris-kms`, `pacman -Q polaris-kms` or
-`dpkg -s polaris-kms` names it), download the release's `polaris-kms` package as well and reinstall
-it:
-
-```sh
-sudo dnf reinstall ./Polaris-kms-fedora44-x86_64.rpm                 # Fedora
-sudo pacman -U ./Polaris-kms-arch-x86_64.pkg.tar.zst                 # Arch
-sudo apt install --reinstall ./Polaris-kms-ubuntu24.04-x86_64.deb    # Ubuntu
-```
-
-On Bazzite, replace the layered package with the release RPM as in
-[Update on Bazzite](bazzite.md#update), then reboot. That step has not been tested over a beta, so
-run the Build Date comparison after the reboot.
-
-On SteamOS, run the SteamOS 3.8 command from the Install section of the
-[v1.4.13 release page](https://github.com/papi-ux/polaris/releases/tag/v1.4.13) again. If the host
-has `polaris-kms`, download `Polaris-kms-steamos3.8-x86_64.pkg.tar.zst` and add it to that block's
-`pacman -U` line.
-
-Then restart Polaris: `systemctl --user restart polaris`. If you started Polaris from the desktop
-instead of as the service, quit it and start it again, because that command does not restart the
-copy you launched. A package check covers the installed files, not the running copy:
-`systemctl --user status polaris` should show the service active since a time after the reinstall.
+- Polaris 1.4.13-beta.2 and beta.3 can crash as a stream starts, whatever the GPU. The crash is in
+  Polaris's Vulkan video encoder, not in PyroWave, and any stream that starts that encoder can take
+  Polaris down before its first frame. On an AMD GPU, Polaris's automatic encoder choice tries it
+  first for Private Stream (a launch mode that runs a game in its own session). The 1.4.13 release
+  fixed it. These are Polaris betas; Nova's 1.4.13 betas are a different app.
 
 ## Check the host's GPU
 
@@ -204,9 +146,10 @@ the Polaris web console) shows. If you changed Log Level, set it back to the def
 
 ## Nova for Android
 
-PyroWave needs Nova for Android 1.4.13-beta.2 or later. The [PyroWave](pyrowave.md) page asks for
-beta.3 or newer because its [Turn it on](pyrowave.md#turn-it-on) steps were written for beta.3; a
-phone already on beta.2 can play PyroWave, but its screens may differ from those steps.
+PyroWave needs the Nova Beta app for Android, 1.4.13-beta.2 or later; stable Nova for Android,
+1.5.0 included, doesn't offer it. The [PyroWave](pyrowave.md) page asks for beta.3 or newer
+because its [Turn it on](pyrowave.md#turn-it-on) steps were written for beta.3; a phone already on
+beta.2 can play PyroWave, but its screens may differ from those steps.
 
 ### Which APK
 
@@ -250,7 +193,7 @@ SDR 4:2:0 only.
 
 ### Bitrate advice
 
-In Nova's 1.5.0 beta, use the host's recommendation for the selected resolution, frame rate,
+In Nova 1.5.0, use the host's recommendation for the selected resolution, frame rate,
 colour format and audio. The shared fallback uses the same handheld 31 dB model: at 1080p120
 4:4:4, 10% FEC and stereo audio it asks for 214.898 Mbps, leaving 192.396 Mbps of video. Auto
 and Use recommended stay at or below 300 Mbps. A number entered by hand can reach a host's
@@ -282,8 +225,8 @@ quotes the codec author's own model instead, which asks for more at small sizes 
 The codec chosen in **Settings > Client Stream Defaults > Change codec settings** applies to every
 host in the beta, and Play Setup in Nova 1.4.13-beta.3 has no codec choice to override it. While
 PyroWave is chosen, a stream to a Space, or to a host that does not offer PyroWave, is refused.
-Choose another codec there before you stream one. On a newer Nova beta, if the codec is not under
-Client Stream Defaults, look for a codec choice in Play Setup.
+Choose another codec there before you stream one. The current Nova Beta app also has **Video
+Codec** in Play Setup, for the stream you are about to start.
 
 Auto never picks PyroWave, so it has to be chosen by name. The PyroWave entry is in Nova's Settings
 whatever host you use. Whether the host can serve it shows when a stream starts, and on the host in
@@ -296,8 +239,8 @@ it shows the codec as PYRO, and a long press on it opens Command Center.
 
 ## Nova for Linux
 
-The standard Nova Linux 1.5.0 beta includes PyroWave; it does not need the separate experimental
-bundle used by 1.4.13. Play Setup checks the host profile, local decoder and selected stream size
+Nova 1.5.0 for Linux and Steam Deck, which is in Beta, includes PyroWave in its standard bundle;
+it does not need the separate experimental bundle used by 1.4.13. Play Setup checks the host profile, local decoder and selected stream size
 before launch, and explains a refusal. It uses host advice first and the calibrated model as its
 fallback, for the stream's actual colour format and mode. Auto and Use recommended stay at or
 below 300 Mbps, while a manual request can reach an advertised 500 Mbps host limit. A built-in
@@ -306,7 +249,7 @@ fall back to another codec.
 
 ### The separate 1.4.13 Alpha
 
-The instructions below apply to the old 1.4.13 packages, not the standard 1.5.0 beta.
+The instructions below apply to the old 1.4.13 packages, not to Nova 1.5.0.
 
 Nova 1.4.13 attaches an experimental PyroWave build of Nova for Linux to
 [its release](https://github.com/papi-ux/nova/releases/tag/v1.4.13):
@@ -443,7 +386,7 @@ the bitrate each quality needed. Polaris reads that fit at two distances, each w
   author calls good quality, until it is checked on a big screen.
 
 The host computes these figures itself, and a fixture in Polaris's tests pins them at both
-targets. Nova's 1.5.0 beta reads the host advice first and mirrors the 31 dB handheld target in
+targets. Nova 1.5.0 reads the host advice first and mirrors the 31 dB handheld target in
 its fallback. At 1920x1080, 120 fps and 4:4:4, with default FEC and stereo audio, the exact
 request is 214.898 Mbps and the encoder figure is 192.396 Mbps. Older clients may still show the
 35 dB estimate, about 400 Mbps; it is not the current handheld recommendation.

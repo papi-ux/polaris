@@ -369,7 +369,7 @@ describe('Update Center release awareness', () => {
 
   it('reads a host on a 1.4.13 beta as the 1.4.13 release, which it is never offered', () => {
     // The published 1.4.13 betas carry and report 1.4.13 itself, so nothing here can tell them from
-    // the release. docs/updates.md states this exception and gives the reinstall that replaces them.
+    // the release. docs/updates.md states this exception, and how 1.5.0 replaces them.
     const host = { platform: 'linux', distro: { id: 'fedora', version_id: '44' }, installed_package_version: '1.4.13' }
     const latestRelease = { ...release, tag_name: 'v1.4.13', name: 'v1.4.13' }
     const prereleaseRelease = { ...release, tag_name: 'v1.4.13-beta.3', name: 'v1.4.13-beta.3', prerelease: true }

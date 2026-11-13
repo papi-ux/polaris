@@ -132,73 +132,38 @@ package offered by Update Center. Check the full version, including `beta.N` or
 beta you are running, and the release a beta precedes counts as newer.
 
 The 1.4.13 betas are the exception. They report `1.4.13`, the same version as the
-1.4.13 release, so on those hosts Update Center shows **Current release** and never
-offers 1.4.13. Replace one by hand as described in
-[Leave a 1.4.13 beta](#leave-a-1413-beta). A later stable release, such as 1.5.0,
-is offered as usual.
+1.4.13 release, so on those hosts Update Center never offered 1.4.13. It offers
+1.5.0 as usual, and installing it replaces the beta
+([Leave a 1.4.13 beta](#leave-a-1413-beta)).
 
 An upgrade keeps the existing account, paired devices, settings and library.
 Sign in at `https://localhost:47990/#/login`; do not repeat first-run account
 creation or delete the configuration directory to update.
 
 For PyroWave testing, use the [PyroWave client and build instructions](pyrowave.md).
-Standard Moonlight does not support that codec, and the ordinary Nova Linux
-Flatpak attached to beta.3 was not built with it enabled.
+Standard Moonlight does not support that codec. Nova 1.5.0's standard Linux bundle
+includes it; the ordinary Nova Linux Flatpak attached to Nova's 1.4.13-beta.3 was
+not built with it enabled.
 
 ## Leave a 1.4.13 beta
 
-The 1.4.13 betas and the 1.4.13 release carry the same package version, `1.4.13`,
-so a package manager can take the beta for the release. On Fedora, `dnf install`
-of the release package answers that it is already installed, "Nothing to do", and
-`dnf upgrade` from the Polaris repository leaves the beta in place. `pacman -Syu`
-from the Polaris repository does the same, and so does the
-[one-command install](repositories.md#one-command-install) on both. Reinstall the
-release over the beta instead, which replaces the installed files with the release's.
+The 1.4.13 betas carried the release's own version, `1.4.13`, so while 1.4.13 was
+the newest release a package manager took a beta for the release: `dnf upgrade`
+and `pacman -Syu` left it in place, and only a reinstall replaced it. 1.5.0 is a
+newer version, so an ordinary update replaces a 1.4.13 beta now, the same way
+it updates any older Polaris.
 
-End active streams first. The commands that name files take them from the
-[1.4.13 release](https://github.com/papi-ux/polaris/releases/tag/v1.4.13), run
-in the folder they were downloaded to. If `polaris-kms` is installed, reinstall
-it in the same command from the same release: a command that names only
-`polaris` leaves the beta's helper in place. Without the helper, leave out the
-`polaris-kms` package or file. Restart Polaris afterwards. Once a later stable
-release such as 1.5.0 is out, none of this is needed: an ordinary upgrade replaces
-a 1.4.13 beta, and the repository commands below stop working because the
-repository then carries only that newer release.
+End active streams first, then update the way your host installed Polaris:
+`sudo dnf upgrade polaris` on Fedora or `sudo pacman -Syu polaris` on Arch with
+the [Polaris repository](repositories.md), or the package for your host from the
+[latest release](https://github.com/papi-ux/polaris/releases/latest), installed
+as its guide shows. A 1.4.13 beta predates **Review update**, the host-approved
+install, which came with 1.5.0. If `polaris-kms` is installed, update it in the same command
+from the same release: a command that names only `polaris` leaves the beta's
+helper in place. Restart Polaris afterwards.
 
-**Fedora**:
-
-```bash
-# From the downloaded files
-sudo dnf reinstall ./Polaris-fedora44-x86_64.rpm ./Polaris-kms-fedora44-x86_64.rpm
-# Or from the Polaris repository
-sudo dnf reinstall polaris polaris-kms
-```
-
-**Ubuntu 24.04**, from the downloaded files. apt replaces both with the release's
-files, the same command the [Ubuntu guide](ubuntu.md#update) updates with.
-
-```bash
-sudo apt install ./Polaris-ubuntu24.04-x86_64.deb ./Polaris-kms-ubuntu24.04-x86_64.deb
-```
-
-**Arch**. pacman warns that the package is up to date and reinstalls it.
-
-```bash
-# From the downloaded files
-sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst ./Polaris-kms-arch-x86_64.pkg.tar.zst
-# Or from the Polaris repository
-sudo pacman -Syu polaris polaris-kms
-```
-
-**SteamOS** takes the same `pacman -U` its [SteamOS guide](steamos.md) installs
-with: reinstall the package for the host's SteamOS release, `Polaris-steamos3.8-x86_64.pkg.tar.zst`
-or `Polaris-steamos3.9-x86_64.pkg.tar.zst`, and its `Polaris-kms-` helper beside it when the host has one. This reinstall was
-checked with pacman on Arch, not on a Steam Deck.
-The 3.9 packages begin with `v1.5.0-beta.2`: use that tagged prerelease after
-publication, as the SteamOS guide shows, rather than the latest stable download.
-
-**Bazzite** layers the package with `rpm-ostree`, and no step that replaces a
-1.4.13 beta with the release there has been verified yet.
+**Bazzite** layers the package with `rpm-ostree`, as the [Bazzite guide](bazzite.md)
+shows; replacing a 1.4.13 beta there has not been checked.
 
 ## Return to stable
 

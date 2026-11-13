@@ -218,10 +218,9 @@ precedes. Its packages carry a version that sorts below that release, so the
 release replaces the beta through an ordinary upgrade: a tag like
 `v1.5.0-beta.2` builds `1.5.0~beta.2` for RPM and DEB and `1.5.0beta.2` for
 pacman, and the host reports `1.5.0-beta.2`. The 1.4.13 betas predate this and
-carry `1.4.13` itself, so dnf treats the 1.4.13 release as already installed on
-them and a repository upgrade leaves them in place.
-[Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) has the reinstall commands
-that replace one.
+carry `1.4.13` itself, so while the repository served 1.4.13 a repository upgrade
+left them in place. It serves 1.5.0 now, which replaces them in an ordinary
+upgrade; [Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) has the steps.
 
 A beta never reaches anyone who has not asked for it. GitHub keeps prereleases
 out of `releases/latest`, the repositories above never serve one, and Polaris

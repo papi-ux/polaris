@@ -97,7 +97,7 @@ describe('System page version headline', () => {
   })
 
   // The published 1.4.13 betas report 1.4.13 itself, so nothing on the page can tell them from the
-  // release: docs/updates.md says so and gives the reinstall that replaces them.
+  // release: docs/updates.md says so, and how 1.5.0 replaces them.
   it('cannot tell a 1.4.13 beta from 1.4.13, and offers it 1.4.14', async () => {
     const same = await systemPage({ running: '1.4.13', stable: 'v1.4.13' })
     expect(same.headline).toBe('Current public release')
