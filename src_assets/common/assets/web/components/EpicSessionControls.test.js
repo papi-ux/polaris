@@ -35,6 +35,20 @@ let wrapper
 afterEach(() => { wrapper?.unmount(); h.api = null; vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('EpicSessionControls', () => {
+  it('explains Flatpak stream End without offering game adoption or close permission', () => {
+    h.api = makeApi({ state: 'unavailable', code: 'epic_flatpak_game_control_unavailable', runtime: 'unknown',
+      can_adopt: false, can_release: false })
+    wrapper = mount(EpicSessionControls)
+    const text = wrapper.get('[data-epic-flatpak-limit]').text()
+    expect(text).toContain('Mirror Desktop only')
+    expect(text).toContain('End Session ends the stream and leaves the desktop game and launcher running')
+    expect(text).toContain('Disconnect and Resume leave them running too')
+    expect(wrapper.find('[data-epic-adopt-start]').exists()).toBe(false)
+    expect(wrapper.find('[data-epic-adopt-consent]').exists()).toBe(false)
+    expect(wrapper.find('[data-epic-release]').exists()).toBe(false)
+    expect(h.api.adopt).not.toHaveBeenCalled()
+    expect(h.api.release).not.toHaveBeenCalled()
+  })
   it('drops Mirror consent for a private session and explains End without consent controls', async () => {
     h.api = makeApi()
     wrapper = mount(EpicSessionControls)

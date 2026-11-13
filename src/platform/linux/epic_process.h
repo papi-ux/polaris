@@ -27,6 +27,8 @@ namespace platf::epic {
     std::string launch_executable;
     std::filesystem::path data_root;
     std::string platform;
+    // Packaging is explicit: sandbox games never enter native observation/adoption.
+    std::optional<epic_library::flatpak_deployment_t> flatpak;
   };
 
   struct observation_t {
@@ -71,6 +73,22 @@ namespace platf::epic {
   close_result_t ask_to_close(adopted_game_t &, std::chrono::milliseconds timeout);
   bool desktop_launcher_running(std::string &reason);
   std::optional<std::filesystem::path> desktop_launcher_executable(std::string &reason);
+
+  // Independent Mirror-only prerequisite, never native proof, adoption or signal authority.
+  class flatpak_desktop_proof_t {
+  public:
+    flatpak_desktop_proof_t(const flatpak_desktop_proof_t &) = default;
+  private:
+    struct state_t;
+    explicit flatpak_desktop_proof_t(std::shared_ptr<const state_t>);
+    std::shared_ptr<const state_t> state_;
+    friend struct detail::engine_t;
+  };
+  std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::flatpak_deployment_t &, std::string &reason);
+  // Production title dispatch also pins the exact same-path directory/launch-file
+  // views. A deployment-only presence proof does not establish that mapping.
+  std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::installation_t &, std::string &reason);
+  bool verify_flatpak_desktop(const flatpak_desktop_proof_t &, std::string &reason);
 
   /** A previously proven original executable, never a guessed path or mounted inner ELF. */
   class launcher_proof_t {
@@ -284,6 +302,10 @@ namespace platf::epic {
       // asked, does not answer in time or has no such unit loaded. Fixture backends opt in.
       virtual std::optional<unit_t> user_unit(const std::string &) { return std::nullopt; }
       virtual std::optional<file_t> stat(const std::filesystem::path &) = 0;
+      // Explicit opt-in: a following stat cannot rule out a symlink in a sandbox view.
+      virtual std::optional<file_t> nofollow_stat(const std::filesystem::path &) { return std::nullopt; }
+      virtual std::optional<epic_library::flatpak_document_t> document(const std::string &, const std::filesystem::path &) { return std::nullopt; }
+      virtual std::optional<std::filesystem::path> portal_host_path(const std::filesystem::path &) { return std::nullopt; }
       virtual std::optional<std::vector<std::string>> list(const std::filesystem::path &, std::size_t limit) = 0;
       virtual int open_pidfd(std::uint64_t pid) = 0;
       virtual std::optional<std::uint64_t> pidfd_pid(int fd) = 0;
@@ -298,6 +320,8 @@ namespace platf::epic {
     std::optional<std::size_t> launcher_instances(std::string &reason, std::shared_ptr<backend_t>, const launcher_proof_t *known_launcher = nullptr, std::string *owner_blocker_label = nullptr,
                                                   std::string *owner_blocker_reason = nullptr);
     std::optional<launcher_proof_t> prove_launcher(std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::flatpak_deployment_t &, std::string &reason, std::shared_ptr<backend_t>);
+    std::optional<flatpak_desktop_proof_t> prove_flatpak_desktop(const epic_library::installation_t &, std::string &reason, std::shared_ptr<backend_t>);
     setup_readiness_t evaluate_setup(const launcher_proof_t *, const title_t *, bool host_idle,
                                      prerequisite_state_t, std::shared_ptr<backend_t>);
     std::optional<bool> title_runtime_absent(const title_t &, std::string &reason, std::shared_ptr<backend_t>);

@@ -67,7 +67,10 @@ export function epicSetupPresentation(state) {
         : 'Scan with Epic open. Provider choice or a Mirror Desktop launch does not complete this step.'
       rows[2].status = 'Needs action'
       rows[2].message = 'Quit Epic completely on the host desktop, then check again.'
-      if (f.proof === 'changed' || f.reason === 'launcher_changed') {
+      if (f.reason === 'epic_flatpak_mirror_only') {
+        rows[2].status = "Can't check"
+        rows[2].message = 'Epic Flatpak supports Mirror Desktop only. Keep its desktop launcher open. End ends the stream and leaves the game running; Private Stream and game-control permission are unavailable for this package.'
+      } else if (f.proof === 'changed' || f.reason === 'launcher_changed') {
         rows[2].message = 'Epic changed or updated. Open it on the host desktop and rescan, then quit it.'
       } else if (f.proof === 'required') {
         rows[2].message = 'Open Epic on the host desktop, scan, then quit it. Repeat after Polaris restarts.'

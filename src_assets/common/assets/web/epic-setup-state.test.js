@@ -5,6 +5,17 @@ import { readEpicSetup } from './epic-setup-contract'
 
 const present = facts => epicSetupPresentation(reduceEpicSetup(emptyEpicSetup(), { type: 'sample', facts: epicSample(facts) }))
 describe('Epic setup facts and historical rows', () => {
+  it('explains the Flatpak Mirror-only limit without offering readiness or closing the desktop game', () => {
+    const facts = readEpicSetup(epicSample({ selected: epicTitle, desktop: 'not_checked', proof: 'unavailable',
+      receipt: 'required', receipt_revision: '0', runtime: 'unknown', state: 'needs_action', reason: 'epic_flatpak_mirror_only' }))
+    expect(facts).not.toBeNull()
+    const p = epicSetupPresentation(reduceEpicSetup(emptyEpicSetup(), { type: 'sample', facts }))
+    expect(p.rows[2].status).toBe("Can't check")
+    expect(p.message).toContain('Epic Flatpak supports Mirror Desktop only')
+    expect(p.message).toContain('End ends the stream and leaves the game running')
+    expect(p.summary).not.toContain('ready for Private Stream')
+    expect(p.rows[1].status).not.toBe('Complete')
+  })
   it('keeps three ordered stable identities and four textual states', () => {
     expect(epicSetupPresentation(emptyEpicSetup()).rows.map(r => r.id)).toEqual(['observed', 'receipt', 'closed'])
     expect(present().rows.map(r => r.status)).toEqual(['Complete', 'Complete', 'Needs action'])
