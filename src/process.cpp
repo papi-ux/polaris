@@ -9127,9 +9127,11 @@ namespace proc {
         epic_command = epic_library::launch_command(_epic_launcher_proof->path(), epic_title->identity);
       } else if (epic_title->flatpak) {
         epic_flatpak_desktop = platf::epic::prove_flatpak_desktop(*epic_title, reason);
-        if (!epic_flatpak_desktop)
+        if (!epic_flatpak_desktop) {
+          BOOST_LOG(warning) << "Epic Flatpak desktop proof refused: " << reason;
           return launch_failure::refuse(503, "epic_flatpak_desktop_unavailable", "The matching Epic Flatpak desktop instance or its identical game-folder and launch-file views could not be verified.",
             "Keep the matching desktop Epic open, finish the installation and verify its existing folder or document access, then rescan and use Mirror Desktop. Polaris does not grant permissions or relocate games.");
+        }
         epic_command = epic_library::flatpak_launch_command(*epic_title->flatpak, epic_title->identity);
       } else {
         const auto launcher = platf::epic::desktop_launcher_executable(reason);
