@@ -87,9 +87,9 @@ async function leaveRunning() { await release() }
 
       <!-- Honest state when the backend has an active game it cannot read. -->
       <p v-if="state.code === 'epic_flatpak_game_control_unavailable'" class="mt-3 text-xs text-support" data-epic-flatpak-limit>
-        Epic Flatpak supports Mirror Desktop only. End Session ends the stream and leaves the desktop game and
-        launcher running. Disconnect and Resume leave them running too. Private Stream and close-game permission
-        are unavailable for this package.
+        Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed.
+        End Session ends only the stream and leaves the desktop game and launcher running.
+        Disconnect and Resume remain unqualified. Private Stream and close-game permission are unavailable.
       </p>
       <template v-else-if="isPrivate">
         <p v-if="privateGameState === 'unavailable'" class="mt-3 text-xs text-warning-bright" data-epic-private-unavailable>

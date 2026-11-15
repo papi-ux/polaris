@@ -69,7 +69,7 @@ export function epicSetupPresentation(state) {
       rows[2].message = 'Quit Epic completely on the host desktop, then check again.'
       if (f.reason === 'epic_flatpak_mirror_only') {
         rows[2].status = "Can't check"
-        rows[2].message = 'Epic Flatpak supports Mirror Desktop only. Keep its desktop launcher open. End ends the stream and leaves the game running; Private Stream and game-control permission are unavailable for this package.'
+        rows[2].message = 'Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed. End ends only the stream and leaves the desktop game and launcher running. Private Stream and game-control permission remain unavailable.'
       } else if (f.proof === 'changed' || f.reason === 'launcher_changed') {
         rows[2].message = 'Epic changed or updated. Open it on the host desktop and rescan, then quit it.'
       } else if (f.proof === 'required') {
