@@ -691,7 +691,7 @@ TEST(EpicPrivateSessionContractTests, FlatpakPrivateAdmissionRefusesBeforeNative
   const auto refusal = launch_failure::take();
   ASSERT_TRUE(refusal);
   EXPECT_EQ(refusal->code, "epic_flatpak_private_unavailable");
-  EXPECT_NE(refusal->message.find("Mirror Desktop only"), std::string::npos);
+  EXPECT_NE(refusal->message.find("Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed."), std::string::npos);
   EXPECT_NE(refusal->action.find("No desktop launch was requested"), std::string::npos);
 }
 #endif
