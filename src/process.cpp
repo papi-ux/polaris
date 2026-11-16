@@ -8973,13 +8973,10 @@ namespace proc {
 
     platf::epic::title_t epic_process_title(const epic_library::installation_t &title) {
       return {title.identity.namespace_id, title.identity.item_id, title.identity.artifact_id,
-        title.install_dir, title.launch_executable, title.data_root, title.platform, title.flatpak};
+        title.install_dir, title.launch_executable, title.data_root, title.platform};
     }
 
     int admit_private_epic(const epic_library::installation_t &title, const platf::epic::launcher_proof_t *proof) {
-      if (title.flatpak)
-        return launch_failure::refuse(409, "epic_flatpak_private_unavailable", "Epic Flatpak supports Mirror Desktop only.",
-          "Choose Mirror Desktop explicitly. No desktop launch was requested; Private Stream is unavailable for this package.");
       std::string reason;
       // Setup step (N2, accepted for now): the launcher proof lives in memory only, so it is
       // needed again after every Polaris restart and every Epic update.
@@ -9080,9 +9077,6 @@ namespace proc {
   }  // namespace
 
   #ifdef POLARIS_TESTS
-  int admit_private_epic_for_tests(const epic_library::installation_t &title) {
-    return admit_private_epic(title, nullptr);
-  }
   std::string epic_private_startup_command_for_tests(const std::filesystem::path &launcher, const epic_library::installation_t &title,
     const std::string &game_cmd, bool appimage_under_isolation, const std::function<std::string(const std::string &)> &isolate) {
     return epic_private_startup_command(launcher, title, game_cmd, appimage_under_isolation, isolate);
@@ -9105,7 +9099,6 @@ namespace proc {
 #ifdef __linux__
     std::optional<epic_library::installation_t> epic_title;
     std::optional<std::string> epic_command;
-    std::optional<platf::epic::flatpak_desktop_proof_t> epic_flatpak_desktop;
     bool epic_private = false;
     if (app.source == "epic_launcher") {
       const auto selection = resolve_launch_selection_for_app(app, launch_selection_request_from_session(*launch_session));
@@ -9125,12 +9118,6 @@ namespace proc {
       if (epic_private) {
         if (const auto refusal = admit_private_epic(*epic_title, _epic_launcher_proof ? &*_epic_launcher_proof : nullptr)) return refusal;
         epic_command = epic_library::launch_command(_epic_launcher_proof->path(), epic_title->identity);
-      } else if (epic_title->flatpak) {
-        epic_flatpak_desktop = platf::epic::prove_flatpak_desktop(*epic_title, reason);
-        if (!epic_flatpak_desktop)
-          return launch_failure::refuse(503, "epic_flatpak_desktop_unavailable", "The matching Epic Flatpak desktop instance or its identical game-folder and launch-file views could not be verified.",
-            "Keep the matching desktop Epic open, finish the installation and verify its existing folder or document access, then rescan and use Mirror Desktop. Polaris does not grant permissions or relocate games.");
-        epic_command = epic_library::flatpak_launch_command(*epic_title->flatpak, epic_title->identity);
       } else {
         const auto launcher = platf::epic::desktop_launcher_executable(reason);
         if (!launcher || !platf::epic::desktop_launcher_running(reason))
@@ -11551,17 +11538,6 @@ namespace proc {
         // generic detached-child teardown (which can escalate). Only an explicit pidfd grant
         // below can close the observed title, and only with SIGTERM.
         desktop_steam_command = desktop_steam_command || unmanaged_epic_launcher;
-        if (unmanaged_epic_launcher && epic_title && epic_title->flatpak) {
-          // Recheck the exact retained desktop instance and installed title immediately
-          // before the URI, after potentially slow stream preparation. Refuse a missing
-          // or mismatched instance; these samples never confer game ownership.
-          std::string reason;
-          const auto current = epic_library::find(epic_library::scan(game_library::library_home_roots()), epic_title->identity);
-          if (!current || *current != *epic_title || !epic_flatpak_desktop ||
-              !platf::epic::verify_flatpak_desktop(*epic_flatpak_desktop, reason))
-            return launch_failure::refuse(503, "epic_flatpak_desktop_changed", "The Epic Flatpak deployment, installation, desktop instance or shared game path changed before dispatch.",
-              "Open the current Epic Flatpak on the desktop, rescan, then launch again in Mirror Desktop.");
-        }
 #endif
         auto child = platf::run_command(_app.elevated, true, cmd, working_dir, detached_env, _pipe.get(), ec, nullptr);
         if (ec) {
@@ -12135,14 +12111,6 @@ namespace proc {
       if (!action.empty()) return refused(409, "session_ended", "This Epic session has ended. No permission was changed.");
       return {200, {{"status", true}, {"version", 1}, {"available", false}}};
     }
-    if (_epic_title->flatpak) {
-      if (!action.empty()) return refused(409, "epic_flatpak_game_control_unavailable", "Epic Flatpak game adoption and close-game permission are unavailable. End still ends the stream.");
-      return {200, {{"status", true}, {"version", 1}, {"available", true}, {"state", "unavailable"},
-        {"code", "epic_flatpak_game_control_unavailable"}, {"app_uuid", _app.uuid}, {"app_name", _app.name},
-        {"session_id", _session_instance_id}, {"revision", ""}, {"runtime", "unknown"},
-        {"can_adopt", false}, {"can_release", false},
-        {"message", "Epic Flatpak runs on the host desktop without game-control permission. End ends the stream and leaves the game and launcher running. Disconnect and Resume leave them running too."}}};
-    }
     if (_epic_private_requested) {
       if (!action.empty())
         return refused(409, "session_managed", "Private Stream owns this session. Manual game adoption or release is unavailable.");
@@ -12170,7 +12138,8 @@ namespace proc {
     if (_launch_session->expected_stream_mode != "desktop_display" || _session_instance_id.empty())
       return refused(409, "unsupported_mode", "Epic controls are available only for this Mirror Desktop session.");
     const auto &t = *_epic_title;
-    const auto target = epic_process_title(t);
+    const platf::epic::title_t target {t.identity.namespace_id, t.identity.item_id, t.identity.artifact_id,
+      t.install_dir, t.launch_executable, t.data_root, t.platform};
     auto observed = _epic_grant ? platf::epic::inspect(*_epic_grant) : platf::epic::observe(target);
     const auto current_revision = _epic_grant ? _epic_grant_revision : _session_instance_id + ":" + observed.revision;
     if (!action.empty()) {

@@ -616,7 +616,6 @@ namespace proc {
   std::string epic_private_session_cgroup_for_tests();
   std::string epic_private_startup_command_for_tests(const std::filesystem::path &launcher, const epic_library::installation_t &title,
     const std::string &game_cmd, bool appimage_under_isolation, const std::function<std::string(const std::string &)> &isolate);
-  int admit_private_epic_for_tests(const epic_library::installation_t &title);
 
   /// What one exact sweep returned, and what its report counted.
   struct exact_generation_sweep_test_result_t {

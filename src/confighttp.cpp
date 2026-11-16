@@ -4043,7 +4043,7 @@ namespace confighttp {
       const char *reason = "check_unresolved";
       for (const char *allowed : {"session_busy", "check_in_progress", "choose_game", "ready", "epic_open_on_desktop",
            "launcher_present_unplaced", "epic_launcher_proof_required", "private_mode_unavailable",
-           "epic_game_already_running", "setup_generation_changed", "epic_installation_unavailable", "epic_installation_changed", "epic_flatpak_mirror_only"})
+           "epic_game_already_running", "setup_generation_changed", "epic_installation_unavailable", "epic_installation_changed"})
         if (raw == allowed) reason = allowed;
       if (raw == "title_prefix_unavailable" || raw == "redirected_title_prefix" || raw == "unsafe_title_prefix") reason = "windows_setup_unknown";
       if (sample.facts.proof == platf::epic::proof_state_t::changed) reason = "launcher_changed";
@@ -4522,7 +4522,6 @@ namespace confighttp {
         {"namespace", i.namespace_id}, {"item_id", i.item_id}, {"artifact_id", i.artifact_id},
         {"already_imported", false}, {"existing_uuid", ""}, {"providers", nlohmann::json::array({"official"})},
         {"provider", "official"}, {"installed_platform", "windows"}, {"runtime", "proton"}, {"lifecycle", "owner_confirmation"}};
-      if (title.flatpak) row["lifecycle"] = "unmanaged";
       const auto catalog = epic_library::heroic_identity(i.artifact_id, game_library::library_home_roots());
       const bool heroic_available = catalog && *catalog == i && std::any_of(heroic_games.begin(), heroic_games.end(), [&](const auto &g) {
         return epic_string(g, "store") == "epic" && epic_string(g, "app_name") == i.artifact_id;

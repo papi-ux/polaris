@@ -124,12 +124,6 @@ if(UNIX AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/src/platform/linux/compositor_identity_channel.cpp
     )
     list(APPEND TEST_SUPPORT_SOURCES ${TEST_LINUX_SUPERVISOR_SOURCES})
-    if(GIO_FOUND AND GIO_UNIX_FOUND)
-        # Epic's read-only Documents resolver also belongs to the standalone fast target.
-        list(APPEND TEST_SUPPORT_SOURCES
-            ${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_bus.cpp
-            ${CMAKE_SOURCE_DIR}/src/steamos_session.cpp)
-    endif()
 endif()
 
 set(TEST_AUDIT_SUPPORT_SOURCES

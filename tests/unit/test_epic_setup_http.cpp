@@ -261,33 +261,6 @@ TEST_F(EpicSetupHttp, SelectedTitleDiagnosticsProjectWithUnknownPrerequisites) {
   EXPECT_EQ(calls, 3);
 }
 
-TEST_F(EpicSetupHttp, FlatpakMirrorOnlyReasonIsPrivateAndCannotCreditNativeReadiness) {
-  reader = [&](const auto &) {
-    ++calls;
-    proc::epic_setup_read_t out;
-    out.supported = true;
-    out.epoch = "flatpak-epoch";
-    out.metadata_available = true;
-    out.facts.proof = platf::epic::proof_state_t::unavailable;
-    out.facts.runtime = platf::epic::runtime_state_t::unknown;
-    out.facts.state = platf::epic::readiness_state_t::needs_action;
-    out.facts.reason = "epic_flatpak_mirror_only";
-    return out;
-  };
-  run([&](auto &client, const auto &) {
-    get(client, "", 401, {});
-    EXPECT_EQ(calls, 0);
-    const auto body = get(client, "?namespace=ns&item_id=item&artifact_id=game", 200, bearer);
-    EXPECT_EQ(body.at("reason"), "epic_flatpak_mirror_only");
-    EXPECT_EQ(body.at("proof"), "unavailable");
-    EXPECT_EQ(body.at("runtime"), "unknown");
-    EXPECT_EQ(body.at("receipt"), "required");
-    EXPECT_NE(body.at("state"), "ready");
-    EXPECT_EQ(body.dump().find("/app"), std::string::npos);
-    EXPECT_EQ(calls, 1);
-  });
-}
-
 TEST_F(EpicSetupHttp, ReaderExceptionReturnsPrivateGenericUnavailable) {
   reader = [&](const auto &) -> proc::epic_setup_read_t { ++calls; throw std::runtime_error("private path"); };
   run([&](auto &client, const auto &) { EXPECT_EQ(get(client, "", 503, bearer).at("error"), "status_unavailable"); });

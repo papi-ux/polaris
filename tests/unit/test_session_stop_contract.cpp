@@ -683,17 +683,6 @@ TEST(EpicPrivateSessionContractTests, OnlyAnAppImageUnderStrictIsolationGetsTheM
   EXPECT_NE(refused.find("Mirror Desktop"), std::string::npos) << refused;
   EXPECT_NE(refused.find("No private request was sent."), std::string::npos) << refused;
 }
-TEST(EpicPrivateSessionContractTests, FlatpakPrivateAdmissionRefusesBeforeNativeProofOrStartup) {
-  epic_library::installation_t title;
-  title.flatpak = epic_library::flatpak_deployment_t {};
-  launch_failure::clear();
-  EXPECT_EQ(proc::admit_private_epic_for_tests(title), 409);
-  const auto refusal = launch_failure::take();
-  ASSERT_TRUE(refusal);
-  EXPECT_EQ(refusal->code, "epic_flatpak_private_unavailable");
-  EXPECT_NE(refusal->message.find("Mirror Desktop only"), std::string::npos);
-  EXPECT_NE(refusal->action.find("No desktop launch was requested"), std::string::npos);
-}
 #endif
 
 TEST(EpicPrivateSessionContractTests, AMissingOrUnreadablePrefixIsStatedWithoutClaimingTheGameWasNeverPlayed) {

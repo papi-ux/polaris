@@ -12,7 +12,7 @@ export const setupEnums = {
   capture: ['captured', 'unchanged', 'unavailable', 'superseded', 'unsupported'],
   reason: ['check_unresolved', 'session_busy', 'check_in_progress', 'choose_game', 'ready', 'epic_open_on_desktop',
     'launcher_present_unplaced', 'epic_launcher_proof_required', 'private_mode_unavailable', 'epic_game_already_running',
-    'setup_generation_changed', 'epic_installation_unavailable', 'epic_installation_changed', 'windows_setup_unknown', 'launcher_changed', 'epic_flatpak_mirror_only', 'unsupported'],
+    'setup_generation_changed', 'epic_installation_unavailable', 'epic_installation_changed', 'windows_setup_unknown', 'launcher_changed', 'unsupported'],
 }
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const revision = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value)
