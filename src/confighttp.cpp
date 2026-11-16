@@ -3919,6 +3919,18 @@ namespace confighttp {
     }
   }
 
+  const char *change_apps_file_under_snapshot(proc::session_snapshot_guard_t snapshot, std::mutex &apps_file,
+                                              const std::function<const char *()> &change,
+                                              const std::function<void()> &reload) {
+    std::scoped_lock apps_lock(apps_file);
+    {
+      const proc::session_snapshot_guard_t held {std::move(snapshot)};
+      if (const auto refused = change()) return refused;
+    }
+    reload();
+    return nullptr;
+  }
+
   void setEpicProvider(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
     const auto fail = [&](const char *message) {
@@ -3940,50 +3952,56 @@ namespace confighttp {
       if (!guard.owns_snapshot()) { fail("A session is changing. Try the provider change when it is idle."); return; }
       const auto uuid = request->path_match[1].str();
       if (uuid.empty() || proc::proc.get_running_app_uuid() == uuid) { fail("End this game's session before changing its provider."); return; }
-      std::scoped_lock apps_lock(apps_file_mutex());
-      auto tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
-      auto &apps = tree.at("apps");
-      auto it = std::find_if(apps.begin(), apps.end(), [&](const auto &app) { return epic_string(app, "uuid") == uuid; });
-      if (it == apps.end()) { fail("That library entry no longer exists."); return; }
-      const auto known = epic_app_identity(*it);
-      if (!known || *known != i || (epic_string(*it, "source") != "heroic" && epic_string(*it, "source") != "epic_launcher")) {
-        fail("The library entry's Epic identity cannot be verified. It was left unchanged."); return;
-      }
-      auto next = *it; // UUID, artwork, history, pad/stream settings and all unrelated fields survive.
-      if (provider == "official") {
-        const auto title = epic_library::find(epic_library::scan(game_library::library_home_roots()), i);
-        if (!title) { fail("This official Epic installation is unavailable. Finish its update and scan again."); return; }
-        if (epic_string(next, "source") == "heroic") {
-          // Restore the exact former launch/provider fields when the owner switches back.
-          auto restore = nlohmann::json::object();
-          for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"})
-            if (next.contains(field)) restore[field] = next[field];
-          next["epic-previous-provider"] = std::move(restore);
+      const auto refused = change_apps_file_under_snapshot(std::move(guard), apps_file_mutex(), [&]() -> const char * {
+        auto tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+        auto &apps = tree.at("apps");
+        auto it = std::find_if(apps.begin(), apps.end(), [&](const auto &app) { return epic_string(app, "uuid") == uuid; });
+        if (it == apps.end()) return "That library entry no longer exists.";
+        const auto known = epic_app_identity(*it);
+        if (!known || *known != i || (epic_string(*it, "source") != "heroic" && epic_string(*it, "source") != "epic_launcher")) {
+          return "The library entry's Epic identity cannot be verified. It was left unchanged.";
         }
-        select_official_epic(next, *title);
-      } else {
-        const auto heroic = epic_heroic_provider(i);
-        if (!heroic) { fail("An installed Heroic provider for this exact Epic title was not found."); return; }
-        if (next.contains("epic-previous-provider") && next["epic-previous-provider"].is_object()) {
-          const auto restore = next["epic-previous-provider"];
-          for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"}) {
-            next.erase(field);
-            if (restore.contains(field)) next[field] = restore[field];
+        auto next = *it; // UUID, artwork, history, pad/stream settings and all unrelated fields survive.
+        if (provider == "official") {
+          const auto title = epic_library::find(epic_library::scan(game_library::library_home_roots()), i);
+          if (!title) return "This official Epic installation is unavailable. Finish its update and scan again.";
+          if (epic_string(next, "source") == "heroic") {
+            // Restore the exact former launch/provider fields when the owner switches back.
+            auto restore = nlohmann::json::object();
+            for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"})
+              if (next.contains(field)) restore[field] = next[field];
+            next["epic-previous-provider"] = std::move(restore);
           }
-          next.erase("epic-previous-provider");
+          select_official_epic(next, *title);
+        } else {
+          const auto heroic = epic_heroic_provider(i);
+          if (!heroic) return "An installed Heroic provider for this exact Epic title was not found.";
+          if (next.contains("epic-previous-provider") && next["epic-previous-provider"].is_object()) {
+            const auto restore = next["epic-previous-provider"];
+            for (const char *field : {"source", "cmd", "detached", "launch-as", "launch-as-basis", "desktop-mirror", "virtual-display", "heroic-app-name", "heroic-store", "heroic-runner", "heroic-install"}) {
+              next.erase(field);
+              if (restore.contains(field)) next[field] = restore[field];
+            }
+            next.erase("epic-previous-provider");
+          }
+          next["source"] = "heroic";
+          next["cmd"] = "";
+          next["detached"] = nlohmann::json::array({heroic->command});
+          next["heroic-app-name"] = heroic->app_name;
+          next["heroic-store"] = "epic";
+          next["heroic-runner"] = heroic->runner;
+          next["heroic-install"] = game_library::heroic_install_name(heroic->install);
+          write_epic_identity(next, i);
         }
-        next["source"] = "heroic";
-        next["cmd"] = "";
-        next["detached"] = nlohmann::json::array({heroic->command});
-        next["heroic-app-name"] = heroic->app_name;
-        next["heroic-store"] = "epic";
-        next["heroic-runner"] = heroic->runner;
-        next["heroic-install"] = game_library::heroic_install_name(heroic->install);
-        write_epic_identity(next, i);
-      }
-      *it = std::move(next);
-      if (file_handler::write_file(config::stream.file_apps.c_str(), tree.dump(4)) != 0) throw std::runtime_error("save failed");
-      proc::refresh(config::stream.file_apps);
+        *it = std::move(next);
+        if (file_handler::write_file(config::stream.file_apps.c_str(), tree.dump(4)) != 0) throw std::runtime_error("save failed");
+        return nullptr;
+      }, [] {
+        // Only the entry checked above changed, and it isn't running, so no stream has to end. Another
+        // game's session keeps going, as it does when an emulator install rewrites its entries.
+        proc::refresh(config::stream.file_apps, false);
+      });
+      if (refused) { fail(refused); return; }
       send_response(response, {{"status", true}, {"uuid", uuid}, {"provider", provider}});
     } catch (const std::exception &) { fail("The provider could not be changed. Refresh the library before trying again."); }
   }

@@ -7,6 +7,7 @@
 // standard includes
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <chrono>
 #include <cstdint>
@@ -254,6 +255,22 @@ namespace confighttp {
    * @brief The uuids of the apps in an apps.json tree whose automatic artwork lookup is off.
    */
   nlohmann::json apps_with_artwork_lookup_off(const std::filesystem::path &appdata, const nlohmann::json &apps_tree);
+
+  /**
+   * @brief Rewrite apps.json while a session snapshot keeps every launch and stop out, then reload
+   *        it once the snapshot has ended.
+   *
+   * `change` runs with the snapshot and `apps_file` held, so the entry it checks can't start or stop
+   * before its new definition is on disk. `reload` runs after the snapshot ends: a reload that ends a
+   * session waits in the lifecycle gate for every snapshot, its own caller's included, and that wait
+   * never ended (#696). `apps_file` stays held through `reload`, as it does for every writer that
+   * reloads, because the reload reads apps.json back.
+   * @param snapshot The caller's snapshot. The caller has already checked that it owns one.
+   * @return What `change` refused with, and then nothing is reloaded; nullptr once reloaded.
+   */
+  const char *change_apps_file_under_snapshot(proc::session_snapshot_guard_t snapshot, std::mutex &apps_file,
+                                              const std::function<const char *()> &change,
+                                              const std::function<void()> &reload);
 
   /**
    * @brief Session lifecycle states.

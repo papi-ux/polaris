@@ -337,6 +337,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_native_reception.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_native_reception_scope.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_epic_setup_http.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_epic_provider_lock_order.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_config_refusal_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/integration/test_nova_contract.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_async_http.cpp
