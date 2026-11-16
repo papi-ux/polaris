@@ -68,7 +68,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-pacman -Sy --noconfirm arch-install-scripts curl git
+# A full upgrade, not -Sy alone: the image is a rolling release, and installing packages
+# against a fresh database without upgrading the rest is a partial upgrade that pacman
+# refuses as soon as a library both sides link changes its soname (OpenSSL 4 did).
+pacman -Syu --noconfirm --needed arch-install-scripts curl git
 pacman-key --init
 
 curl --fail --location --proto '=https' --tlsv1.2 \
