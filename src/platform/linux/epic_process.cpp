@@ -368,6 +368,18 @@ namespace platf::epic {
     };
 
     mount_t image_mount(const std::string &text, const fs::path &image) {
+      const auto namespace_root = [](std::string_view root) {
+        // Linux nsfs show_path emits <namespace kind>:[inode], not a file path.
+        const auto marker = root.find(":[");
+        if (marker == std::string_view::npos || root.back() != ']') return false;
+        constexpr std::array<std::string_view, 8> kinds {"cgroup", "ipc", "mnt", "net", "pid", "time", "user", "uts"};
+        if (std::find(kinds.begin(), kinds.end(), root.substr(0, marker)) == kinds.end()) return false;
+        const auto digits = root.substr(marker + 2, root.size() - marker - 3);
+        std::uint64_t inode = 0;
+        const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), inode);
+        return !digits.empty() && digits.front() != '0' && parsed.ec == std::errc {} &&
+               parsed.ptr == digits.data() + digits.size() && inode != 0;
+      };
       std::optional<mount_t> result;
       std::istringstream stream(text);
       std::string line;
@@ -382,7 +394,15 @@ namespace platf::epic {
         const auto major = number(std::string_view(fields[2]).substr(0, colon));
         const auto minor = number(std::string_view(fields[2]).substr(colon + 1));
         const fs::path point = unescape(fields[4]);
-        require(safe_absolute_path(point) && safe_absolute_path(unescape(fields[3])), "malformed_mount_path");
+        const auto root = unescape(fields[3]);
+        const bool nsfs = *(sep + 1) == "nsfs";
+        require(safe_absolute_path(point) && (safe_absolute_path(root) || (nsfs && namespace_root(root))), "malformed_mount_path");
+        if (nsfs) {
+          // Namespace handles cannot supply an image-containing filesystem or
+          // be ignored in favour of an ancestor hidden by this mount.
+          require(!inside(image, point), "namespace_image_mount");
+          continue;
+        }
         if (!inside(image, point)) {
           continue;
         }

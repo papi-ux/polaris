@@ -2113,6 +2113,145 @@ TEST_F(EpicProcess, RetainedNativeLauncherProofRechecksMagicAndOwnerWithoutAProc
   EXPECT_TRUE(host->signals.empty());
 }
 
+TEST_F(EpicProcess, NativeLauncherProofSkipsEveryNsfsHandleKindWithoutChangingTheImageMount) {
+  // Linux nsfs rows carry <kind>:[inode] as their root. These identifiers are inert fixture values.
+  std::vector<std::string> roots;
+  for (const auto *kind : {"cgroup", "ipc", "mnt", "net", "pid", "time", "user", "uts"}) roots.push_back(std::string(kind) + ":[700]");
+  roots.push_back("mnt:[18446744073709551615]");
+  for (const auto &root : roots) {
+    for (const bool appimage : {false, true}) {
+      host = std::make_shared<fixture_t>();
+      if (appimage) host->fuse_launcher();
+      else host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+      const auto before = ep::testing::prove_launcher(error, host);
+      ASSERT_TRUE(before) << error;
+      const auto row = "60 21 0:7 " + root + " /run/.userns ro,nosuid,nodev - nsfs nsfs rw\n";
+      host->files["/proc/43/mountinfo"] += row;
+      if (appimage) host->files["/proc/44/mountinfo"] += row;
+      const auto after = ep::testing::prove_launcher(error, host);
+      ASSERT_TRUE(after) << root << ' ' << error;
+      // Skipped, never chosen: the launcher keeps the same image mount and every other proven fact.
+      EXPECT_TRUE(ep::same_launcher_observation(*before, *after)) << root;
+      EXPECT_EQ(after->appimage(), appimage);
+      EXPECT_TRUE(ep::verify_launcher(*after, error)) << error;
+      EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+    }
+  }
+}
+
+TEST_F(EpicProcess, NativeLauncherProofRefusesMalformedNsfsRootsAndKeepsEveryOtherRowCheck) {
+  const std::pair<const char *, const char *> rows[] {
+    {"60 21 0:7 relative /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 unknown:[700] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 USER:[700] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 :[700] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user[700] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[700 /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[0] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[0700] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[-1] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[+700] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[0x2bc] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[18446744073709551616] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[700]suffix /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[700] run/.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[700] /run/../.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[700] /run/./.userns ro - nsfs nsfs rw\n", "malformed_mount_path"},
+    {"60 21 0:7 user:[\\999] /run/.userns ro - nsfs nsfs rw\n", "malformed_proc_path"},
+    {"60 21 0:7 user:[700] /run/\\999 ro - nsfs nsfs rw\n", "malformed_proc_path"},
+    {"60 21 0:x user:[700] /run/.userns ro - nsfs nsfs rw\n", "malformed_proc_number"},
+    {"60 21 invalid user:[700] /run/.userns ro - nsfs nsfs rw\n", "malformed_mount_device"},
+    {"60 21 0:7 user:[700] /run/.userns ro nsfs nsfs rw\n", "malformed_mountinfo"},
+    {"60 21 0:34 /@fixture /fixture/../fixture rw - btrfs /dev/fixture rw\n", "malformed_mount_path"},
+    {"60 21 0:34 /@fixture/../x /fixture rw - btrfs /dev/fixture rw\n", "malformed_mount_path"},
+  };
+  for (const auto &[row, expected] : rows) {
+    host = std::make_shared<fixture_t>();
+    host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+    ASSERT_TRUE(ep::testing::prove_launcher(error, host)) << error;
+    host->files["/proc/43/mountinfo"] += row;
+    EXPECT_FALSE(ep::testing::prove_launcher(error, host)) << row;
+    EXPECT_EQ(error, expected) << row;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, NativeLauncherProofRefusesAnNsfsMountAtOrAboveTheLauncherImage) {
+  for (const auto *point : {"/", "/usr", "/usr/bin", "/usr/bin/EpicGamesLauncher"}) {
+    host = std::make_shared<fixture_t>();
+    host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+    ASSERT_TRUE(ep::testing::prove_launcher(error, host)) << error;
+    host->files["/proc/43/mountinfo"] += "60 21 0:7 user:[700] " + std::string(point) + " ro - nsfs nsfs rw\n";
+    EXPECT_FALSE(ep::testing::prove_launcher(error, host));
+    EXPECT_EQ(error, "namespace_image_mount") << point;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+  for (const auto *point : {"/tmp", "/tmp/.mount_EpicXXX", "/tmp/.mount_EpicXXX/usr/bin/EpicGamesLauncher"}) {
+    const auto row = "60 21 0:7 net:[700] " + std::string(point) + " ro - nsfs nsfs rw\n";
+    host = std::make_shared<fixture_t>();
+    host->fuse_launcher();
+    ASSERT_TRUE(ep::testing::prove_launcher(error, host)) << error;
+    host->files["/proc/43/mountinfo"] += row;
+    EXPECT_FALSE(ep::testing::prove_launcher(error, host));
+    EXPECT_EQ(error, "namespace_image_mount") << point;
+    // The AppImage keeper's table is held to the same rule; its refusal stays unproven, not inferred.
+    host = std::make_shared<fixture_t>();
+    host->fuse_launcher();
+    host->files["/proc/44/mountinfo"] += row;
+    EXPECT_FALSE(ep::testing::prove_launcher(error, host));
+    EXPECT_EQ(error, "launcher_appimage_path_unproven") << point;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, NativeLauncherProofAcceptsAHandleRootOnlyOnAnNsfsRow) {
+  // The filesystem type alone qualifies a row; its source field or a look-alike type does not.
+  for (const auto *row : {
+         "60 21 0:7 user:[700] /run/.userns ro - tmpfs tmpfs rw\n",
+         "60 21 0:7 user:[700] /run/.userns ro - tmpfs nsfs rw\n",
+         "60 21 0:7 user:[700] /run/.userns ro - nsfs2 nsfs rw\n",
+         "60 21 0:7 user:[700] /run/.userns ro - fuse.nsfs nsfs rw\n",
+         "60 21 0:7 user:[700] /run/.userns ro - NSFS nsfs rw\n",
+         "60 21 0:34 user:[700] /usr/bin ro - btrfs /dev/fixture ro\n",
+       }) {
+    host = std::make_shared<fixture_t>();
+    host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+    ASSERT_TRUE(ep::testing::prove_launcher(error, host)) << error;
+    host->files["/proc/43/mountinfo"] += row;
+    EXPECT_FALSE(ep::testing::prove_launcher(error, host)) << row;
+    EXPECT_EQ(error, "malformed_mount_path") << row;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+  // An accepted nsfs row does not relax the checks on the mount that holds the image.
+  for (int failure = 0; failure < 3; ++failure) {
+    host = std::make_shared<fixture_t>();
+    host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
+    auto &mounts = host->files["/proc/43/mountinfo"];
+    mounts += "60 21 0:7 user:[700] /run/.userns ro - nsfs nsfs rw\n";
+    ASSERT_TRUE(ep::testing::prove_launcher(error, host)) << error;
+    switch (failure) {
+      case 0: mounts += "61 21 0:52 / / ro - ext4 /dev/other ro\n"; break;
+      case 1: mounts.replace(mounts.find("0:1 / /"), 7, "0:1 relative /"); break;
+      case 2: mounts.erase(0, mounts.find('\n') + 1); break;
+    }
+    EXPECT_FALSE(ep::testing::prove_launcher(error, host)) << failure;
+    const char *expected[] {"ambiguous_image_mount", "malformed_mount_path", "missing_image_mount"};
+    EXPECT_EQ(error, expected[failure]) << failure;
+    EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+  }
+}
+
+TEST_F(EpicProcess, NativeImageProofAlsoAcceptsUnrelatedNsfsWithoutAcquiringAuthority) {
+  const auto before = ep::testing::observe(host->title(), host);
+  ASSERT_TRUE(before.available) << before.reason;
+  host->files["/proc/41/mountinfo"] += "60 21 0:7 user:[700] /run/.userns ro - nsfs nsfs rw\n";
+  const auto after = ep::testing::observe(host->title(), host);
+  EXPECT_TRUE(after.available) << after.reason;
+  EXPECT_EQ(after.pid, before.pid);
+  EXPECT_TRUE(host->opened.empty()); EXPECT_TRUE(host->signals.empty());
+}
+
 TEST_F(EpicProcess, SetupColdOpenObservationDoesNotInventAScanOrPublishAProof) {
   host->add_process(43, "/usr/bin/EpicGamesLauncher", "/fixture/owner", 10003);
   ep::setup_history_t history;
