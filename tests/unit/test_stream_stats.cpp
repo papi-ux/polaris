@@ -121,6 +121,11 @@ namespace {
         use_cage_compositor {config::video.linux_display.use_cage_compositor},
         prefer_gpu_native_capture {config::video.linux_display.prefer_gpu_native_capture},
         stream_mode {config::video.linux_display.stream_mode} {
+#ifdef __linux__
+      // A worker an earlier test started may have been refused priority elevation, which leaves
+      // a process-wide note the profile reports as a warning. These cases are about GPU facts.
+      platf::set_thread_priority_unavailable_note_for_tests(std::string {});
+#endif
     }
 
     ~LinuxDisplayConfigGuard() {
