@@ -9,6 +9,8 @@
 
 #ifdef __linux__
 
+#include "src/logging.h"
+
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 
@@ -18,6 +20,7 @@
 #include <limits>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <source_location>
 #include <string_view>
@@ -1485,37 +1488,134 @@ namespace multiseat::container {
     return std::nullopt;
   }
 
+  namespace {
+    // A refused worker start used to leave the host log only "seat start status 4, worker
+    // result 5" (GitHub #821). Each refusal now names its check once, in words a host owner
+    // can act on. Writing the line cannot change what launch() returns: anything building or
+    // logging it throws stays here. Never put secrets, tokens, the docker command line or
+    // environment values in a reason; names, image ids, paths and exit codes are fine.
+    template<class Describe>
+    void warn_refused(std::string_view worker, Describe &&describe) noexcept {
+      try {
+        std::ostringstream reason;
+        describe(reason);
+        // A request that failed its own checks may carry a name that is no token at all.
+        if (opaque_name_token(worker)) {
+          BOOST_LOG(warning) << "Space worker " << worker << " was refused: " << reason.str();
+        } else {
+          BOOST_LOG(warning) << "Space worker was refused: " << reason.str();
+        }
+      } catch (...) {
+      }
+    }
+
+    void describe_runtime_refusal(std::ostream &out, const options_t &options) {
+      out << "the container runtime " << options.runtime_executable.native()
+          << " is missing, or isn't a root-owned file in root-owned folders that only root can change";
+    }
+
+    void describe_gpu_refusal(std::ostream &out, const options_t &options) {
+      out << "a GPU device node (";
+      std::string_view separator;
+      for (const auto &gpu : options.gpus) {
+        for (const auto &device : gpu.devices) {
+          out << separator << device.path.native();
+          separator = ", ";
+        }
+      }
+      out << ") isn't read-write for this account, or changed since Polaris started (a driver reload "
+             "or GPU reset does that). Restart Polaris";
+    }
+
+    void describe_input_refusal(std::ostream &out, const input::allocation_t &allocation) {
+      out << "its virtual input devices (";
+      std::string_view separator;
+      for (const auto &node : allocation.nodes) {
+        out << separator << node.host_path.native();
+        separator = ", ";
+      }
+      out << ") changed since Polaris made them, or aren't read-write for this account";
+    }
+
+    void describe_run_refusal(
+      std::ostream &out,
+      const options_t &options,
+      const profile_t &profile,
+      int exit_status,
+      std::string_view outcome
+    ) {
+      const auto docker = options.engine == engine_e::docker;
+      out << (docker ? "docker run" : "podman run") << " exited with code " << exit_status << " and "
+          << outcome << " (image " << profile.image_reference << ')';
+      if (docker) out << ". Docker's own log has the reason: journalctl -u docker";
+    }
+  }  // namespace
+
   bool backend_t::launch_host_ready(
     const worker_launch_spec_t &spec,
     const input::allocation_t &input_allocation
   ) const {
-    if (!base_host_ready() || !runtime_ready()) {
+    // The checks run in the same order and stop at the same place as one condition would;
+    // each is split out only so its refusal can be named.
+    const auto refused = [&spec](auto &&describe) {
+      warn_refused(spec.identity.worker_name, describe);
       return false;
+    };
+    if (!base_host_ready()) {
+      // Reading the account's own uid again only picks the words.
+      if (host_.effective_uid() == 0) {
+        return refused([](std::ostream &out) {
+          out << "Polaris is running as root, and a Space worker never starts as root. "
+                 "Run Polaris as your own account";
+        });
+      }
+      return refused([this](std::ostream &out) {
+        out << "the container engine client " << options_.executable.native()
+            << " is missing or isn't executable by this account";
+      });
+    }
+    if (!runtime_ready()) {
+      return refused([this](std::ostream &out) { describe_runtime_refusal(out, options_); });
     }
     const auto worker_authority_directory =
       options_.ipc_root / spec.resources.runtime_namespace;
     const auto worker_ipc_directory = worker_authority_directory / ipc_directory;
     const auto worker_auth_directory = worker_authority_directory / auth_directory;
-    if (!safe_path(worker_authority_directory) ||
-        !host_.private_read_write_directory(options_.ipc_root) ||
-        !host_.private_read_write_directory(worker_authority_directory) ||
-        !host_.private_read_write_directory(worker_ipc_directory) ||
-        !host_.private_read_write_directory(worker_auth_directory) ||
-        !host_.private_readable_file(worker_auth_directory / capability_file)) {
-      return false;
+    if (!safe_path(worker_authority_directory)) {
+      return refused([&](std::ostream &out) {
+        out << "its worker folder " << worker_authority_directory.native() << " isn't a plain absolute path";
+      });
     }
-    const auto devices_ready = gpu_catalog_current() &&
-                               input_allocation_current(input_allocation);
-    if (!devices_ready) {
-      return false;
-    }
-    return std::all_of(
-      options_.shared_game_mounts.begin(),
-      options_.shared_game_mounts.end(),
-      [this](const auto &mount) {
-        return host_.readable_directory(mount.host_path);
+    for (const auto *directory : {&options_.ipc_root, &worker_authority_directory,
+                                  &worker_ipc_directory, &worker_auth_directory}) {
+      if (!host_.private_read_write_directory(*directory)) {
+        return refused([directory](std::ostream &out) {
+          out << "the folder " << directory->native()
+              << " is missing, or isn't a private read-write folder owned by this account";
+        });
       }
-    );
+    }
+    if (const auto capability = worker_auth_directory / capability_file;
+        !host_.private_readable_file(capability)) {
+      return refused([&capability](std::ostream &out) {
+        out << "its capability file " << capability.native()
+            << " is missing, or isn't readable and private to this account";
+      });
+    }
+    if (!gpu_catalog_current()) {
+      return refused([this](std::ostream &out) { describe_gpu_refusal(out, options_); });
+    }
+    if (!input_allocation_current(input_allocation)) {
+      return refused([&input_allocation](std::ostream &out) { describe_input_refusal(out, input_allocation); });
+    }
+    for (const auto &mount : options_.shared_game_mounts) {
+      if (!host_.readable_directory(mount.host_path)) {
+        return refused([&mount](std::ostream &out) {
+          out << "the shared game folder " << mount.host_path.native() << " isn't readable by this account";
+        });
+      }
+    }
+    return true;
   }
 
   bool backend_t::valid_spec(const worker_launch_spec_t &spec) const {
@@ -1716,13 +1816,24 @@ namespace multiseat::container {
   }
 
   worker_command_result_e backend_t::launch(const worker_launch_spec_t &spec) {
-    if (!valid_spec(spec)) {
+    // Every refusal below names its check once and returns exactly what it did before.
+    const auto refused = [&spec](auto &&describe) {
+      warn_refused(spec.identity.worker_name, describe);
       return worker_command_result_e::rejected;
+    };
+    if (!valid_spec(spec)) {
+      return refused([](std::ostream &out) {
+        out << "its start request didn't pass Polaris's own consistency check. "
+               "That's a Polaris bug, so please report it with this log";
+      });
     }
     const auto *gpu = gpu_for(spec);
     const auto *profile = profile_for(spec.profile_key);
     if (!gpu || !profile) {
-      return worker_command_result_e::rejected;
+      return refused([&spec](std::ostream &out) {
+        out << "its GPU " << spec.identity.seat.logical_gpu_id << " or Space " << spec.profile_key
+            << " isn't in Polaris's current Spaces setup";
+      });
     }
     std::optional<input::allocation_t> input_allocation;
     try {
@@ -1734,16 +1845,25 @@ namespace multiseat::container {
       return worker_command_result_e::indeterminate;
     }
     if (!input_allocation) {
-      return worker_command_result_e::rejected;
+      return refused([&spec](std::ostream &out) {
+        out << "its virtual input devices for " << spec.resources.input_seat
+            << " are missing or don't match the request";
+      });
     }
     const auto input_fingerprint = input_manifest_fingerprint(*input_allocation);
     if (!input_fingerprint) {
-      return worker_command_result_e::rejected;
+      return refused([](std::ostream &out) {
+        out << "Polaris couldn't record its virtual input device list";
+      });
     }
     std::optional<std::vector<std::uint64_t>> launching_groups;
     try {
       launching_groups = host_.supplementary_groups();
-      if (!launching_groups || !launch_host_ready(spec, *input_allocation)) {
+      if (!launching_groups) {
+        return refused([](std::ostream &out) { out << "Polaris couldn't read its own group list"; });
+      }
+      if (!launch_host_ready(spec, *input_allocation)) {
+        // launch_host_ready() named the check that refused.
         return worker_command_result_e::rejected;
       }
       const auto engine = require_docker_engine();
@@ -1751,7 +1871,10 @@ namespace multiseat::container {
       // built-in AppArmor profile. Custom policies are also unverified here.
       // Refuse before creating anything, never relax the daemon's security.
       if (engine.apparmor && options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
-        return worker_command_result_e::rejected;
+        return refused([](std::ostream &out) {
+          out << "Docker uses AppArmor, and a Steam Space's sandbox can't run under it yet. "
+                 "See the security row in Host Setup, under Spaces in Polaris";
+        });
       }
     } catch (...) {
       return worker_command_result_e::indeterminate;
@@ -1769,7 +1892,14 @@ namespace multiseat::container {
       return worker_command_result_e::indeterminate;
     }
     if (!*volume_present) {
-      return worker_command_result_e::rejected;
+      return refused([this, profile](std::ostream &out) {
+        if (options_.engine == engine_e::docker) {
+          out << "the Space's Docker volume " << profile->opaque_volume_name
+              << " isn't a plain local volume (local driver, no options, in Docker's own volumes folder)";
+        } else {
+          out << "the Space's volume " << profile->opaque_volume_name << " doesn't exist";
+        }
+      });
     }
 
     command_result_t result;
@@ -1778,7 +1908,10 @@ namespace multiseat::container {
       // Do not quarantine this as an uncertain container creation outcome.
       if (options_.media_enabled && needs_profile_network(profile->runtime_profile) &&
           !host_.trusted_data_file(std::filesystem::path(steam_seccomp_path), steam_seccomp_data)) {
-        return worker_command_result_e::rejected;
+        return refused([](std::ostream &out) {
+          out << "the Steam security file " << steam_seccomp_path
+              << " is missing or differs from this Polaris build. Install the matching native Polaris package";
+        });
       }
       const auto argv = launch_argv(
         spec,
@@ -1788,15 +1921,26 @@ namespace multiseat::container {
         *input_fingerprint,
         *launching_groups
       );
-      if (!runtime_ready() ||
-          host_.supplementary_groups() != launching_groups ||
-          !gpu_catalog_current() || !input_allocation_current(*input_allocation)) {
-        return worker_command_result_e::rejected;
+      // The last recheck before the run, in its original order.
+      if (!runtime_ready()) {
+        return refused([this](std::ostream &out) { describe_runtime_refusal(out, options_); });
+      }
+      if (host_.supplementary_groups() != launching_groups) {
+        return refused([](std::ostream &out) { out << "Polaris's group list changed while the Space was starting"; });
+      }
+      if (!gpu_catalog_current()) {
+        return refused([this](std::ostream &out) { describe_gpu_refusal(out, options_); });
+      }
+      if (!input_allocation_current(*input_allocation)) {
+        return refused([&input_allocation](std::ostream &out) { describe_input_refusal(out, *input_allocation); });
       }
       if (options_.media_enabled && needs_profile_network(profile->runtime_profile)) {
         const auto network = profile_network_id(host_, profile->profile_key, true);
         if (!network || std::find(argv.begin(), argv.end(), "--network=" + *network) == argv.end())
-          return worker_command_result_e::rejected;
+          return refused([profile](std::ostream &out) {
+            out << "its private network " << profile_network_name(profile->profile_key)
+                << " couldn't be confirmed, or changed while the Space was starting";
+          });
       }
       result = host_.run(
         argv,
@@ -1826,7 +1970,9 @@ namespace multiseat::container {
         }
       );
       if (exact == records.end()) {
-        return worker_command_result_e::rejected;
+        return refused([&](std::ostream &out) {
+          describe_run_refusal(out, options_, *profile, result.exit_status, "left no container");
+        });
       }
       if (!record_matches_spec(*exact, spec)) {
         return worker_command_result_e::indeterminate;
@@ -1835,9 +1981,12 @@ namespace multiseat::container {
           exact->observation.state == worker_observed_state_e::ready) {
         return worker_command_result_e::already_applied;
       }
-      return exact->observation.state == worker_observed_state_e::stopped ?
-               worker_command_result_e::rejected :
-               worker_command_result_e::indeterminate;
+      if (exact->observation.state == worker_observed_state_e::stopped) {
+        return refused([&](std::ostream &out) {
+          describe_run_refusal(out, options_, *profile, result.exit_status, "its container stopped");
+        });
+      }
+      return worker_command_result_e::indeterminate;
     } catch (...) {
       return worker_command_result_e::indeterminate;
     }

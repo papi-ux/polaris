@@ -7,6 +7,7 @@
 #include "src/platform/linux/multiseat_moonlight_activation.h"
 #include "src/rtsp.h"
 #include "src/stream.h"
+#include "../../tests_log_capture.h"
 
 #ifdef __linux__
 
@@ -1690,6 +1691,33 @@ namespace {
       }
     }
     EXPECT_EQ(unexpected_callers, std::vector<std::string> {"src/main.cpp"});
+  }
+
+  // GitHub #821: a Space that would not start logged its two results as bare numbers.
+  class MultiseatSpaceStartLog : public MultiseatControllerRuntimeTest {};
+
+  TEST_F(MultiseatSpaceStartLog, ARefusedWorkerStartNamesBothResults) {
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
+    auto *runtime = controller_.get();
+    auto driver = make_profile_controller(std::move(controller_));
+    auto cleanup = util::fail_guard([&] { state_->allow_cleanup(); EXPECT_TRUE(driver->shutdown()); });
+    auto launch = controller_launch(2201, 3201);
+    launch->width = 1920; launch->height = 1080; launch->fps = 60000;
+    driver->reconcile();
+    state_->set_next_worker_launch(worker_command_result_e::rejected);
+    const test_log_capture_t log;
+    const auto started = driver->begin(launch);
+    EXPECT_FALSE(started.seat);
+    EXPECT_EQ(started.result.status, 503);
+    const auto text = log.text();
+    const std::string line =
+      "Warning: Space worker was not started: seat start status 4 (worker_rejected), worker result 5 (backend_rejected)\n";
+    EXPECT_NE(text.find(line), std::string::npos) << text;
+    std::size_t warnings = 0;
+    for (auto found = text.find("Space worker was not started"); found != std::string::npos;
+         found = text.find("Space worker was not started", found + 1)) ++warnings;
+    EXPECT_EQ(warnings, 1U) << text;
+    EXPECT_EQ(runtime->seats(), 0U);
   }
 }  // namespace
 

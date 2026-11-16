@@ -78,6 +78,45 @@ namespace multiseat {
       }
       return "unknown";
     }
+    // A Space that would not start used to log bare numbers that meant nothing without the
+    // enum declarations beside them (GitHub #821). The names go next to the numbers.
+    const char *start_status_name(controller_start_status_e status) {
+      switch (status) {
+        case controller_start_status_e::started: return "started";
+        case controller_start_status_e::controller_not_ready: return "controller_not_ready";
+        case controller_start_status_e::invalid_request: return "invalid_request";
+        case controller_start_status_e::input_rejected: return "input_rejected";
+        case controller_start_status_e::worker_rejected: return "worker_rejected";
+        case controller_start_status_e::worker_indeterminate: return "worker_indeterminate";
+        case controller_start_status_e::input_cleanup_incomplete: return "input_cleanup_incomplete";
+        case controller_start_status_e::launch_cancelled: return "launch_cancelled";
+      }
+      return "unknown";
+    }
+    const char *worker_start_name(coordinator_start_result_e result) {
+      switch (result) {
+        case coordinator_start_result_e::started: return "started";
+        case coordinator_start_result_e::reconciliation_required: return "reconciliation_required";
+        case coordinator_start_result_e::seat_not_found: return "seat_not_found";
+        case coordinator_start_result_e::invalid_seat_state: return "invalid_seat_state";
+        case coordinator_start_result_e::authority_rejected: return "authority_rejected";
+        case coordinator_start_result_e::backend_rejected: return "backend_rejected";
+        case coordinator_start_result_e::backend_indeterminate: return "backend_indeterminate";
+        case coordinator_start_result_e::cleanup_blocked: return "cleanup_blocked";
+      }
+      return "unknown";
+    }
+    const char *mutation_result_name(mutation_result_e result) {
+      switch (result) {
+        case mutation_result_e::applied: return "applied";
+        case mutation_result_e::not_found: return "not_found";
+        case mutation_result_e::stale_controller: return "stale_controller";
+        case mutation_result_e::stale_generation: return "stale_generation";
+        case mutation_result_e::invalid_state: return "invalid_state";
+        case mutation_result_e::invalid_selection: return "invalid_selection";
+      }
+      return "unknown";
+    }
     void describe_worker(std::ostream &out, const coordinator_reconciliation_report_t &worker) {
       const auto &broker = worker.broker;
       out << "worker{admission_ready=" << worker.admission_ready
@@ -199,15 +238,17 @@ namespace multiseat {
         // default words and the log got none. Say which step, and with what.
         const auto bound = runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch");
         if (bound != mutation_result_e::applied) {
-          BOOST_LOG(warning) << "Space worker was not started: the runtime could not be bound (result "
-                             << static_cast<int>(bound) << ')';
+          BOOST_LOG(warning) << "Space worker was not started: the runtime could not be bound, result "
+                             << static_cast<int>(bound) << " (" << mutation_result_name(bound) << ')';
           return {};
         }
         const auto started = runtime_->start_seat(handle, plan);
         if (!started.started()) {
           BOOST_LOG(warning) << "Space worker was not started: seat start status "
-                             << static_cast<int>(started.status) << ", worker result "
-                             << (started.worker ? std::to_string(static_cast<int>(*started.worker)) : std::string("none"));
+                             << static_cast<int>(started.status) << " (" << start_status_name(started.status)
+                             << "), worker result "
+                             << (started.worker ? std::to_string(static_cast<int>(*started.worker)) + " (" +
+                                                    worker_start_name(*started.worker) + ')' : std::string("none"));
           return {};
         }
         return {{200, "Space worker is starting"}, handle};

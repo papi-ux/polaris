@@ -8,6 +8,7 @@
 #ifdef __linux__
 
 #include "multiseat_steam_seccomp.h"
+#include "../../tests_log_capture.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
@@ -18,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -91,8 +93,13 @@ namespace {
     }
 
     bool trusted_runtime_file(const std::filesystem::path &path) const override {
+      ++runtime_reads;
+      if (runtime_trusted_reads != 0 && runtime_reads > runtime_trusted_reads) return false;
       return runtime_ready && (path == "/usr/bin/crun" || path == "/usr/bin/runc");
     }
+    // Zero keeps every read as runtime_ready says; N makes each read after the Nth fail.
+    std::size_t runtime_trusted_reads = 0;
+    mutable std::size_t runtime_reads = 0;
 
     bool seccomp_ready = true;
     bool trusted_data_file(const std::filesystem::path &path, std::string_view expected) const override {
@@ -3484,6 +3491,337 @@ TEST(MultiseatDockerBackend, RefusesHostDriverOptionsThatEscapeTheLoaderDirector
     mutations[index](options);
     EXPECT_THROW((backend_t {host, input_manifests_for_tests(), options}), std::invalid_argument);
   }
+}
+
+
+namespace {
+  // GitHub #821: a refused worker start left only two numbers in the host log. Each refusal
+  // in launch() now logs one warning naming its check, and still returns what it did.
+  const std::string refused_worker = "Warning: Space worker polaris-worker-controller-a1b2-1 was refused: ";
+  const std::string steam_image = std::string {"ghcr.io/papi-ux/polaris-seat-steam@sha256:"} + std::string(64, 'a');
+
+  std::vector<std::string> refusal_lines(const test_log_capture_t &log) {
+    std::vector<std::string> lines;
+    std::istringstream text {log.text()};
+    for (std::string line; std::getline(text, line);) {
+      if (line.find("was refused: ") != std::string::npos) lines.push_back(line);
+    }
+    return lines;
+  }
+
+  std::vector<std::string> one_refusal(const std::string &reason) {
+    return {refused_worker + reason};
+  }
+
+  struct steam_media_t {
+    options_t options;
+    worker_launch_spec_t spec;
+  };
+
+  steam_media_t steam_media_for_tests() {
+    auto options = docker_options_for_tests();
+    options.media_enabled = true;
+    options.profiles.front().profile_key = "profile-alpha";
+    options.workloads = {{workload_kind_e::steam, "big-picture-v1"}};
+    auto spec = valid_spec();
+    spec.workload = options.workloads.front();
+    spec.profile_key = options.profiles.front().profile_key;
+    spec.display_mode.hdr = false;
+    return {std::move(options), std::move(spec)};
+  }
+}
+
+TEST(MultiseatWorkerRefusalLog, AnInconsistentRequestSaysItIsAPolarisBug) {
+  const std::string reason =
+    "its start request didn't pass Polaris's own consistency check. That's a Polaris bug, so please report it with this log";
+  {
+    fake_host_t host;
+    backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+    auto spec = valid_spec();
+    spec.compositor = compositor_e::automatic;
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal(reason));
+    EXPECT_TRUE(host.calls.empty());
+  }
+  // A name that is no token is left out rather than written into the log.
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  auto spec = valid_spec();
+  spec.identity.worker_name = "worker\nWarning: forged";
+  spec.resources.worker_name = spec.identity.worker_name;
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), std::vector<std::string> {"Warning: Space worker was refused: " + reason});
+}
+
+TEST(MultiseatWorkerRefusalLog, MissingInputDevicesNameTheirInputSeat) {
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  inputs.missing = true;
+  backend_t backend {host, inputs, options_for_tests()};
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), one_refusal(
+    "its virtual input devices for polaris-input-controller-a1b2-1 are missing or don't match the request"));
+  EXPECT_TRUE(host.calls.empty());
+}
+
+TEST(MultiseatWorkerRefusalLog, EachHostCheckNamesWhatItFound) {
+  struct case_t {
+    const char *check;
+    std::function<void(fake_host_t &)> configure;
+    std::string reason;
+  };
+  const std::vector<case_t> cases {
+    {"group list", [](auto &host) { host.groups = std::nullopt; },
+     "Polaris couldn't read its own group list"},
+    {"root", [](auto &host) { host.uid = 0; },
+     "Polaris is running as root, and a Space worker never starts as root. Run Polaris as your own account"},
+    {"engine client", [](auto &host) { host.executable_ready = false; },
+     "the container engine client /usr/bin/podman is missing or isn't executable by this account"},
+    {"runtime", [](auto &host) { host.runtime_ready = false; },
+     "the container runtime /usr/bin/crun is missing, or isn't a root-owned file in root-owned folders that only root can change"},
+    {"worker folder", [](auto &host) {
+       host.private_directories.erase("/run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-1/ipc");
+     },
+     "the folder /run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-1/ipc is missing, "
+     "or isn't a private read-write folder owned by this account"},
+    {"capability file", [](auto &host) { host.private_files.clear(); },
+     "its capability file /run/user/1000/polaris-workers/polaris-runtime-controller-a1b2-1/auth/auth-token "
+     "is missing, or isn't readable and private to this account"},
+    {"GPU nodes", [](auto &host) { host.accessible_devices.erase("/dev/dri/card0"); },
+     "a GPU device node (/dev/dri/renderD128, /dev/dri/card0) isn't read-write for this account, or changed since "
+     "Polaris started (a driver reload or GPU reset does that). Restart Polaris"},
+    {"input nodes", [](auto &host) { host.accessible_devices.erase("/dev/input/event11"); },
+     "its virtual input devices (/dev/input/event10, /dev/input/event11, /dev/input/event12, /dev/input/event13) "
+     "changed since Polaris made them, or aren't read-write for this account"},
+    {"shared game folder", [](auto &host) { host.readable_directories.clear(); },
+     "the shared game folder /srv/Games Library isn't readable by this account"},
+  };
+  for (const auto &refusal : cases) {
+    SCOPED_TRACE(refusal.check);
+    fake_host_t host;
+    refusal.configure(host);
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options_for_tests()};
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal(refusal.reason));
+    EXPECT_TRUE(host.calls.empty());
+  }
+}
+
+TEST(MultiseatWorkerRefusalLog, AppArmorPointsAtHostSetup) {
+  auto [options, spec] = steam_media_for_tests();
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  auto info = docker_info_for_tests();
+  info["SecurityOptions"].push_back("name=apparmor");
+  host.push({.exit_status = 0, .output = info.dump()});
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), one_refusal(
+    "Docker uses AppArmor, and a Steam Space's sandbox can't run under it yet. "
+    "See the security row in Host Setup, under Spaces in Polaris"));
+  EXPECT_EQ(host.calls.size(), 1U);
+}
+
+TEST(MultiseatWorkerRefusalLog, AVolumeRefusalNamesTheVolume) {
+  {
+    fake_host_t host;
+    backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+    host.push({.exit_status = 1});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal("the Space's volume pv-a9f0 doesn't exist"));
+  }
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, docker_options_for_tests()};
+  auto volume = docker_volume_for_tests();
+  volume["Driver"] = "untrusted-plugin";
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = volume.dump()});
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(valid_spec()), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), one_refusal(
+    "the Space's Docker volume pv-a9f0 isn't a plain local volume (local driver, no options, in Docker's own volumes folder)"));
+  EXPECT_EQ(host.calls.size(), 2U);
+}
+
+TEST(MultiseatWorkerRefusalLog, AMissingSteamSecurityFileIsNamed) {
+  auto [options, spec] = steam_media_for_tests();
+  fake_host_t host;
+  host.seccomp_ready = false;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), one_refusal(
+    "the Steam security file " + std::string(multiseat::container::steam_seccomp_path) +
+    " is missing or differs from this Polaris build. Install the matching native Polaris package"));
+  EXPECT_EQ(host.calls.size(), 2U);
+}
+
+TEST(MultiseatWorkerRefusalLog, TheLastRecheckNamesWhatChanged) {
+  const auto spec = valid_spec();
+  const auto allocation = input_allocation_for(spec.identity.seat);
+  {
+    SCOPED_TRACE("runtime");
+    fake_host_t host;
+    host.runtime_trusted_reads = 1;
+    backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+    host.push({.exit_status = 0});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal(
+      "the container runtime /usr/bin/crun is missing, or isn't a root-owned file in root-owned folders that only root can change"));
+    ASSERT_EQ(host.calls.size(), 1U);
+    EXPECT_EQ(host.calls.front().at(2), "volume");
+  }
+  {
+    SCOPED_TRACE("groups");
+    fake_host_t host;
+    host.groups_change_on_recheck = true;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker_options_for_tests()};
+    host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal("Polaris's group list changed while the Space was starting"));
+    EXPECT_EQ(host.calls.size(), 2U);
+  }
+  {
+    SCOPED_TRACE("GPU");
+    fake_host_t host;
+    host.replacement_after_character_device_call = 7;
+    host.replacement_character_device_path = "/dev/dri/renderD128";
+    host.replacement_character_device_identity = device_identity(226, 0);
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, options_for_tests()};
+    host.push({.exit_status = 0});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal(
+      "a GPU device node (/dev/dri/renderD128, /dev/dri/card0) isn't read-write for this account, or changed since "
+      "Polaris started (a driver reload or GPU reset does that). Restart Polaris"));
+    EXPECT_EQ(host.calls.size(), 1U);
+  }
+  SCOPED_TRACE("input");
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  auto changed = observation_for(allocation.nodes.front());
+  ++changed.snapshot->inode;
+  inputs.observations[allocation.nodes.front().host_path.native()] = {observation_for(allocation.nodes.front()), changed};
+  backend_t backend {host, inputs, options_for_tests()};
+  host.push({.exit_status = 0});
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), one_refusal(
+    "its virtual input devices (/dev/input/event10, /dev/input/event11, /dev/input/event12, /dev/input/event13) "
+    "changed since Polaris made them, or aren't read-write for this account"));
+  EXPECT_EQ(host.calls.size(), 1U);
+}
+
+TEST(MultiseatWorkerRefusalLog, AReplacedSpaceNetworkIsNamed) {
+  auto [options, spec] = steam_media_for_tests();
+  fake_host_t host;
+  fake_input_manifest_source_t inputs;
+  backend_t backend {host, inputs, options};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = steam_network(spec.profile_key).dump()});
+  host.push({.exit_status = 0, .output = steam_network(spec.profile_key, std::string(64, 'f')).dump()});
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), one_refusal(
+    "its private network " + multiseat::container::profile_network_name(spec.profile_key) +
+    " couldn't be confirmed, or changed while the Space was starting"));
+  EXPECT_EQ(host.calls.size(), 4U);
+}
+
+TEST(MultiseatWorkerRefusalLog, AFailedRunGivesItsExitCodeAndPointsAtDockersLog) {
+  const auto spec = valid_spec();
+  {
+    SCOPED_TRACE("Docker, no container");
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker_options_for_tests()};
+    host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+    host.push({.exit_status = 125});
+    queue_docker_inventory(host, {});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal(
+      "docker run exited with code 125 and left no container (image " + steam_image +
+      "). Docker's own log has the reason: journalctl -u docker"));
+  }
+  {
+    SCOPED_TRACE("Docker, stopped container");
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker_options_for_tests()};
+    host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+    host.push({.exit_status = 126});
+    queue_docker_inventory(host, {docker_container_for(spec, first_id, "exited")});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+    EXPECT_EQ(refusal_lines(log), one_refusal(
+      "docker run exited with code 126 and its container stopped (image " + steam_image +
+      "). Docker's own log has the reason: journalctl -u docker"));
+  }
+  SCOPED_TRACE("Podman, no container");
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.push({.exit_status = 0});
+  host.push({.exit_status = 125});
+  queue_inventory(host, {});
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::rejected);
+  EXPECT_EQ(refusal_lines(log), one_refusal("podman run exited with code 125 and left no container (image " + steam_image + ')'));
+}
+
+TEST(MultiseatWorkerRefusalLog, StartsThatWorkOrStayUncertainLogNoRefusal) {
+  const auto spec = valid_spec();
+  {
+    SCOPED_TRACE("started");
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker_options_for_tests()};
+    host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+    host.push({.exit_status = 0, .output = std::string(first_id) + "\n"});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::applied);
+    EXPECT_TRUE(refusal_lines(log).empty()) << log.text();
+  }
+  {
+    SCOPED_TRACE("already running");
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker_options_for_tests()};
+    host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+    host.push({.exit_status = 125});
+    queue_docker_inventory(host, {docker_container_for(spec, first_id)});
+    const test_log_capture_t log;
+    EXPECT_EQ(backend.launch(spec), worker_command_result_e::already_applied);
+    EXPECT_TRUE(refusal_lines(log).empty()) << log.text();
+  }
+  SCOPED_TRACE("volume unknown");
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.push({.exit_status = 125});
+  const test_log_capture_t log;
+  EXPECT_EQ(backend.launch(spec), worker_command_result_e::indeterminate);
+  EXPECT_TRUE(refusal_lines(log).empty()) << log.text();
 }
 
 #endif
