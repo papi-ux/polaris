@@ -8978,8 +8978,8 @@ namespace proc {
 
     int admit_private_epic(const epic_library::installation_t &title, const platf::epic::launcher_proof_t *proof) {
       if (title.flatpak)
-        return launch_failure::refuse(409, "epic_flatpak_private_unavailable", "Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed.",
-          "Private Stream remains unavailable. No desktop launch was requested.");
+        return launch_failure::refuse(409, "epic_flatpak_private_unavailable", "Epic Flatpak supports Mirror Desktop only.",
+          "Choose Mirror Desktop explicitly. No desktop launch was requested; Private Stream is unavailable for this package.");
       std::string reason;
       // Setup step (N2, accepted for now): the launcher proof lives in memory only, so it is
       // needed again after every Polaris restart and every Epic update.
@@ -9129,8 +9129,8 @@ namespace proc {
         epic_flatpak_desktop = platf::epic::prove_flatpak_desktop(*epic_title, reason);
         if (!epic_flatpak_desktop) {
           BOOST_LOG(warning) << "Epic Flatpak desktop proof refused: " << reason;
-          return launch_failure::refuse(503, "epic_flatpak_desktop_unavailable", "The Epic Flatpak desktop instance or game installation could not be verified.",
-            "Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed.");
+          return launch_failure::refuse(503, "epic_flatpak_desktop_unavailable", "The matching Epic Flatpak desktop instance or its identical game-folder and launch-file views could not be verified.",
+            "Keep the matching desktop Epic open, finish the installation and verify its existing folder or document access, then rescan and use Mirror Desktop. Polaris does not grant permissions or relocate games.");
         }
         epic_command = epic_library::flatpak_launch_command(*epic_title->flatpak, epic_title->identity);
       } else {
@@ -11561,8 +11561,8 @@ namespace proc {
           const auto current = epic_library::find(epic_library::scan(game_library::library_home_roots()), epic_title->identity);
           if (!current || *current != *epic_title || !epic_flatpak_desktop ||
               !platf::epic::verify_flatpak_desktop(*epic_flatpak_desktop, reason))
-            return launch_failure::refuse(503, "epic_flatpak_desktop_changed", "The Epic Flatpak desktop instance or installation changed before launch.",
-              "Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed.");
+            return launch_failure::refuse(503, "epic_flatpak_desktop_changed", "The Epic Flatpak deployment, installation, desktop instance or shared game path changed before dispatch.",
+              "Open the current Epic Flatpak on the desktop, rescan, then launch again in Mirror Desktop.");
         }
 #endif
         auto child = platf::run_command(_app.elevated, true, cmd, working_dir, detached_env, _pipe.get(), ec, nullptr);
@@ -12138,12 +12138,12 @@ namespace proc {
       return {200, {{"status", true}, {"version", 1}, {"available", false}}};
     }
     if (_epic_title->flatpak) {
-      if (!action.empty()) return refused(409, "epic_flatpak_game_control_unavailable", "Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed. Game adoption and close-game permission are unavailable. End ends only the stream and leaves the desktop game and launcher running.");
+      if (!action.empty()) return refused(409, "epic_flatpak_game_control_unavailable", "Epic Flatpak game adoption and close-game permission are unavailable. End still ends the stream.");
       return {200, {{"status", true}, {"version", 1}, {"available", true}, {"state", "unavailable"},
         {"code", "epic_flatpak_game_control_unavailable"}, {"app_uuid", _app.uuid}, {"app_name", _app.name},
         {"session_id", _session_instance_id}, {"revision", ""}, {"runtime", "unknown"},
         {"can_adopt", false}, {"can_release", false},
-        {"message", "Epic Flatpak support is deferred to the 1.5.1 cycle; physical controller acceptance has not passed. End ends only the stream and leaves the desktop game and launcher running. Game adoption and close-game permission are unavailable."}}};
+        {"message", "Epic Flatpak runs on the host desktop without game-control permission. End ends the stream and leaves the game and launcher running. Disconnect and Resume leave them running too."}}};
     }
     if (_epic_private_requested) {
       if (!action.empty())
