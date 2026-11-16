@@ -412,7 +412,7 @@ TEST(EpicLibraryTests, FlatpakDispatchAndStatusHaveNoNativeAdoptionOrGenericEndF
   EXPECT_NE(refused.find("{\"can_adopt\", false}"), std::string::npos);
   EXPECT_EQ(refused.find("platf::epic::observe"), std::string::npos);
   EXPECT_EQ(refused.find("platf::epic::adopt"), std::string::npos);
-  EXPECT_NE(refused.find("End ends only the stream and leaves the desktop game and launcher running"), std::string::npos);
+  EXPECT_NE(refused.find("End ends the stream and leaves the game and launcher running"), std::string::npos);
   const auto check = source.find("!platf::epic::verify_flatpak_desktop(*epic_flatpak_desktop, reason)");
   const auto spawn = source.find("auto child = platf::run_command(_app.elevated, true, cmd", check);
   ASSERT_NE(check, std::string::npos); ASSERT_NE(spawn, std::string::npos); EXPECT_LT(check, spawn);
