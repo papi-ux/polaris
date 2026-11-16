@@ -348,6 +348,11 @@ TEST_F(CrashReportStateDir, ASecondProcessNeverReplacesTheOwnersRecord) {
 }
 
 TEST_F(CrashReportStateDir, AOneShotCommandThatFaultsDoesNotWriteIntoTheServicesEvidenceFile) {
+#if defined(__SANITIZE_ADDRESS__)
+  // A one-shot run arms no handler, so the fault meets the default disposition, which in an
+  // AddressSanitizer build is the sanitizer's own report and exit status 1, not death by signal.
+  GTEST_SKIP() << "AddressSanitizer handles SIGSEGV itself in this build";
+#endif
   const auto evidence = root_ / std::string {crash_report::crash_evidence_file_name};
   crash_report::begin_run(root_, (root_ / "polaris.log").string(), "1.5.0");
 
