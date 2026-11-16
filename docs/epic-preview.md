@@ -16,6 +16,7 @@ Use [Epic's official Preview download page](https://launcher.epicgames.com/).
 [Epic documents](https://www.epicgames.com/help/c-32735058/c-Trending_0/what-is-the-epic-games-launcher-early-preview-a12104725)
 an x86-64 AppImage and a Debian package. Both are the Preview launcher, not a stable release.
 Choose the package suited to your distribution; Polaris does not install or convert Epic packages.
+Epic's Flathub package isn't supported in 1.5.0.
 
 Open Epic on the host desktop, sign in yourself, and let the selected game's installation or
 update finish. Keep the launcher open before launching through Polaris. Polaris does not read
