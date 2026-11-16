@@ -25,10 +25,11 @@ and play your library while your desktop stays exactly as you left it.
 
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
 
-![Polaris Mission Control: Control Ultimate Edition is next up, the host is ready for clients with 5 of 5 launch checks passing, the launch mode is Private Stream, and recent games wait below](docs/screenshots/v1.5.0/polaris-mission-control-aurora.webp)
+![Polaris Mission Control during a live stream: Control Ultimate Edition playing on a Retroid Pocket 6 with Nova for 4 minutes, with Disconnect Client and End, the game's art under Now streaming, the route from this host's NVIDIA GeForce RTX 4090 over HEVC 1920×1080 to the Retroid Pocket 6, and readings of quality A 100, 3 ms round trip, 120.0 fps of a 120 target, 0.0% loss, 26.0 Mbps and 2.4 ms encode](docs/screenshots/v1.5.0/polaris-mission-control-aurora.webp)
 
-<sub>Mission Control, the Polaris console in your browser: the next game, whether
-the host is ready, how the game will launch and how your GPU is doing.</sub>
+<sub>Mission Control, the Polaris console in your browser, during a stream: the game
+and the device playing it, the route from your GPU to the client, and a live
+quality grade with latency, frame rate and loss.</sub>
 
 ## What Polaris does
 
