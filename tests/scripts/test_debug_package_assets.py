@@ -77,11 +77,13 @@ class DebugPackageAssets(unittest.TestCase):
         script = self.root / "scripts/ci/validate-pacman-debug.py"
         script.parent.mkdir(parents=True)
         shutil.copyfile(VALIDATOR, script)
-        for directory, extension in (("fedora44", "rpm"), ("ubuntu24.04", "deb")):
+        # Each supported Fedora release and Ubuntu publishes its own Polaris and DRM/KMS helper pair.
+        self.native = (("fedora44", "rpm"), ("fedora45", "rpm"), ("ubuntu24.04", "deb"))
+        for directory, extension in self.native:
             folder = self.raw / directory
             folder.mkdir()
             for component in ("Polaris", "Polaris-kms"):
-                (folder / f"{component}.{extension}").write_bytes(component.encode())
+                (folder / f"{component}.{extension}").write_bytes(f"{component} {directory}".encode())
 
     def validate(self, platform="arch"):
         return subprocess.run([
@@ -149,7 +151,11 @@ class DebugPackageAssets(unittest.TestCase):
             for name in ("polaris", "polaris-kms", "polaris-debug"):
                 output = final / f"Polaris{name.removeprefix('polaris')}-{platform}-x86_64.pkg.tar.zst"
                 self.assertEqual(output.read_bytes(), self.archives[platform, name].read_bytes())
-        self.assertEqual(len(list(final.iterdir())), 13)
+        for directory, extension in self.native:
+            for component in ("Polaris", "Polaris-kms"):
+                output = final / f"{component}-{directory}-x86_64.{extension}"
+                self.assertEqual(output.read_bytes(), (self.raw / directory / f"{component}.{extension}").read_bytes())
+        self.assertEqual(len(list(final.iterdir())), 15)
 
     def test_prerelease_packages_keep_the_release_binary_name_and_stage(self):
         # A prerelease's pkgver carries its label joined straight onto the number, 1.4.13beta.3, the
