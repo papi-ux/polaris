@@ -36,6 +36,13 @@ namespace live_tuning_fec {
     std::optional<std::int64_t> from_frame;
   };
 
+  // libstdc++ 15 deprecates the shared_ptr overloads of std::atomic_load and
+  // std::atomic_store from C++20 on, in favour of std::atomic<std::shared_ptr<T>>, and
+  // the Arch and SteamOS packages build with -Werror. The overloads are still correct
+  // for published_, so the warning is silenced for this class only.
+  #pragma GCC diagnostic push
+  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
   /**
    * One controller-owned transaction. Writers serialize with the controller's
    * mutex. The packetizer only calls selection_for_frame(), which acquires
@@ -258,5 +265,7 @@ namespace live_tuning_fec {
     std::shared_ptr<const publication_t> baseline_;
     std::shared_ptr<const publication_t> published_;
   };
+
+  #pragma GCC diagnostic pop
 
 }  // namespace live_tuning_fec
