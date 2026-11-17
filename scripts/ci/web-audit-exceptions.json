@@ -1,0 +1,11 @@
+{
+  "exceptions": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "added": "2026-11-17",
+      "review_by": "2026-12-17",
+      "reason": "Picomatch is used only for file matching while the web UI is built (through vite), it is not part of the shipped web bundle, and every release up to 4.0.7 is affected with no fixed release yet."
+    }
+  ]
+}

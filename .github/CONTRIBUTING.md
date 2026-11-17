@@ -29,6 +29,8 @@ npm ci
 npm audit --audit-level=high
 ```
 
+If the audit fails, CI runs `node scripts/ci/audit-web-dependencies.mjs`, which passes only high or critical advisories listed with a review date in `scripts/ci/web-audit-exceptions.json`.
+
 For C++ changes, configure and build the affected production targets and run their matching test binaries. Release-package changes also need the relevant package build and installed-layout smoke test; ordinary branch CI does not replace exact-tag verification.
 
 Do not rewrite or force-push another contributor's commits to make a review pass. Follow-up fixes should be additive commits so the review history remains inspectable.
