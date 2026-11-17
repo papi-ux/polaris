@@ -374,6 +374,24 @@ namespace {
     std::thread loop_;
   };
 
+  /**
+   * The packet a legacy fixed-rate loop encodes from a newly raised image. Its wait for an image ends
+   * every ~42 ms at 120 fps and then re-encodes the last image, so one that ended just before the raise
+   * puts that repeat first: no frame timestamp and neither source flag. Takes packets until the first
+   * that carries a frame timestamp, within `timeout`; every packet before it must be such a repeat.
+   */
+  video::packet_t next_legacy_frame_packet(paced_stream_t &stream, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+      const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+      if (left <= 0ms) return {};
+      auto packet = stream.next_packet(left);
+      if (!packet || packet->frame_timestamp) return packet;
+      EXPECT_FALSE(packet->source_time_paced) << "a packet before the raised image's was not a legacy repeat";
+      EXPECT_FALSE(packet->source_clock_timestamp) << "a packet before the raised image's was not a legacy repeat";
+    }
+  }
+
   /// A newly captured frame presented at present_mono_ns, stamped by the production epoch path.
   std::shared_ptr<platf::img_t> stamped_frame(video::capture_epoch_stepper_for_tests_t &epoch,
                                               std::int64_t present_mono_ns) {
@@ -1040,8 +1058,8 @@ TEST(SourcePacingProductionTests, IneligibleSessionsAndUnsupportedRoutesKeepTheF
       auto frame = stamped_frame(epoch, monotonic_now_ns());
       const auto original = *frame->frame_timestamp;
       stream.raise(frame);
-      auto packet = stream.next_packet(400ms);
-      ASSERT_TRUE(packet);
+      auto packet = next_legacy_frame_packet(stream, 400ms);
+      ASSERT_TRUE(packet) << "no packet carried a frame timestamp within 400 ms of the raise";
       EXPECT_FALSE(packet->source_time_paced);
       EXPECT_FALSE(packet->source_clock_timestamp);
       // Exactly the fixed-rate loop: its pacer starts at the image's own capture timestamp.
@@ -1070,7 +1088,7 @@ TEST(SourcePacingProductionTests, OneStampedImageIsSourcePacedForAnEligibleConsu
     eligible.raise(frame);
     host_off.raise(frame);
     auto paced = eligible.next_packet(400ms);
-    auto legacy = host_off.next_packet(400ms);
+    auto legacy = next_legacy_frame_packet(host_off, 400ms);
     ASSERT_TRUE(paced && legacy);
     EXPECT_TRUE(paced->source_time_paced);
     EXPECT_TRUE(paced->source_clock_timestamp);
