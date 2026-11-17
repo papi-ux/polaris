@@ -76,8 +76,16 @@ rather than deleting something it cannot prove is disposable; see
 systemctl --user enable --now polaris
 ```
 
-Polaris runs as a user service, so it starts with your graphical session and has access to it. Check
-status with `systemctl --user status polaris`.
+Polaris runs as a user service with access to your graphical session. On KDE Plasma, an enabled
+Polaris starts with the session. GNOME doesn't start `xdg-desktop-autostart.target`, where `enable`
+puts the service, so on GNOME also run this once:
+
+```bash
+systemctl --user add-wants graphical-session.target polaris.service
+```
+
+It adds Polaris to your graphical session, so GNOME starts it every time you log in. Check status
+with `systemctl --user status polaris`.
 
 The application menu entry starts this same service, so opening Polaris from the desktop and
 autostart never run two copies. Quitting from the tray stops it; the menu entry, the next login, or
