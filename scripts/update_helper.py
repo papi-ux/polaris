@@ -31,6 +31,9 @@ RPMKEYS = '/usr/bin/rpmkeys'
 VENDOR_KEY = Path('/usr/share/polaris/keys/polaris.gpg')
 VENDOR_FINGERPRINT = '58017EDFFA9F803E07ED26F835F13F14FAAD15CC'
 VENDOR_KEY_SHA256 = '3387618dcfa246abb5c53abc3a27893791a2de34916fc0954e6195b3a3bb0fe1'
+# The certificate bundle that Fedora's ca-certificates package owns on Fedora 44 and 45. It is the only
+# trust this helper uses for GitHub: no other file, directory, environment value or default store.
+CA_BUNDLE = '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem'
 PACKAGES = ('polaris', 'polaris-kms')
 # The Fedora releases whose official release assets this helper installs, by exact VERSION_ID.
 # A host outside this set, a derivative, another architecture or an image based system is refused.
@@ -111,11 +114,14 @@ class OfficialRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, newurl)
 
 
+def official_tls_context():
+    return ssl.create_default_context(cafile=CA_BUNDLE)
+
+
 def open_official(url):
     # Ignore caller proxy/TLS/environment settings, even when invoked without pkexec.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), OfficialRedirect(),
-                                         urllib.request.HTTPSHandler(context=ssl.create_default_context(
-                                             cafile='/etc/pki/tls/certs/ca-bundle.crt')))
+                                         urllib.request.HTTPSHandler(context=official_tls_context()))
     return opener.open(urllib.request.Request(url, headers={'User-Agent': 'Polaris-host-update',
                                                           'Accept': 'application/vnd.github+json'}), timeout=30)
 
@@ -284,13 +290,15 @@ def download(asset, destination):
 
 
 def validate_package(path, asset, version, run=command):
-    code, output = run([RPM, '-qp', '--nomanifest', '--qf', QUERY, '--', str(path)])
+    # --nosignature: without the vendor key in RPM's database, as after installing the release files directly, RPM
+    # prints a NOKEY warning into this output. The download's SHA-256 and verify_vendor_signatures cover the file.
+    code, output = run([RPM, '-qp', '--nosignature', '--nomanifest', '--qf', QUERY, '--', str(path)])
     require(code == 0, 'package_unqualified', 'RPM could not read package metadata.')
     identity = parse_identity(output, asset['package'])
     require(identity['version'] == version and identity['rpm_version'] == version.replace('-', '~')
             and identity['release'] == '1', 'release_changed',
             'The package version or RPM release differs from the reviewed release format.')
-    code, output = run([RPM, '-qp', '--nomanifest', '--qf', '[%{OBSOLETENAME}\n]', '--', str(path)])
+    code, output = run([RPM, '-qp', '--nosignature', '--nomanifest', '--qf', '[%{OBSOLETENAME}\n]', '--', str(path)])
     # Reject ALL obsoletes, including the allowed pair: upgrade by exact name only.
     require(code == 0 and not output.strip(), 'transaction_not_closed', 'Packages with obsoletes are not allowed.')
 

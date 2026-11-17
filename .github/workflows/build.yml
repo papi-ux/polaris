@@ -2019,6 +2019,20 @@ jobs:
           test -x /usr/bin/polaris
           rpm -ql polaris | tee build/cpack_artifacts/package-files.txt
           python3 scripts/spaces/verify_package.py /
+          # The update helper trusts only the CA bundle Fedora's ca-certificates owns. Build its TLS context from the
+          # installed helper in this release's own image, so a bundle that moved fails here instead of on a host.
+          python3 -I - /usr/bin/polaris-update-helper <<'PY'
+          import importlib.machinery
+          import importlib.util
+          import sys
+          loader = importlib.machinery.SourceFileLoader('update_helper', sys.argv[1])
+          helper = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+          loader.exec_module(helper)
+          stats = helper.official_tls_context().cert_store_stats()
+          print('update helper CA bundle:', helper.CA_BUNDLE, stats)
+          if not stats['x509_ca']:
+              sys.exit('the update helper CA bundle holds no CA certificate')
+          PY
           binary="$(awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }' build/cpack_artifacts/package-files.txt)"
           if [ -z "$binary" ]; then
             echo "Installed Polaris binary was not found" >&2

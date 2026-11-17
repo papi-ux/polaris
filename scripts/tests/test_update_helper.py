@@ -57,6 +57,13 @@ class HelperTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(helper.Refusal):
                 helper.read_review_guard(io.StringIO(raw))
 
+    def test_github_trust_is_only_the_ca_bundle_fedora_ships(self):
+        # Fedora 44 and 45 keep it here; /etc/pki/tls/certs/ca-bundle.crt is gone from both.
+        self.assertEqual(helper.CA_BUNDLE, '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem')
+        with patch.object(helper.ssl, 'create_default_context', return_value='context') as create:
+            self.assertEqual(helper.official_tls_context(), 'context')
+        create.assert_called_once_with(cafile=helper.CA_BUNDLE)
+
     def test_only_actual_fedora44_asset_family_is_qualified(self):
         self.assertEqual(helper.qualify_host('ID=fedora\nVERSION_ID="44"', 'x86_64', False), fedora('44'))
         for os_release, machine, image in (('ID=bazzite\nID_LIKE=fedora\nVERSION_ID=44', 'x86_64', False),
@@ -130,6 +137,8 @@ class HelperTests(unittest.TestCase):
         with self.assertRaises(helper.Refusal) as raised:
             helper.validate_package(Path('/private/a.rpm'), asset, '1.5.1', run=obsoleting)
         self.assertEqual(raised.exception.code, 'transaction_not_closed')
+        # A host without the vendor key in RPM's database would otherwise add a NOKEY warning to both answers.
+        self.assertEqual([argv[:5] for argv in calls], [[helper.RPM, '-qp', '--nosignature', '--nomanifest', '--qf']] * 2)
 
     def test_download_compares_exact_independent_size_and_digest(self):
         asset = helper.select_release([release()], 'stable', packages(), fedora())['assets'][0]
