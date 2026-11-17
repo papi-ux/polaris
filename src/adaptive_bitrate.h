@@ -126,14 +126,21 @@ namespace adaptive_bitrate {
     std::optional<live_tuning_native::diagnostic_t> native_diagnostic;
   };
 
+  /**
+   * history_t::trace_scope_t. Defined outside history_t because Clang decides whether a nested class
+   * with default member initializers is default-constructible while the enclosing class is still
+   * incomplete, and keeps that answer: std::optional<trace_scope_t>::emplace() then does not compile.
+   */
+  struct history_trace_scope_t {
+    // Opaque host observation identity, independent of the private app/session bearer.
+    std::uint64_t id = 0;
+    std::optional<std::int64_t> origin_steady_ns;
+    std::optional<std::uint64_t> first_sequence;
+  };
+
   /** A bounded, oldest-first copy of one stream scope's history. */
   struct history_t {
-    struct trace_scope_t {
-      // Opaque host observation identity, independent of the private app/session bearer.
-      std::uint64_t id = 0;
-      std::optional<std::int64_t> origin_steady_ns;
-      std::optional<std::uint64_t> first_sequence;
-    };
+    using trace_scope_t = history_trace_scope_t;
     /// The stream scope these entries belong to. A history that never had one, or whose stream ended,
     /// is unscoped and must not be attributed to any stream.
     bool scoped = false;
