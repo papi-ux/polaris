@@ -25,6 +25,13 @@ exists in the release, wait for a compatible release rather than installing an
 RPM built for another Fedora version. If Polaris is already installed, follow
 [Update](#update) instead of the fresh-install command.
 
+On a Bazzite image built on Fedora 45, where `rpm -E %fedora` prints `45`, the
+matching files are `Polaris-fedora45-x86_64.rpm` and
+`Polaris-kms-fedora45-x86_64.rpm`, published from 1.5.0. The commands in this
+guide take the Fedora 44 files; on Fedora 45, use `fedora45` in each file name
+instead. The package layers and host setup completes on Bazzite 45.20261117.1;
+streaming there has not been validated yet.
+
 Polaris and Sunshine use the same default GameStream ports. Stop and disable the
 Sunshine service you actually use before starting Polaris. Common unit names are
 `sunshine.service`, `homebrew.sunshine.service`, and
@@ -222,6 +229,22 @@ Use this for an existing Polaris layer. A fresh install uses the command in
 `cannot install both polaris-...` / `conflicting requests` error. Do not remove
 unrelated layers or reset your configuration to resolve that error.
 
+With `polaris-kms` layered too, that transaction fails with
+`nothing provides polaris = ... needed by polaris-kms-...`, because the helper
+needs its exact Polaris. Download both files of the newer release and replace
+both in one transaction instead:
+
+```bash
+rpm_name="Polaris-fedora44-x86_64.rpm"
+kms_name="Polaris-kms-fedora44-x86_64.rpm"
+curl --fail --location --output "./${rpm_name}" \
+  "https://github.com/papi-ux/polaris/releases/latest/download/${rpm_name}" &&
+curl --fail --location --output "./${kms_name}" \
+  "https://github.com/papi-ux/polaris/releases/latest/download/${kms_name}" &&
+sudo rpm-ostree install --uninstall=polaris --uninstall=polaris-kms \
+  "./${rpm_name}" "./${kms_name}"
+```
+
 After a successful transaction, inspect `rpm-ostree status`, save your work, and
 reboot. The booted deployment is marked `●`; a pending version above it is not
 running yet. The dashboard may therefore show the old version until reboot.
@@ -274,10 +297,29 @@ with the capability already recorded in package metadata, which rpm-ostree lays
 down like any other file, so nothing has to be made writable and nothing has to
 be repeated.
 
+On a host that uses the
+[Polaris repository](repositories.md#bazzite-and-other-ostree-hosts), layer it
+by name:
+
 ```bash
 sudo rpm-ostree install polaris-kms
 systemctl reboot
 ```
+
+A host installed from the downloaded RPM has no repository to find it in, and
+that command answers `Packages not found: polaris-kms`. Layer the helper file of
+the same release as the layered Polaris instead:
+
+```bash
+kms_name="Polaris-kms-fedora44-x86_64.rpm"
+curl --fail --location --output "./${kms_name}" \
+  "https://github.com/papi-ux/polaris/releases/latest/download/${kms_name}" &&
+sudo rpm-ostree install "./${kms_name}"
+systemctl reboot
+```
+
+`latest` is the same release only while the layered Polaris is the latest one;
+if it is older, update Polaris first, as [Update](#update) shows.
 
 After the reboot, once:
 
@@ -375,6 +417,16 @@ systemctl --user disable --now polaris
 sudo rpm-ostree uninstall polaris
 rpm-ostree status
 ```
+
+With `polaris-kms` layered too, name both packages in the uninstall line:
+
+```bash
+sudo rpm-ostree uninstall polaris polaris-kms
+```
+
+Naming `polaris` alone reports success and removes nothing, because the helper
+requires its Polaris and rpm-ostree keeps it; if you already ran that, run
+`sudo rpm-ostree uninstall polaris-kms` to finish.
 
 Reboot after the transaction succeeds. If you used the optional KMS copy, remove
 that copy and its dedicated drop-in. Keep `~/.config/polaris` to preserve your

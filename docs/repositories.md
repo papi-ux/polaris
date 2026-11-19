@@ -60,10 +60,11 @@ What it leaves to you:
   that does, and the [Fedora](fedora.md#optional-drmkms-capture) and
   [Arch](arch.md#optional-drmkms-capture) guides cover the logout that follows.
 
-On Bazzite and other ostree hosts it layers Polaris with `rpm-ostree` and leaves
-host setup until after the reboot; the [Bazzite guide](bazzite.md) covers that
-path in full. Everywhere else, Ubuntu and SteamOS included, follow your
-distribution's guide. The sections below are the same steps by hand.
+On Bazzite and other ostree hosts, follow
+[Bazzite and other ostree hosts](#bazzite-and-other-ostree-hosts) below, or the
+[Bazzite guide](bazzite.md) for the downloaded package. Everywhere else, Ubuntu
+and SteamOS included, follow your distribution's guide. The sections below are
+the same steps by hand.
 
 ## After install or upgrade
 
@@ -119,16 +120,29 @@ explicitly with `sudo rpm --import https://repo.papi-ux.com/polaris.gpg`.
 The same repository works, layered rather than installed:
 
 ```bash
-sudo rpm --import https://repo.papi-ux.com/polaris.gpg
 sudo curl --location --output /etc/yum.repos.d/polaris.repo \
   https://repo.papi-ux.com/fedora/polaris.repo
-rpm-ostree install polaris
+sudo rpm-ostree install polaris
 systemctl reboot
 ```
 
-The key import stays here, unlike the Fedora steps above. `dnf` offers the key
-from `gpgkey=` and waits for an answer; `rpm-ostree` does not ask, so the key has
-to be in rpm's keyring before it will layer a signed package.
+There is no key import here either. `rpm --import` cannot write rpm's database
+on an ostree host, where it is read-only, and is not needed: `rpm-ostree`
+fetches the key named by `gpgkey=` itself, without asking, and checks the
+repository metadata and the packages against it.
+
+On a host that already has Polaris layered from a downloaded file,
+`sudo rpm-ostree install polaris` succeeds but only records
+`Inactive requests: polaris (already provided by polaris-...)`, and the file
+stays, so that host does not follow the repository. Swap the file for the
+repository package in one transaction instead:
+
+```bash
+# Polaris alone:
+sudo rpm-ostree install --uninstall=polaris polaris
+# Polaris and polaris-kms, both layered from files:
+sudo rpm-ostree install --uninstall=polaris --uninstall=polaris-kms polaris polaris-kms
+```
 
 Layered packages are updated by `rpm-ostree upgrade`, so Polaris follows the
 image update instead of needing to be re-layered from a downloaded RPM.

@@ -114,6 +114,16 @@ Bazzite:
 sudo rpm-ostree uninstall polaris
 ```
 
+With `polaris-kms` layered too, name both:
+
+```bash
+sudo rpm-ostree uninstall polaris polaris-kms
+```
+
+Naming `polaris` alone reports success and removes nothing, because the helper requires its
+Polaris and rpm-ostree keeps it; if you already ran that, run
+`sudo rpm-ostree uninstall polaris-kms` to finish.
+
 Then reboot into the new deployment.
 
 The package takes its binaries with it, including `polaris-spaces-setup`, plus the user service

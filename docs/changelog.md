@@ -5,7 +5,7 @@ Every public Polaris release, newest first, with what changed in each.
 Older historical tags remain in the repository for continuity, but the current public product line
 starts at `v1.0.0`.
 
-## v1.5.0
+## v1.5.0 - 2026-11-19
 
 - A Private Stream running in headless labwc no longer offers native touch and pen that its isolated input route cannot deliver, so clients can use their mouse fallback. The offer follows the admitted runtime, including on resume; supported desktop and mirror routes, controller touch and other capabilities keep their existing behavior.
 - The AppStream metainfo dates a release by its commit, so software centers such as Discover and GNOME Software show 1.5.0's real date. Every semver build wrote `<release version="…" date="1990-01-01">`, because only a date-style version (`YYYY.MMDD.N`) carried a date. The date is now the first of `POLARIS_RELEASE_DATE=YYYY-MM-DD` (a CMake variable or the environment; an invalid date fails the configure), the committer date of `HEAD` in UTC when `.git` exists, or `SOURCE_DATE_EPOCH` when it is after 2020-01-01; otherwise CMake warns and keeps 1990-01-01. The configure log names the source, and a Nix path flake with a pre-2020 time leaves the date unset instead of passing 1970-01-01. The Building guide says what a tarball build needs.
